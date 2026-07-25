@@ -1,0 +1,18 @@
+I want to create an enhanced version of TextAnalysisTool.NET from scratch. See https://textanalysistool.github.io/. There are screenshots there. The tool is downloaded locally here: "E:\TextAnalysisTool\TextAnalysisTool.NET.exe". If you want, you can execute it and use UI automation or something to exercise and learn more about its features.
+
+The main enhancements I want:
+
+1. It should be super fast at loading extremely large files. It should load right away and stream in lines from the opened file. Perhaps using memory mapped I/O might be best.
+2. It should support a list of filters just like the original tool. It should have all the same functionality. Filtering should also be fast. It should "stream" the filtering so that the view immediately shows lines that already passed the filters, while it continues to execute the filters on the rest of the file to figure out which lines pass the filters.
+3. It should be possible to search the list of filters using a search box so that I can find filters among the list of filters. This shouldn't affect the filtering of the file itself, it is simply a way to quickly find the filters I'm interested in so that I can enable/disable them. The search box should filter the filter list down to the filters that pass the search filter.
+4. It should support hierarchical filters, which the original tool doesn't support. The original tool just has a flat list of filters. Any line that matches any filter will be displayed. The first filter that matches a line will apply the colors/styles it has to that line. What I want in addition to that is the following:
+    a. Each filter can have any number of sub filters under them. Sub filters can have more sub filters and so on. It might be ok to hard code max level of nesting.
+    b. If a filter at any level is selected, a line matches that filter only if it matches all of the parents of that filter as well, even if the parents are not selected/enabled.
+    c. The coloring/styling of the deepest nested enabled fitler applies to that line.
+    d. If a line matches a filter, but doesn't match any of its descendent filters, it should still be displayed if that filter is enabled.
+    e. Did you understand all of these requirements? Explain it back to me with examples. Maybe even suggest some enhancements/improvements.
+5. It should have a mechanism of defining how to separate each line of text into columns, and then enable/disable those columns so that only the enabled columns are displayed (this should not affect filtering in any way, filters still apply on the whole line).
+
+The tool should be as fast and responsive as possible. Figure out what framework to use to implement it.
+
+Write a complete and thorough design document for this project so that I can review it first.
