@@ -183,6 +183,11 @@ internal sealed class CascadeApp : IDisposable
     public string DialogText(Window dlg)
         => string.Join(" | ", dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(t => t.Name ?? "").Where(n => n.Length > 0));
 
+    /// <summary>Waits until a dialog's text labels contain <paramref name="substring"/> (find runs async).</summary>
+    public bool WaitDialogText(Window dlg, string substring, int ms = 8000)
+        => Retry.WhileFalse(() => DialogText(dlg).Contains(substring, StringComparison.OrdinalIgnoreCase),
+               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
+
     /// <summary>Text of the currently selected log row (its full line), or "" if none selected/visible.</summary>
     public string SelectedRowText()
     {
@@ -194,6 +199,11 @@ internal sealed class CascadeApp : IDisposable
         }
         return "";
     }
+
+    /// <summary>Waits until the selected log row's text contains <paramref name="substring"/> (find runs async).</summary>
+    public bool WaitSelectedRowText(string substring, int ms = 8000)
+        => Retry.WhileFalse(() => SelectedRowText().Contains(substring, StringComparison.Ordinal),
+               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
 
     /// <summary>Reads the system clipboard as text (on an STA thread, since the app set it cross-process).</summary>
     public static string ReadClipboardText()

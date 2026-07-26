@@ -18,6 +18,7 @@ public sealed class MainForm : Form
     private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _srcLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left, ToolTipText = "Open filter file" };
     private readonly ToolStripStatusLabel _busyLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
@@ -251,6 +252,7 @@ public sealed class MainForm : Form
         _status.SizingGrip = false;
         // Stable names so UI Automation (the FlaUI tests) can locate each field.
         _srcLabel.Name = "stat.src";
+        _filterLabel.Name = "stat.filter";
         _busyLabel.Name = "stat.busy";
         _selLabel.Name = "stat.sel";
         _filLabel.Name = "stat.fil";
@@ -259,7 +261,7 @@ public sealed class MainForm : Form
         _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
-            _srcLabel, _progress, _busyLabel,
+            _srcLabel, _filterLabel, _progress, _busyLabel,
             _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
     }
@@ -309,7 +311,7 @@ public sealed class MainForm : Form
             _filterTree.Attach(_doc);
             _settings.AddRecentFile(path);
             RefreshRecentMenus();
-            Text = $"Cascade — {Path.GetFileName(path)}";
+            UpdateTitle();
             _lastRowCount = _lastMatched = -1;
             UpdateStatus();
         }
@@ -531,6 +533,7 @@ public sealed class MainForm : Form
             _settings.Save();
             RefreshRecentMenus();
             UpdateTitle();
+            UpdateStatus();
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
@@ -628,17 +631,36 @@ public sealed class MainForm : Form
 
     private void ShowFind()
     {
-        _findDialog ??= new FindDialog(DoFind);
+        if (_findDialog is null)
+        {
+            _findDialog = new FindDialog(DoFind);
+            _findDialog.CancelRequested += () => _doc.CancelFind();
+        }
         if (!_findDialog.Visible) _findDialog.Show(this);
         _findDialog.FocusInput();
     }
 
-    private void DoFind(FindQuery query, bool forward)
+    private async void DoFind(FindQuery query, bool forward)
     {
         _lastQuery = query;
         long start = _grid.CaretLine;
         start = start < 0 ? 0 : start + (forward ? 1 : -1);
-        long found = _doc.FindLine(query, start, forward, CancellationToken.None);
+
+        _findDialog?.SetSearching(true);
+        var progress = new Progress<double>(f => _findDialog?.SetProgress(f));
+        long found;
+        try
+        {
+            found = await _doc.FindLineAsync(query, start, forward, progress);
+        }
+        catch (OperationCanceledException)
+        {
+            // The user cancelled, or a newer search superseded this one. Only reset the dialog when no
+            // search is still running (i.e. a genuine cancel, not a supersede that already re-armed it).
+            if (!_doc.IsFindRunning) { _findDialog?.SetSearching(false); _findDialog?.SetStatus("Canceled."); }
+            return;
+        }
+        _findDialog?.SetSearching(false);
         if (found >= 0) { GoToLine(found + 1); _findDialog?.SetStatus(""); }
         else _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet — file still loading…");
     }
@@ -685,6 +707,7 @@ public sealed class MainForm : Form
         _lastMatched = _doc.MatchedLineCount;
         _lastBusy = _doc.IsBusy;
         _srcLabel.Text = string.IsNullOrEmpty(_doc.FilePath) ? "  (no file)" : "  " + _doc.FilePath;
+        _filterLabel.Text = string.IsNullOrEmpty(_filterFilePath) ? "" : "  " + _filterFilePath + "  ";
 
         bool hasFile = !string.IsNullOrEmpty(_doc.FilePath);
         bool indexing = hasFile && !_doc.IsIndexComplete;

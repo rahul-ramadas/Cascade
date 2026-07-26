@@ -13,16 +13,19 @@ public static class FindEngine
     /// <summary>Finds the next/previous line (relative to <paramref name="startLine"/>, inclusive)
     /// that matches. Returns the line number, or -1 if none before hitting an end.</summary>
     public static long Find(LineReader reader, LineIndex index, long fileLength, long lineCount,
-        FindQuery query, long startLine, bool forward, CancellationToken ct)
+        FindQuery query, long startLine, bool forward, CancellationToken ct, Action<double>? onProgress = null)
     {
         if (lineCount <= 0) return -1;
         if (Compile(query) is not var (rx, cmp)) return -1;
 
         long line = Math.Clamp(startLine, 0, lineCount - 1);
         int step = forward ? 1 : -1;
-        for (; line >= 0 && line < lineCount; line += step)
+        long total = Math.Max(1, forward ? lineCount - line : line + 1);
+        long scanned = 0;
+        for (; line >= 0 && line < lineCount; line += step, scanned++)
         {
-            if ((line & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+            if ((scanned & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+            if ((scanned & 0xFFFF) == 0) onProgress?.Invoke(Math.Min(1.0, (double)scanned / total));
             if (IsHit(LineSpan(reader, index, fileLength, line), query, rx, cmp)) return line;
         }
         return -1;
@@ -32,16 +35,19 @@ public static class FindEngine
     /// (each mapped to a file line via <paramref name="rowToLine"/>) so the hit is always a visible line.
     /// Returns the matching file line, or -1.</summary>
     public static long FindInRows(LineReader reader, LineIndex index, long fileLength, long rowCount,
-        Func<long, long> rowToLine, FindQuery query, long startRow, bool forward, CancellationToken ct)
+        Func<long, long> rowToLine, FindQuery query, long startRow, bool forward, CancellationToken ct, Action<double>? onProgress = null)
     {
         if (rowCount <= 0) return -1;
         if (Compile(query) is not var (rx, cmp)) return -1;
 
         long row = Math.Clamp(startRow, 0, rowCount - 1);
         int step = forward ? 1 : -1;
-        for (; row >= 0 && row < rowCount; row += step)
+        long total = Math.Max(1, forward ? rowCount - row : row + 1);
+        long scanned = 0;
+        for (; row >= 0 && row < rowCount; row += step, scanned++)
         {
-            if ((row & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+            if ((scanned & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+            if ((scanned & 0xFFFF) == 0) onProgress?.Invoke(Math.Min(1.0, (double)scanned / total));
             long line = rowToLine(row);
             if (IsHit(LineSpan(reader, index, fileLength, line), query, rx, cmp)) return line;
         }

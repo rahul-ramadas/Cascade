@@ -146,35 +146,35 @@ public class UiFeatureTests
 
         // --- dim mode: the highlighted line must actually contain the query ---
         app.FindInDialog(dlg, "other line 137", forward: true);
-        Check("dim forward -> Ln 138", app.StatusText("Ln:") == "Ln: 138 / 1,000", app.StatusText("Ln:"));
-        Check("dim forward: selected line contains query", app.SelectedRowText().Contains("other line 137", StringComparison.Ordinal), app.SelectedRowText());
+        Check("dim forward -> Ln 138", app.WaitStatus("Ln:", "Ln: 138 / 1,000"), app.StatusText("Ln:"));
+        Check("dim forward: selected line contains query", app.WaitSelectedRowText("other line 137"), app.SelectedRowText());
 
         app.FindInDialog(dlg, "other line 246", forward: true);
-        Check("dim forward2 -> Ln 247", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
-        Check("dim forward2: selected line contains query", app.SelectedRowText().Contains("other line 246", StringComparison.Ordinal), app.SelectedRowText());
+        Check("dim forward2 -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
+        Check("dim forward2: selected line contains query", app.WaitSelectedRowText("other line 246"), app.SelectedRowText());
 
         app.FindInDialog(dlg, "other line 89", forward: false);
-        Check("dim backward -> Ln 90", app.StatusText("Ln:") == "Ln: 90 / 1,000", app.StatusText("Ln:"));
-        Check("dim backward: selected line contains query", app.SelectedRowText().Contains("other line 89", StringComparison.Ordinal), app.SelectedRowText());
+        Check("dim backward -> Ln 90", app.WaitStatus("Ln:", "Ln: 90 / 1,000"), app.StatusText("Ln:"));
+        Check("dim backward: selected line contains query", app.WaitSelectedRowText("other line 89"), app.SelectedRowText());
 
         // repeat the same unique query forward: it must NOT re-find the current line
         app.FindInDialog(dlg, "other line 246", forward: true); // caret at 89 -> 246 is ahead
-        Check("dim re-find forward -> Ln 247", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
+        Check("dim re-find forward -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
         app.FindInDialog(dlg, "other line 246", forward: true); // caret==246, unique -> not found, stay
-        Check("dim no more matches -> not found", app.DialogText(dlg).Contains("Not found", StringComparison.OrdinalIgnoreCase), app.DialogText(dlg));
+        Check("dim no more matches -> not found", app.WaitDialogText(dlg, "Not found"), app.DialogText(dlg));
         Check("dim no more matches -> selection unchanged", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
 
         // --- filtered mode: the highlighted line must STILL contain the query ---
         app.ToggleFilteredMode();
         app.FindInDialog(dlg, "MATCH line 500", forward: true);
-        Check("filtered: matched-line search -> Ln 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
-        Check("filtered: selected line contains query", app.SelectedRowText().Contains("MATCH line 500", StringComparison.Ordinal), app.SelectedRowText());
+        Check("filtered: matched-line search -> Ln 501", app.WaitStatus("Ln:", "Ln: 501 / 1,000"), app.StatusText("Ln:"));
+        Check("filtered: selected line contains query", app.WaitSelectedRowText("MATCH line 500"), app.SelectedRowText());
 
         // text that only exists on a HIDDEN (filtered-out) line, AHEAD of the caret, must NOT jump to a
         // wrong (visible) line — the highlighted line must always contain the query.
         app.FindInDialog(dlg, "other line 733", forward: true);
         Check("filtered: hidden-only text reports not found",
-            app.DialogText(dlg).Contains("Not found", StringComparison.OrdinalIgnoreCase), app.DialogText(dlg));
+            app.WaitDialogText(dlg, "Not found"), app.DialogText(dlg));
         Check("filtered: hidden-only text leaves selection put (still 501)",
             app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
 

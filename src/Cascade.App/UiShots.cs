@@ -36,6 +36,11 @@ internal static class UiShots
         ShotDialog(new FilterEditDialog(demoFilter, isNew: false), outDir, "filter-edit");
         ShotDialog(new FindDialog((_, _) => { }), outDir, "find");
 
+        var findSearching = new FindDialog((_, _) => { });
+        findSearching.SetSearching(true);
+        findSearching.SetProgress(0.45);
+        ShotDialog(findSearching, outDir, "find-searching");
+
         var cols = new ColumnSpec();
         ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");

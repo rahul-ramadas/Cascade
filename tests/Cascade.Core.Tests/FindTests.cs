@@ -61,4 +61,31 @@ public class FindTests
         }
         finally { src.Dispose(); }
     }
+
+    [Fact]
+    public void Reports_progress_and_honors_cancellation()
+    {
+        var (src, index, det) = Harness.Build(string.Join('\n', Enumerable.Range(0, 200_000).Select(i => "nope " + i)));
+        try
+        {
+            var reader = new LineReader(src, det.Encoding);
+            var q = new FindQuery("absent-text", Regex: false, CaseSensitive: false);
+
+            // A full no-match scan reports progress as it goes and returns -1.
+            int reports = 0;
+            double last = -1;
+            long r = FindEngine.Find(reader, index, src.Length, index.Count, q, 0, forward: true,
+                CancellationToken.None, f => { reports++; last = f; });
+            Assert.Equal(-1, r);
+            Assert.True(reports > 1, $"expected multiple progress callbacks, got {reports}");
+            Assert.InRange(last, 0.0, 1.0);
+
+            // An already-cancelled token aborts promptly instead of scanning the whole file.
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            Assert.Throws<OperationCanceledException>(() =>
+                FindEngine.Find(reader, index, src.Length, index.Count, q, 0, forward: true, cts.Token));
+        }
+        finally { src.Dispose(); }
+    }
 }

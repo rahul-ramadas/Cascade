@@ -28,6 +28,8 @@ public sealed class CascadeDocument : IDisposable
     private Task _indexTask = Task.CompletedTask;
     private DetectedEncoding _enc;
     private FilterService.Generation? _generation;
+    private CancellationTokenSource? _findCts;
+    private Task<long>? _findTask;
 
     public CascadeDocument()
     {
@@ -131,7 +133,17 @@ public sealed class CascadeDocument : IDisposable
             Updated?.Invoke();
             return;
         }
-        _generation = CurrentSnapshot.HasAnyEnabled ? _filterService.Restart(CurrentSnapshot) : null;
+        if (CurrentSnapshot.HasAnyEnabled)
+        {
+            _generation = _filterService.Restart(CurrentSnapshot);
+        }
+        else
+        {
+            // No enabled filters: cancel any in-flight pass so IsBusy / IsFilterIdle clear immediately,
+            // rather than leaving an orphaned run that freezes the progress bar until it finishes.
+            _filterService.Stop();
+            _generation = null;
+        }
         _filterService.Notify();
         Updated?.Invoke();
     }
@@ -170,14 +182,14 @@ public sealed class CascadeDocument : IDisposable
         lock (gen.CountsSync) return gen.Counts[idx];
     }
 
-    public long FindLine(FindQuery query, long startLine, bool forward, CancellationToken ct)
+    public long FindLine(FindQuery query, long startLine, bool forward, CancellationToken ct, Action<double>? onProgress = null)
     {
         if (_src is null) return -1;
         var reader = new LineReader(_src, _enc.Encoding);
 
         // In dim mode every line is visible, so search the whole file.
         if (!FilteredMode)
-            return FindEngine.Find(reader, _index, _src.Length, CompletedLineCount, query, startLine, forward, ct);
+            return FindEngine.Find(reader, _index, _src.Length, CompletedLineCount, query, startLine, forward, ct, onProgress);
 
         // In filtered mode, search ONLY the visible (matched) lines, so the hit is always a line the
         // user can see — otherwise a match on a hidden line would snap the highlight to a different,
@@ -199,8 +211,29 @@ public sealed class CascadeDocument : IDisposable
             if (r < 0) return -1;
             startRow = r;
         }
-        return FindEngine.FindInRows(reader, _index, _src.Length, rows, view.LineAt, query, startRow, forward, ct);
+        return FindEngine.FindInRows(reader, _index, _src.Length, rows, view.LineAt, query, startRow, forward, ct, onProgress);
     }
+
+    /// <summary>True while a background find started by <see cref="FindLineAsync"/> is still running.</summary>
+    public bool IsFindRunning => _findTask is { IsCompleted: false };
+
+    /// <summary>Runs <see cref="FindLine"/> on a background thread so the UI stays responsive, cancelling
+    /// any previous in-flight find. Scan progress (0..1) is reported via <paramref name="progress"/>. The
+    /// returned task is cancelled (throws <see cref="OperationCanceledException"/>) if superseded by another
+    /// call or by <see cref="CancelFind"/>.</summary>
+    public Task<long> FindLineAsync(FindQuery query, long startLine, bool forward, IProgress<double>? progress = null)
+    {
+        _findCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _findCts = cts;
+        Action<double>? onProgress = progress is null ? null : progress.Report;
+        var task = Task.Run(() => FindLine(query, startLine, forward, cts.Token, onProgress), cts.Token);
+        _findTask = task;
+        return task;
+    }
+
+    /// <summary>Cancels a background find in progress (if any).</summary>
+    public void CancelFind() => _findCts?.Cancel();
 
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via
     /// the caller's +/-1) that deep-matches <paramref name="filter"/>, or -1 if none. Scans decoded
@@ -246,6 +279,10 @@ public sealed class CascadeDocument : IDisposable
 
     private void DisposeCurrent()
     {
+        // Stop any background find first so it cannot read the memory-mapped file after we free it.
+        try { _findCts?.Cancel(); } catch { /* ignore */ }
+        try { _findTask?.Wait(2000); } catch { /* ignore */ }
+        _findTask = null;
         try { _indexCts.Cancel(); } catch { /* ignore */ }
         try { _indexTask.Wait(1000); } catch { /* ignore */ }
         _filterService?.Dispose();

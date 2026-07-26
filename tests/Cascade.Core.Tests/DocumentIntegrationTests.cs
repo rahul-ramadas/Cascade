@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Cascade.Core.Document;
+using Cascade.Core.Find;
 using Cascade.Core.Model;
 
 namespace Cascade.Core.Tests;
@@ -62,6 +63,109 @@ public class DocumentIntegrationTests
             doc.Dispose();
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void Disabling_all_filters_cancels_the_running_pass_cleanly()
+    {
+        // Large enough that a filter pass cannot complete in the microseconds between the two
+        // ApplyFilters calls below, so the "disable all" happens while a pass is genuinely running.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 1_000_000; i++)
+            sb.Append(i % 3 == 0 ? "ERROR x" : "info x").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var f = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            doc.Filters.Add(f);
+            doc.Filters.ShowOnlyFilteredLines = true;
+            doc.ApplyFilters();     // kick off a real pass over 1,000,000 lines
+
+            f.Enabled = false;      // ...then immediately remove all enabled filters
+            doc.ApplyFilters();
+
+            // With no enabled filters the previous pass must be cancelled at once, so filtering is idle
+            // immediately — otherwise the status bar stays "busy" with a frozen progress bar until the
+            // orphaned run finishes on its own.
+            Assert.True(doc.IsFilterIdle, "disabling all filters must cancel the running pass immediately");
+            Assert.Equal(0, doc.FilterProcessedLineCount);
+        }
+        finally { doc.Dispose(); File.Delete(path); }
+    }
+
+    [Fact]
+    public void Rapid_filter_changes_settle_without_getting_stuck_busy()
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < 200_000; i++)
+            sb.Append(i % 5 == 0 ? "MATCH " : "other ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var a = new Filter { Enabled = true, Match = { Text = "MATCH" } };
+            var b = new Filter { Enabled = true, Match = { Text = "other" } };
+            doc.Filters.Add(a);
+            doc.Filters.Add(b);
+            doc.Filters.ShowOnlyFilteredLines = true;
+
+            // Hammer ApplyFilters with rapidly changing enabled states, never waiting for completion —
+            // this includes transient "nothing enabled" states.
+            var rnd = new Random(1234);
+            for (int i = 0; i < 300; i++)
+            {
+                a.Enabled = rnd.Next(2) == 0;
+                b.Enabled = rnd.Next(2) == 0;
+                doc.ApplyFilters();
+            }
+
+            // End in a known state and let it settle.
+            a.Enabled = true;
+            b.Enabled = false;
+            doc.ApplyFilters();
+
+            var sw = Stopwatch.StartNew();
+            while (!doc.IsFilterIdle && sw.ElapsedMilliseconds < 20000) Thread.Sleep(2);
+            Assert.True(doc.IsFilterIdle, "filtering never settled after rapid changes");
+            Assert.Equal(40_000, doc.MatchedLineCount); // every 5th line matches "MATCH"
+        }
+        finally { doc.Dispose(); File.Delete(path); }
+    }
+
+    [Fact]
+    public void Opening_a_new_file_while_a_find_runs_does_not_read_the_freed_mmap()
+    {
+        // A long scan on file A must be cancelled and joined before A's memory-mapped file is freed by
+        // opening file B — otherwise the background find would read freed memory (AccessViolation crash).
+        var sb = new StringBuilder();
+        for (int i = 0; i < 2_000_000; i++) sb.Append("nope ").Append(i).Append('\n');
+        string a = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+        string b = Harness.TempFile(Encoding.UTF8.GetBytes("hello\nworld\n"));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(a);
+            doc.WaitForIndex();
+            var find = doc.FindLineAsync(new FindQuery("absent-string", false, false), 0, true); // long scan
+
+            doc.Open(b); // disposes A's mmap; must cancel + join the find first
+            doc.WaitForIndex();
+
+            Assert.Equal(2, doc.CompletedLineCount);
+            try { find.Wait(3000); } catch (AggregateException) { /* OperationCanceledException is fine */ }
+            Assert.True(find.IsCompleted);
+        }
+        finally { doc.Dispose(); File.Delete(a); File.Delete(b); }
     }
 
     [Fact]

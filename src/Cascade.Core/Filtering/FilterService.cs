@@ -90,6 +90,21 @@ public sealed class FilterService : IDisposable
         return gen;
     }
 
+    /// <summary>Cancels the current generation (if any) and goes idle. Use when there are no enabled
+    /// filters so <see cref="IsIdle"/> reports true at once and the UI can clear its "busy" state and
+    /// progress bar immediately, instead of leaving an orphaned pass running to completion.</summary>
+    public void Stop()
+    {
+        lock (_lock)
+        {
+            _cts.Cancel();
+            _cts = new CancellationTokenSource();
+            _current = null;
+            _processed = 0;
+        }
+        _wake.Set();
+    }
+
     /// <summary>Signals that more indexed lines are available (or indexing completed).</summary>
     public void Notify() => _wake.Set();
 
