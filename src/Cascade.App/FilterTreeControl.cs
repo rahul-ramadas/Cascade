@@ -14,10 +14,13 @@ public sealed class FilterTreeControl : UserControl
 {
     private enum DropMode { None, Before, After, Onto }
 
-    private readonly TextBox _search = new()
+    // The placeholder uses the native Win32 cue banner (see CueTextBox), NOT WinForms' PlaceholderText:
+    // the managed PlaceholderText is redrawn in WM_PAINT and flickers on the box's hover/paint cycles,
+    // whereas the OS cue banner is painted by the edit control itself and never flickers.
+    private readonly CueTextBox _search = new()
     {
         Dock = DockStyle.Top,
-        PlaceholderText = "Find filter (Enter / F3 = next, Shift+Enter = prev)…"
+        Cue = "Find filter (Enter / F3 = next, Shift+Enter = prev)\u2026"
     };
     private readonly BufferedTreeView _tree = new()
     {
