@@ -1,0 +1,79 @@
+# ---- Build output ----
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Dd]ebug/
+[Rr]elease/
+[Dd]ebugPublic/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+build/
+bld/
+[Ll]og/
+[Ll]ogs/
+artifacts/
+
+# ---- .NET / MSBuild ----
+project.lock.json
+project.fragment.lock.json
+*.binlog
+*.nuget.props
+*.nuget.targets
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.cache
+*.VisualState.xml
+TestResult.xml
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+BenchmarkDotNet.Artifacts/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+**/packages/*
+!**/packages/build/
+*.nuget.dgspec.json
+
+# ---- Visual Studio / VS Code / Rider ----
+.vs/
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+
+# ---- Test / coverage ----
+[Cc]overage*/
+*.coverage
+*.coveragexml
+coverage.json
+coverage.cobertura.xml
+*.trx
+
+# ---- OS files ----
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---- App / project-specific ----
+# Screenshot / research artifacts created by the --screens harness
+.shots/
+.shots*/
+# Local crash / self-test logs are written to %TEMP%/%APPDATA%, not the repo,
+# but ignore any stray copies just in case.
+cascade_crash.log
+cascade_selftest.log

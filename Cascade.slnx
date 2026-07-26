@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Cascade.App/Cascade.App.csproj" />
+    <Project Path="src/Cascade.Core/Cascade.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj" />
+  </Folder>
+</Solution>
