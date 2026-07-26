@@ -22,6 +22,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
+    private readonly ToolStripStatusLabel _lineLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _zoomLabel = new() { AutoSize = true };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Marquee, Visible = false, MarqueeAnimationSpeed = 30, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
@@ -109,10 +110,12 @@ public sealed class MainForm : Form
 
     // ---- menu ----
 
-    private static ToolStripMenuItem Mi(string text, EventHandler onClick, Keys keys = Keys.None)
+    private static ToolStripMenuItem Mi(string text, EventHandler onClick, Keys keys = Keys.None, string? shortcutText = null)
     {
         var m = new ToolStripMenuItem(text, null, onClick);
         if (keys != Keys.None) m.ShortcutKeys = keys;
+        // Override the displayed shortcut where the default enum name is ugly (e.g. "Oemplus").
+        if (shortcutText is not null) m.ShortcutKeyDisplayString = shortcutText;
         return m;
     }
 
@@ -131,6 +134,7 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(Mi("Save Filters &As…", (_, _) => SaveFilters(true)));
         file.DropDownItems.Add(Mi("&Append Filters…", (_, _) => AppendFilters()));
         file.DropDownItems.Add(Mi("&Import .tat filters…", (_, _) => ImportTat()));
+        file.DropDownItems.Add(Mi("&Close Filters", (_, _) => CloseFilters()));
         file.DropDownItems.Add(new ToolStripSeparator());
         _recentFilesMenu = new ToolStripMenuItem("Recent &Files");
         _recentFilterFilesMenu = new ToolStripMenuItem("Recent Filter Files");
@@ -165,8 +169,8 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(BuildMarkersMenu());
         view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
-        view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus));
-        view.DropDownItems.Add(Mi("Zoom &Out", (_, _) => _grid.Zoom(-10), Keys.Control | Keys.OemMinus));
+        view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
+        view.DropDownItems.Add(Mi("Zoom &Out", (_, _) => _grid.Zoom(-10), Keys.Control | Keys.OemMinus, "Ctrl+-"));
         view.DropDownItems.Add(Mi("&Reset Zoom", (_, _) => _grid.ResetZoom(), Keys.Control | Keys.D0));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Focus &Text Area", (_, _) => FocusTextArea(), Keys.Control | Keys.Shift | Keys.T));
@@ -178,7 +182,7 @@ public sealed class MainForm : Form
         var filters = new ToolStripMenuItem("Fi&lters");
         filters.DropDownItems.Add(Mi("&Add Filter…", (_, _) => AddFilter(null)));
         filters.DropDownItems.Add(Mi("Add &Child Filter…", (_, _) => AddFilter(_filterTree.SelectedFilter)));
-        filters.DropDownItems.Add(Mi("New Filter from Current &Line…", (_, _) => NewFilterFromCurrentLine(), Keys.Control | Keys.Shift | Keys.N));
+        filters.DropDownItems.Add(Mi("New Filter from Current &Line…", (_, _) => NewFilterFromCurrentLine(), Keys.Control | Keys.N));
         filters.DropDownItems.Add(Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); }));
         filters.DropDownItems.Add(Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected()));
         filters.DropDownItems.Add(new ToolStripSeparator());
@@ -214,12 +218,16 @@ public sealed class MainForm : Form
     private ToolStripMenuItem BuildFilterLocationMenu()
     {
         var m = new ToolStripMenuItem("Filter List &Location");
-        m.DropDownItems.Add("Dock &Bottom\tCtrl+Down", null, (_, _) => SetFilterDock(FilterDock.Bottom));
-        m.DropDownItems.Add("Dock &Top\tCtrl+Up", null, (_, _) => SetFilterDock(FilterDock.Top));
-        m.DropDownItems.Add("Dock &Left\tCtrl+Left", null, (_, _) => SetFilterDock(FilterDock.Left));
-        m.DropDownItems.Add("Dock &Right\tCtrl+Right", null, (_, _) => SetFilterDock(FilterDock.Right));
+        // Show the key as a right-aligned hint (ShortcutKeyDisplayString); the keys themselves are
+        // handled in ProcessCmdKey, so we don't register them via ShortcutKeys here.
+        static ToolStripMenuItem Item(string text, string keys, EventHandler onClick)
+            => new(text, null, onClick) { ShortcutKeyDisplayString = keys };
+        m.DropDownItems.Add(Item("Dock &Bottom", "Ctrl+Down", (_, _) => SetFilterDock(FilterDock.Bottom)));
+        m.DropDownItems.Add(Item("Dock &Top", "Ctrl+Up", (_, _) => SetFilterDock(FilterDock.Top)));
+        m.DropDownItems.Add(Item("Dock &Left", "Ctrl+Left", (_, _) => SetFilterDock(FilterDock.Left)));
+        m.DropDownItems.Add(Item("Dock &Right", "Ctrl+Right", (_, _) => SetFilterDock(FilterDock.Right)));
         m.DropDownItems.Add(new ToolStripSeparator());
-        m.DropDownItems.Add("Show/&Hide Filter List\tCtrl+Shift+L", null, (_, _) => ToggleFilterList());
+        m.DropDownItems.Add(Item("Show/&Hide Filter List", "Ctrl+Shift+L", (_, _) => ToggleFilterList()));
         return m;
     }
 
@@ -239,13 +247,20 @@ public sealed class MainForm : Form
 
     private void BuildStatusBar()
     {
+        // The sizing grip overlaps (and hides) the last status field; the window resizes via its border.
+        _status.SizingGrip = false;
+        // Stable names so UI Automation (the FlaUI tests) can locate each field.
+        _srcLabel.Name = "stat.src";
+        _busyLabel.Name = "stat.busy";
+        _selLabel.Name = "stat.sel";
+        _filLabel.Name = "stat.fil";
+        _totalLabel.Name = "stat.total";
+        _lineLabel.Name = "stat.line";
+        _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
             _srcLabel, _progress, _busyLabel,
-            new ToolStripStatusLabel("Sel:"), _selLabel,
-            new ToolStripStatusLabel("Fil:"), _filLabel,
-            new ToolStripStatusLabel("Total:"), _totalLabel,
-            _zoomLabel
+            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
     }
 
@@ -262,6 +277,12 @@ public sealed class MainForm : Form
             else if (!a.StartsWith('/') && !a.StartsWith("--")) file = a;
         }
         if (file is not null && File.Exists(file)) OpenFile(file, null);
+
+        // If no filter file was given on the command line, reload the one the user last had open.
+        if (filterFile is null && _settings.AutoLoadLastFilterFile
+            && !string.IsNullOrEmpty(_settings.LastFilterFile) && File.Exists(_settings.LastFilterFile))
+            filterFile = _settings.LastFilterFile;
+
         if (filterFile is not null && File.Exists(filterFile)) LoadFiltersFrom(filterFile);
         if (demo)
         {
@@ -430,6 +451,8 @@ public sealed class MainForm : Form
                 _settings.AddRecentFilterFile(path);
             }
             _filtersDirty = false;
+            _settings.LastFilterFile = path; // remember for auto-load next launch
+            _settings.Save();
             _filterTree.Attach(_doc);
             SyncFilteredModeMenu();
             _grid.RefreshView();
@@ -472,6 +495,23 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK) LoadFiltersFrom(dlg.FileName);
     }
 
+    /// <summary>Detaches the current filter file: clears all filters, forgets the file path, and stops it
+    /// from being auto-loaded next launch. (Save first if you want to keep the current set.)</summary>
+    private void CloseFilters()
+    {
+        _doc.SetFilters(new FilterCollection());
+        _filterFilePath = null;
+        _filtersDirty = false;
+        _settings.LastFilterFile = null;
+        _settings.Save();
+        _filterTree.Attach(_doc);
+        SyncFilteredModeMenu();
+        _grid.RefreshView();
+        RefreshRecentMenus();
+        UpdateTitle();
+        UpdateStatus();
+    }
+
     private void SaveFilters(bool saveAs)
     {
         string? path = _filterFilePath;
@@ -487,6 +527,8 @@ public sealed class MainForm : Form
             _filterFilePath = path;
             _filtersDirty = false;
             _settings.AddRecentFilterFile(path);
+            _settings.LastFilterFile = path; // remember for auto-load next launch
+            _settings.Save();
             RefreshRecentMenus();
             UpdateTitle();
         }
@@ -497,11 +539,14 @@ public sealed class MainForm : Form
 
     private void ToggleFilteredMode()
     {
-        _doc.Filters.ShowOnlyFilteredLines = !_doc.Filters.ShowOnlyFilteredLines;
-        SyncFilteredModeMenu();
+        // Capture the anchor in the CURRENT mode before flipping, so it maps the current row correctly.
         long anchor = _grid.CurrentAnchorLine();
-        _doc.ApplyFilters();
-        _grid.SetViewAnchor(anchor, select: true);
+        _doc.Filters.ShowOnlyFilteredLines = !_doc.Filters.ShowOnlyFilteredLines;
+        _filtersDirty = true;
+        SyncFilteredModeMenu();
+        // Filtered vs. dim is a display-only mode: the matched set is unchanged, so there is no need to
+        // re-run filtering (which would blank the view). Just re-map the view and center the line.
+        _grid.SetViewAnchor(anchor, select: true, center: true);
         _grid.RefreshView();
         _anchorActive = anchor >= 0;
         UpdateStatus();
@@ -663,10 +708,12 @@ public sealed class MainForm : Form
             _progress.Value = (int)(1000L * done / total);
         }
 
-        _selLabel.Text = _grid.SelectedCount.ToString("N0");
-        _filLabel.Text = _doc.MatchedLineCount.ToString("N0");
-        _totalLabel.Text = _doc.CompletedLineCount.ToString("N0");
-        _zoomLabel.Text = $"{_settings.ZoomPercent}%";
+        _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
+        _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";
+        _totalLabel.Text = $"Total: {_doc.CompletedLineCount:N0}";
+        long caretLine = _grid.CaretLine;
+        _lineLabel.Text = caretLine >= 0 ? $"Ln: {caretLine + 1:N0} / {_doc.CompletedLineCount:N0}" : "Ln: \u2014";
+        _zoomLabel.Text = $"Zoom: {_settings.ZoomPercent}%";
     }
 
     private void UpdateTitle()
@@ -678,14 +725,21 @@ public sealed class MainForm : Form
 
     private void RefreshRecentMenus()
     {
-        void Fill(ToolStripMenuItem menu, List<string> items, Action<string> open)
+        void Fill(ToolStripMenuItem menu, List<string> items, Action<string> open, string clearText, Action clear)
         {
             menu.DropDownItems.Clear();
             foreach (var p in items) menu.DropDownItems.Add(p, null, (_, _) => { if (File.Exists(p)) open(p); });
+            if (items.Count > 0)
+            {
+                menu.DropDownItems.Add(new ToolStripSeparator());
+                menu.DropDownItems.Add(clearText, null, (_, _) => clear());
+            }
             menu.Enabled = items.Count > 0;
         }
-        Fill(_recentFilesMenu, _settings.RecentFiles, p => OpenFile(p, null));
-        Fill(_recentFilterFilesMenu, _settings.RecentFilterFiles, LoadFiltersFrom);
+        Fill(_recentFilesMenu, _settings.RecentFiles, p => OpenFile(p, null), "Clear Recent Files",
+            () => { _settings.RecentFiles.Clear(); _settings.Save(); RefreshRecentMenus(); });
+        Fill(_recentFilterFilesMenu, _settings.RecentFilterFiles, LoadFiltersFrom, "Clear Recent Filter Files",
+            () => { _settings.RecentFilterFiles.Clear(); _settings.Save(); RefreshRecentMenus(); });
     }
 
     private void ShowAbout()

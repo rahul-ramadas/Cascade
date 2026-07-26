@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- For reading the system clipboard in the copy test (System.Windows.Forms.Clipboard). -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- These tests drive the real Cascade.exe through Windows UI Automation (FlaUI). They need an
+         interactive desktop session and must never run in parallel with each other. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FlaUI.UIA3" Version="4.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- Build the app first (so Cascade.exe exists) but do not copy its output into this project. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Cascade.App\Cascade.App.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+</Project>

@@ -18,7 +18,11 @@ public sealed class FindDialog : Form
     {
         _search = search;
         Text = "Find";
-        FormBorderStyle = FormBorderStyle.FixedToolWindow;
+        // Use a standard fixed dialog frame (not a tool window) so the close button matches the app's
+        // other dialogs — the tool-window caption renders a small, inset close button that looks off.
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MinimizeBox = false;
+        MaximizeBox = false;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.CenterParent;
         AutoScaleMode = AutoScaleMode.Dpi;

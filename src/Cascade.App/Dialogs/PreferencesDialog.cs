@@ -11,6 +11,7 @@ public sealed class PreferencesDialog : DialogBase
     private readonly NumericUpDown _size = new() { Minimum = 6, Maximum = 48, DecimalPlaces = 1, Increment = 0.5m };
     private readonly NumericUpDown _tab = new() { Minimum = 1, Maximum = 16 };
     private readonly CheckBox _lineNumbers = new() { Text = "Show line numbers", AutoSize = true };
+    private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
     private readonly CheckBox _remote = new() { Text = "Remote Desktop lean mode (leanest rendering)", AutoSize = true };
     private readonly ComboBox _markers = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
@@ -63,6 +64,7 @@ public sealed class PreferencesDialog : DialogBase
         Row("Tab size:", _tab);
         Row("Markers:", _markers);
         Row("", _lineNumbers);
+        Row("", _autoLoadFilters);
         Row("", _remote);
 
         var buttons = OkCancelRow(out var ok, out _);
@@ -98,6 +100,7 @@ public sealed class PreferencesDialog : DialogBase
         _size.Value = (decimal)Math.Clamp(_s.FontSize, 6f, 48f);
         _tab.Value = Math.Clamp(_s.TabSize, 1, 16);
         _lineNumbers.Checked = _s.ShowLineNumbers;
+        _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
         _remote.Checked = _s.RemoteLean;
         _markers.SelectedIndex = (int)_s.MarkerVisibility;
     }
@@ -108,6 +111,7 @@ public sealed class PreferencesDialog : DialogBase
         _s.FontSize = (float)_size.Value;
         _s.TabSize = (int)_tab.Value;
         _s.ShowLineNumbers = _lineNumbers.Checked;
+        _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
         _s.RemoteLean = _remote.Checked;
         _s.MarkerVisibility = (MarkerVisibilityMode)_markers.SelectedIndex;
     }

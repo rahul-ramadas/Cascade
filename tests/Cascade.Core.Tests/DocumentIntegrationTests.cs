@@ -19,6 +19,52 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
+    public void SetFilters_before_a_file_is_open_does_not_throw()
+    {
+        // Auto-loading a saved filter set at startup happens BEFORE any file is open (the filter service
+        // isn't created until Open()). Enabled filters must not trigger a NullReferenceException here;
+        // they should simply take effect once a file is opened.
+        using var doc = new CascadeDocument();
+
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(new Filter { Enabled = true, Match = { Text = "ERROR" } });
+
+        doc.SetFilters(filters); // must not throw
+
+        Assert.True(doc.FilteredMode);
+        Assert.Equal(0, doc.RowCount); // nothing open yet
+    }
+
+    [Fact]
+    public void Filters_loaded_before_open_take_effect_after_open()
+    {
+        string[] lines = { "ERROR one", "info two", "ERROR three", "debug four" };
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(string.Join('\n', lines)));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            // Load filters first (as startup auto-load does), THEN open the file.
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Enabled = true, Match = { Text = "ERROR" } });
+            doc.SetFilters(filters);
+
+            doc.Open(path);
+            doc.WaitForIndex();
+            WaitFilter(doc);
+
+            Assert.True(doc.FilteredMode);
+            Assert.Equal(2, doc.MatchedLineCount);
+            Assert.Equal(2, doc.RowCount);
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Open_index_filter_and_map_rows()
     {
         string[] lines =

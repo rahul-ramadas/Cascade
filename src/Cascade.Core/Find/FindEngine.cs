@@ -15,30 +15,62 @@ public static class FindEngine
     public static long Find(LineReader reader, LineIndex index, long fileLength, long lineCount,
         FindQuery query, long startLine, bool forward, CancellationToken ct)
     {
-        if (lineCount <= 0 || string.IsNullOrEmpty(query.Text)) return -1;
-
-        Regex? rx = null;
-        if (query.Regex)
-        {
-            var opts = RegexOptions.CultureInvariant;
-            if (!query.CaseSensitive) opts |= RegexOptions.IgnoreCase;
-            try { rx = new Regex(query.Text, opts); }
-            catch (ArgumentException) { return -1; }
-        }
-        var cmp = query.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        if (lineCount <= 0) return -1;
+        if (Compile(query) is not var (rx, cmp)) return -1;
 
         long line = Math.Clamp(startLine, 0, lineCount - 1);
         int step = forward ? 1 : -1;
         for (; line >= 0 && line < lineCount; line += step)
         {
             if ((line & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
-            long s = index.Get(line);
-            long e = (line + 1 < index.Count) ? index.Get(line + 1) : fileLength;
-            var span = reader.GetChars(s, e);
-
-            bool hit = rx is not null ? rx.IsMatch(span) : span.Contains(query.Text, cmp);
-            if (hit) return line;
+            if (IsHit(LineSpan(reader, index, fileLength, line), query, rx, cmp)) return line;
         }
         return -1;
+    }
+
+    /// <summary>Like <see cref="Find"/> but restricted to a filtered view: it walks display <b>rows</b>
+    /// (each mapped to a file line via <paramref name="rowToLine"/>) so the hit is always a visible line.
+    /// Returns the matching file line, or -1.</summary>
+    public static long FindInRows(LineReader reader, LineIndex index, long fileLength, long rowCount,
+        Func<long, long> rowToLine, FindQuery query, long startRow, bool forward, CancellationToken ct)
+    {
+        if (rowCount <= 0) return -1;
+        if (Compile(query) is not var (rx, cmp)) return -1;
+
+        long row = Math.Clamp(startRow, 0, rowCount - 1);
+        int step = forward ? 1 : -1;
+        for (; row >= 0 && row < rowCount; row += step)
+        {
+            if ((row & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+            long line = rowToLine(row);
+            if (IsHit(LineSpan(reader, index, fileLength, line), query, rx, cmp)) return line;
+        }
+        return -1;
+    }
+
+    private static ReadOnlySpan<char> LineSpan(LineReader reader, LineIndex index, long fileLength, long line)
+    {
+        long s = index.Get(line);
+        long e = (line + 1 < index.Count) ? index.Get(line + 1) : fileLength;
+        return reader.GetChars(s, e);
+    }
+
+    private static bool IsHit(ReadOnlySpan<char> span, FindQuery query, Regex? rx, StringComparison cmp)
+        => rx is not null ? rx.IsMatch(span) : span.Contains(query.Text, cmp);
+
+    /// <summary>Builds the regex (if any) and comparison for a query, or returns null for an empty /
+    /// invalid-regex query (which matches nothing).</summary>
+    private static (Regex? Rx, StringComparison Cmp)? Compile(FindQuery query)
+    {
+        if (string.IsNullOrEmpty(query.Text)) return null;
+        Regex? rx = null;
+        if (query.Regex)
+        {
+            var opts = RegexOptions.CultureInvariant;
+            if (!query.CaseSensitive) opts |= RegexOptions.IgnoreCase;
+            try { rx = new Regex(query.Text, opts); }
+            catch (ArgumentException) { return null; }
+        }
+        return (rx, query.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase);
     }
 }

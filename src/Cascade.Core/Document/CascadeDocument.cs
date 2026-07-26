@@ -123,6 +123,14 @@ public sealed class CascadeDocument : IDisposable
     public void ApplyFilters()
     {
         CurrentSnapshot = FilterSnapshot.Build(Filters);
+        if (_filterService is null)
+        {
+            // No file open yet (e.g. filters auto-loaded at startup). Keep the snapshot so the filters
+            // take effect as soon as a file is opened; there is nothing to evaluate against right now.
+            _generation = null;
+            Updated?.Invoke();
+            return;
+        }
         _generation = CurrentSnapshot.HasAnyEnabled ? _filterService.Restart(CurrentSnapshot) : null;
         _filterService.Notify();
         Updated?.Invoke();
@@ -164,8 +172,34 @@ public sealed class CascadeDocument : IDisposable
 
     public long FindLine(FindQuery query, long startLine, bool forward, CancellationToken ct)
     {
+        if (_src is null) return -1;
         var reader = new LineReader(_src, _enc.Encoding);
-        return FindEngine.Find(reader, _index, _src.Length, CompletedLineCount, query, startLine, forward, ct);
+
+        // In dim mode every line is visible, so search the whole file.
+        if (!FilteredMode)
+            return FindEngine.Find(reader, _index, _src.Length, CompletedLineCount, query, startLine, forward, ct);
+
+        // In filtered mode, search ONLY the visible (matched) lines, so the hit is always a line the
+        // user can see — otherwise a match on a hidden line would snap the highlight to a different,
+        // non-matching visible line.
+        var view = MatchView;
+        long rows = view.Count;
+        if (rows <= 0) return -1;
+
+        long startRow;
+        if (forward)
+        {
+            startRow = view.RowAtOrAfterLine(startLine);
+            if (startRow >= rows) return -1; // nothing visible at/after the start point
+        }
+        else
+        {
+            long r = view.RowAtOrAfterLine(startLine);
+            if (r >= rows || view.LineAt(r) > startLine) r--; // step back to the row at/before startLine
+            if (r < 0) return -1;
+            startRow = r;
+        }
+        return FindEngine.FindInRows(reader, _index, _src.Length, rows, view.LineAt, query, startRow, forward, ct);
     }
 
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via

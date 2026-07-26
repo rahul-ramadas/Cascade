@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
+using Cascade.Core.Document;
 using Cascade.Core.Model;
 
 namespace Cascade.App;
@@ -40,9 +42,94 @@ internal static class UiShots
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
 
         ShotMainForm(outDir, file, tat);
+        ShotGridStates(outDir);
 
         Console.WriteLine("done");
         return 0;
+    }
+
+    /// <summary>Renders the log grid in a few key states (dim vs. filtered, with a colored match, a
+    /// marker, and a selected line) so the coloring/selection/marker rendering can be reviewed.</summary>
+    private static void ShotGridStates(string dir)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < 40; i++)
+        {
+            string lvl = i % 4 == 0 ? "ERROR" : i % 4 == 1 ? "WARN " : "INFO ";
+            sb.Append($"[2026-07-16T18:06:{i:00}.123][inventory-svc][{i:000}][{lvl}] message number {i} with detail text\n");
+        }
+        string path = Path.Combine(Path.GetTempPath(), "cascade_states_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var settings = AppSettings.Load();
+        var doc = new CascadeDocument();
+        doc.Open(path);
+        doc.WaitForIndex();
+        doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xC0, 0, 0), Bold = true } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
+        doc.ApplyFilters();
+        WaitIdle(doc);
+        doc.Markers.Toggle(2, 0);
+        doc.Markers.Toggle(6, 3);
+
+        var grid = new LineGridControl { Dock = DockStyle.Fill };
+        var host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(1100, 470), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+        host.Controls.Add(grid);
+        grid.Attach(doc, settings);
+        host.Show();
+        Settle();
+        grid.SelectRowForAccessibility(5);
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-dim");
+
+        doc.Filters.ShowOnlyFilteredLines = true;
+        doc.ApplyFilters();
+        WaitIdle(doc);
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-filtered");
+
+        // Columns enabled (display-only split into named columns).
+        doc.Filters.ShowOnlyFilteredLines = false;
+        doc.ApplyFilters();
+        WaitIdle(doc);
+        doc.Columns.Enabled = true;
+        doc.Columns.Mode = ColumnSplitMode.Delimiter;
+        doc.Columns.Delimiter = "]";
+        doc.Columns.Columns.Clear();
+        foreach (var (n, w) in new[] { ("Time", 190), ("Provider", 90), ("Id", 55), ("Level", 80), ("Message", 360) })
+            doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w });
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-columns");
+
+        host.Close();
+        host.Dispose();
+        doc.Dispose();
+        try { File.Delete(path); } catch { /* ignore */ }
+    }
+
+    private static void WaitIdle(CascadeDocument doc)
+    {
+        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 5000;)
+        {
+            if (doc.IsIndexComplete && doc.IsFilterIdle) return;
+            Thread.Sleep(5);
+        }
+    }
+
+    private static void Settle()
+    {
+        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;) { Application.DoEvents(); Thread.Sleep(10); }
+    }
+
+    private static void CapControl(Form host, string dir, string name)
+    {
+        using var bmp = new Bitmap(host.ClientSize.Width, host.ClientSize.Height);
+        host.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        bmp.Save(Path.Combine(dir, name + ".png"), ImageFormat.Png);
+        Console.WriteLine($"{name}: {bmp.Width}x{bmp.Height}");
     }
 
     private static void ShotDialog(Form form, string dir, string name)

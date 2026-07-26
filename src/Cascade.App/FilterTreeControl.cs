@@ -401,8 +401,8 @@ public sealed class FilterTreeControl : UserControl
         menu.Items.Add("Edit…", null, (_, _) => { if (SelectedFilter is { } f) EditRequested?.Invoke(f); });
         menu.Items.Add("Remove", null, (_, _) => RemoveSelected());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Find next matching\tF4", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); });
-        menu.Items.Add("Find previous matching\tShift+F4", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); });
+        menu.Items.Add(new ToolStripMenuItem("Find next matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
+        menu.Items.Add(new ToolStripMenuItem("Find previous matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); }) { ShortcutKeyDisplayString = "Shift+F4" });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Enable all", null, (_, _) => SetAllEnabled(true));
         menu.Items.Add("Disable all", null, (_, _) => SetAllEnabled(false));

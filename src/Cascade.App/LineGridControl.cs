@@ -37,6 +37,7 @@ public sealed class LineGridControl : Control
     private bool _dragging;
     private long _anchorLine = -1;   // file line to keep in view across streaming view rebuilds
     private bool _anchorSelect;
+    private bool _anchorCenter;
 
     public event Action? SelectionChanged;
     public event Action<long>? LineDoubleClicked;
@@ -54,6 +55,8 @@ public sealed class LineGridControl : Control
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
         TabStop = true;
+        AccessibleRole = AccessibleRole.List;
+        AccessibleName = "Cascade log view";
         RebuildFonts();
     }
 
@@ -68,8 +71,14 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>Requests that <paramref name="line"/> (or the nearest visible line) stay in view as the
-    /// filtered view rebuilds. Re-applied on each <see cref="RefreshView"/> until cleared.</summary>
-    public void SetViewAnchor(long line, bool select) { _anchorLine = line; _anchorSelect = select; }
+    /// filtered view rebuilds. Re-applied on each <see cref="RefreshView"/> until cleared. When
+    /// <paramref name="center"/> is set the line is centered in the viewport, otherwise just kept visible.</summary>
+    public void SetViewAnchor(long line, bool select, bool center = false)
+    {
+        _anchorLine = line;
+        _anchorSelect = select;
+        _anchorCenter = center;
+    }
 
     public void ClearViewAnchor() => _anchorLine = -1;
 
@@ -81,7 +90,16 @@ public sealed class LineGridControl : Control
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _caretRow = row;
         if (_anchorSelect) _sel.SetSingle(row);
-        EnsureVisible(row);
+        if (_anchorCenter) CenterOnRow(row); else EnsureVisible(row);
+    }
+
+    private void CenterOnRow(long row)
+    {
+        int visible = VisibleRowCount;
+        long rows = _doc?.RowCount ?? 0;
+        long maxFirst = Math.Max(0, rows - visible);
+        _firstRow = Math.Clamp(row - visible / 2, 0, maxFirst);
+        _vbar.Value = (int)Math.Clamp(_firstRow, 0, _vbar.Maximum);
     }
 
     public void Attach(CascadeDocument doc, AppSettings settings)
@@ -548,6 +566,131 @@ public sealed class LineGridControl : Control
     }
 
     protected override void OnResize(EventArgs e) { base.OnResize(e); RefreshView(); }
+
+    // ---- accessibility (UI Automation) ----
+    // The log view is fully owner-drawn, so it exposes a proper accessibility tree: the control is a
+    // List whose children are the currently-visible lines. Each line reports its 1-based number
+    // (Value), its text (Name), selection/focus state, and on-screen bounds. This gives screen readers
+    // a usable view of the log AND lets external UI-automation tests observe selection and scrolling.
+    protected override AccessibleObject CreateAccessibilityInstance() => new GridAccessibleObject(this);
+
+    private int VisibleRowSpan()
+    {
+        if (_doc is null) return 0;
+        long rows = _doc.RowCount;
+        return (int)Math.Max(0, Math.Min(VisibleRowCount, rows - _firstRow));
+    }
+
+    /// <summary>Selects a display row in response to an accessibility client (screen reader / UIA).
+    /// Marshalled to the UI thread; behaves like a single-click selection.</summary>
+    internal void SelectRowForAccessibility(long row)
+    {
+        if (_doc is null) return;
+        if (InvokeRequired) { BeginInvoke(() => SelectRowForAccessibility(row)); return; }
+        row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
+        _anchorLine = -1;
+        _caretRow = row;
+        _sel.SetSingle(row);
+        EnsureVisible(row);
+        Invalidate();
+        SelectionChanged?.Invoke();
+    }
+
+    private sealed class GridAccessibleObject : Control.ControlAccessibleObject
+    {
+        private readonly LineGridControl _g;
+        public GridAccessibleObject(LineGridControl g) : base(g) => _g = g;
+
+        public override AccessibleRole Role => AccessibleRole.List;
+
+        public override string? Value
+        {
+            get
+            {
+                if (_g._doc is null || _g._caretRow < 0 || _g._caretRow >= _g._doc.RowCount) return "";
+                long line = _g._doc.RowToLine(_g._caretRow);
+                return $"Line {line + 1}: {_g._doc.GetLineText(line)}";
+            }
+            set { }
+        }
+
+        public override int GetChildCount() => _g.VisibleRowSpan();
+
+        public override AccessibleObject? GetChild(int index)
+            => index >= 0 && index < _g.VisibleRowSpan() ? new RowAccessibleObject(_g, this, index) : null;
+
+        public override AccessibleObject? GetSelected()
+        {
+            if (_g._caretRow < 0) return null;
+            int i = (int)(_g._caretRow - _g._firstRow);
+            return i >= 0 && i < _g.VisibleRowSpan() ? new RowAccessibleObject(_g, this, i) : null;
+        }
+
+        public override AccessibleObject? GetFocused() => GetSelected();
+
+        public override AccessibleObject? HitTest(int x, int y)
+        {
+            Point client = _g.PointToClient(new Point(x, y));
+            int i = (client.Y - _g.HeaderHeight) / Math.Max(1, _g._rowHeight);
+            return i >= 0 && i < _g.VisibleRowSpan() ? GetChild(i) : this;
+        }
+    }
+
+    private sealed class RowAccessibleObject : AccessibleObject
+    {
+        private readonly LineGridControl _g;
+        private readonly AccessibleObject _parent;
+        private readonly int _visibleIndex;
+
+        public RowAccessibleObject(LineGridControl g, AccessibleObject parent, int visibleIndex)
+        {
+            _g = g; _parent = parent; _visibleIndex = visibleIndex;
+        }
+
+        private long Row => _g._firstRow + _visibleIndex;
+        private long Line => _g._doc is null ? -1 : _g._doc.RowToLine(Row);
+
+        public override AccessibleObject Parent => _parent;
+        public override AccessibleRole Role => AccessibleRole.ListItem;
+
+        public override string? Name
+        {
+            get { long line = Line; return line < 0 || _g._doc is null ? "" : _g._doc.GetLineText(line); }
+            set { }
+        }
+
+        // 1-based file line number, so screen readers and automation can identify the row.
+        public override string? Value { get => (Line + 1).ToString(); set { } }
+
+        public override Rectangle Bounds
+        {
+            get
+            {
+                int y = _g.HeaderHeight + _visibleIndex * _g._rowHeight;
+                int w = Math.Max(0, _g.ClientSize.Width - _g._vbar.Width);
+                return _g.RectangleToScreen(new Rectangle(0, y, w, _g._rowHeight));
+            }
+        }
+
+        public override AccessibleStates State
+        {
+            get
+            {
+                var s = AccessibleStates.Selectable | AccessibleStates.Focusable;
+                if (_g._sel.Contains(Row)) s |= AccessibleStates.Selected;
+                if (Row == _g._caretRow) s |= AccessibleStates.Focused;
+                return s;
+            }
+        }
+
+        public override void Select(AccessibleSelection flags)
+        {
+            if ((flags & (AccessibleSelection.TakeSelection | AccessibleSelection.TakeFocus)) != 0)
+                _g.SelectRowForAccessibility(Row);
+        }
+
+        public override void DoDefaultAction() => _g.SelectRowForAccessibility(Row);
+    }
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
     private static Color ToColor(RgbColor c) => Color.FromArgb(c.R, c.G, c.B);

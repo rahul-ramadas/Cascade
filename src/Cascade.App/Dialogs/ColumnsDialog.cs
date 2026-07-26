@@ -29,6 +29,8 @@ public sealed class ColumnsDialog : DialogBase
         AllowUserToDeleteRows = false,
         RowHeadersVisible = false,
         AllowUserToResizeColumns = true,
+        BackgroundColor = SystemColors.Window,
+        BorderStyle = BorderStyle.FixedSingle,
         SelectionMode = DataGridViewSelectionMode.CellSelect
     };
 

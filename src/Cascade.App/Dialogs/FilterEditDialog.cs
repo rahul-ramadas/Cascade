@@ -35,6 +35,10 @@ public sealed class FilterEditDialog : DialogBase
         _filter = filter;
         Text = isNew ? "Add Filter" : "Edit Filter";
 
+        // Accessible names so screen readers announce these fields (the visual labels aren't linked).
+        _description.AccessibleName = "Filter description";
+        _text.AccessibleName = "Filter text";
+
         _foreBtn.Size = new Size(Dpi(56), Dpi(23));
         _backBtn.Size = new Size(Dpi(56), Dpi(23));
         _marker.Width = Dpi(50);
@@ -57,13 +61,13 @@ public sealed class FilterEditDialog : DialogBase
             root.Controls.Add(field);
         }
 
-        Row("Description:", _description);
+        Row("Text:", _text);
 
         var typeRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0), WrapContents = false };
         typeRow.Controls.AddRange(new Control[] { _typeText, _typeMarker, _marker });
         Row("Type:", typeRow);
 
-        Row("Text:", _text);
+        Row("Description:", _description);
 
         var optRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0), WrapContents = false };
         optRow.Controls.AddRange(new Control[] { _regex, _caseSensitive });
@@ -117,6 +121,8 @@ public sealed class FilterEditDialog : DialogBase
         if (Owner is { } owner)
             Location = new Point(owner.Left + Math.Max(0, (owner.Width - Width) / 2),
                                  owner.Top + Math.Max(0, (owner.Height - Height) / 2));
+
+        ActiveControl = _text; // default focus in the (now first) Text field
     }
 
     private void LoadFromFilter()

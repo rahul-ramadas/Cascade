@@ -28,6 +28,12 @@ public sealed class AppSettings
     public List<string> RecentFiles { get; set; } = new();
     public List<string> RecentFilterFiles { get; set; } = new();
 
+    /// <summary>The filter file (.cascade or .tat) last loaded/saved; auto-loaded on the next launch.</summary>
+    public string? LastFilterFile { get; set; }
+
+    /// <summary>When true, <see cref="LastFilterFile"/> is reloaded automatically at startup.</summary>
+    public bool AutoLoadLastFilterFile { get; set; } = true;
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 
@@ -39,8 +45,12 @@ public sealed class AppSettings
     [System.Text.Json.Serialization.JsonIgnore] public Color SelectionFore => Color.FromArgb(SelectionForeArgb);
     [System.Text.Json.Serialization.JsonIgnore] public Color DimForeground => Color.FromArgb(DimForegroundArgb);
 
-    private static string SettingsPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cascade", "settings.json");
+    private static string SettingsDir =>
+        Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR") is { Length: > 0 } dir
+            ? dir
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cascade");
+
+    private static string SettingsPath => Path.Combine(SettingsDir, "settings.json");
 
     public void AddRecentFile(string path) => AddRecent(RecentFiles, path);
     public void AddRecentFilterFile(string path) => AddRecent(RecentFilterFiles, path);
