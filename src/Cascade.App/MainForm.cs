@@ -49,7 +49,7 @@ public sealed class MainForm : Form
         Text = "Cascade";
         WindowState = FormWindowState.Maximized;
         MinimumSize = new Size(700, 400);
-        try { Icon = SystemIcons.Application; } catch { /* ignore */ }
+        Icon = LoadAppIcon();
 
         BuildMenu();
         BuildStatusBar();
@@ -85,6 +85,23 @@ public sealed class MainForm : Form
         Shown += (_, _) => ProcessArgs(args);
         FormClosing += OnClosing;
         UpdateStatus();
+    }
+
+    /// <summary>Loads the embedded multi-resolution application icon; falls back to the system icon.</summary>
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            var asm = typeof(MainForm).Assembly;
+            var name = asm.GetManifestResourceNames().FirstOrDefault(n => n.EndsWith("cascade.ico", StringComparison.OrdinalIgnoreCase));
+            if (name is not null)
+            {
+                using var s = asm.GetManifestResourceStream(name);
+                if (s is not null) return new Icon(s); // keep all frames so each UI context picks its size
+            }
+        }
+        catch { /* fall through to the default icon */ }
+        return SystemIcons.Application;
     }
 
     protected override void OnLoad(EventArgs e)
