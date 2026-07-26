@@ -204,7 +204,7 @@ public sealed class LineGridControl : Control
     {
         var g = e.Graphics;
         g.Clear(_settings.Background);
-        if (_doc is null) return;
+        if (_doc is null) { DrawFocusBar(g); return; }
 
         int gutter = GutterWidth();
         int contentW = ContentWidth;
@@ -262,6 +262,8 @@ public sealed class LineGridControl : Control
                 using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack))) g.DrawRectangle(pen, 0, y, rowRect.Width - 1, _rowHeight - 1);
         }
 
+        DrawFocusBar(g);
+
         if (columns) runningMaxWidth = TotalColumnsWidth();
         if (runningMaxWidth != _maxContentWidth)
         {
@@ -269,6 +271,16 @@ public sealed class LineGridControl : Control
             BeginInvoke(UpdateHScroll);
         }
     }
+
+    private void DrawFocusBar(Graphics g)
+    {
+        if (!Focused) return;
+        using var b = new SolidBrush(_settings.SelectionBack);
+        g.FillRectangle(b, 0, 0, LogicalToDeviceUnits(3), ClientSize.Height);
+    }
+
+    protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+    protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
     private Font SelectFont(ResolvedStyle s) =>
         s is { Bold: true, Italic: true } ? _fontBoldItalic :
@@ -334,6 +346,10 @@ public sealed class LineGridControl : Control
     private void DrawMarkers(Graphics g, long line, int y)
     {
         if (!MarkersVisible || _doc is null) return;
+        // Keep the marker gutter the neutral margin color (not the line's fill color) so the marker
+        // bars stay clearly visible regardless of the line's filter highlight or selection.
+        using (var bg = new SolidBrush(_settings.GutterBack))
+            g.FillRectangle(bg, 0, y, MarkerGutterWidth, _rowHeight);
         byte mask = _doc.Markers.MaskOf(line);
         if (mask == 0) return;
         for (int m = 0; m < 8; m++)
@@ -457,7 +473,10 @@ public sealed class LineGridControl : Control
         if (_doc is null) return;
         foreach (long row in _sel.Rows(CopyLineCap)) _doc.Markers.Toggle(_doc.RowToLine(row), index);
         if (_sel.Count == 0 && _caretRow >= 0) _doc.Markers.Toggle(_doc.RowToLine(_caretRow), index);
-        _doc.ApplyFilters();
+        // Re-run filtering only when a marker-based filter is active (its matches depend on markers).
+        // Otherwise a marker toggle just changes the gutter, so a repaint suffices — re-filtering would
+        // needlessly rebuild the view and shift the scroll position / selection.
+        if (_doc.CurrentSnapshot.HasMarkerFilter) _doc.ApplyFilters();
         RefreshView();
     }
 

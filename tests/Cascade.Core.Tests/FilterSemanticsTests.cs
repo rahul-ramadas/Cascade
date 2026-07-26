@@ -14,6 +14,35 @@ public class FilterSemanticsTests
     private static LineEval Eval(FilterCollection c, string line)
         => FilterSnapshot.Build(c).Evaluate(line.AsSpan(), 0, null);
 
+    private static Filter Marker(int index, bool enabled)
+        => new() { Enabled = enabled, Match = { Type = FilterMatchType.Marker, MarkerIndex = index } };
+
+    [Fact]
+    public void HasMarkerFilter_is_true_only_when_a_marker_filter_participates()
+    {
+        // No marker filter → toggling a marker can't affect results.
+        var textOnly = new FilterCollection();
+        textOnly.Add(Make("Error", enabled: true));
+        Assert.False(FilterSnapshot.Build(textOnly).HasMarkerFilter);
+
+        // An enabled marker filter participates.
+        var enabledMarker = new FilterCollection();
+        enabledMarker.Add(Marker(0, enabled: true));
+        Assert.True(FilterSnapshot.Build(enabledMarker).HasMarkerFilter);
+
+        // A disabled marker filter with no enabled descendants does NOT participate.
+        var disabledMarker = new FilterCollection();
+        disabledMarker.Add(Marker(0, enabled: false));
+        Assert.False(FilterSnapshot.Build(disabledMarker).HasMarkerFilter);
+
+        // A disabled marker filter that is an ancestor of an enabled child still constrains it → participates.
+        var ancestor = new FilterCollection();
+        var marker = Marker(1, enabled: false);
+        ancestor.Add(marker);
+        ancestor.Add(Make("boom", enabled: true), marker);
+        Assert.True(FilterSnapshot.Build(ancestor).HasMarkerFilter);
+    }
+
     [Fact]
     public void Example1_refinement_and_deepest_coloring()
     {

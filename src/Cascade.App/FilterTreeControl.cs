@@ -82,6 +82,32 @@ public sealed class FilterTreeControl : UserControl
 
         _search.TextChanged += (_, _) => JumpToMatch(fromSelection: false, forward: true);
         _search.KeyDown += OnSearchKeyDown;
+
+        // A subtle left accent bar marks which sub-area (search box vs list) holds focus; the reserved
+        // left padding gives it room without overlapping the controls.
+        BackColor = SystemColors.Window;
+        DoubleBuffered = true;
+        Padding = new Padding(FocusBarWidth, 0, 0, 0);
+        _search.GotFocus += (_, _) => Invalidate();
+        _search.LostFocus += (_, _) => Invalidate();
+        _tree.GotFocus += (_, _) => Invalidate();
+        _tree.LostFocus += (_, _) => Invalidate();
+    }
+
+    private const int FocusBarWidth = 3;
+
+    /// <summary>Draws the focus accent bar in the reserved left strip, aligned with the focused sub-area.</summary>
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        int w = Padding.Left;
+        if (w <= 0) return;
+        Rectangle r;
+        if (_search.Focused) r = new Rectangle(0, _search.Top, w, _search.Height);
+        else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height);
+        else return;
+        using var b = new SolidBrush(_settings.SelectionBack);
+        e.Graphics.FillRectangle(b, r);
     }
 
     private void OnTreeMouseDown(object? sender, MouseEventArgs e)
@@ -164,6 +190,7 @@ public sealed class FilterTreeControl : UserControl
         else if (e.KeyCode == Keys.Delete) { RemoveSelected(); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Enter) { if (SelectedFilter is { } f) EditRequested?.Invoke(f); e.Handled = e.SuppressKeyPress = true; }
         else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.Escape && _search.TextLength > 0) { _search.Clear(); e.Handled = e.SuppressKeyPress = true; }
     }
 
     private void JumpToMatch(bool fromSelection, bool forward)
@@ -218,6 +245,16 @@ public sealed class FilterTreeControl : UserControl
         Color bg = ToColor(rs.Background);
         Color fg = ToColor(rs.Foreground);
         FontStyle style = (rs.Bold ? FontStyle.Bold : 0) | (rs.Italic ? FontStyle.Italic : 0);
+
+        // While a filter search is active, matching filters keep their colors (with the matched term bold,
+        // drawn below); non-matching filters are shown colorless and dimmed so the matches stand out.
+        string sq = _search.Text.Trim();
+        if (sq.Length > 0 && !Matches(e.Node, sq))
+        {
+            bg = _settings.Background;
+            fg = _settings.DimForeground;
+            style = FontStyle.Regular;
+        }
 
         int rightEdge = _tree.ClientSize.Width;
         int countX = rightEdge - _header.CountWidth;
@@ -424,8 +461,20 @@ public sealed class FilterTreeControl : UserControl
     public void SetAllEnabled(bool enabled)
     {
         if (_doc is null) return;
-        foreach (var f in _doc.Filters.EnumerateDepthFirst()) f.Enabled = enabled;
-        Rebuild();
+        // Toggle the check state in place instead of rebuilding the tree. Rebuild() clears and recreates
+        // every node (the list blanks then repopulates → a visible flash); enable/disable-all only changes
+        // each node's checkbox. _building suppresses the per-node AfterCheck → FiltersChanged; BeginUpdate
+        // batches the repaint so it's flicker-free.
+        _building = true;
+        _tree.BeginUpdate();
+        foreach (var n in _flat)
+        {
+            if (n.Tag is Filter f) f.Enabled = enabled;
+            n.Checked = enabled;
+        }
+        _tree.EndUpdate();
+        _building = false;
+        _tree.Invalidate();
         FiltersChanged?.Invoke();
     }
 
@@ -448,6 +497,15 @@ public sealed class FilterTreeControl : UserControl
 
     /// <summary>Selects the first filter (used by the screenshot/demo harness).</summary>
     public void SelectFirst() { if (_flat.Count > 0) _tree.SelectedNode = _flat[0]; }
+
+    /// <summary>Sets the filter-search text (used by the screenshot/demo harness).</summary>
+    internal void SetSearchText(string text) => _search.Text = text;
+
+    /// <summary>True when the filter search box currently has keyboard focus.</summary>
+    public bool SearchHasFocus => _search.Focused;
+
+    /// <summary>True when the filter list (tree) currently has keyboard focus.</summary>
+    public bool ListHasFocus => _tree.Focused;
 
     /// <summary>Repaints nodes so live match counts refresh while filtering streams.</summary>
     public void RefreshCounts() => _tree.Invalidate();

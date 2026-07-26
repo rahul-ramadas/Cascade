@@ -112,6 +112,8 @@ public sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
+        if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (!IsTextInputFocused())
         {
@@ -605,6 +607,19 @@ public sealed class MainForm : Form
     private void FocusFilterList() { EnsureFilterListVisible(); _filterTree.FocusList(); }
 
     private void FocusFilterSearch() { EnsureFilterListVisible(); _filterTree.FocusSearch(); }
+
+    /// <summary>Tab / Shift+Tab cycles focus between the three main areas: log view → filter search → filter list.</summary>
+    private void CycleFocus(bool forward)
+    {
+        int current = _grid.Focused ? 0 : _filterTree.SearchHasFocus ? 1 : _filterTree.ListHasFocus ? 2 : 0;
+        int next = ((forward ? current + 1 : current - 1) % 3 + 3) % 3;
+        switch (next)
+        {
+            case 1: FocusFilterSearch(); break;
+            case 2: FocusFilterList(); break;
+            default: FocusTextArea(); break;
+        }
+    }
 
     private void EnsureFilterListVisible()
     {

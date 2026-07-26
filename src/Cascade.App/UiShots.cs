@@ -48,9 +48,51 @@ internal static class UiShots
 
         ShotMainForm(outDir, file, tat);
         ShotGridStates(outDir);
+        ShotFilterSearch(outDir);
 
         Console.WriteLine("done");
         return 0;
+    }
+
+    /// <summary>Renders the filter list with an active search term so the highlight (matching filters keep
+    /// their color with the term bold; non-matching filters are colorless and dimmed) can be reviewed.</summary>
+    private static void ShotFilterSearch(string dir)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < 30; i++)
+        {
+            string lvl = i % 4 == 0 ? "ERROR" : i % 4 == 1 ? "WARN " : "INFO ";
+            sb.Append($"[2026-07-16T18:06:{i:00}][inventory-svc][{lvl}] disk network message {i}\n");
+        }
+        string path = Path.Combine(Path.GetTempPath(), "cascade_fsearch_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var settings = AppSettings.Load();
+        var doc = new CascadeDocument();
+        doc.Open(path);
+        doc.WaitForIndex();
+        doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xC0, 0, 0), Bold = true } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "info", Match = { Text = "INFO" }, Style = { Foreground = new RgbColor(0x60, 0x60, 0x60) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "disk io", Match = { Text = "disk" }, Style = { Foreground = new RgbColor(0, 0, 0xC0) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "network", Match = { Text = "network" }, Style = { Foreground = new RgbColor(0, 0x88, 0) } });
+        doc.ApplyFilters();
+        WaitIdle(doc);
+
+        var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+        var host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(560, 220), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+        host.Controls.Add(tree);
+        tree.SetSettings(settings);
+        tree.Attach(doc);
+        tree.SetSearchText("ERROR"); // matches only the "errors" filter; the rest are dimmed
+        host.Show();
+        Settle();
+        CapControl(host, dir, "filter-search");
+
+        host.Close();
+        host.Dispose();
+        doc.Dispose();
+        try { File.Delete(path); } catch { /* ignore */ }
     }
 
     /// <summary>Renders the log grid in a few key states (dim vs. filtered, with a colored match, a

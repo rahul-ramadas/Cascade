@@ -40,10 +40,14 @@ public sealed class FilterSnapshot
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
     public bool HasEnabledInclude { get; }
+    /// <summary>True if a marker-type filter participates in filtering (it is enabled, or it is an ancestor
+    /// of an enabled filter). When false, toggling a line marker cannot change any filter result, so the
+    /// view need not be re-filtered.</summary>
+    public bool HasMarkerFilter { get; }
     public int FilterCount { get; }
 
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
-        bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude)
+        bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter)
     {
         _roots = roots;
         _index = index;
@@ -52,6 +56,7 @@ public sealed class FilterSnapshot
         ShowOnlyFilteredLines = showOnlyFiltered;
         HasAnyEnabled = hasAnyEnabled;
         HasEnabledInclude = hasEnabledInclude;
+        HasMarkerFilter = hasMarkerFilter;
     }
 
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
@@ -71,7 +76,7 @@ public sealed class FilterSnapshot
 
     public static FilterSnapshot Build(FilterCollection filters)
     {
-        bool anyEnabled = false, anyInclude = false;
+        bool anyEnabled = false, anyInclude = false, anyMarker = false;
         int counter = 0;
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
@@ -114,13 +119,14 @@ public sealed class FilterSnapshot
 
             node.SubtreeHasEnabled = f.Enabled;
             foreach (var c in children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
+            if (node.Type == FilterMatchType.Marker && node.SubtreeHasEnabled) anyMarker = true;
             return node;
         }
 
         var roots = new Node[filters.Roots.Count];
         for (int i = 0; i < filters.Roots.Count; i++) roots[i] = Convert(filters.Roots[i], 0);
 
-        return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines, anyEnabled, anyInclude);
+        return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines, anyEnabled, anyInclude, anyMarker);
     }
 
     /// <summary>Evaluates a single line. <paramref name="markers"/> may be null when no marker
