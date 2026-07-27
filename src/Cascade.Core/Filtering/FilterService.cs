@@ -41,6 +41,7 @@ public sealed class FilterService : IDisposable
     {
         public LineReader Reader = null!;
         public long[] Counts = null!;
+        public FilterSnapshot.MatchContext Context = null!;
     }
 
     private const int Block = 1 << 15; // 32,768 lines per ordered block
@@ -210,14 +211,19 @@ public sealed class FilterService : IDisposable
             };
 
             Parallel.For(0, len, options,
-                () => new Worker { Reader = new LineReader(_src, _encoding), Counts = new long[gen.Counts.Length] },
+                () => new Worker
+                {
+                    Reader = new LineReader(_src, _encoding),
+                    Counts = new long[gen.Counts.Length],
+                    Context = gen.Snapshot.GetThreadContext()
+                },
                 (k, _, w) =>
                 {
                     long line = start + k;
                     long s = _index.Get(line);
                     long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _fileLength;
                     var span = w.Reader.GetChars(s, e);
-                    shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts).Shown;
+                    shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
                     return w;
                 },
                 w => { lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i]; });

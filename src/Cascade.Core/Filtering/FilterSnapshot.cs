@@ -31,11 +31,50 @@ public sealed class FilterSnapshot
         public bool SubtreeHasEnabled;
         public Node[] Children = Array.Empty<Node>();
         public Filter Source = null!;
+
+        /// <summary>Bit of this node's literal in the shared automaton, or -1 when it is matched another way.</summary>
+        public int LiteralBit = -1;
+        /// <summary>Literals of a rewritten "L0.+L1" regex, matched with plain substring searches.</summary>
+        public string[]? Sequence;
+        /// <summary>Automaton bits for each literal in <see cref="Sequence"/>: all must occur for the
+        /// sequence to have any chance, so this rejects almost every line without scanning it again.</summary>
+        public int[]? SequenceBits;
+        public StringComparison Comparison;
+    }
+
+    /// <summary>Per-thread scratch for <see cref="Evaluate"/>: the automaton's hit bitset for one line.
+    /// <see cref="Regex"/> deliberately is <b>not</b> shared across threads — it caches a single internal
+    /// runner, so concurrent callers allocate a fresh one on every call (measured 5.8x slower).</summary>
+    public sealed class MatchContext
+    {
+        internal readonly FilterSnapshot Owner;
+        internal readonly ulong[] Hits;
+        internal readonly Regex?[] Regexes;
+
+        internal MatchContext(FilterSnapshot owner, int words, int nodes)
+        {
+            Owner = owner;
+            Hits = new ulong[words];
+            Regexes = new Regex?[nodes];
+        }
+
+        /// <summary>Width of the automaton hit bitset, i.e. how many patterns the automatons hold.</summary>
+        public int HitWords => Hits.Length;
     }
 
     private readonly Node[] _roots;
+    /// <summary>Each root's automaton bit (or -1). Testing these first keeps the per-line scan inside two tiny
+    /// arrays instead of dereferencing every root object — with ~175 filters almost all of them do not match,
+    /// and chasing their pointers cost more than the matching itself.</summary>
+    private readonly int[] _rootBits;
     private readonly Dictionary<Filter, int> _index;
     private readonly Node[] _nodesByIndex;
+    private readonly LiteralAutomaton? _ciAutomaton;
+    private readonly LiteralAutomaton? _csAutomaton;
+    private readonly int _ciWords;
+    private readonly int _hitWords;
+
+    [ThreadStatic] private static MatchContext? _threadContext;
 
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
@@ -47,9 +86,12 @@ public sealed class FilterSnapshot
     public int FilterCount { get; }
 
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
-        bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter)
+        bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter,
+        LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton)
     {
         _roots = roots;
+        _rootBits = new int[roots.Length];
+        for (int i = 0; i < roots.Length; i++) _rootBits[i] = roots[i].LiteralBit;
         _index = index;
         _nodesByIndex = nodesByIndex;
         FilterCount = filterCount;
@@ -57,6 +99,27 @@ public sealed class FilterSnapshot
         HasAnyEnabled = hasAnyEnabled;
         HasEnabledInclude = hasEnabledInclude;
         HasMarkerFilter = hasMarkerFilter;
+        _ciAutomaton = ciAutomaton;
+        _csAutomaton = csAutomaton;
+        _ciWords = ciAutomaton?.Words ?? 0;
+        _hitWords = _ciWords + (csAutomaton?.Words ?? 0);
+    }
+
+    /// <summary>Scratch buffers for evaluating lines on one thread. Reused across calls on that thread.</summary>
+    public MatchContext CreateContext() => new(this, Math.Max(1, _hitWords), _nodesByIndex.Length);
+
+    /// <summary>This thread's cached scratch for this snapshot. Filter workers take one per thread rather than
+    /// per work item, so the buffers (and any per-thread <see cref="Regex"/>) are built once, not per block.</summary>
+    public MatchContext GetThreadContext() => ThreadContext;
+
+    private MatchContext ThreadContext
+    {
+        get
+        {
+            var ctx = _threadContext;
+            if (ctx is null || !ReferenceEquals(ctx.Owner, this)) _threadContext = ctx = CreateContext();
+            return ctx;
+        }
     }
 
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
@@ -66,10 +129,18 @@ public sealed class FilterSnapshot
     /// every ancestor's predicate match (independent of enabled state). Used by per-filter find.</summary>
     public bool DeepMatches(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, Filter target)
     {
+        var context = ThreadContext;
+        var hits = context.Hits.AsSpan();
+        if (_hitWords > 0)
+        {
+            hits.Clear();
+            _ciAutomaton?.Match(line, hits[.._ciWords]);
+            _csAutomaton?.Match(line, hits[_ciWords..]);
+        }
         for (Filter? f = target; f is not null; f = f.Parent)
         {
             if (!_index.TryGetValue(f, out int idx)) return false; // not part of this snapshot
-            if (!Matches(_nodesByIndex[idx], line, lineNumber, markers)) return false;
+            if (!Matches(_nodesByIndex[idx], line, lineNumber, markers, context)) return false;
         }
         return true;
     }
@@ -100,12 +171,20 @@ public sealed class FilterSnapshot
 
             if (f.Match.Type == FilterMatchType.Text && f.Match.Regex && f.Match.Text.Length > 0)
             {
-                var options = RegexOptions.Compiled | RegexOptions.CultureInvariant;
-                if (!f.Match.CaseSensitive) options |= RegexOptions.IgnoreCase;
-                try { node.Regex = new Regex(f.Match.Text, options); }
-                catch (ArgumentException) { node.Regex = null; } // invalid regex → never matches
+                // "L0.+L1" style patterns - by far the most common in log filters - become plain substring
+                // searches: vectorized, and with no Regex object to contend on.
+                if (RegexLiteralRewriter.TryRewrite(f.Match.Text, out string[] parts))
+                    node.Sequence = parts;
+                else
+                {
+                    var options = RegexOptions.Compiled | RegexOptions.CultureInvariant;
+                    if (!f.Match.CaseSensitive) options |= RegexOptions.IgnoreCase;
+                    try { node.Regex = new Regex(f.Match.Text, options); }
+                    catch (ArgumentException) { node.Regex = null; } // invalid regex → never matches
+                }
             }
             node.IsRegex = f.Match.Type == FilterMatchType.Text && f.Match.Regex;
+            node.Comparison = f.Match.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
             if (f.Enabled)
             {
@@ -126,7 +205,50 @@ public sealed class FilterSnapshot
         var roots = new Node[filters.Roots.Count];
         for (int i = 0; i < filters.Roots.Count; i++) roots[i] = Convert(filters.Roots[i], 0);
 
-        return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines, anyEnabled, anyInclude, anyMarker);
+        // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
+        // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character
+        // table, so they get separate automatons (their hit bits live in one bitset, offset by _ciWords).
+        // Literals of rewritten regexes go in too, purely as a prefilter.
+        //
+        // Only filters that actually take part in evaluation are included. Dfs prunes any node whose subtree
+        // holds nothing enabled, so those patterns would only enlarge the automaton (a bigger transition table
+        // is the main cost of matching) and widen the hit bitset. Note the test is SubtreeHasEnabled, not
+        // Enabled: a disabled ancestor still constrains its enabled descendants. Anything left out simply
+        // falls back to a direct substring search, which is what per-filter find uses it for anyway.
+        var ciTexts = new List<string>();
+        var csTexts = new List<string>();
+        foreach (var node in nodes)
+        {
+            if (node.Type != FilterMatchType.Text || !node.SubtreeHasEnabled) continue;
+            var bucket = node.CaseSensitive ? csTexts : ciTexts;
+            if (node.Sequence is not null) bucket.AddRange(node.Sequence);
+            else if (!node.IsRegex && node.Text.Length > 0) bucket.Add(node.Text);
+        }
+        var ci = LiteralAutomaton.TryBuild(ciTexts, ignoreCase: true);
+        var cs = LiteralAutomaton.TryBuild(csTexts, ignoreCase: false);
+
+        int ciBit = 0, csBit = 0;
+        int csBitBase = (ci?.Words ?? 0) * 64;
+        foreach (var node in nodes)
+        {
+            if (node.Type != FilterMatchType.Text || !node.SubtreeHasEnabled) continue;
+            bool available = node.CaseSensitive ? cs is not null : ci is not null;
+            if (node.Sequence is not null)
+            {
+                var bits = new int[node.Sequence.Length];
+                for (int i = 0; i < bits.Length; i++)
+                    bits[i] = node.CaseSensitive ? csBitBase + csBit++ : ciBit++;
+                if (available) node.SequenceBits = bits;
+            }
+            else if (!node.IsRegex && node.Text.Length > 0)
+            {
+                int bit = node.CaseSensitive ? csBitBase + csBit++ : ciBit++;
+                if (available) node.LiteralBit = bit;
+            }
+        }
+
+        return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines,
+            anyEnabled, anyInclude, anyMarker, ci, cs);
     }
 
     /// <summary>Evaluates a single line. <paramref name="markers"/> may be null when no marker
@@ -137,25 +259,45 @@ public sealed class FilterSnapshot
     /// <summary>Evaluates a line and, when <paramref name="counts"/> is provided (size
     /// <see cref="FilterCount"/>), increments the entry of every enabled filter that deep-matches.</summary>
     public LineEval Evaluate(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts)
+        => Evaluate(line, lineNumber, markers, counts, ThreadContext);
+
+    /// <summary>As above, using caller-supplied per-thread scratch (see <see cref="CreateContext"/>). Filter
+    /// workers pass their own context so nothing is shared between threads.</summary>
+    public LineEval Evaluate(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
+        MatchContext context)
     {
+        // One pass over the line finds every literal filter that occurs in it; the tree walk below then just
+        // tests bits instead of re-scanning the line once per filter.
+        var hits = context.Hits.AsSpan();
+        if (_hitWords > 0)
+        {
+            hits.Clear();
+            _ciAutomaton?.Match(line, hits[.._ciWords]);
+            _csAutomaton?.Match(line, hits[_ciWords..]);
+        }
+
         int bestDepth = -1;
         Filter? best = null;
         bool excluded = false;
         bool anyIncludeMatched = false;
 
-        foreach (var root in _roots)
-            Dfs(root, line, lineNumber, markers, counts, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
-
+        for (int i = 0; i < _roots.Length; i++)
+        {
+            // A literal root that the automaton did not hit cannot match, and neither can its subtree.
+            int bit = _rootBits[i];
+            if (bit >= 0 && (hits[bit >> 6] & (1UL << (bit & 63))) == 0) continue;
+            Dfs(_roots[i], line, lineNumber, markers, counts, context, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+        }
         bool included = HasEnabledInclude ? anyIncludeMatched : true;
         bool shown = included && !excluded;
         return new LineEval(shown, shown ? best : null);
     }
 
     private void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
-        ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
+        MatchContext context, ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
     {
         if (!node.SubtreeHasEnabled) return;          // prune: nothing enabled at/below
-        if (!Matches(node, line, lineNumber, markers)) return; // prune: descendants require this match
+        if (!Matches(node, line, lineNumber, markers, context)) return; // prune: descendants require this match
 
         if (node.Enabled)
         {
@@ -172,17 +314,47 @@ public sealed class FilterSnapshot
         }
 
         foreach (var child in node.Children)
-            Dfs(child, line, lineNumber, markers, counts, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(child, line, lineNumber, markers, counts, context, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
     }
 
-    private static bool Matches(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers)
+    private static bool Matches(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,
+        MatchContext context)
     {
         if (node.Type == FilterMatchType.Marker)
             return markers is not null && node.MarkerIndex >= 0 && markers.Has(lineNumber, node.MarkerIndex);
 
         if (node.Text.Length == 0) return true; // empty pattern matches everything
-        if (node.IsRegex) return node.Regex is not null && node.Regex.IsMatch(line); // invalid regex → no match
-        var cmp = node.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-        return line.Contains(node.Text, cmp);
+
+        // Plain literal already resolved by the automaton pass.
+        if (node.LiteralBit >= 0) return (context.Hits[node.LiteralBit >> 6] & (1UL << (node.LiteralBit & 63))) != 0;
+
+        // Regex rewritten to "literal .+ literal ...".
+        if (node.Sequence is not null)
+        {
+            if (node.SequenceBits is not null)
+            {
+                // Every literal must occur somewhere before the ordering can possibly hold.
+                foreach (int bit in node.SequenceBits)
+                    if ((context.Hits[bit >> 6] & (1UL << (bit & 63))) == 0) return false;
+            }
+            return RegexLiteralRewriter.Matches(line, node.Sequence, node.Comparison);
+        }
+
+        if (node.IsRegex)
+        {
+            // Use this thread's own Regex instance: a shared one serializes on its internal runner cache.
+            return (context.Regexes[node.Index] ??= CloneRegex(node)).IsMatch(line);
+        }
+        return line.Contains(node.Text, node.Comparison);
+    }
+
+    /// <summary>Stand-in for a pattern that failed to compile: "(?!)" can never match.</summary>
+    private static readonly Regex AlwaysFails = new("(?!)", RegexOptions.None);
+
+    private static Regex CloneRegex(Node node)
+    {
+        if (node.Regex is null) return AlwaysFails;
+        try { return new Regex(node.Regex.ToString(), node.Regex.Options); }
+        catch (ArgumentException) { return AlwaysFails; }
     }
 }
