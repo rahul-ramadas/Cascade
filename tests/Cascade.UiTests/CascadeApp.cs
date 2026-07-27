@@ -268,7 +268,8 @@ internal sealed class CascadeApp : IDisposable
     {
         var row = Retry.WhileNull(() =>
             Rows().FirstOrDefault(r => r.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault == oneBasedLine.ToString()),
-            TimeSpan.FromSeconds(3)).Result ?? throw new InvalidOperationException($"Row for line {oneBasedLine} not visible.");
+            TimeSpan.FromSeconds(3)).Result
+            ?? throw new InvalidOperationException($"Row for line {oneBasedLine} not visible; on screen: {VisibleLineRange()}.");
         var la = row.Patterns.LegacyIAccessible.Pattern;
         la.Select(3); // SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION
         System.Threading.Thread.Sleep(120);
@@ -286,6 +287,24 @@ internal sealed class CascadeApp : IDisposable
         rv.SetValue(firstRow);
         System.Threading.Thread.Sleep(150);
         return true;
+    }
+
+    /// <summary>Scrolls so <paramref name="row"/> sits in the middle of the viewport, whatever its height.
+    /// Tests must never assume a window size - CI screens are far smaller than a developer's monitor, so a
+    /// hard-coded first row can leave the target off-screen.</summary>
+    public bool ScrollRowToMiddle(int row)
+    {
+        int visible = Math.Max(1, Rows().Length);
+        return ScrollVerticalTo(Math.Max(0, row - visible / 2));
+    }
+
+    /// <summary>The lines currently on screen, as "first-last (count)" - used in failure messages.</summary>
+    private string VisibleLineRange()
+    {
+        var lines = Rows()
+            .Select(r => int.TryParse(r.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault, out int n) ? n : -1)
+            .Where(n => n > 0).ToArray();
+        return lines.Length == 0 ? "no rows" : $"{lines.Min()}-{lines.Max()} ({lines.Length} rows)";
     }
 
     private static void Expand(AutomationElement item)

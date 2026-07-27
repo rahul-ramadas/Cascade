@@ -19,7 +19,7 @@ public class UiFeatureTests
         void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
         // Scroll a middle region into view, then select a MATCH line (0-based 500 -> 1-based 501).
-        app.ScrollVerticalTo(474);
+        app.ScrollRowToMiddle(500);
         app.SelectLine(501);
         Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
         Check("one line selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
