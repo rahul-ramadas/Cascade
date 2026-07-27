@@ -453,8 +453,28 @@ public sealed class FilterTreeControl : UserControl
     public void RemoveSelected()
     {
         if (_doc is null || SelectedFilter is not { } f) return;
+        var node = _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f));
         _doc.Filters.Remove(f);
-        Rebuild();
+
+        if (node is null) Rebuild();   // not on screen for some reason; fall back to a full refresh
+        else
+        {
+            // Drop just this node (its children go with it) instead of calling Rebuild(). Rebuild clears
+            // and recreates every node, so the whole list blanks and repopulates - a visible flash on every
+            // delete. Removing one node leaves the rest of the tree, its scroll position and its expansion
+            // state completely untouched.
+            var next = node.NextNode ?? node.PrevNode ?? node.Parent;
+            _building = true;
+            _tree.BeginUpdate();
+            node.Remove();
+            _flat.Clear();
+            FlattenInto(_tree.Nodes);
+            _tree.EndUpdate();
+            _building = false;
+            // Keep a sensible selection so repeated Delete presses keep working without re-clicking.
+            if (next is not null) _tree.SelectedNode = next;
+        }
+
         FiltersChanged?.Invoke();
     }
 

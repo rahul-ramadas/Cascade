@@ -27,17 +27,20 @@ internal static class TestData
     }
 
     /// <summary>A .tat with a single enabled include filter matching "MATCH".</summary>
-    public static string WriteFilterFile()
+    public static string WriteFilterFile() => WriteFilterFile("MATCH");
+
+    /// <summary>A .tat with one enabled include filter per match text, in the given order.</summary>
+    public static string WriteFilterFile(params string[] texts)
     {
-        const string xml =
-            "<TextAnalysisTool.NET version=\"2025-11-21\" showOnlyFilteredLines=\"False\">\n" +
-            "  <filters>\n" +
-            "    <filter enabled=\"y\" excluding=\"n\" description=\"match rows\" foreColor=\"FF0000\" " +
-            "type=\"matches_text\" case_sensitive=\"n\" regex=\"n\" text=\"MATCH\" />\n" +
-            "  </filters>\n" +
-            "</TextAnalysisTool.NET>\n";
+        var sb = new StringBuilder();
+        sb.Append("""<TextAnalysisTool.NET version="2025-11-21" showOnlyFilteredLines="False">""").Append('\n');
+        sb.Append("  <filters>\n");
+        foreach (string t in texts)
+            sb.Append($"""    <filter enabled="y" excluding="n" description="{t}" foreColor="FF0000" type="matches_text" case_sensitive="n" regex="n" text="{t}" />""").Append('\n');
+        sb.Append("  </filters>\n");
+        sb.Append("</TextAnalysisTool.NET>\n");
         string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".tat");
-        File.WriteAllText(path, xml, new UTF8Encoding(false));
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
         return path;
     }
 

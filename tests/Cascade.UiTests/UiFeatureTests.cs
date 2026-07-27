@@ -108,6 +108,49 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Deleting_a_filter_leaves_the_rest_of_the_list_intact()
+    {
+        // Deleting used to rebuild the entire tree, so the list visibly blanked and repopulated. It now
+        // removes just the one node, which means the remaining nodes - and the model behind them - have to
+        // stay exactly right without the safety net of a full refresh.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "line 999", "line 998");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            // "line 999" and "line 998" each match exactly one line, and neither is a MATCH line, so the
+            // matched count is an exact check that the model really changed.
+            Check("all three filters listed", app.FilterNode("MATCH") is not null
+                && app.FilterNode("line 999") is not null && app.FilterNode("line 998") is not null);
+            Check("count with all three", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
+
+            // Remove the middle one.
+            app.FilterNode("line 999")!.AsTreeItem().Select();
+            app.ClickMenu("Filters", "Remove Filter");
+
+            Check("deleted filter is gone", app.FilterNode("line 999") is null);
+            Check("filter above survives", app.FilterNode("MATCH") is not null);
+            Check("filter below survives", app.FilterNode("line 998") is not null);
+            Check("count after delete", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 1:N0}"), app.StatusText("Fil:"));
+
+            // Again, so repeated in-place deletes are covered too.
+            app.FilterNode("line 998")!.AsTreeItem().Select();
+            app.ClickMenu("Filters", "Remove Filter");
+
+            Check("second delete removes it", app.FilterNode("line 998") is null);
+            Check("original filter still listed", app.FilterNode("MATCH") is not null);
+            Check("count back to the base set", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));
+
+            Assert.True(fails.Count == 0, "Filter delete failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
     public void Copy_and_docking_work()
     {
         using var app = CascadeApp.Launch();
