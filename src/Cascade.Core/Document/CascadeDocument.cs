@@ -110,6 +110,12 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Lines the active filter generation has finished analyzing (0 when no filters run).</summary>
     public long FilterProcessedLineCount => _generation is not null ? _filterService.ProcessedLineCount : 0;
 
+    /// <summary>Filter changes served entirely from cached per-filter results, with no pass over the file.</summary>
+    public long FilterCacheHits => _filterService?.CacheHits ?? 0;
+
+    /// <summary>Bytes held by the per-filter match cache.</summary>
+    public long FilterCacheBytes => _filterService?.CacheBytes ?? 0;
+
     /// <summary>File lines below this value are fully resolved in the current view: every visible line before
     /// it has been discovered, so <see cref="RowForLine"/> is authoritative for them. Because a filter pass
     /// updates the visible set in place, this is the whole file as soon as one pass has covered it — only the

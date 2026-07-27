@@ -151,6 +151,18 @@ public sealed class VisibleLineSet
         RecountAll();
     }
 
+    /// <summary>Replaces the visibility of lines <c>[0, lines)</c> with <paramref name="words"/> (one bit per
+    /// line). Used when the result is rebuilt from cached per-filter sets instead of by scanning the file.</summary>
+    public void ReplaceAll(ReadOnlySpan<ulong> words, long lines)
+    {
+        EnsureLines(lines);
+        long totalWords = (_lines + WordBits - 1) / WordBits;
+        long n = Math.Min(words.Length, totalWords);
+        for (long w = 0; w < n; w++) SetWord(w, (long)words[(int)w]);
+        for (long w = n; w < totalWords; w++) SetWord(w, 0L);
+        RecountAll();
+    }
+
     /// <summary>Publishes an immutable snapshot of the rank index for lock-free readers.</summary>
     public void Publish()
     {

@@ -36,6 +36,11 @@ public sealed class FilterSnapshot
         public int LiteralBit = -1;
         /// <summary>Literals of a rewritten "L0.+L1" regex, matched with plain substring searches.</summary>
         public string[]? Sequence;
+        /// <summary>Identifies the chain of predicates (root..this) that decides this filter's deep match, so a
+        /// cached result can be reused only while that whole chain is unchanged.</summary>
+        public string CacheKey = "";
+        /// <summary>False when the deep match depends on markers, which change independently of the filters.</summary>
+        public bool Cacheable;
         /// <summary>Automaton bits for each literal in <see cref="Sequence"/>: all must occur for the
         /// sequence to have any chance, so this rejects almost every line without scanning it again.</summary>
         public int[]? SequenceBits;
@@ -122,6 +127,27 @@ public sealed class FilterSnapshot
         }
     }
 
+    /// <summary>A filter taking part in evaluation, described for the match cache.</summary>
+    public readonly record struct CacheableFilter(int Index, string Key, bool Enabled, bool IsExclude);
+
+    /// <summary>Words needed for a deep-match bitset (one bit per filter).</summary>
+    public int DeepMatchWords => (FilterCount + 63) / 64;
+
+    /// <summary>The filters that take part in evaluation, each with the key identifying the predicate chain
+    /// behind its deep match. Returns false when any of them cannot be cached — marker filters depend on
+    /// markers, which change independently of the filter set, so those results must never be reused.</summary>
+    public bool TryGetCacheableFilters(out List<CacheableFilter> filters)
+    {
+        filters = new List<CacheableFilter>();
+        foreach (var node in _nodesByIndex)
+        {
+            if (!node.SubtreeHasEnabled) continue;   // pruned: never evaluated, nothing to cache
+            if (!node.Cacheable) { filters.Clear(); return false; }
+            filters.Add(new CacheableFilter(node.Index, node.CacheKey, node.Enabled, node.Kind == FilterKind.Exclude));
+        }
+        return true;
+    }
+
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
     public bool TryGetIndex(Filter filter, out int index) => _index.TryGetValue(filter, out index);
 
@@ -152,7 +178,7 @@ public sealed class FilterSnapshot
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
 
-        Node Convert(Filter f, int depth)
+        Node Convert(Filter f, int depth, string parentKey, bool parentCacheable)
         {
             var node = new Node
             {
@@ -168,6 +194,14 @@ public sealed class FilterSnapshot
             };
             index[f] = node.Index;
             nodes.Add(node);
+
+            // A filter's deep match is decided by its own predicate and every ancestor's, so the cache key is
+            // the whole chain: editing a parent must invalidate its children too.
+            string own = f.Match.Type == FilterMatchType.Marker
+                ? $"M{f.Match.MarkerIndex}"
+                : $"T{(f.Match.Regex ? 'r' : 'l')}{(f.Match.CaseSensitive ? 'S' : 'i')}:{f.Match.Text}";
+            node.CacheKey = parentKey.Length == 0 ? own : parentKey + "\u0001" + own;
+            node.Cacheable = parentCacheable && f.Match.Type != FilterMatchType.Marker;
 
             if (f.Match.Type == FilterMatchType.Text && f.Match.Regex && f.Match.Text.Length > 0)
             {
@@ -193,7 +227,7 @@ public sealed class FilterSnapshot
             }
 
             var children = new Node[f.Children.Count];
-            for (int i = 0; i < f.Children.Count; i++) children[i] = Convert(f.Children[i], depth + 1);
+            for (int i = 0; i < f.Children.Count; i++) children[i] = Convert(f.Children[i], depth + 1, node.CacheKey, node.Cacheable);
             node.Children = children;
 
             node.SubtreeHasEnabled = f.Enabled;
@@ -203,7 +237,7 @@ public sealed class FilterSnapshot
         }
 
         var roots = new Node[filters.Roots.Count];
-        for (int i = 0; i < filters.Roots.Count; i++) roots[i] = Convert(filters.Roots[i], 0);
+        for (int i = 0; i < filters.Roots.Count; i++) roots[i] = Convert(filters.Roots[i], 0, "", true);
 
         // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
         // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character
@@ -265,6 +299,14 @@ public sealed class FilterSnapshot
     /// workers pass their own context so nothing is shared between threads.</summary>
     public LineEval Evaluate(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
         MatchContext context)
+        => Evaluate(line, lineNumber, markers, counts, context, default);
+
+    /// <summary>As above, additionally recording one bit per filter in <paramref name="deepMatches"/> (indexed
+    /// by <see cref="TryGetIndex"/>) for every filter that <i>deep-matches</i> this line. Deep match does not
+    /// depend on which filters are enabled, so those bits stay valid across enable/disable and are what the
+    /// match cache stores.</summary>
+    public LineEval Evaluate(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
+        MatchContext context, Span<ulong> deepMatches)
     {
         // One pass over the line finds every literal filter that occurs in it; the tree walk below then just
         // tests bits instead of re-scanning the line once per filter.
@@ -286,7 +328,7 @@ public sealed class FilterSnapshot
             // A literal root that the automaton did not hit cannot match, and neither can its subtree.
             int bit = _rootBits[i];
             if (bit >= 0 && (hits[bit >> 6] & (1UL << (bit & 63))) == 0) continue;
-            Dfs(_roots[i], line, lineNumber, markers, counts, context, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(_roots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
         }
         bool included = HasEnabledInclude ? anyIncludeMatched : true;
         bool shown = included && !excluded;
@@ -294,10 +336,13 @@ public sealed class FilterSnapshot
     }
 
     private void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
-        MatchContext context, ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
+        MatchContext context, Span<ulong> deepMatches, ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
     {
         if (!node.SubtreeHasEnabled) return;          // prune: nothing enabled at/below
         if (!Matches(node, line, lineNumber, markers, context)) return; // prune: descendants require this match
+
+        // Reaching here means every ancestor matched too, so this is a deep match.
+        if (!deepMatches.IsEmpty) deepMatches[node.Index >> 6] |= 1UL << (node.Index & 63);
 
         if (node.Enabled)
         {
@@ -314,7 +359,7 @@ public sealed class FilterSnapshot
         }
 
         foreach (var child in node.Children)
-            Dfs(child, line, lineNumber, markers, counts, context, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
     }
 
     private static bool Matches(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,

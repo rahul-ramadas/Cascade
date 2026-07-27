@@ -35,6 +35,12 @@ public sealed class FilterService : IDisposable
         /// was unfiltered, so the first filtered frame still shows the user's current lines).</summary>
         internal bool SeedAllVisible;
         internal bool Seeded;
+
+        /// <summary>Per-filter accumulators (indexed by filter index) filled while this pass runs, so its work
+        /// is remembered and later enable/disable changes need no pass at all. Null when not caching.</summary>
+        internal FilterMatchCache.SetBuilder?[]? CacheBuild;
+        internal List<FilterSnapshot.CacheableFilter>? CacheFilters;
+        internal bool CacheStored;
     }
 
     private sealed class Worker
@@ -42,6 +48,7 @@ public sealed class FilterService : IDisposable
         public LineReader Reader = null!;
         public long[] Counts = null!;
         public FilterSnapshot.MatchContext Context = null!;
+        public ulong[] Deep = Array.Empty<ulong>();
     }
 
     private const int Block = 1 << 15; // 32,768 lines per ordered block
@@ -60,6 +67,9 @@ public sealed class FilterService : IDisposable
     // One visible-line set per file, reused by every generation: a filter change re-evaluates lines and
     // updates it in place (keep / drop / add) rather than rebuilding it, so the view is never empty.
     private readonly VisibleLineSet _visible = new();
+    // Remembers which lines each filter matched, so toggling filters recombines cached sets instead of
+    // re-reading the file.
+    private readonly FilterMatchCache _cache = new();
     private Generation? _current;
     private long _processed;
     private long _genId;
@@ -100,6 +110,12 @@ public sealed class FilterService : IDisposable
         _wake.Set();
         return gen;
     }
+
+    /// <summary>Bytes currently held by the per-filter match cache.</summary>
+    public long CacheBytes => _cache.UsedBytes;
+
+    /// <summary>How many filter changes were served entirely from cached results, with no pass over the file.</summary>
+    public long CacheHits { get; private set; }
 
     /// <summary>Cancels the current generation (if any) and goes idle. Use when there are no enabled
     /// filters so <see cref="IsIdle"/> reports true at once and the UI can clear its "busy" state and
@@ -166,6 +182,20 @@ public sealed class FilterService : IDisposable
             // (already held in the shared set).
             if (gen.SeedAllVisible) _visible.FillVisible(_completedCount());
             _visible.Publish();
+
+            // If every participating filter's results are already cached for the whole file, the new visible
+            // set is just a bitwise combine of them - no reading, decoding or matching at all.
+            if (TryApplyFromCache(gen))
+            {
+                lock (_lock)
+                {
+                    if (!ReferenceEquals(gen, _current)) return;
+                    _processed = _completedCount();
+                }
+                Progress?.Invoke(gen);
+                return;
+            }
+            StartCacheBuild(gen);
         }
 
         while (!ct.IsCancellationRequested)
@@ -178,7 +208,17 @@ public sealed class FilterService : IDisposable
             }
 
             long to = _completedCount();
-            if (from >= to) return; // caught up; wait for next Notify
+
+            // A cache build records whole 64-line words, and ProcessBlock assumes each block starts on a word
+            // boundary. Indexing hands us an arbitrary number of lines, so while it is still running, stop at
+            // the last whole word and pick the remainder up next time.
+            if (gen.CacheBuild is not null && !_indexComplete()) to &= ~63L;
+
+            if (from >= to)
+            {
+                StoreCacheIfComplete(gen, from);
+                return; // caught up; wait for next Notify
+            }
 
             // Process in ordered blocks, publishing progress after each so the UI can show both the
             // streaming matches and a live "lines analyzed" count that climbs smoothly to the total.
@@ -197,11 +237,84 @@ public sealed class FilterService : IDisposable
         }
     }
 
+    /// <summary>Rebuilds the visible set purely from cached per-filter results. Only possible once indexing is
+    /// finished and every participating filter has a cached set covering the whole file.</summary>
+    private bool TryApplyFromCache(Generation gen)
+    {
+        if (!_indexComplete()) return false;
+        long lines = _completedCount();
+        if (lines <= 0) return false;
+        if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return false;
+
+        var includes = new List<FilterMatchCache.MatchSet>();
+        var excludes = new List<FilterMatchCache.MatchSet>();
+        var counts = new long[gen.Counts.Length];
+        foreach (var filter in filters)
+        {
+            if (!_cache.TryGet(filter.Key, lines, out var set)) return false;
+            if (!filter.Enabled) continue;                 // counts only track enabled filters
+            counts[filter.Index] = set.Matches;
+            (filter.IsExclude ? excludes : includes).Add(set);
+        }
+
+        var shown = new ulong[(lines + 63) / 64];
+        FilterMatchCache.Combine(includes, excludes, gen.Snapshot.HasEnabledInclude, lines, shown);
+        _visible.ReplaceAll(shown, lines);
+        _visible.Publish();
+        lock (gen.CountsSync) Array.Copy(counts, gen.Counts, counts.Length);
+        gen.CacheStored = true;   // nothing new to remember
+        CacheHits++;
+        return true;
+    }
+
+    /// <summary>Prepares accumulators so this pass also remembers each filter's results for next time.
+    /// Indexing need not be finished: opening a file with filters already applied starts evaluation at 0%
+    /// indexed, and that pass is the one most worth remembering. The pass must start at line 0 though - a set
+    /// missing the head of the file could never be reused - and only complete results are ever stored.</summary>
+    private void StartCacheBuild(Generation gen)
+    {
+        lock (_lock) { if (_processed != 0) return; }
+        if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return;
+
+        var builders = new FilterMatchCache.SetBuilder?[gen.Counts.Length];
+        long lines = _completedCount();
+        foreach (var filter in filters) builders[filter.Index] = new FilterMatchCache.SetBuilder(lines);
+        gen.CacheBuild = builders;
+        gen.CacheFilters = filters;
+    }
+
+    /// <summary>Stores the accumulated results once the pass has covered the whole file.</summary>
+    private void StoreCacheIfComplete(Generation gen, long processed)
+    {
+        if (gen.CacheStored || gen.CacheBuild is null || gen.CacheFilters is null) return;
+        if (!_indexComplete() || processed < _completedCount()) return;
+
+        gen.CacheStored = true;
+        foreach (var filter in gen.CacheFilters)
+        {
+            var builder = gen.CacheBuild[filter.Index];
+            if (builder is not null) _cache.Store(filter.Key, builder.Build(processed));
+        }
+        gen.CacheBuild = null;
+        gen.CacheFilters = null;
+    }
+
     private void ProcessBlock(Generation gen, long start, int len, CancellationToken ct)
     {
         bool[] shown = ArrayPool<bool>.Shared.Rent(len);
         long[] blockCounts = new long[gen.Counts.Length];
         object mergeLock = new();
+
+        // When a cache build is in flight, each 64-line group records which filters deep-matched its lines.
+        // Groups own whole words, so they can be written in parallel without any synchronisation.
+        bool caching = gen.CacheBuild is not null;
+        int deepWords = caching ? gen.Snapshot.DeepMatchWords : 0;   // words in one line's bitset
+        int filterCount = gen.Snapshot.FilterCount;
+        int groups = (len + 63) / 64;
+        int deepLength = caching ? filterCount * groups : 0;         // one word per (filter, group)
+        ulong[]? deepBits = caching ? ArrayPool<ulong>.Shared.Rent(deepLength) : null;
+        if (deepBits is not null) Array.Clear(deepBits, 0, deepLength);
+
         try
         {
             var options = new ParallelOptions
@@ -210,20 +323,47 @@ public sealed class FilterService : IDisposable
                 MaxDegreeOfParallelism = Environment.ProcessorCount
             };
 
-            Parallel.For(0, len, options,
+            Parallel.For(0, groups, options,
                 () => new Worker
                 {
                     Reader = new LineReader(_src, _encoding),
                     Counts = new long[gen.Counts.Length],
-                    Context = gen.Snapshot.GetThreadContext()
+                    Context = gen.Snapshot.GetThreadContext(),
+                    Deep = deepWords == 0 ? Array.Empty<ulong>() : new ulong[deepWords]
                 },
-                (k, _, w) =>
+                (g, _, w) =>
                 {
-                    long line = start + k;
-                    long s = _index.Get(line);
-                    long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _fileLength;
-                    var span = w.Reader.GetChars(s, e);
-                    shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
+                    int from = g * 64, until = Math.Min(from + 64, len);
+                    for (int k = from; k < until; k++)
+                    {
+                        long line = start + k;
+                        long s = _index.Get(line);
+                        long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _fileLength;
+                        var span = w.Reader.GetChars(s, e);
+
+                        if (deepBits is null)
+                        {
+                            shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
+                            continue;
+                        }
+
+                        Array.Clear(w.Deep);
+                        shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context, w.Deep).Shown;
+
+                        // Transpose this line's deep matches into per-filter words. Only set bits are visited,
+                        // and a line matches very few filters, so this stays cheap.
+                        int bitInGroup = k - from;
+                        for (int word = 0; word < deepWords; word++)
+                        {
+                            ulong bits = w.Deep[word];
+                            while (bits != 0)
+                            {
+                                int filter = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                                deepBits[filter * groups + g] |= 1UL << bitInGroup;
+                                bits &= bits - 1;
+                            }
+                        }
+                    }
                     return w;
                 },
                 w => { lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i]; });
@@ -234,12 +374,30 @@ public sealed class FilterService : IDisposable
             _visible.ApplyRange(start, shown.AsSpan(0, len));
             _visible.Publish();
 
+            // Hand this block's per-filter results to the cache being built for this pass.
+            if (deepBits is not null && gen.CacheBuild is { } builders && gen.CacheFilters is { } cacheFilters)
+            {
+                long firstWord = start / 64;   // blocks are word-aligned
+                foreach (var filter in cacheFilters)
+                {
+                    var builder = builders[filter.Index];
+                    if (builder is null) continue;
+                    int baseIndex = filter.Index * groups;
+                    for (int g = 0; g < groups; g++)
+                    {
+                        ulong word = deepBits[baseIndex + g];
+                        if (word != 0) builder.AddWord(firstWord + g, word);
+                    }
+                }
+            }
+
             lock (gen.CountsSync)
                 for (int i = 0; i < blockCounts.Length; i++) gen.Counts[i] += blockCounts[i];
         }
         finally
         {
             ArrayPool<bool>.Shared.Return(shown);
+            if (deepBits is not null) ArrayPool<ulong>.Shared.Return(deepBits);
         }
     }
 
