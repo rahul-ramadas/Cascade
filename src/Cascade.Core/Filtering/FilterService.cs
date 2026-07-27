@@ -30,6 +30,11 @@ public sealed class FilterService : IDisposable
             Id = id;
             Counts = new long[snapshot.FilterCount];
         }
+
+        /// <summary>Seed the shared visible set to "everything visible" before sweeping (set when the view
+        /// was unfiltered, so the first filtered frame still shows the user's current lines).</summary>
+        internal bool SeedAllVisible;
+        internal bool Seeded;
     }
 
     private sealed class Worker
@@ -51,6 +56,9 @@ public sealed class FilterService : IDisposable
     private readonly object _lock = new();
     private readonly AutoResetEvent _wake = new(false);
     private readonly Thread _thread;
+    // One visible-line set per file, reused by every generation: a filter change re-evaluates lines and
+    // updates it in place (keep / drop / add) rather than rebuilding it, so the view is never empty.
+    private readonly VisibleLineSet _visible = new();
     private Generation? _current;
     private long _processed;
     private long _genId;
@@ -74,15 +82,17 @@ public sealed class FilterService : IDisposable
         _thread.Start();
     }
 
-    /// <summary>Starts a fresh generation for a changed filter set, cancelling any in-flight run.</summary>
-    public Generation Restart(FilterSnapshot snapshot)
+    /// <summary>Starts a fresh generation for a changed filter set, cancelling any in-flight run. The visible
+    /// set is <b>reused</b>, so the re-evaluation updates it line by line instead of clearing it;
+    /// <paramref name="seedAllVisible"/> marks every line visible first (the previous view was unfiltered).</summary>
+    public Generation Restart(FilterSnapshot snapshot, bool seedAllVisible = false)
     {
         Generation gen;
         lock (_lock)
         {
             _cts.Cancel();
             _cts = new CancellationTokenSource();
-            gen = new Generation(snapshot, FilteredView.CreateExplicit(), ++_genId);
+            gen = new Generation(snapshot, FilteredView.CreateExplicit(_visible), ++_genId) { SeedAllVisible = seedAllVisible };
             _current = gen;
             _processed = 0;
         }
@@ -147,6 +157,16 @@ public sealed class FilterService : IDisposable
 
     private void ProcessAvailable(Generation gen, CancellationToken ct)
     {
+        if (!gen.Seeded)
+        {
+            gen.Seeded = true;
+            // Start from what the user is currently looking at so the view morphs in place instead of
+            // blanking: every line when no filters were active, otherwise the previous pass's results
+            // (already held in the shared set).
+            if (gen.SeedAllVisible) _visible.FillVisible(_completedCount());
+            _visible.Publish();
+        }
+
         while (!ct.IsCancellationRequested)
         {
             long from;
@@ -202,8 +222,11 @@ public sealed class FilterService : IDisposable
                 },
                 w => { lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i]; });
 
-            for (int k = 0; k < len; k++)
-                if (shown[k]) gen.View.Append(start + k);
+            // Update the visible set IN PLACE for this block: lines that still match keep their place, lines
+            // that stopped matching are dropped, new matches are added. Then publish the refreshed rank index
+            // so readers see a complete, coherent view of the whole file at every instant.
+            _visible.ApplyRange(start, shown.AsSpan(0, len));
+            _visible.Publish();
 
             lock (gen.CountsSync)
                 for (int i = 0; i < blockCounts.Length; i++) gen.Counts[i] += blockCounts[i];

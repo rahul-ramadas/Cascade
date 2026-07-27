@@ -41,6 +41,10 @@ public sealed class MainForm : Form
     private bool _anchorActive;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
+    /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
+    /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
+    internal bool NoSavePrompt;
+
     private enum FilterDock { Bottom, Top, Left, Right }
 
     public MainForm(AppSettings settings, string[] args)
@@ -374,13 +378,15 @@ public sealed class MainForm : Form
     private void OnFiltersChanged()
     {
         _filtersDirty = true;
-        long anchor = _grid.CurrentAnchorLine();
+        // Capture where the viewport is BEFORE the visible-line set changes, so the same line can be held at
+        // the same place on screen while the new matches stream in.
+        var anchor = _grid.CaptureViewAnchor();
         _doc.ApplyFilters();
         // In filtered mode the matched rows shift, so re-select the anchor line; in dim mode the row
         // set is unchanged, so leave any existing (possibly multi-row) selection intact.
         _grid.SetViewAnchor(anchor, select: _doc.FilteredMode);
         _grid.RefreshView();
-        _anchorActive = anchor >= 0;
+        _anchorActive = anchor.IsValid;
         UpdateTitle();
         UpdateStatus();
     }
@@ -562,7 +568,7 @@ public sealed class MainForm : Form
     private void ToggleFilteredMode()
     {
         // Capture the anchor in the CURRENT mode before flipping, so it maps the current row correctly.
-        long anchor = _grid.CurrentAnchorLine();
+        var anchor = _grid.CaptureViewAnchor();
         _doc.Filters.ShowOnlyFilteredLines = !_doc.Filters.ShowOnlyFilteredLines;
         _filtersDirty = true;
         SyncFilteredModeMenu();
@@ -570,7 +576,7 @@ public sealed class MainForm : Form
         // re-run filtering (which would blank the view). Just re-map the view and center the line.
         _grid.SetViewAnchor(anchor, select: true, center: true);
         _grid.RefreshView();
-        _anchorActive = anchor >= 0;
+        _anchorActive = anchor.IsValid;
         UpdateStatus();
     }
 
@@ -715,7 +721,7 @@ public sealed class MainForm : Form
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_filtersDirty && _filterFilePath is not null)
+        if (!NoSavePrompt && _filtersDirty && _filterFilePath is not null)
         {
             var r = MessageBox.Show(this, "Save changes to filters?", "Cascade", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (r == DialogResult.Cancel) { e.Cancel = true; return; }

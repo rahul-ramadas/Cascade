@@ -169,6 +169,52 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
+    public void Changing_filters_keeps_every_line_resolvable_while_the_new_pass_streams()
+    {
+        // Big enough that the new pass cannot finish in the microseconds after ApplyFilters returns.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 2_000_000; i++) sb.Append(i % 10 == 0 ? "MATCH " : "other ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            long total = doc.CompletedLineCount;
+
+            var filter = new Filter { Enabled = true, Match = { Text = "MATCH" } };
+            doc.Filters.Add(filter);
+            doc.Filters.ShowOnlyFilteredLines = true;
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            long matches = doc.MatchedLineCount;
+            long deep = total - 1000;
+            long rowBefore = doc.RowAtOrAfterLine(deep);
+            Assert.True(rowBefore > 0);
+
+            // Change the filters. Because the visible set is updated IN PLACE rather than rebuilt, a line
+            // deep in the file still maps to a real row immediately - the UI can hold the user's position
+            // instead of waiting for the sweep to reach it. (Rebuilding would report row 0 here.)
+            filter.Match.Text = "other";
+            doc.ApplyFilters();
+            long rowDuring = doc.RowAtOrAfterLine(deep);
+            long knownDuring = doc.ViewKnownThroughLine;
+
+            Assert.Equal(total, knownDuring);
+            Assert.True(Math.Abs(rowDuring - rowBefore) < 100_000,
+                $"deep line should stay near its row while re-filtering (was {rowBefore}, now {rowDuring})");
+
+            // ...and the pass still converges to exactly the new result: 9 of every 10 lines say "other".
+            WaitFilter(doc);
+            Assert.Equal(matches * 9, doc.MatchedLineCount);
+            Assert.Equal(total, doc.ViewKnownThroughLine);
+        }
+        finally { doc.Dispose(); File.Delete(path); }
+    }
+
+    [Fact]
     public void Open_index_filter_and_map_rows()
     {
         string[] lines =

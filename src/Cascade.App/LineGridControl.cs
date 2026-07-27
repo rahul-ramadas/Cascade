@@ -7,6 +7,14 @@ using Cascade.Core.Model;
 
 namespace Cascade.App;
 
+/// <summary>A viewport position that survives a rebuild of the visible-line set: the line to hold still,
+/// its offset in rows from the top of the viewport, and the caret line to re-establish as rows shift.</summary>
+public readonly record struct ViewAnchor(long Line, int Offset, long CaretLine)
+{
+    public static readonly ViewAnchor None = new(-1, 0, -1);
+    public bool IsValid => Line >= 0;
+}
+
 /// <summary>
 /// A fully virtualized, owner-drawn log view. Only the rows currently on screen are decoded and
 /// painted (via GDI <see cref="TextRenderer"/>), so it renders multi-GB files at 60 fps with flat
@@ -35,9 +43,14 @@ public sealed class LineGridControl : Control
     private int _maxContentWidth;
     private long _caretRow = -1;
     private bool _dragging;
-    private long _anchorLine = -1;   // file line to keep in view across streaming view rebuilds
+    // View stabilization across streaming view rebuilds: hold _anchorLine at _anchorOffset rows from the top
+    // of the viewport, and keep the caret on _anchorCaretLine, as rows are discovered beneath them.
+    private long _anchorLine = -1;
+    private int _anchorOffset;
+    private long _anchorCaretLine = -1;
     private bool _anchorSelect;
-    private bool _anchorCenter;
+    private bool _syncingScroll;     // true while pushing _firstRow into the scrollbar (ignore its echo)
+    private long[] _window = new long[64];   // file lines resolved for the current frame
 
     public event Action? SelectionChanged;
     public event Action<long>? LineDoubleClicked;
@@ -50,8 +63,8 @@ public sealed class LineGridControl : Control
         BackColor = Color.White;
         Controls.Add(_vbar);
         Controls.Add(_hbar);
-        _vbar.Scroll += (_, e) => { _anchorLine = -1; _firstRow = e.NewValue; Invalidate(); };
-        _vbar.ValueChanged += (_, _) => { _firstRow = _vbar.Value; Invalidate(); };
+        _vbar.Scroll += (_, e) => { ClearViewAnchor(); _firstRow = e.NewValue; Invalidate(); };
+        _vbar.ValueChanged += (_, _) => { if (_syncingScroll) return; _firstRow = _vbar.Value; Invalidate(); };
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
         TabStop = true;
@@ -62,44 +75,129 @@ public sealed class LineGridControl : Control
 
     public long CaretLine => _caretRow >= 0 && _doc is not null ? _doc.RowToLine(_caretRow) : -1;
 
-    /// <summary>The file line to preserve across a view change: the caret line, else the first visible line.</summary>
-    public long CurrentAnchorLine()
+    /// <summary>Captures the viewport's current position so it can be restored after the visible-line set
+    /// changes: the line to hold still (the caret line when it is on screen, else the top visible line), its
+    /// offset from the top of the viewport, and the caret line to re-establish. Call this BEFORE the change
+    /// and pass the result to <see cref="SetViewAnchor"/> after it.</summary>
+    public ViewAnchor CaptureViewAnchor()
     {
-        if (_doc is null || _doc.RowCount == 0) return -1;
-        long row = _caretRow >= 0 && _caretRow < _doc.RowCount ? _caretRow : Math.Clamp(_firstRow, 0, _doc.RowCount - 1);
-        return _doc.RowToLine(row);
+        if (_doc is null || _doc.RowCount == 0) return ViewAnchor.None;
+        long rows = _doc.RowCount;
+        long top = Math.Clamp(_firstRow, 0, rows - 1);
+        long caretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
+        // Hold the caret line still when it is actually on screen; otherwise hold the top visible line, so
+        // the text never jumps to a caret the user cannot see.
+        bool caretOnScreen = _caretRow >= top && _caretRow < Math.Min(rows, top + VisibleRowCount);
+        long pin = caretOnScreen ? _caretRow : top;
+        return new ViewAnchor(_doc.RowToLine(pin), (int)(pin - top), caretLine);
     }
 
-    /// <summary>Requests that <paramref name="line"/> (or the nearest visible line) stay in view as the
-    /// filtered view rebuilds. Re-applied on each <see cref="RefreshView"/> until cleared. When
-    /// <paramref name="center"/> is set the line is centered in the viewport, otherwise just kept visible.</summary>
-    public void SetViewAnchor(long line, bool select, bool center = false)
+    /// <summary>Arms view stabilization: as the filtered view streams in, the anchor's line is held at the
+    /// same on-screen offset, so lines discovered before it move the scrollbar rather than the text.
+    /// Re-applied on each <see cref="RefreshView"/> until cleared. <paramref name="center"/> instead places
+    /// the line in the middle of the viewport (used when switching filtered/dim mode).</summary>
+    public void SetViewAnchor(ViewAnchor anchor, bool select, bool center = false)
     {
-        _anchorLine = line;
+        _anchorLine = anchor.Line;
+        _anchorCaretLine = anchor.CaretLine;
+        _anchorOffset = center
+            ? Math.Max(0, VisibleRowCount / 2)
+            : Math.Clamp(anchor.Offset, 0, Math.Max(0, VisibleRowCount - 1));
         _anchorSelect = select;
-        _anchorCenter = center;
     }
 
-    public void ClearViewAnchor() => _anchorLine = -1;
+    public void ClearViewAnchor() { _anchorLine = -1; _anchorCaretLine = -1; }
 
-    private void ApplyViewAnchor()
+    /// <summary>While a filter pass is running the viewport must be identified by a <b>line</b>, never by a bare
+    /// row index: rows shift continuously as lines are added and dropped before it. Every user navigation
+    /// (scroll, wheel, click, arrow keys) clears the anchor, so re-establish one at wherever the user just
+    /// landed — otherwise the view starts drifting under them again the moment they scroll.</summary>
+    private void AnchorToViewportIfStreaming()
     {
-        if (_doc is null || _anchorLine < 0 || _doc.RowCount == 0) return;
-        long row = _doc.RowForLine(_anchorLine);
-        if (row < 0) row = _doc.RowAtOrAfterLine(_anchorLine);
-        row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
-        _caretRow = row;
-        if (_anchorSelect) _sel.SetSingle(row);
-        if (_anchorCenter) CenterOnRow(row); else EnsureVisible(row);
+        if (_doc is null || _anchorLine >= 0 || !_doc.IsBusy) return;
+        long rows = _doc.RowCount;
+        if (rows == 0) return;
+        _anchorLine = _doc.RowToLine(Math.Clamp(_firstRow, 0, rows - 1));
+        _anchorOffset = 0;
+        _anchorCaretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
+        // Keep a single selected row on its line; leave a multi-row selection alone.
+        _anchorSelect = _sel.Count == 1;
     }
 
-    private void CenterOnRow(long row)
+    /// <summary>Row currently displaying <paramref name="line"/> (or the nearest following visible line), or
+    /// -1 when the streaming filter has not reached that line yet — its position is then simply unknown, and
+    /// snapping the view to the scan frontier is what makes the text scroll wildly while filtering runs.</summary>
+    private long ResolveRow(long line)
     {
-        int visible = VisibleRowCount;
+        if (_doc is null || line < 0) return -1;
+        long row = _doc.RowForLine(line);
+        if (row >= 0) return row;
+        return line < _doc.ViewKnownThroughLine ? _doc.RowAtOrAfterLine(line) : -1;
+    }
+
+    private void ApplyViewAnchor() => PinToAnchor();
+
+    /// <summary>Re-derives the viewport (and caret) from the anchored <b>line</b>. Row indices move underneath
+    /// us while a pass adds or drops lines before the anchor, so anything computed from them goes stale within
+    /// a frame; painting re-resolves the window itself (see <see cref="OnPaint"/>), and this keeps the
+    /// scrollbar and hit-testing in step between paints.</summary>
+    private void PinToAnchor()
+    {
+        if (_doc is null || _anchorLine < 0) return;
+        long rows = _doc.RowCount;
+        if (rows == 0) return;
+
+        PinCaretToAnchor();
+        SyncFirstRowToAnchor();
+    }
+
+    /// <summary>Re-derives only the top row from the anchored line — no caret or selection side effects, so it
+    /// is safe to call from hit-testing and from the middle of a drag-selection.</summary>
+    private void SyncFirstRowToAnchor()
+    {
+        if (_doc is null || _anchorLine < 0) return;
+        long rows = _doc.RowCount;
+        if (rows == 0) return;
+        long row = ResolveRow(_anchorLine);
+        if (row < 0) return; // position not knowable yet → hold the viewport perfectly still
+        _firstRow = ClampFirstRow(Math.Clamp(row, 0, rows - 1) - _anchorOffset);
+    }
+
+    /// <summary>Keeps the caret (and, in filtered mode, the selection) on its original line as rows shift.</summary>
+    private void PinCaretToAnchor()
+    {
+        if (_doc is null || _anchorCaretLine < 0) return;
+        long rows = _doc.RowCount;
+        long caret = ResolveRow(_anchorCaretLine);
+        if (caret < 0 || rows == 0) return;
+        _caretRow = Math.Clamp(caret, 0, rows - 1);
+        if (_anchorSelect) _sel.SetSingle(_caretRow);
+    }
+
+    private long ClampFirstRow(long first)
+    {
         long rows = _doc?.RowCount ?? 0;
-        long maxFirst = Math.Max(0, rows - visible);
-        _firstRow = Math.Clamp(row - visible / 2, 0, maxFirst);
-        _vbar.Value = (int)Math.Clamp(_firstRow, 0, _vbar.Maximum);
+        return Math.Clamp(first, 0, Math.Max(0, rows - VisibleRowCount));
+    }
+
+    /// <summary>Scrolls so <paramref name="first"/> is the top visible row (clamped), syncing the scrollbar.</summary>
+    private void SetFirstRow(long first)
+    {
+        _firstRow = ClampFirstRow(first);
+        SyncVScrollValue();
+    }
+
+    /// <summary>Pushes <see cref="_firstRow"/> into the scrollbar without letting the scrollbar's own clamping
+    /// (its Maximum/LargeChange keep growing as rows stream in) drag the visible text back.</summary>
+    private void SyncVScrollValue()
+    {
+        _syncingScroll = true;
+        try
+        {
+            int max = Math.Max(_vbar.Minimum, _vbar.Maximum - _vbar.LargeChange + 1);
+            _vbar.Value = (int)Math.Clamp(_firstRow, _vbar.Minimum, max);
+        }
+        finally { _syncingScroll = false; }
     }
 
     public void Attach(CascadeDocument doc, AppSettings settings)
@@ -110,6 +208,7 @@ public sealed class LineGridControl : Control
         _hScroll = 0;
         _caretRow = -1;
         _sel.Clear();
+        ClearViewAnchor();
         RebuildFonts();
         RefreshView();
     }
@@ -150,14 +249,22 @@ public sealed class LineGridControl : Control
         if (_caretRow >= rows) _caretRow = rows - 1;
 
         int vMax = (int)Math.Min(int.MaxValue, Math.Max(0, rows - 1));
-        _vbar.Maximum = vMax;
-        _vbar.LargeChange = Math.Max(1, visible);
-        _vbar.SmallChange = 1;
-        _vbar.Value = (int)Math.Clamp(_firstRow, 0, vMax);
-        _vbar.Enabled = rows > visible;
+        // Grow the scrollbar's range silently: while filtering streams, Maximum/LargeChange change on every
+        // refresh, and letting the scrollbar echo that back into _firstRow would drag the visible text.
+        _syncingScroll = true;
+        try
+        {
+            _vbar.Maximum = vMax;
+            _vbar.LargeChange = Math.Max(1, visible);
+            _vbar.SmallChange = 1;
+            _vbar.Enabled = rows > visible;
+        }
+        finally { _syncingScroll = false; }
 
         UpdateHScroll();
+        AnchorToViewportIfStreaming();
         if (_anchorLine >= 0) ApplyViewAnchor();
+        SyncVScrollValue(); // reflect the final position in the (possibly grown) range
         Invalidate();
     }
 
@@ -211,6 +318,22 @@ public sealed class LineGridControl : Control
         int headerH = HeaderHeight;
         long rows = _doc.RowCount;
         int visible = VisibleRowCount;
+
+        // Resolve this whole frame in one shot against a single snapshot of the visible set. While a filter
+        // pass streams, lines before the viewport are being added and dropped continuously, so a first row
+        // computed on the last refresh tick is already stale, and row-by-row lookups would mix two states
+        // inside a single frame. Doing it here keeps the anchored line exactly where the user last saw it.
+        if (_window.Length < visible) _window = new long[visible];
+        Span<long> window = _window.AsSpan(0, visible);
+        int windowCount;
+        AnchorToViewportIfStreaming();
+        if (_anchorLine >= 0)
+        {
+            PinCaretToAnchor();
+            _firstRow = ClampFirstRow(_doc.ResolveWindow(_anchorLine, _anchorOffset, window, out windowCount));
+        }
+        else windowCount = _doc.LinesForRows(_firstRow, window);
+
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
 
         bool columns = _doc.Columns.Enabled;
@@ -222,9 +345,9 @@ public sealed class LineGridControl : Control
         for (int i = 0; i < visible; i++)
         {
             long row = _firstRow + i;
-            if (row >= rows) break;
+            if (row >= rows || i >= windowCount) break;
             int y = headerH + i * _rowHeight;
-            long line = _doc.RowToLine(row);
+            long line = _window[i];
             string text = _doc.GetLineText(line);
             var eval = _doc.EvaluateText(text, line);
 
@@ -380,8 +503,8 @@ public sealed class LineGridControl : Control
     {
         Focus();
         if (_doc is null || e.Button != MouseButtons.Left) { base.OnMouseDown(e); return; }
-        _anchorLine = -1;
-        long row = RowAtY(e.Y);
+        long row = RowAtY(e.Y); // resolves against the live viewport before stabilization is dropped
+        ClearViewAnchor();
         if (row < 0 || row >= _doc.RowCount) return;
 
         if ((ModifierKeys & Keys.Shift) != 0 && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, row);
@@ -496,7 +619,11 @@ public sealed class LineGridControl : Control
         SelectionChanged?.Invoke();
     }
 
-    private void MoveCaret(long delta, bool extend) => MoveCaretTo((_caretRow < 0 ? _firstRow : _caretRow) + delta, extend);
+    private void MoveCaret(long delta, bool extend)
+    {
+        SyncFirstRowToAnchor(); // work from the current position, not one a streaming pass has already shifted
+        MoveCaretTo((_caretRow < 0 ? _firstRow : _caretRow) + delta, extend);
+    }
 
     private void MoveCaretTo(long row, bool extend)
     {
@@ -514,26 +641,27 @@ public sealed class LineGridControl : Control
     private long RowAtY(int y)
     {
         if (y < HeaderHeight) return -1;
+        // A running pass shifts every row index between paints, so re-derive the top row from its anchored
+        // line first: otherwise a click maps to whatever was under the cursor a frame (thousands of rows) ago.
+        SyncFirstRowToAnchor();
         return _firstRow + (y - HeaderHeight) / _rowHeight;
     }
 
     private void ScrollBy(int deltaRows)
     {
-        _anchorLine = -1;
-        long rows = _doc?.RowCount ?? 0;
-        long maxFirst = Math.Max(0, rows - VisibleRowCount);
-        _firstRow = Math.Clamp(_firstRow + deltaRows, 0, maxFirst);
-        _vbar.Value = (int)Math.Clamp(_firstRow, 0, _vbar.Maximum);
+        // Scroll relative to where the view actually is now, not to a row index captured a frame ago (which a
+        // running pass may already have shifted by thousands of rows).
+        SyncFirstRowToAnchor();
+        ClearViewAnchor();
+        SetFirstRow(_firstRow + deltaRows);
         Invalidate();
     }
 
     private void EnsureVisible(long row)
     {
         int visible = VisibleRowCount;
-        if (row < _firstRow) _firstRow = row;
-        else if (row >= _firstRow + visible) _firstRow = row - visible + 1;
-        _firstRow = Math.Max(0, _firstRow);
-        _vbar.Value = (int)Math.Clamp(_firstRow, 0, _vbar.Maximum);
+        if (row < _firstRow) SetFirstRow(row);
+        else if (row >= _firstRow + visible) SetFirstRow(row - visible + 1);
     }
 
     public void SelectAll() { if (_doc is not null) { _sel.SelectAll(_doc.RowCount); Invalidate(); SelectionChanged?.Invoke(); } }

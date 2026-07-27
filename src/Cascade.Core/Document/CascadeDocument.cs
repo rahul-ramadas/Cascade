@@ -79,11 +79,45 @@ public sealed class CascadeDocument : IDisposable
     public long RowAtOrAfterLine(long line)
         => FilteredMode ? MatchView.RowAtOrAfterLine(line) : Math.Clamp(line, 0, Math.Max(0, CompletedLineCount));
 
+    /// <summary>Resolves one whole screen of rows against a <b>single</b> consistent snapshot of the visible
+    /// set, anchoring <paramref name="anchorLine"/> at <paramref name="anchorOffset"/> rows from the top and
+    /// filling <paramref name="lines"/> with the file lines to paint. A streaming pass keeps adding and
+    /// dropping lines while the UI paints, so resolving row by row would mix two states inside one frame.
+    /// Returns the first row.</summary>
+    public long ResolveWindow(long anchorLine, int anchorOffset, Span<long> lines, out int count)
+    {
+        if (FilteredMode) return MatchView.ResolveWindow(anchorLine, anchorOffset, lines, out count);
+        long first = Math.Clamp(anchorLine - anchorOffset, 0, Math.Max(0, CompletedLineCount - lines.Length));
+        count = FillLines(first, lines);
+        return first;
+    }
+
+    /// <summary>Fills <paramref name="lines"/> with the file lines shown from <paramref name="firstRow"/> on,
+    /// resolved against a single snapshot. Returns how many were filled.</summary>
+    public int LinesForRows(long firstRow, Span<long> lines)
+        => FilteredMode ? MatchView.LinesForRows(firstRow, lines) : FillLines(Math.Max(0, firstRow), lines);
+
+    private int FillLines(long firstRow, Span<long> lines)
+    {
+        int count = (int)Math.Clamp(CompletedLineCount - firstRow, 0, lines.Length);
+        for (int i = 0; i < count; i++) lines[i] = firstRow + i;
+        return count;
+    }
+
     /// <summary>Number of lines matching the filters (the status-bar "Fil" count).</summary>
     public long MatchedLineCount => MatchView.Count;
 
     /// <summary>Lines the active filter generation has finished analyzing (0 when no filters run).</summary>
     public long FilterProcessedLineCount => _generation is not null ? _filterService.ProcessedLineCount : 0;
+
+    /// <summary>File lines below this value are fully resolved in the current view: every visible line before
+    /// it has been discovered, so <see cref="RowForLine"/> is authoritative for them. Because a filter pass
+    /// updates the visible set in place, this is the whole file as soon as one pass has covered it — only the
+    /// very first pass over a file being indexed reports a smaller extent. Lets the view tell "not evaluated
+    /// yet" apart from "filtered out", so it can hold still instead of chasing the scan frontier.</summary>
+    public long ViewKnownThroughLine => (FilteredMode && _generation is not null)
+        ? Math.Min(_generation.View.KnownLines, CompletedLineCount)
+        : CompletedLineCount;
 
     public bool IsBusy => _src is not null && (!IsIndexComplete || !(_filterService?.IsIdle ?? true));
 
@@ -135,7 +169,9 @@ public sealed class CascadeDocument : IDisposable
         }
         if (CurrentSnapshot.HasAnyEnabled)
         {
-            _generation = _filterService.Restart(CurrentSnapshot);
+            // The pass reuses (and updates in place) the existing visible set. When no filters were active the
+            // view was showing every line, so seed it that way and let the sweep drop what no longer matches.
+            _generation = _filterService.Restart(CurrentSnapshot, seedAllVisible: _generation is null);
         }
         else
         {

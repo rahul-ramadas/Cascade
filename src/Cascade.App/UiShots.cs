@@ -24,6 +24,13 @@ internal static class UiShots
         string? tat = args.FirstOrDefault(a => a.EndsWith(".tat", StringComparison.OrdinalIgnoreCase) && File.Exists(a));
         Directory.CreateDirectory(outDir);
 
+        // Render against a THROWAWAY settings directory. Reading the real settings made the harness auto-load
+        // the user's last filter file, which /demo then dirtied - so closing the window popped a modal
+        // "Save changes to filters?" prompt that blocked this headless run forever (and answering "Yes" would
+        // have overwritten their filter file with the demo state).
+        string settingsDir = Path.Combine(Path.GetTempPath(), "cascade_screens_" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", settingsDir);
+
         Console.WriteLine($"DPI scaling test. Output: {outDir}");
 
         var demoFilter = new Filter
@@ -49,6 +56,8 @@ internal static class UiShots
         ShotMainForm(outDir, file, tat);
         ShotGridStates(outDir);
         ShotFilterSearch(outDir);
+
+        try { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); } catch { /* ignore */ }
 
         Console.WriteLine("done");
         return 0;
@@ -212,6 +221,7 @@ internal static class UiShots
             WindowState = FormWindowState.Normal,
             Opacity = 0 // render off-screen; DrawToBitmap reads the control tree, not the screen
         };
+        form.NoSavePrompt = true; // nobody is here to answer a modal prompt on close
         form.Show();
         form.Activate();
         Application.DoEvents();
