@@ -578,6 +578,10 @@ public sealed class LineGridControl : Control
 
         switch (e.KeyCode)
         {
+            // Ctrl+Up/Down scrolls the view only - the caret and selection stay where they are, so you can
+            // look around without losing your place. Must come before the plain Up/Down cases.
+            case Keys.Up when e.Control && !e.Shift && !e.Alt: ScrollBy(-1); break;
+            case Keys.Down when e.Control && !e.Shift && !e.Alt: ScrollBy(1); break;
             case Keys.Up: MoveCaret(-1, e.Shift); break;
             case Keys.Down: MoveCaret(1, e.Shift); break;
             case Keys.PageUp: MoveCaret(-page, e.Shift); break;

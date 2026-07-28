@@ -157,6 +157,15 @@ internal sealed class CascadeApp : IDisposable
     public static int IndexOfFilter(string[] names, string containsText)
         => Array.FindIndex(names, n => n.Contains(containsText, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The lowest 1-based file line currently on screen, or -1 when nothing is visible.</summary>
+    public int FirstVisibleLine()
+    {
+        var lines = Rows()
+            .Select(r => int.TryParse(r.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault, out int n) ? n : -1)
+            .Where(n => n > 0).ToArray();
+        return lines.Length == 0 ? -1 : lines.Min();
+    }
+
     /// <summary>Selects a filter and gives the list keyboard focus, so shortcuts are routed to it.</summary>
     public void FocusFilter(string containsText)
     {

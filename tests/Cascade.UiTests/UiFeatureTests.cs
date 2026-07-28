@@ -283,6 +283,37 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Ctrl_arrows_scroll_the_log_without_moving_the_selection()
+    {
+        using var app = CascadeApp.Launch();
+        var fails = new List<string>();
+        void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+        // Start in the middle, so there is room to scroll both ways.
+        app.ScrollRowToMiddle(500);
+        app.SelectLine(501);
+        // Driving the scrollbar and the row accessibility leaves focus somewhere else, and these keys only
+        // apply while the log has it.
+        app.ClickMenu("View", "Focus Text Area");
+        string selected = app.StatusText("Ln:");
+        int top = app.FirstVisibleLine();
+        Check("a line is selected to begin with", selected == "Ln: 501 / 1,000", selected);
+
+        for (int i = 0; i < 5; i++) app.CtrlKey(VirtualKeyShort.DOWN);
+        int afterDown = app.FirstVisibleLine();
+        Check("ctrl+down scrolls the view", afterDown > top, $"top {top} -> {afterDown}");
+        Check("ctrl+down leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));
+        Check("ctrl+down leaves the selection alone", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
+
+        for (int i = 0; i < 5; i++) app.CtrlKey(VirtualKeyShort.UP);
+        int afterUp = app.FirstVisibleLine();
+        Check("ctrl+up scrolls back", afterUp == top, $"top {top} -> {afterDown} -> {afterUp}");
+        Check("ctrl+up leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));
+
+        Assert.True(fails.Count == 0, "Scroll failures:\n  " + string.Join("\n  ", fails));
+    }
+
+    [Fact]
     public void Copy_and_docking_work()
     {
         using var app = CascadeApp.Launch();
