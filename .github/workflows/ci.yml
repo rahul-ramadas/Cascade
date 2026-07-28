@@ -81,25 +81,19 @@ jobs:
           -p:Version=$env:VERSION
           -o artifacts/publish
 
-      # Everything above tests the multi-file build output in bin/. This is the only step that runs the
-      # artifact we actually ship, which is a different layout: assemblies and config are bundled inside
-      # the exe. --selftest covers the engine and settings; --screens builds every dialog and the main
-      # window, so it proves the embedded icon and resources still resolve out of the bundle.
-      # Cascade.exe is a GUI-subsystem binary, so PowerShell does NOT wait for it and $LASTEXITCODE would
-      # be meaningless - Start-Process -Wait -PassThru is required.
-      - name: Smoke-test the published exe
-        run: |
-          $exe = (Resolve-Path artifacts/publish/Cascade.exe).Path
-          $shots = Join-Path $env:RUNNER_TEMP 'shots'
-          New-Item -ItemType Directory -Force -Path $shots | Out-Null
-          foreach ($run in @(@('--selftest'), @('--screens', $shots))) {
-            $p = Start-Process $exe -ArgumentList $run -Wait -PassThru
-            if ($p.ExitCode -ne 0) {
-              Get-Content (Join-Path $env:TEMP 'cascade_selftest.log') -ErrorAction SilentlyContinue
-              throw "Published Cascade.exe failed '$($run -join ' ')' with exit code $($p.ExitCode)."
-            }
-          }
-          if (-not (Test-Path (Join-Path $shots 'main.png'))) { throw "The published exe rendered no main window." }
+      # The run above tested the multi-file build output in bin/. The published exe is a different
+      # layout - assemblies and embedded resources come out of the bundle rather than off disk - so the
+      # whole suite is repeated against the artifact we actually ship. CASCADE_TEST_EXE redirects
+      # TestData.AppExe(), which every UI test launches, including the --selftest and --screens harnesses.
+      - name: UI tests against the published exe
+        timeout-minutes: 15
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
+        run: >
+          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
+          -c Release --no-build
+          --logger "trx;LogFileName=ui-published.trx"
+          --results-directory artifacts/test-results
 
       - name: Package
         env:

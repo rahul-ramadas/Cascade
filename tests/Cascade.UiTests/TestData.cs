@@ -44,9 +44,20 @@ internal static class TestData
         return path;
     }
 
-    /// <summary>Path to the built Cascade.exe (same build config as this test assembly).</summary>
+    /// <summary>
+    /// Path to the Cascade.exe under test. Defaults to the build output next to this test assembly.
+    /// Set CASCADE_TEST_EXE to point the whole suite at a different one - CI aims it at the PUBLISHED
+    /// single-file exe, because that is what ships and it resolves its assemblies and embedded resources
+    /// out of the bundle rather than from files on disk.
+    /// </summary>
     public static string AppExe()
     {
+        if (Environment.GetEnvironmentVariable("CASCADE_TEST_EXE") is { Length: > 0 } chosen)
+        {
+            if (!File.Exists(chosen)) throw new FileNotFoundException("CASCADE_TEST_EXE points at a file that does not exist: " + chosen);
+            return chosen;
+        }
+
         string config =
 #if DEBUG
             "Debug";
