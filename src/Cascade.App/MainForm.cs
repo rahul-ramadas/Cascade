@@ -40,12 +40,10 @@ public sealed class MainForm : Form
     private bool _lastBusy;
     private bool _anchorActive;
     private bool _findBusy;
-    private string _findWhat = "", _findMsg = "", _findMsgDetail = "";
+    private string _findWhat = "", _findWhatDetail = "", _findMsg = "", _findMsgDetail = "";
     private double _findFraction;
     private DateTime _findMsgUntil;
-    private Font? _metricFont;
-    private int _activitySlot, _progressSlot;
-    private (string Path, int Width) _shownSrc, _shownFilter;
+    private int _activitySlot, _progressSlot;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
@@ -300,10 +298,6 @@ public sealed class MainForm : Form
         _filterLabel.Name = "stat.filter";
         _busyLabel.Name = "stat.busy";
 
-        // The numbers get a monospaced face so their digits sit in fixed columns; the paths keep the UI font,
-        // which fits far more characters into the same space.
-        _metricFont = new Font("Consolas", _status.Font.SizeInPoints);
-
         foreach (var l in new[] { _srcLabel, _filterLabel })
         {
             l.TextAlign = ContentAlignment.MiddleLeft;
@@ -319,14 +313,16 @@ public sealed class MainForm : Form
         _busyLabel.TextAlign = ContentAlignment.MiddleLeft;
         _busyLabel.Margin = new Padding(Dpi(6), 0, Dpi(4), 0);
         _busyLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
-        _activitySlot = Dpi(200);
         _progressSlot = _progress.Width + _progress.Margin.Horizontal;
+        // Size the slot to the widest thing it will ever hold, so the wording is never clipped.
+        _activitySlot = TextRenderer.MeasureText(WidestActivityText, _busyLabel.Font).Width + _progressSlot + Dpi(16);
         _busyLabel.Width = _activitySlot;
 
-        // Each metric is a fixed box, so a value growing a digit never shifts its neighbours.
+        // Each metric is a fixed box, so a value growing a digit never shifts its neighbours. The UI font is
+        // kept: its digits are already all the same width, so a monospaced face would buy no extra stability
+        // and would cost the paths ~140px of room.
         foreach (var l in new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel })
         {
-            l.Font = _metricFont;
             l.AutoSize = false;
             l.TextAlign = ContentAlignment.MiddleLeft;
             l.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
@@ -576,7 +572,7 @@ public sealed class MainForm : Form
 
         // A filter scan decodes and matches every line, which on a multi-gigabyte file takes long enough
         // that doing it inline would freeze the window with no sign of progress.
-        SetFindBusy(true, $"Searching for {Quote(filter.Match.Text)}");
+        SetFindBusy(true, "Searching", $"Searching for {Quote(filter.Match.Text)}");
         var progress = new Progress<double>(f => _findFraction = f);
         long found;
         try
@@ -614,10 +610,11 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    private void SetFindBusy(bool busy, string? what = null)
+    private void SetFindBusy(bool busy, string? what = null, string? detail = null)
     {
         _findBusy = busy;
         _findWhat = busy ? what ?? "Searching" : "";
+        _findWhatDetail = busy ? detail ?? _findWhat : "";
         _findFraction = 0;
         if (busy) _findMsg = "";   // a new search supersedes the last "no more matches"
         UpdateStatus();
@@ -628,6 +625,9 @@ public sealed class MainForm : Form
         => term.Length <= 40 ? $"\u201c{term}\u201d" : $"\u201c{term[..40]}\u2026\u201d";
 
     private const int FindMessageSeconds = 5;
+
+    /// <summary>The longest wording the activity slot has to fit; it is sized from this.</summary>
+    private const string WidestActivityText = "Searching\u2026 100%  (Esc)";
 
     private void LoadFilters()
     {
@@ -937,8 +937,25 @@ public sealed class MainForm : Form
         _busyLabel.ToolTipText = detail ?? text;
         string fitted = text.Length == 0
             ? ""
-            : Shorten(text, _busyLabel.Width - _busyLabel.Padding.Horizontal - Dpi(8), _busyLabel.Font);
+            : ShortenEnd(text, _busyLabel.Width - _busyLabel.Padding.Horizontal - Dpi(8), _busyLabel.Font);
         if (_busyLabel.Text != fitted) _busyLabel.Text = fitted;
+    }
+
+    /// <summary>Trims plain text from the end. (Paths are trimmed in the middle instead, because their last
+    /// segment is the part worth keeping - doing that to a status message eats the word and keeps the
+    /// number.)</summary>
+    private static string ShortenEnd(string text, int maxWidth, Font font)
+    {
+        if (maxWidth <= 0) return "";
+        if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
+        int lo = 0, hi = text.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (TextRenderer.MeasureText(text[..mid] + "\u2026", font).Width <= maxWidth) lo = mid;
+            else hi = mid - 1;
+        }
+        return lo == 0 ? "\u2026" : text[..lo] + "\u2026";
     }
 
     private void SetProgress(ProgressBarStyle style, double fraction)
@@ -1019,7 +1036,7 @@ public sealed class MainForm : Form
         if (_findBusy)
         {
             // A find is what the user just asked for, so it wins the slot.
-            SetActivity($"{_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc)", SystemColors.ControlText);
+            SetActivity($"{_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
             SetProgress(ProgressBarStyle.Continuous, _findFraction);
         }
         else if (_findMsg.Length > 0)
@@ -1029,14 +1046,17 @@ public sealed class MainForm : Form
         }
         else if (indexing)
         {
-            SetActivity($"Indexing\u2026 {_doc.CompletedLineCount:N0}", SystemColors.ControlText);
-            // The total is unknown until indexing finishes, so animate indeterminately.
+            // The line count is already in the Total field, and the total is unknown until indexing ends,
+            // so there is nothing useful to add here beyond the fact that it is running.
+            SetActivity("Indexing\u2026", SystemColors.ControlText, $"Indexing\u2026 {_doc.CompletedLineCount:N0} lines so far");
             SetProgress(ProgressBarStyle.Marquee, 0);
         }
         else if (filtering)
         {
-            SetActivity($"Filtering\u2026 {_doc.FilterProcessedLineCount:N0}", SystemColors.ControlText);
-            SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
+            double done = Fraction(indexing, filtering);
+            SetActivity($"Filtering\u2026 {done * 100:F0}%", SystemColors.ControlText,
+                $"Filtering\u2026 {_doc.FilterProcessedLineCount:N0} of {_doc.CompletedLineCount:N0} lines");
+            SetProgress(ProgressBarStyle.Continuous, done);
         }
         else
         {
