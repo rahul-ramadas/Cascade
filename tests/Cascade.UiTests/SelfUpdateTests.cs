@@ -18,11 +18,10 @@ public class SelfUpdateTests
     private const string NewVersion = "9999.1.1";
 
     [Fact]
-    public void An_update_is_downloaded_while_running_and_installed_on_exit()
+    public void An_update_is_installed_while_running_without_disturbing_the_session()
     {
         string dir = Path.Combine(Path.GetTempPath(), "cascade_upd_ui_" + Guid.NewGuid().ToString("N"));
         string exe = CopyAppTo(dir);
-        string staged = Path.Combine(dir, $"Cascade.update-{NewVersion}.exe");
 
         using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion);
         string log = TestData.WriteLogFile();
@@ -42,31 +41,34 @@ public class SelfUpdateTests
             using (var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
                                                        ownsSettingsDir: false, env, exe))
             {
-                // The app tells the user, without interrupting them.
+                // The app tells the user, without interrupting them. The version named is the one really
+                // on disk now, not whatever the release claimed to be.
                 string message = app.WaitForStatus("Will update to");
                 Assert.True(message.Length > 0, "no update notice appeared. Elements: " + app.DescribeTextElements());
-                Assert.Equal($"Will update to v{NewVersion} on restart", message);
+                Assert.Equal($"Will update to v{VersionOf(exe)} on restart", message);
 
-                // ...and the download really is on disk, parked next to the executable.
-                Assert.True(File.Exists(staged), "the update was announced but never staged on disk");
+                // It is installed already, not merely downloaded: there is an executable in place and the
+                // image the app is running from has been moved aside.
+                Assert.True(File.Exists(exe), "the install left no executable behind");
+                Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 1),
+                            "the running image was not moved aside, so nothing was installed");
+                Assert.Empty(Directory.GetFiles(dir, "*.part"));
+                Assert.False(File.Exists(Path.Combine(dir, "Cascade.new.exe")));
 
-                // Nothing is swapped while the user is still working.
-                Assert.Equal(File.ReadAllBytes(exe).Length, new FileInfo(exe).Length);
-                Assert.True(File.Exists(exe));
+                // The session carries on regardless - the window is still usable.
+                Assert.Equal($"Total: {TestData.LineCount:N0}", app.StatusText("Total:"));
 
                 closed = app.CloseGracefully();
             }
-            Assert.True(closed, "the app did not exit cleanly, so the update could not be installed");
+            Assert.True(closed, "the app did not exit cleanly");
 
-            // The swap consumes the staged file...
-            Assert.True(WaitUntil(() => !File.Exists(staged)),
-                        "the staged update was not installed when the app closed");
-            Assert.True(File.Exists(exe), "the update left no executable behind");
-
-            // ...and the superseded image deletes itself without waiting for the next launch.
+            // The superseded image deletes itself without waiting for the next launch.
             Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 0),
                         "the old executable was left behind: " +
                         string.Join(", ", Directory.GetFiles(dir, "Cascade.old*.exe").Select(Path.GetFileName)));
+
+            // The lock is not left lying around either.
+            Assert.False(File.Exists(Path.Combine(dir, "Cascade.update.lock")));
 
             // The installed file is a working build, not a corpse.
             Assert.Equal(0, RunVersion(exe));
@@ -116,6 +118,8 @@ public class SelfUpdateTests
             }
 
             Assert.Empty(Directory.GetFiles(dir, "Cascade.update-*"));
+            Assert.Empty(Directory.GetFiles(dir, "*.part"));
+            Assert.False(File.Exists(Path.Combine(dir, "Cascade.new.exe")));
             Assert.Empty(Directory.GetFiles(dir, "Cascade.old*.exe"));
             Assert.Equal(0, RunVersion(exe));   // still the build we started with, and still runnable
 
@@ -207,11 +211,10 @@ public class SelfUpdateTests
     }
 
     /// <summary>
-    /// Two instances running from the same directory both stage the same update and both try to install it
-    /// as they exit. The one thing that must never happen is ending up without a working executable: the
-    /// first mover renames it out of the way, so a second mover that assumed it was still there could leave
-    /// nothing to launch. Also checks the swap is not applied twice and that nothing is left lying about
-    /// once a later run has had its chance to sweep.
+    /// Two instances running from the same directory. Only one may update it: they share a lock keyed to
+    /// the install, so the second finds it held and leaves well alone rather than downloading and
+    /// installing on top. Whatever the interleaving, the directory must end up with one working executable
+    /// and nothing else.
     /// </summary>
     [Fact]
     public void Two_instances_updating_at_once_leave_exactly_one_working_executable()
@@ -220,8 +223,7 @@ public class SelfUpdateTests
         string exe = CopyAppTo(dir);
         long originalLength = new FileInfo(exe).Length;
 
-        // Long enough that the first instance is still downloading when the second starts its own check,
-        // which is the only way the two contend for the staging files.
+        // Long enough that the second instance starts while the first still holds the lock mid-download.
         using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion) { AssetDelayMs = 5000 };
         string logA = TestData.WriteLogFile(), logB = TestData.WriteLogFile();
         string cfgA = CascadeApp.NewSettingsDir(), cfgB = CascadeApp.NewSettingsDir();
@@ -239,26 +241,31 @@ public class SelfUpdateTests
             var b = CascadeApp.LaunchExisting(logB, null, cfgB, ownsFiles: false, ownsSettingsDir: false, env, exe);
             try
             {
-                // Both must see the update; they share one staging path, so this is the contended case.
-                Assert.NotEqual("", a.WaitForStatus("Will update to"));
-                Assert.NotEqual("", b.WaitForStatus("Will update to"));
+                // Exactly one install happens: one image moved aside, however the two interleave.
+                Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 1),
+                            "no instance installed the update");
+                Thread.Sleep(3000);   // give the one that lost the lock every chance to install a second time
+                Assert.Single(Directory.GetFiles(dir, "Cascade.old*.exe"));
+
+                // And somebody said so.
+                Assert.True(a.StatusText("Will update to").Length > 0 || b.StatusText("Will update to").Length > 0,
+                            "neither instance announced the update");
+
+                Assert.True(File.Exists(exe));
+                Assert.Equal(originalLength, new FileInfo(exe).Length);
 
                 a.CloseGracefully();
-                Assert.True(WaitUntil(() => RunVersion(exe) == 0),
-                            "after the first instance installed the update the executable did not run");
-
                 b.CloseGracefully();
             }
             finally { a.Dispose(); b.Dispose(); }
 
-            // The invariant that matters: one executable, and it works.
+            // One executable, and it works.
             Assert.True(File.Exists(exe), "the update left no executable behind");
             Assert.Equal(0, RunVersion(exe));
-            Assert.True(new FileInfo(exe).Length == originalLength,
-                        "the installed executable is not the size of the one that was served");
 
             Assert.Empty(Directory.GetFiles(dir, "*.part"));
-            Assert.Empty(Directory.GetFiles(dir, "Cascade.update-*.exe"));
+            Assert.False(File.Exists(Path.Combine(dir, "Cascade.new.exe")));
+            Assert.False(File.Exists(Path.Combine(dir, "Cascade.update.lock")));
 
             // The image the second instance was still running from cannot be deleted until it exits, so it
             // falls to whichever instance leaves last - no waiting for the next launch.

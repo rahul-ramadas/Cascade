@@ -46,7 +46,7 @@ internal static class AppUpdater
         string repo = Environment.GetEnvironmentVariable(RepoVariable) is { Length: > 0 } r ? r : DefaultRepo;
         string api = Environment.GetEnvironmentVariable(ApiVariable) is { Length: > 0 } a ? a : DefaultApi;
 
-        var source = new GitHubReleaseSource(Http, repo, ct => GitCredentialToken.GetAsync("github.com", ct), api);
+        var source = new GitHubReleaseSource(Http, repo, ct => TokenFor(api, ct), api);
         var options = new UpdateOptions
         {
             ExePath = AppInfo.ExePath,
@@ -54,6 +54,20 @@ internal static class AppUpdater
             Force = force
         };
         return new UpdateService(source, options, VerifyAsync);
+    }
+
+    /// <summary>
+    /// The user's git credential is only ever sent to GitHub itself. CASCADE_UPDATE_API can point the
+    /// updater anywhere, so without this check anyone able to set that variable could collect a token that
+    /// carries the scopes of the user's git, not of this app.
+    /// </summary>
+    private static Task<string?> TokenFor(string api, CancellationToken ct)
+    {
+        bool isGitHub = Uri.TryCreate(api, UriKind.Absolute, out var uri)
+                        && uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase);
+        return isGitHub
+            ? GitCredentialToken.GetAsync("github.com", ct)
+            : Task.FromResult(Environment.GetEnvironmentVariable(GitCredentialToken.EnvironmentVariable));
     }
 
     /// <summary>

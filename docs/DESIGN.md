@@ -795,24 +795,41 @@ thread; there is no periodic polling.
 - **Authentication.** The releases are private, so the app borrows the credential the user already gave
   to git, via `git credential fill` with all interactive prompts disabled (`GIT_TERMINAL_PROMPT=0`,
   `GCM_INTERACTIVE=never`). No token is embedded in the binary and none is stored. A machine without a
-  credential simply never updates. Note that a private asset must be fetched from the API asset endpoint
-  with `Accept: application/octet-stream` - the plain `browser_download_url` returns 404 even when
-  authenticated.
-- **Download.** The new build is parked beside the executable as `Cascade.update-<version>.exe`, so a
-  staged update survives being killed without needing a sidecar to describe it. The status bar says
-  "Will update to v… on restart" and nothing else changes.
+  credential simply never updates. `git.exe` is resolved to an **absolute path**, never by name, and never
+  from the application's own directory: `CreateProcess` searches that directory first, and this app is
+  designed to be copied into shared folders. The credential is only ever sent to `api.github.com`, so
+  pointing `CASCADE_UPDATE_API` elsewhere cannot collect it. A private asset must be fetched from the API
+  asset endpoint with `Accept: application/octet-stream` - the plain `browser_download_url` returns 404
+  even when authenticated.
+- **One updater per copy.** Every instance tries for an exclusive lock file next to the executable
+  (`Cascade.update.lock`, opened `FileShare.None` with `DeleteOnClose`); whoever misses it simply does not
+  update this session. A lock *file* rather than a named mutex: it is keyed to the install location by
+  construction, the kernel releases it if the holder is killed, it has no thread affinity (the update path
+  is `async`, and a `Mutex` cannot be released on another thread), and on a network share the server
+  enforces it where a machine-scoped mutex would not stop a second machine.
+- **Download.** Written to a per-process `Cascade.new.<pid>.part`, then renamed to `Cascade.new.exe` once
+  verified, so a partial file never wears the trusted name.
 - **Verification.** Before it is trusted, the download must be a real PE image *and* answer `--version`
   with a version and exit code 0. A file that cannot do that is deleted, never installed. The check is
   killed if it does not answer promptly, so a hung or window-opening build cannot leak a process.
-- **Installation.** Windows refuses to delete a running executable but allows it to be *renamed*, and a
-  process keeps running happily from its renamed image. So the swap is: rename the running exe to
-  `Cascade.old.exe`, move the staged file into its place. This happens **after the message loop ends**,
-  never mid-session, so a long read of a log file is never interrupted. If the second move fails the
-  first is rolled back, so a failed update can never leave no executable at all.
+- **Installation.** One call: `ReplaceFile` puts the new build at `Cascade.exe` and moves the running image
+  to `Cascade.old.exe` in the same operation, so there is **never an instant with no executable**. Windows
+  permits this on a running image where an overwriting `Move` fails with ACCESS_DENIED, and the process
+  carries on from the moved-aside file. It happens at startup, while the app runs: that does not disturb
+  the session, and unlike installing on the way out it cannot be lost to a kill, a dropped RDP session or
+  a power cut later on. The new build takes effect at the next launch.
+- **Versions.** The baseline is the version of `Cascade.exe` **on disk**, read from its version resource
+  without running it - not the running process's version, which would re-install after every update and
+  could downgrade. Comparison is on three components: the running build parses `2026.8.1` (Revision -1)
+  while the same file's resource reads `2026.8.1.0` (Revision 0), and -1 &lt; 0 would make every build look
+  older than itself.
 - **Cleanup.** The superseded image cannot delete itself, so the exiting app starts the newly installed
   exe with `--cleanup <pid> <path>`; it waits for the old process and removes the file (measured at
-  ~3 ms after exit). A startup sweep removes anything left behind by a kill or power loss, and it runs
-  whether or not updating is enabled.
+  ~3 ms after exit). With several instances the image stays in use until the last one leaves, so every exit
+  tries a direct delete first and only hands over to a helper for files still held. `--cleanup` refuses any
+  path that is not a superseded image beside the executable. A startup sweep removes anything left behind
+  by a kill or power loss, and it runs whether or not updating is enabled - but it never touches a staged
+  build, which only the lock holder may judge.
 
 Test hooks (environment variables): `CASCADE_UPDATE=off` disables updating entirely (the UI tests set
 this so a run never touches the network); `CASCADE_UPDATE_FORCE=1` installs the latest release even when

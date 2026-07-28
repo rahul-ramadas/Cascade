@@ -21,6 +21,51 @@ public static class GitCredentialToken
     /// <summary>An override for tests and unattended machines; checked before git is consulted.</summary>
     public const string EnvironmentVariable = "CASCADE_UPDATE_TOKEN";
 
+    /// <summary>
+    /// Finds git.exe by absolute path, never by name.
+    ///
+    /// CreateProcess searches the calling image's OWN directory first, and this application is designed to
+    /// be copied into shared folders and onto USB sticks - a git.exe dropped beside it would otherwise be
+    /// executed, as the user, on every startup. That directory and the current directory are both refused.
+    /// </summary>
+    private static string? ResolveGit()
+    {
+        string? own = null;
+        try { own = Path.GetDirectoryName(Environment.ProcessPath ?? ""); } catch { /* keep looking */ }
+
+        foreach (string dir in SearchDirectories())
+        {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
+            try
+            {
+                string full = Path.GetFullPath(dir.Trim().Trim('"'));
+                if (own is { Length: > 0 } && string.Equals(full, own, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(full, Environment.CurrentDirectory, StringComparison.OrdinalIgnoreCase)) continue;
+
+                string candidate = Path.Combine(full, "git.exe");
+                if (File.Exists(candidate)) return candidate;
+            }
+            catch { /* an unusable PATH entry */ }
+        }
+        return null;
+    }
+
+    private static IEnumerable<string> SearchDirectories()
+    {
+        foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
+            yield return dir;
+
+        foreach (string root in new[] { "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432" })
+            if (Environment.GetEnvironmentVariable(root) is { Length: > 0 } p)
+            {
+                yield return Path.Combine(p, "Git", "cmd");
+                yield return Path.Combine(p, "Git", "bin");
+            }
+
+        if (Environment.GetEnvironmentVariable("LOCALAPPDATA") is { Length: > 0 } local)
+            yield return Path.Combine(local, "Programs", "Git", "cmd");
+    }
+
     public static async Task<string?> GetAsync(string host, CancellationToken ct)
     {
         if (Environment.GetEnvironmentVariable(EnvironmentVariable) is { Length: > 0 } fromEnv)
@@ -32,7 +77,9 @@ public static class GitCredentialToken
 
     private static async Task<string?> FromGitAsync(string host, CancellationToken ct)
     {
-        var psi = new ProcessStartInfo("git")
+        if (ResolveGit() is not { } git) return null;
+
+        var psi = new ProcessStartInfo(git)
         {
             UseShellExecute = false,
             CreateNoWindow = true,

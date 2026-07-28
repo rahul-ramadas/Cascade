@@ -16,9 +16,10 @@ internal static class Program
 
         // Started by the previous version as it exited, purely to delete the executable it was running from
         // (Windows will not let a process delete its own image). Returns before any UI exists, so nothing
-        // appears on screen.
+        // appears on screen. The path is checked: this must not become a way to delete an arbitrary file.
         if (args.Length > 0 && args[0].Equals("--cleanup", StringComparison.OrdinalIgnoreCase))
             return args.Length >= 3 && int.TryParse(args[1], out int pid)
+                   && UpdateInstaller.IsSupersededImagePath(AppInfo.ExePath, args[2])
                 ? UpdateInstaller.RunCleanup(pid, args[2])
                 : 2;
 
@@ -26,14 +27,14 @@ internal static class Program
         // the running one.
         if (args.Length > 0 && args[0].Equals("--version", StringComparison.OrdinalIgnoreCase))
         {
-            AttachConsole(-1);
+            AttachConsoleIfNotRedirected();
             Console.WriteLine(AppInfo.InformationalVersion);
             return 0;
         }
 
         if (args.Length > 0 && IsHelp(args[0]))
         {
-            AttachConsole(-1);
+            AttachConsoleIfNotRedirected();
             Console.WriteLine(HelpText);
             return 0;
         }
@@ -63,13 +64,13 @@ internal static class Program
 
         // Tidy up after previous runs first, and do it whether or not updating is switched on: turning
         // updates off must not strand a superseded executable or a half-finished download forever.
-        try { UpdateInstaller.Sweep(AppInfo.ExePath, AppInfo.Version); } catch { /* best effort */ }
+        try { UpdateInstaller.Sweep(AppInfo.ExePath); } catch { /* best effort */ }
 
-        // Checked once, at startup, on a background thread. The swap itself happens after the message loop
-        // ends so that a session spent reading a log is never interrupted by it.
+        // Checked once, at startup, on a background thread. Installing does not disturb this session - the
+        // process keeps running from its moved-aside image - and the new build takes effect at next launch.
         var updater = AppUpdater.Create();
         using var updateCts = new CancellationTokenSource();
-        if (updater is not null) _ = Task.Run(() => updater.CheckAsync(updateCts.Token));
+        if (updater is not null) _ = Task.Run(() => updater.RunAsync(updateCts.Token));
 
         try
         {
@@ -83,15 +84,20 @@ internal static class Program
         finally
         {
             updateCts.Cancel();
-            updater?.ApplyPending();
             UpdateInstaller.CleanUpSupersededImages(AppInfo.ExePath);
         }
         return 0;
     }
 
 
-    private static bool IsHelp(string a) =>
-        a.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
+    /// <summary>Attaching to the launching console re-points the standard handles, which would send output
+    /// to the terminal instead of the pipe when a parent is capturing it - as update verification does.</summary>
+    private static void AttachConsoleIfNotRedirected()
+    {
+        if (!Console.IsOutputRedirected) AttachConsole(-1);
+    }
+
+    private static bool IsHelp(string a) =>        a.Equals("--help", StringComparison.OrdinalIgnoreCase) ||
         a.Equals("-h", StringComparison.OrdinalIgnoreCase) ||
         a == "/?";
 

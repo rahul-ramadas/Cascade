@@ -15,13 +15,15 @@ public sealed class UpdateOptions
 }
 
 /// <summary>
-/// Checks for a newer release once, downloads it in the background, and parks it next to the executable.
-/// Nothing is swapped while the app runs - the exchange happens after the message loop ends, so a long
-/// session over a log file is never interrupted.
+/// Checks for a newer release once at startup and installs it while the app runs.
 ///
-/// Every failure is silent by design: no network, no credential, a private repository the user cannot see,
-/// a corrupt download - all simply mean "no update today". <see cref="LastError"/> keeps the reason for the
-/// About box rather than putting it in the user's face.
+/// Installing does not disturb the session: the running process keeps going from its moved-aside image,
+/// and the new build takes effect at the next launch. Doing it now rather than on the way out means a kill,
+/// a dropped RDP session or a power cut later cannot lose an update that was already downloaded.
+///
+/// Only one process per installed copy does this, decided by <see cref="InstallLock"/>. Every failure is
+/// silent by design - no network, no credential, a private repository the user cannot see - and
+/// <see cref="LastError"/> keeps the reason for the About box rather than putting it in the user's face.
 /// </summary>
 public sealed class UpdateService
 {
@@ -30,7 +32,6 @@ public sealed class UpdateService
     private readonly Func<string, CancellationToken, Task<bool>> _verify;
 
     private volatile Version? _pendingVersion;
-    private volatile string? _pendingPath;
     private volatile string? _lastError;
 
     /// <param name="verify">Proves a downloaded file is a working build before it is allowed to replace the
@@ -43,91 +44,105 @@ public sealed class UpdateService
         _verify = verify;
     }
 
-    /// <summary>Version waiting to be installed on exit, or null.</summary>
+    /// <summary>The version installed on disk when it is newer than the one running - whoever installed it.
+    /// It takes effect at the next launch.</summary>
     public Version? PendingVersion => _pendingVersion;
 
     /// <summary>Why the last check produced nothing, or null if it succeeded or has not run.</summary>
     public string? LastError => _lastError;
 
-    /// <summary>
-    /// Looks for a newer release and downloads it. Never throws and never blocks the UI thread; run it as a
-    /// background task at startup and forget about it.
-    /// </summary>
-    public async Task CheckAsync(CancellationToken ct)
+    /// <summary>Re-reads what is on disk, which another instance may have replaced. Only ever raises the
+    /// notice: once a newer build is installed it cannot become un-installed.</summary>
+    public void RefreshPending()
     {
-        try
-        {
-            // A staged update from a session that was killed before it could swap is still good.
-            if (UpdateInstaller.FindStaged(_options.ExePath, _options.CurrentVersion, _options.Force) is { } already)
-            {
-                _pendingPath = already;
-                _pendingVersion = UpdateInstaller.StagedVersionOf(_options.ExePath, already);
-                return;
-            }
-
-            var release = await _source.GetLatestAsync(ct).ConfigureAwait(false);
-            if (release is null) { _lastError ??= "No release information available."; return; }
-
-            if (!_options.Force && release.Version <= _options.CurrentVersion)
-            {
-                _lastError = null;
-                return;
-            }
-
-            string staged = UpdateInstaller.StagedPath(_options.ExePath, release.Version);
-            // Per-process, so two instances downloading at once do not fight over one file.
-            string part = $"{staged}.{Environment.ProcessId}.part";
-            try
-            {
-                await _source.DownloadAssetAsync(release, part, ct).ConfigureAwait(false);
-
-                if (!await _verify(part, ct).ConfigureAwait(false))
-                {
-                    _lastError = "The downloaded update did not run correctly and was discarded.";
-                    TryDelete(part);
-                    return;
-                }
-
-                try { File.Move(part, staged, overwrite: true); }
-                catch when (File.Exists(staged)) { TryDelete(part); } // another instance staged the same build
-            }
-            catch
-            {
-                TryDelete(part);
-                throw;
-            }
-
-            _pendingPath = staged;
-            _pendingVersion = release.Version;
-            _lastError = null;
-        }
-        catch (OperationCanceledException) { /* shutting down; the sweep tidies up next launch */ }
-        catch (Exception ex) { _lastError = ex.Message; }
+        var installed = UpdateInstaller.VersionOf(_options.ExePath);
+        var running = UpdateInstaller.Normalize(_options.CurrentVersion);
+        if (installed is not null && installed > running) _pendingVersion = installed;
     }
 
     /// <summary>
-    /// Installs the staged update. Call after the message loop has ended - the swap renames the running
-    /// executable, so doing it mid-session would be pointless and doing it during shutdown of a window is
-    /// needlessly early. Returns the version installed, or null if there was nothing to do.
+    /// The whole update, start to finish. Never throws and never blocks the UI thread; run it as a
+    /// background task at startup and forget about it.
     /// </summary>
-    public Version? ApplyPending()
+    public async Task RunAsync(CancellationToken ct)
     {
+        RefreshPending();
+        using var gate = InstallLock.TryAcquire(_options.ExePath);
+        if (gate is null) return;
+
+        try { await UpdateAsync(ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* shutting down; the next launch sweeps up */ }
+        catch (Exception ex) { _lastError = ex.Message; }
+
+        RefreshPending();
+    }
+
+    private async Task UpdateAsync(CancellationToken ct)
+    {
+        string exe = _options.ExePath;
+        var installed = UpdateInstaller.VersionOf(exe) ?? UpdateInstaller.Normalize(_options.CurrentVersion);
+        string staged = UpdateInstaller.StagedPath(exe);
+
+        // A verified download left behind by a killed session is still good, if it is still newer.
+        if (File.Exists(staged))
+        {
+            var already = UpdateInstaller.VersionOf(staged);
+            if (already is not null && (_options.Force || already > installed)) { Install(exe, staged, already); return; }
+            TryDelete(staged);
+        }
+
+        var release = await _source.GetLatestAsync(ct).ConfigureAwait(false);
+        if (release is null) { _lastError = "No release information available."; return; }
+
+        if (!_options.Force && release.Version <= installed) { _lastError = null; return; }
+
+        string part = UpdateInstaller.PartPath(exe);
         try
         {
-            string? staged = _pendingPath
-                ?? UpdateInstaller.FindStaged(_options.ExePath, _options.CurrentVersion, _options.Force);
-            if (staged is null) return null;
+            await _source.DownloadAssetAsync(release, part, ct).ConfigureAwait(false);
 
-            var version = UpdateInstaller.StagedVersionOf(_options.ExePath, staged);
-            return UpdateInstaller.Apply(_options.ExePath, staged) is null ? null : version;
+            if (!await _verify(part, ct).ConfigureAwait(false))
+            {
+                _lastError = "The downloaded update did not run correctly and was discarded.";
+                TryDelete(part);
+                return;
+            }
+            MoveWithRetry(part, staged);
         }
-        catch { return null; }
+        catch
+        {
+            TryDelete(part);
+            throw;
+        }
+
+        Install(exe, staged, UpdateInstaller.VersionOf(staged) ?? release.Version);
+    }
+
+    private void Install(string exe, string staged, Version? version)
+    {
+        if (UpdateInstaller.Apply(exe, staged) is null)
+        {
+            _lastError = "The update was downloaded but could not be installed.";
+            return;
+        }
+        _pendingVersion = version;
+        _lastError = null;
+    }
+
+    /// <summary>A just-written executable is often held for a moment by antivirus or the search indexer,
+    /// and losing the download to that would mean fetching it all over again.</summary>
+    private static void MoveWithRetry(string from, string to)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try { File.Move(from, to, overwrite: true); return; }
+            catch when (attempt < 20) { Thread.Sleep(100); }
+        }
     }
 
     /// <summary>
     /// Deleting a rejected download usually fails on the first attempt: it was just being run to verify it,
-    /// and Windows releases the image a moment after the process dies. Retrying briefly means the leftover
-    /// goes now rather than surviving until the next launch's sweep.
+    /// and Windows releases the image a moment after the process dies.
     /// </summary>
     private static void TryDelete(string path)
     {

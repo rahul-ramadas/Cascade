@@ -31,14 +31,14 @@ public class UpdateTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private string WriteStaged(Version v, string content = "new build")
+    private string WriteStaged(string content = "new build")
     {
-        string p = UpdateInstaller.StagedPath(_exe, v);
+        string p = UpdateInstaller.StagedPath(_exe);
         File.WriteAllText(p, content);
         return p;
     }
 
-    // ---------------- naming and parsing ----------------
+    // ---------------- naming and versions ----------------
 
     [Theory]
     [InlineData("v2026.7.6", true, "2026.7.6")]
@@ -53,19 +53,25 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
-    public void A_staged_file_name_carries_its_version_so_it_survives_a_kill()
+    public void A_build_must_not_compare_as_older_than_itself()
     {
-        string staged = UpdateInstaller.StagedPath(_exe, new Version(2026, 8, 1));
-        Assert.Equal(_dir, Path.GetDirectoryName(staged));
-        Assert.Equal(new Version(2026, 8, 1), UpdateInstaller.StagedVersionOf(_exe, staged));
+        // The running app parses "2026.8.1" (Revision -1); the same file's version resource reads
+        // "2026.8.1.0" (Revision 0). Left alone, -1 < 0 makes every build look out of date forever.
+        var running = new Version(2026, 8, 1);
+        var fromFile = new Version(2026, 8, 1, 0);
+        Assert.True(running < fromFile, "the trap this normalisation exists for has changed");
+
+        Assert.Equal(UpdateInstaller.Normalize(fromFile), UpdateInstaller.Normalize(running));
+        Assert.False(UpdateInstaller.Normalize(fromFile) > UpdateInstaller.Normalize(running));
     }
 
     [Fact]
-    public void Unrelated_files_are_not_mistaken_for_staged_updates()
+    public void A_version_is_read_from_a_real_executable_without_running_it()
     {
-        Assert.Null(UpdateInstaller.StagedVersionOf(_exe, Path.Combine(_dir, "Cascade.exe")));
-        Assert.Null(UpdateInstaller.StagedVersionOf(_exe, Path.Combine(_dir, "Cascade.update-nightly.exe")));
-        Assert.Null(UpdateInstaller.StagedVersionOf(_exe, Path.Combine(_dir, "Other.update-1.2.3.exe")));
+        string realExe = Environment.ProcessPath!;   // the test host: a genuine signed binary with a version
+        Assert.NotNull(UpdateInstaller.VersionOf(realExe));
+        Assert.Null(UpdateInstaller.VersionOf(_exe));               // a text file has no version resource
+        Assert.Null(UpdateInstaller.VersionOf(Path.Combine(_dir, "absent.exe")));
     }
 
     // ---------------- sweeping ----------------
@@ -75,10 +81,10 @@ public class UpdateTests : IDisposable
     {
         string old = UpdateInstaller.OldPath(_exe);
         File.WriteAllText(old, "previous");
-        string part = UpdateInstaller.StagedPath(_exe, new Version(2026, 9, 1)) + ".part";
+        string part = UpdateInstaller.PartPath(_exe);
         File.WriteAllText(part, "half a download");
 
-        UpdateInstaller.Sweep(_exe, Current);
+        UpdateInstaller.Sweep(_exe);
 
         Assert.False(File.Exists(old));
         Assert.False(File.Exists(part));
@@ -86,50 +92,21 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
-    public void Sweep_discards_a_staged_update_that_is_no_longer_newer()
+    public void Sweep_leaves_a_staged_build_alone()
     {
-        // This is what an applied update becomes: the staged copy is now the running version.
-        string stale = WriteStaged(new Version(2026, 7, 6));
-        string older = WriteStaged(new Version(2025, 1, 1));
-
-        UpdateInstaller.Sweep(_exe, Current);
-
-        Assert.False(File.Exists(stale));
-        Assert.False(File.Exists(older));
-    }
-
-    [Fact]
-    public void Sweep_keeps_a_staged_update_that_is_still_newer()
-    {
-        string keep = WriteStaged(new Version(2026, 8, 1));
-        UpdateInstaller.Sweep(_exe, Current);
-        Assert.True(File.Exists(keep));
-    }
-
-    [Fact]
-    public void The_newest_staged_update_is_the_one_chosen()
-    {
-        WriteStaged(new Version(2026, 8, 1));
-        string newest = WriteStaged(new Version(2026, 12, 3));
-        WriteStaged(new Version(2026, 7, 9));
-
-        Assert.Equal(newest, UpdateInstaller.FindStaged(_exe, Current, force: false));
-    }
-
-    [Fact]
-    public void A_staged_update_that_is_not_newer_is_only_chosen_when_forced()
-    {
-        string same = WriteStaged(Current);
-        Assert.Null(UpdateInstaller.FindStaged(_exe, Current, force: false));
-        Assert.Equal(same, UpdateInstaller.FindStaged(_exe, Current, force: true));
+        // Only the lock holder may judge a staged build; sweeping it away from under one would throw away a
+        // complete, verified download.
+        string staged = WriteStaged();
+        UpdateInstaller.Sweep(_exe);
+        Assert.True(File.Exists(staged));
     }
 
     // ---------------- the swap ----------------
 
     [Fact]
-    public void Apply_puts_the_new_build_in_place_and_hands_back_the_old_one()
+    public void Apply_installs_the_new_build_and_hands_back_the_old_one()
     {
-        string staged = WriteStaged(new Version(2026, 8, 1), "the new build");
+        string staged = WriteStaged("the new build");
 
         string? old = UpdateInstaller.Apply(_exe, staged);
 
@@ -140,24 +117,77 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
-    public void A_failed_swap_leaves_the_working_executable_where_it_was()
+    public void A_failed_install_leaves_the_working_executable_where_it_was()
     {
-        // The most damaging possible outcome is moving the running exe away and then failing to install the
-        // replacement, which would leave nothing to launch next time.
-        string staged = WriteStaged(new Version(2026, 8, 1), "the new build");
+        // The most damaging possible outcome is losing the executable entirely, so the install is one
+        // operation that either happens or does not.
+        string staged = WriteStaged("the new build");
         using (File.Open(staged, FileMode.Open, FileAccess.Read, FileShare.None))
-        {
-            string? old = UpdateInstaller.Apply(_exe, staged);
-            Assert.Null(old);
-        }
+            Assert.Null(UpdateInstaller.Apply(_exe, staged));
 
         Assert.True(File.Exists(_exe));
         Assert.Equal("running build", File.ReadAllText(_exe));
     }
 
     [Fact]
-    public void Apply_does_nothing_when_there_is_no_staged_file()
-        => Assert.Null(UpdateInstaller.Apply(_exe, Path.Combine(_dir, "Cascade.update-2026.8.1.exe")));
+    public void An_old_image_still_in_use_does_not_block_the_install()
+    {
+        // A process from an earlier generation is still running from Cascade.old.exe, so that name cannot
+        // be reused - but the update must still go in.
+        string inUse = UpdateInstaller.OldPath(_exe);
+        File.WriteAllText(inUse, "an earlier generation");
+        string staged = WriteStaged("the new build");
+
+        // Sharing reads still denies deletion, which is the condition under test.
+        using (File.Open(inUse, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            string? old = UpdateInstaller.Apply(_exe, staged);
+
+            Assert.NotNull(old);
+            Assert.NotEqual(inUse, old);
+            Assert.Equal("the new build", File.ReadAllText(_exe));
+            Assert.Equal("an earlier generation", File.ReadAllText(inUse));
+        }
+    }
+
+    [Fact]
+    public void Apply_does_nothing_when_there_is_no_staged_build()
+        => Assert.Null(UpdateInstaller.Apply(_exe, UpdateInstaller.StagedPath(_exe)));
+
+    [Theory]
+    [InlineData("Cascade.old.exe", true)]
+    [InlineData("Cascade.old-123.exe", true)]
+    [InlineData("Cascade.exe", false)]
+    [InlineData("Cascade.new.exe", false)]
+    [InlineData("settings.json", false)]
+    public void Only_a_superseded_image_may_be_named_on_the_cleanup_command_line(string name, bool allowed)
+        => Assert.Equal(allowed, UpdateInstaller.IsSupersededImagePath(_exe, Path.Combine(_dir, name)));
+
+    [Fact]
+    public void Cleanup_refuses_a_path_outside_the_install_directory()
+        => Assert.False(UpdateInstaller.IsSupersededImagePath(_exe, Path.Combine(_dir, "sub", "Cascade.old.exe")));
+
+    // ---------------- the lock ----------------
+
+    [Fact]
+    public void Only_one_process_at_a_time_may_update_an_installed_copy()
+    {
+        using (var first = InstallLock.TryAcquire(_exe))
+        {
+            Assert.NotNull(first);
+            Assert.Null(InstallLock.TryAcquire(_exe));   // a second instance must not proceed
+        }
+
+        using var afterRelease = InstallLock.TryAcquire(_exe);
+        Assert.NotNull(afterRelease);
+    }
+
+    [Fact]
+    public void The_lock_leaves_nothing_behind()
+    {
+        InstallLock.TryAcquire(_exe)!.Dispose();
+        Assert.False(File.Exists(InstallLock.PathFor(_exe)));
+    }
 
     // ---------------- the service ----------------
 
@@ -193,16 +223,18 @@ public class UpdateTests : IDisposable
     private static ReleaseInfo Release(Version v) => new(v, "v" + v, 42, "Cascade.exe", 0);
 
     [Fact]
-    public async Task A_newer_release_is_downloaded_and_staged()
+    public async Task A_newer_release_is_downloaded_and_installed_while_running()
     {
         var source = new FakeSource { Latest = Release(new Version(2026, 8, 1)) };
         var svc = Service(source);
 
-        await svc.CheckAsync(CancellationToken.None);
+        await svc.RunAsync(CancellationToken.None);
 
         Assert.Equal(new Version(2026, 8, 1), svc.PendingVersion);
-        Assert.Equal("downloaded build", File.ReadAllText(UpdateInstaller.StagedPath(_exe, new Version(2026, 8, 1))));
-        Assert.Equal("running build", File.ReadAllText(_exe));  // nothing is swapped while running
+        Assert.Equal("downloaded build", File.ReadAllText(_exe));
+        Assert.Equal("running build", File.ReadAllText(UpdateInstaller.OldPath(_exe)));
+        Assert.Empty(Directory.GetFiles(_dir, "*.part"));
+        Assert.False(File.Exists(UpdateInstaller.StagedPath(_exe)));
     }
 
     [Fact]
@@ -211,10 +243,11 @@ public class UpdateTests : IDisposable
         var source = new FakeSource { Latest = Release(Current) };
         var svc = Service(source);
 
-        await svc.CheckAsync(CancellationToken.None);
+        await svc.RunAsync(CancellationToken.None);
 
         Assert.Null(svc.PendingVersion);
         Assert.Equal(0, source.Downloads);
+        Assert.Equal("running build", File.ReadAllText(_exe));
     }
 
     [Fact]
@@ -223,10 +256,10 @@ public class UpdateTests : IDisposable
         var source = new FakeSource { Latest = Release(Current) };
         var svc = Service(source, force: true);
 
-        await svc.CheckAsync(CancellationToken.None);
+        await svc.RunAsync(CancellationToken.None);
 
         Assert.Equal(Current, svc.PendingVersion);
-        Assert.Equal(1, source.Downloads);
+        Assert.Equal("downloaded build", File.ReadAllText(_exe));
     }
 
     [Fact]
@@ -235,10 +268,12 @@ public class UpdateTests : IDisposable
         var source = new FakeSource { Latest = Release(new Version(2026, 8, 1)) };
         var svc = Service(source, verify: (_, _) => Task.FromResult(false));
 
-        await svc.CheckAsync(CancellationToken.None);
+        await svc.RunAsync(CancellationToken.None);
 
         Assert.Null(svc.PendingVersion);
-        Assert.Empty(Directory.GetFiles(_dir, "Cascade.update-*"));
+        Assert.Equal("running build", File.ReadAllText(_exe));   // nothing was installed
+        Assert.Empty(Directory.GetFiles(_dir, "*.part"));
+        Assert.False(File.Exists(UpdateInstaller.StagedPath(_exe)));
         Assert.NotNull(svc.LastError);
     }
 
@@ -248,42 +283,39 @@ public class UpdateTests : IDisposable
         var source = new FakeSource { Failure = new HttpRequestException("no network") };
         var svc = Service(source);
 
-        await svc.CheckAsync(CancellationToken.None);   // must not throw
+        await svc.RunAsync(CancellationToken.None);   // must not throw
 
         Assert.Null(svc.PendingVersion);
         Assert.Contains("no network", svc.LastError);
+        Assert.Equal("running build", File.ReadAllText(_exe));
     }
 
     [Fact]
-    public async Task An_update_staged_by_a_killed_session_is_adopted_without_asking_again()
-    {
-        WriteStaged(new Version(2026, 8, 1));
-        var source = new FakeSource { Failure = new InvalidOperationException("must not be consulted") };
-        var svc = Service(source);
-
-        await svc.CheckAsync(CancellationToken.None);
-
-        Assert.Equal(new Version(2026, 8, 1), svc.PendingVersion);
-        Assert.Equal(0, source.LatestCalls);
-    }
-
-    [Fact]
-    public async Task The_staged_update_is_installed_on_exit_and_reported()
+    public async Task An_instance_that_loses_the_lock_does_not_even_ask_for_a_release()
     {
         var source = new FakeSource { Latest = Release(new Version(2026, 8, 1)) };
         var svc = Service(source);
-        await svc.CheckAsync(CancellationToken.None);
 
-        var installed = svc.ApplyPending();
+        using (InstallLock.TryAcquire(_exe))          // another instance is already updating
+            await svc.RunAsync(CancellationToken.None);
 
-        Assert.Equal(new Version(2026, 8, 1), installed);
-        Assert.Equal("downloaded build", File.ReadAllText(_exe));
-        Assert.True(File.Exists(UpdateInstaller.OldPath(_exe)));
+        Assert.Equal(0, source.LatestCalls);
+        Assert.Equal("running build", File.ReadAllText(_exe));
     }
 
     [Fact]
-    public void Exiting_with_nothing_staged_installs_nothing()
-        => Assert.Null(Service(new FakeSource()).ApplyPending());
+    public async Task A_staged_build_of_unknown_provenance_is_replaced_rather_than_trusted()
+    {
+        // Whatever this is, its version cannot be read, so it must not be installed on faith.
+        WriteStaged("something left behind");
+        var source = new FakeSource { Latest = Release(new Version(2026, 8, 1)) };
+        var svc = Service(source);
+
+        await svc.RunAsync(CancellationToken.None);
+
+        Assert.Equal(1, source.Downloads);
+        Assert.Equal("downloaded build", File.ReadAllText(_exe));
+    }
 
     // ---------------- the GitHub source, against a real HTTP server ----------------
 
