@@ -3,8 +3,9 @@ using System.Diagnostics;
 namespace Cascade.UiTests;
 
 /// <summary>
-/// The headless screenshot harness (<c>Cascade.exe --screens</c>) builds a real MainForm, so any modal prompt
-/// raised while it runs blocks it forever with nobody to answer. That happened for real: it loaded the
+/// The app's headless entry points: the screenshot harness, the self-test, and the command line it
+/// advertises. The screenshot harness (<c>Cascade.exe --screens</c>) builds a real MainForm, so any modal
+/// prompt raised while it runs blocks it forever with nobody to answer. That happened for real: it loaded the
 /// developer's actual settings, auto-loaded their last filter file, dirtied it via <c>/demo</c>, and then hung
 /// on "Save changes to filters?" when closing the window. This guards that it always runs to completion.
 /// </summary>
@@ -49,5 +50,51 @@ public class ScreenshotHarnessTests
             Assert.True(app.ExitCode == 0, $"--selftest failed (exit {app.ExitCode}){detail}");
         }
         finally { try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ } }
+    }
+
+    /// <summary>
+    /// The help text is the only description of the command line a user gets, so it has to match what the
+    /// parser really does. It once claimed switches that were never implemented, which is a worse failure
+    /// than having no help at all - hence the negative assertions.
+    /// </summary>
+    [Theory]
+    [InlineData("--help")]
+    [InlineData("-h")]
+    [InlineData("/?")]
+    public void Help_describes_the_real_command_line(string flag)
+    {
+        var (exit, output) = RunCaptured(flag);
+
+        Assert.Equal(0, exit);
+        foreach (string expected in new[]
+                 {
+                     "/Filters:", "/demo",
+                     "--version", "--selftest", "--screens", "--cleanup",
+                     "CASCADE_SETTINGS_DIR", "CASCADE_UPDATE"
+                 })
+            Assert.Contains(expected, output);
+
+        // Parity arguments from the original tool that Cascade does not implement. Advertising one would
+        // send a user hunting for a feature that is not there.
+        foreach (string absent in new[] { "/Config:", "/Line:", "/Clipboard" })
+            Assert.DoesNotContain(absent, output);
+    }
+
+    [Fact]
+    public void Version_prints_a_parseable_version()
+    {
+        var (exit, output) = RunCaptured("--version");
+        Assert.Equal(0, exit);
+        Assert.True(Version.TryParse(output.Trim().Split('+')[0], out _), "not a version: " + output);
+    }
+
+    private static (int ExitCode, string Output) RunCaptured(string argument)
+    {
+        var psi = new ProcessStartInfo(TestData.AppExe()) { UseShellExecute = false, RedirectStandardOutput = true };
+        psi.ArgumentList.Add(argument);
+        using var app = Process.Start(psi) ?? throw new InvalidOperationException("Could not start Cascade.exe.");
+        string output = app.StandardOutput.ReadToEnd();
+        Assert.True(app.WaitForExit(60_000), $"'{argument}' never finished");
+        return (app.ExitCode, output);
     }
 }

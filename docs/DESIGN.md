@@ -756,17 +756,36 @@ leading `[...]` groups"** button will offer to generate this template from a sam
 - Import/Export config XML (parity), plus the new `.cascade` workspace.
 
 ### 10.5 Command line
-`cascade [InputFile] [/Filters:f.tat|.cascade]... [/Config:c.xml] [/Line:N] [/Clipboard]`
-(parity with the original's arguments; several `/Filters` may be supplied and are appended).
 
-Diagnostic and internal switches, each of which returns before any window is created:
+**Implemented today:**
+
+```
+Cascade.exe [file] [/Filters:<path>] [/demo]
+```
+
+| Argument | Behaviour |
+| --- | --- |
+| `file` | Any argument not starting with `/` or `--`. Opened if it exists, silently ignored if not. |
+| `/Filters:<path>` | A `.cascade` or `.tat` filter file; also suppresses auto-loading the last one used. |
+| `/demo` | Enables the first four filters and selects the first. Used by the screenshot harness. |
+
+Only the **last** `file` and the **last** `/Filters:` win — neither is accumulated. With no `/Filters:`,
+the last filter file is auto-loaded unless that is switched off in Preferences.
+
+Diagnostic and internal switches. Each returns before any window is created, and each is recognised
+**only as the first argument** (`Cascade.exe foo.log --version` opens the log, it does not print a version):
 
 | Switch | Purpose |
 | --- | --- |
+| `--help`, `-h`, `/?` | Prints the usage above and exits. |
 | `--version` | Prints the informational version and exits. Also how a downloaded update proves it runs. |
-| `--selftest [file] [/Filters:x]` | Headless engine + settings checks; log in `%TEMP%\cascade_selftest.log`. |
-| `--screens <dir>` | Renders every dialog and the main window to PNGs for visual review. |
+| `--selftest [file] [/Filters:x]` | Headless engine, settings and rendering checks; log in `%TEMP%\cascade_selftest.log`. Exit 0 pass, 1 fail, 2 exception. |
+| `--screens [outDir] [file] [file.tat]` | Renders every dialog and the main window to PNGs for visual review. `outDir` is picked as the first argument that already exists as a directory or contains "shots", so create it first. |
 | `--cleanup <pid> <path>` | Started by the previous version as it exits, to delete the executable it ran from. |
+
+**Not implemented** (parity goals from the original, listed here so the gap is not mistaken for a bug):
+`/Config:c.xml`, `/Line:N` and `/Clipboard` are not recognised, and multiple `/Filters:` arguments are
+not appended.
 
 ### 10.6 Updating
 
