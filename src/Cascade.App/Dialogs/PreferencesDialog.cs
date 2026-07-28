@@ -3,7 +3,7 @@ using System.Windows.Forms;
 
 namespace Cascade.App;
 
-/// <summary>Edits <see cref="AppSettings"/> (font, colors, tab size, line numbers, markers, remote mode).</summary>
+/// <summary>Edits <see cref="AppSettings"/> (font, colors, tab size, line numbers, markers).</summary>
 public sealed class PreferencesDialog : DialogBase
 {
     private readonly AppSettings _s;
@@ -12,7 +12,6 @@ public sealed class PreferencesDialog : DialogBase
     private readonly NumericUpDown _tab = new() { Minimum = 1, Maximum = 16 };
     private readonly CheckBox _lineNumbers = new() { Text = "Show line numbers", AutoSize = true };
     private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
-    private readonly CheckBox _remote = new() { Text = "Remote Desktop lean mode (leanest rendering)", AutoSize = true };
     private readonly ComboBox _markers = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
     private readonly Button _fg = new() { FlatStyle = FlatStyle.Flat };
@@ -65,7 +64,6 @@ public sealed class PreferencesDialog : DialogBase
         Row("Markers:", _markers);
         Row("", _lineNumbers);
         Row("", _autoLoadFilters);
-        Row("", _remote);
 
         var buttons = OkCancelRow(out var ok, out _);
         root.Controls.Add(buttons);
@@ -101,7 +99,6 @@ public sealed class PreferencesDialog : DialogBase
         _tab.Value = Math.Clamp(_s.TabSize, 1, 16);
         _lineNumbers.Checked = _s.ShowLineNumbers;
         _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
-        _remote.Checked = _s.RemoteLean;
         _markers.SelectedIndex = (int)_s.MarkerVisibility;
     }
 
@@ -112,7 +109,6 @@ public sealed class PreferencesDialog : DialogBase
         _s.TabSize = (int)_tab.Value;
         _s.ShowLineNumbers = _lineNumbers.Checked;
         _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
-        _s.RemoteLean = _remote.Checked;
         _s.MarkerVisibility = (MarkerVisibilityMode)_markers.SelectedIndex;
     }
 }

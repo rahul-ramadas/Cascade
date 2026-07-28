@@ -34,7 +34,6 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => LogCrash(crashLog, e.ExceptionObject as Exception);
 
         var settings = AppSettings.Load();
-        if (SystemInformation.TerminalServerSession) settings.RemoteLean = true;
         try
         {
             Application.Run(new MainForm(settings, args));

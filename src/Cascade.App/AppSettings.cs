@@ -23,7 +23,6 @@ public sealed class AppSettings
     public int TabSize { get; set; } = 4;
     public bool ShowLineNumbers { get; set; } = true;
     public MarkerVisibilityMode MarkerVisibility { get; set; } = MarkerVisibilityMode.WhenInUse;
-    public bool RemoteLean { get; set; }
 
     public List<string> RecentFiles { get; set; } = new();
     public List<string> RecentFilterFiles { get; set; } = new();

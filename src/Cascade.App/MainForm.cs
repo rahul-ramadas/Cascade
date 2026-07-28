@@ -28,7 +28,7 @@ public sealed class MainForm : Form
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Marquee, Visible = false, MarqueeAnimationSpeed = 30, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
-    private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!;
+    private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     private FindDialog? _findDialog;
@@ -251,13 +251,28 @@ public sealed class MainForm : Form
 
     private ToolStripMenuItem BuildMarkersMenu()
     {
-        var m = new ToolStripMenuItem("Show &Markers");
+        _miMarkers = new ToolStripMenuItem("Show &Markers");
         void Item(string text, MarkerVisibilityMode mode) =>
-            m.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) => { _settings.MarkerVisibility = mode; _grid.RefreshView(); }) { Checked = _settings.MarkerVisibility == mode });
+            _miMarkers.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) =>
+            {
+                _settings.MarkerVisibility = mode;
+                SyncMarkersMenu();
+                _grid.RefreshView();
+            })
+            { Tag = mode });
         Item("Always", MarkerVisibilityMode.Always);
         Item("Never", MarkerVisibilityMode.Never);
         Item("When in use", MarkerVisibilityMode.WhenInUse);
-        return m;
+        SyncMarkersMenu();
+        return _miMarkers;
+    }
+
+    /// <summary>Ticks whichever marker mode is actually in effect. Preferences can change the same setting,
+    /// so the menu has to re-read it rather than assume it still owns it.</summary>
+    private void SyncMarkersMenu()
+    {
+        foreach (ToolStripMenuItem item in _miMarkers.DropDownItems)
+            item.Checked = (MarkerVisibilityMode)item.Tag! == _settings.MarkerVisibility;
     }
 
     private ToolStripMenuItem BuildFilterLocationMenu()
@@ -914,6 +929,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _miLineNumbers.Checked = _settings.ShowLineNumbers;
+            SyncMarkersMenu();
             _grid.ApplySettings(_settings);
             _filterTree.SetSettings(_settings);
             UpdateStatus();

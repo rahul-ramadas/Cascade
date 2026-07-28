@@ -1,7 +1,3 @@
 There is a preference that controls whether the UX is remote desktop friendly. What does that do? What is the tradeoff between having that on vs. off? I'd prefer if the UX is always Remote Desktop friendly, but I want to know if that means I have to give up something.
 
-Keyboard shortcuts for moving filters up and down and indent and un-indenting them.
-
-Set up Github actions build and release pipeline.
-
 Make it a single binary if that doesn't have any downsides.
