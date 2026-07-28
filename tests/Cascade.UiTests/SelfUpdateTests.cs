@@ -44,6 +44,7 @@ public class SelfUpdateTests
             {
                 // The app tells the user, without interrupting them.
                 string message = app.WaitForStatus("Will update to");
+                Assert.True(message.Length > 0, "no update notice appeared. Elements: " + app.DescribeTextElements());
                 Assert.Equal($"Will update to v{NewVersion} on restart", message);
 
                 // ...and the download really is on disk, parked next to the executable.
@@ -121,6 +122,81 @@ public class SelfUpdateTests
             if (localBuild)
                 Assert.True(github.ReleaseRequests == 0,
                             "a local build asked for a release; it must not update itself at all");
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { }
+            try { Directory.Delete(settingsDir, true); } catch { }
+            TryDeleteDir(dir);
+        }
+    }
+
+    /// <summary>
+    /// The notice sits at the otherwise empty right end of the menu bar rather than in the status bar,
+    /// where it used to squeeze the file paths. That is only worth doing if it disturbs nothing: the menus
+    /// must still work, it must not be reachable by keyboard, and it must not collide with the menu items
+    /// when the window is too narrow to hold both.
+    /// </summary>
+    [Fact]
+    public void The_update_notice_sits_in_the_menu_bar_without_disturbing_it()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_upd_ui_" + Guid.NewGuid().ToString("N"));
+        string exe = CopyAppTo(dir);
+
+        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion);
+        string log = TestData.WriteLogFile();
+        string settingsDir = CascadeApp.NewSettingsDir();
+        var env = new Dictionary<string, string>
+        {
+            ["CASCADE_UPDATE"] = "on",
+            ["CASCADE_UPDATE_API"] = github.Prefix,
+            ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_FORCE"] = "1"
+        };
+
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
+                                                      ownsSettingsDir: false, env, exe);
+            Assert.NotEqual("", app.WaitForStatus("Will update to"));
+
+            var notice = app.Element("Will update to") ?? throw new InvalidOperationException("no update notice");
+            var file = app.Element("File") ?? throw new InvalidOperationException("no File menu");
+            var help = app.Element("Help") ?? throw new InvalidOperationException("no Help menu");
+
+            // Same band as the menus, and hard right.
+            Assert.True(Math.Abs(notice.BoundingRectangle.Top - file.BoundingRectangle.Top) <= 6,
+                        $"notice is not on the menu row: notice {notice.BoundingRectangle}, File {file.BoundingRectangle}");
+            Assert.True(notice.BoundingRectangle.Left > help.BoundingRectangle.Right,
+                        "notice overlaps the menu items");
+            Assert.True(app.Window.BoundingRectangle.Right - notice.BoundingRectangle.Right < 60,
+                        "notice is not right-aligned");
+
+            // It is a label, not a menu: tabbing or arrowing along the menu bar must never land on it.
+            Assert.False(notice.Properties.IsKeyboardFocusable.ValueOrDefault,
+                         "the update notice can take keyboard focus");
+
+            // The menus still work with it present.
+            Assert.True(app.ClickMenu("View", "Zoom In"), "the View menu stopped working");
+            Assert.True(app.WaitStatus("Zoom:", "Zoom: 110%"), app.StatusText("Zoom:"));
+
+            // Squeeze the window to its narrowest: MainForm clamps to a 700px MinimumSize, so this is the
+            // tightest the menu bar can ever get and the only state where a collision is reachable.
+            app.ResizeTo(400, 500);
+            double width = app.Window.BoundingRectangle.Width;
+            Assert.True(width <= 780, $"the window did not shrink to its minimum: {app.Window.BoundingRectangle}");
+
+            var narrowHelp = app.Element("Help");
+            Assert.NotNull(narrowHelp);            // the menus must survive being squeezed
+            Assert.NotNull(app.Element("File"));
+
+            var narrowNotice = app.Element("Will update to");
+            Assert.NotNull(narrowNotice);          // and the notice must not silently vanish
+            Assert.True(narrowNotice!.BoundingRectangle.Left >= narrowHelp!.BoundingRectangle.Right,
+                        $"at minimum width the notice overlaps the menus: notice " +
+                        $"{narrowNotice.BoundingRectangle}, Help {narrowHelp.BoundingRectangle}, window {width}");
+
+            app.CloseGracefully();
         }
         finally
         {

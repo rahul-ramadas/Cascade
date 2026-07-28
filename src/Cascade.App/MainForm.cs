@@ -27,7 +27,17 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _lineLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _zoomLabel = new() { AutoSize = true };
     // Hidden until a downloaded update is waiting, which happens at most once in a session.
-    private readonly ToolStripStatusLabel _updateLabel = new() { AutoSize = true, Visible = false, BorderSides = ToolStripStatusLabelBorderSides.Left };
+    // Lives at the right end of the menu bar, which is otherwise empty, so announcing an update does not
+    // squeeze the status bar's paths. Not a menu item: it must never be focusable or open anything.
+    // No AccessibleName - that would replace the text as the name UI Automation reports.
+    private readonly ToolStripLabel _updateLabel = new()
+    {
+        Alignment = ToolStripItemAlignment.Right,
+        Visible = false,
+        Name = "stat.update",
+        ForeColor = Color.SeaGreen,
+        Overflow = ToolStripItemOverflow.Never
+    };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Marquee, Visible = false, MarqueeAnimationSpeed = 30, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
@@ -53,6 +63,9 @@ public sealed class MainForm : Form
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
     internal bool NoSavePrompt;
+
+    // Harness only: shows the update notice without an update actually being pending.
+    internal string? UpdateNoticeOverride;
 
     /// <summary>Null when updating is switched off. Only ever read here - the swap happens in Program after
     /// the message loop ends.</summary>
@@ -256,7 +269,7 @@ public sealed class MainForm : Form
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add(Mi("&About Cascade", (_, _) => ShowAbout()));
 
-        menu.Items.AddRange(new ToolStripItem[] { file, edit, view, filters, help });
+        menu.Items.AddRange(new ToolStripItem[] { file, edit, view, filters, help, _updateLabel });
         MainMenuStrip = menu;
         Controls.Add(menu);
         RefreshRecentMenus();
@@ -366,16 +379,12 @@ public sealed class MainForm : Form
         _totalLabel.Name = "stat.total";
         _lineLabel.Name = "stat.line";
         _zoomLabel.Name = "stat.zoom";
-        _updateLabel.Name = "stat.update";
-        _updateLabel.ForeColor = Color.SeaGreen;
-        _updateLabel.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
         _status.Items.AddRange(new ToolStripItem[]
         {
             // The label comes before the bar so the section's divider sits on an item whose left edge never
             // moves; with the bar first, hiding it dragged the divider left by the bar's width.
             _srcLabel, _filterLabel, _busyLabel, _progress,
-            // Last, so that appearing takes room from the springing paths rather than shifting every metric.
-            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel, _updateLabel
+            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
 
         EnsureMetricWidths();
@@ -1109,7 +1118,7 @@ public sealed class MainForm : Form
         if (_doc.RowCount != _lastRowCount || _doc.MatchedLineCount != _lastMatched
             || _doc.IsBusy || _doc.IsBusy != _lastBusy
             || _findBusy || _findMsg.Length > 0
-            || (_updater?.PendingVersion is not null) != _updateLabel.Visible)
+            || (_updater?.PendingVersion is not null || UpdateNoticeOverride is not null) != _updateLabel.Visible)
             UpdateStatus();
     }
 
@@ -1190,10 +1199,12 @@ public sealed class MainForm : Form
         _zoomLabel.Text = $"Zoom: {_settings.ZoomPercent}%";
 
         // A downloaded update is worth saying once, quietly, and leaving on show.
-        if (_updater?.PendingVersion is { } pending)
+        string? notice = UpdateNoticeOverride
+                         ?? (_updater?.PendingVersion is { } pending ? $"Will update to v{pending} on restart" : null);
+        if (notice is not null)
         {
-            _updateLabel.Text = $"Will update to v{pending} on restart";
-            _updateLabel.ToolTipText = $"Cascade {pending} has been downloaded and will be installed when this window closes.";
+            _updateLabel.Text = notice;
+            _updateLabel.ToolTipText = "This version has been downloaded and will be installed when this window closes.";
             _updateLabel.Visible = true;
         }
         else if (_updateLabel.Visible)
@@ -1201,7 +1212,6 @@ public sealed class MainForm : Form
             _updateLabel.Visible = false;
         }
     }
-
     private void UpdateTitle()
     {
         string file = string.IsNullOrEmpty(_doc.FilePath) ? "" : " — " + Path.GetFileName(_doc.FilePath);

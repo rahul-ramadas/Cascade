@@ -235,6 +235,7 @@ internal static class UiShots
             Opacity = 0 // render off-screen; DrawToBitmap reads the control tree, not the screen
         };
         form.NoSavePrompt = true; // nobody is here to answer a modal prompt on close
+        form.UpdateNoticeOverride = "Will update to v2026.8.1 on restart";
         form.Show();
         form.Activate();
         Application.DoEvents();

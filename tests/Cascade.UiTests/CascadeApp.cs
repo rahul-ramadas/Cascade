@@ -103,6 +103,32 @@ internal sealed class CascadeApp : IDisposable
         => Retry.WhileEmpty(() => StatusText(prefix), TimeSpan.FromMilliseconds(ms),
                TimeSpan.FromMilliseconds(100)).Result ?? "";
 
+    /// <summary>Every element carrying text, for when an expected label cannot be found. Log rows are left
+    /// out: there are hundreds and they drown everything else.</summary>
+    public string DescribeTextElements()
+    {
+        var parts = Window.FindAllDescendants()
+            .Where(e => !string.IsNullOrWhiteSpace(e.Name) && e.ControlType != ControlType.ListItem)
+            .Select(e => $"{e.ControlType}:'{e.Name}'")
+            .Take(60);
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>The first non-row element whose name starts with <paramref name="prefix"/>, or null.</summary>
+    public AutomationElement? Element(string prefix)
+        => Window.FindAllDescendants()
+                 .FirstOrDefault(e => e.ControlType != ControlType.ListItem &&
+                                      (e.Name ?? "").StartsWith(prefix, StringComparison.Ordinal));
+
+    /// <summary>Un-maximizes and resizes the window, to check layout when space runs short.</summary>
+    public void ResizeTo(int width, int height)
+    {
+        Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Normal);
+        System.Threading.Thread.Sleep(200);
+        Window.Patterns.Transform.Pattern.Resize(width, height);
+        System.Threading.Thread.Sleep(400);
+    }
+
     /// <summary>
     /// Closes the window and waits for the process to actually exit. <see cref="Dispose"/> kills the
     /// process, which skips everything the app does on the way out - including installing an update.
