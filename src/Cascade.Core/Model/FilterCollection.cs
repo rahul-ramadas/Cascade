@@ -60,6 +60,41 @@ public sealed class FilterCollection
         return true;
     }
 
+    /// <summary>Moves <paramref name="filter"/> one slot towards the start (-1) or end (+1) of its own
+    /// sibling list. Returns false when it is already at that end.</summary>
+    public bool Reorder(Filter filter, int delta)
+    {
+        var list = filter.Parent?.Children ?? Roots;
+        int from = list.IndexOf(filter);
+        int to = from + delta;
+        if (from < 0 || to < 0 || to >= list.Count) return false;
+        list.RemoveAt(from);
+        list.Insert(to, filter);
+        return true;
+    }
+
+    /// <summary>Nests <paramref name="filter"/> under the sibling directly above it, as its last child.
+    /// Returns false when nothing sits above it at this level, or the extra level would exceed
+    /// <see cref="MaxDepth"/>.</summary>
+    public bool Indent(Filter filter)
+    {
+        var list = filter.Parent?.Children ?? Roots;
+        int i = list.IndexOf(filter);
+        if (i <= 0) return false;
+        var newParent = list[i - 1];
+        return Move(filter, newParent, newParent.Children.Count);
+    }
+
+    /// <summary>Moves <paramref name="filter"/> out one level, placing it directly after its former parent.
+    /// Returns false when it is already at the top level.</summary>
+    public bool Outdent(Filter filter)
+    {
+        var parent = filter.Parent;
+        if (parent is null) return false;
+        var above = parent.Parent?.Children ?? Roots;
+        return Move(filter, parent.Parent, above.IndexOf(parent) + 1);
+    }
+
     public IEnumerable<Filter> EnumerateDepthFirst()
     {
         foreach (var root in Roots)

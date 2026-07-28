@@ -280,7 +280,8 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via
     /// the caller's +/-1) that deep-matches <paramref name="filter"/>, or -1 if none. Scans decoded
     /// lines directly, so it works regardless of the filtered/dim view or whether the filter is enabled.</summary>
-    public long FindLineMatchingFilter(Filter filter, long startLine, bool forward, CancellationToken ct)
+    public long FindLineMatchingFilter(Filter filter, long startLine, bool forward, CancellationToken ct,
+        Action<double>? onProgress = null)
     {
         if (_src is null) return -1;
         var snapshot = CurrentSnapshot;
@@ -288,24 +289,44 @@ public sealed class CascadeDocument : IDisposable
         long count = CompletedLineCount;
         if (count <= 0) return -1;
 
+        const int ProgressEvery = 64 * 1024;
         var reader = new LineReader(_src, _enc.Encoding);
         if (forward)
         {
-            for (long l = Math.Max(0, startLine); l < count; l++)
+            long from = Math.Max(0, startLine), span = Math.Max(1, count - from);
+            for (long l = from; l < count; l++)
             {
                 ct.ThrowIfCancellationRequested();
                 if (DeepMatchesLine(reader, snapshot, filter, l)) return l;
+                if (onProgress is not null && (l - from) % ProgressEvery == 0) onProgress((l - from) / (double)span);
             }
         }
         else
         {
-            for (long l = Math.Min(startLine, count - 1); l >= 0; l--)
+            long from = Math.Min(startLine, count - 1), span = Math.Max(1, from + 1);
+            for (long l = from; l >= 0; l--)
             {
                 ct.ThrowIfCancellationRequested();
                 if (DeepMatchesLine(reader, snapshot, filter, l)) return l;
+                if (onProgress is not null && (from - l) % ProgressEvery == 0) onProgress((from - l) / (double)span);
             }
         }
         return -1;
+    }
+
+    /// <summary>Runs <see cref="FindLineMatchingFilter"/> on a background thread so the window stays
+    /// responsive, cancelling any find already in flight. Shares its cancellation with
+    /// <see cref="FindLineAsync"/>, so <see cref="IsFindRunning"/> and <see cref="CancelFind"/> cover both.</summary>
+    public Task<long> FindLineMatchingFilterAsync(Filter filter, long startLine, bool forward,
+        IProgress<double>? progress = null)
+    {
+        _findCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _findCts = cts;
+        Action<double>? onProgress = progress is null ? null : progress.Report;
+        var task = Task.Run(() => FindLineMatchingFilter(filter, startLine, forward, cts.Token, onProgress), cts.Token);
+        _findTask = task;
+        return task;
     }
 
     private bool DeepMatchesLine(LineReader reader, FilterSnapshot snapshot, Filter filter, long line)

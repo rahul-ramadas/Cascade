@@ -56,6 +56,10 @@ public sealed class LineGridControl : Control
     public event Action<long>? LineDoubleClicked;
     public event Action? ZoomChanged;
 
+    /// <summary>Raised with the 0-based marker index when marker navigation runs off the end. The host
+    /// decides how to report it, so all the find commands give identical feedback.</summary>
+    public event Action<int>? NoMoreMarkers;
+
     public LineGridControl()
     {
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
@@ -609,7 +613,7 @@ public sealed class LineGridControl : Control
         _anchorLine = -1;
         long fromLine = CaretLine < 0 ? (forward ? -1 : _doc.CompletedLineCount) : CaretLine;
         long line = forward ? _doc.Markers.Next(fromLine, index) : _doc.Markers.Previous(fromLine, index);
-        if (line < 0) return;
+        if (line < 0) { NoMoreMarkers?.Invoke(index); return; }
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         _caretRow = row;

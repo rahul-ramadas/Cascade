@@ -3,6 +3,7 @@ using System.Drawing;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Input;
 using FlaUI.Core.Tools;
 using FlaUI.Core.WindowsAPI;
 using FlaUI.UIA3;
@@ -140,6 +141,68 @@ internal sealed class CascadeApp : IDisposable
         => Tree().FindAllDescendants(cf => cf.ByControlType(ControlType.TreeItem))
                  .FirstOrDefault(n => (n.Name ?? "").Contains(containsText, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Names of the top-level filters, in list order.</summary>
+    public string[] RootFilterNames()
+        => Tree().FindAllChildren(cf => cf.ByControlType(ControlType.TreeItem)).Select(n => n.Name ?? "").ToArray();
+
+    /// <summary>Names of the filters nested directly under the named one, in list order.</summary>
+    public string[] ChildFilterNames(string parentContains)
+    {
+        var parent = FilterNode(parentContains);
+        if (parent is null) return Array.Empty<string>();
+        return parent.FindAllChildren(cf => cf.ByControlType(ControlType.TreeItem)).Select(n => n.Name ?? "").ToArray();
+    }
+
+    /// <summary>Position of a filter within <paramref name="names"/>, or -1.</summary>
+    public static int IndexOfFilter(string[] names, string containsText)
+        => Array.FindIndex(names, n => n.Contains(containsText, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Selects a filter and gives the list keyboard focus, so shortcuts are routed to it.</summary>
+    public void FocusFilter(string containsText)
+    {
+        var node = FilterNode(containsText)
+            ?? throw new InvalidOperationException($"Filter '{containsText}' not in the list.");
+        node.AsTreeItem().Select();
+        try { node.Focus(); } catch { /* selection is what matters */ }
+        System.Threading.Thread.Sleep(120);
+    }
+
+    /// <summary>Waits for a status-bar message containing <paramref name="containsText"/>. The whole-window
+    /// flash is far too brief to observe, so the wording in the status bar is what the tests assert on.</summary>
+    public bool WaitForFindMessage(string containsText, int ms = 4000)
+        => Retry.WhileFalse(
+               () => Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
+                           .Any(t => (t.Name ?? "").Contains(containsText, StringComparison.OrdinalIgnoreCase)),
+               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(40)).Result;
+
+    /// <summary>Presses Ctrl + <paramref name="key"/> against whatever currently has focus.</summary>
+    public void CtrlKey(VirtualKeyShort key)
+    {
+        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, key);
+        System.Threading.Thread.Sleep(200);
+    }
+
+    /// <summary>Presses <paramref name="key"/> on its own against whatever currently has focus.</summary>
+    public void Key(VirtualKeyShort key)
+    {
+        Keyboard.Type(key);
+        System.Threading.Thread.Sleep(200);
+    }
+
+    /// <summary>Presses Shift + <paramref name="key"/> against whatever currently has focus.</summary>
+    public void ShiftKey(VirtualKeyShort key)
+    {
+        Keyboard.TypeSimultaneously(VirtualKeyShort.SHIFT, key);
+        System.Threading.Thread.Sleep(200);
+    }
+
+    /// <summary>Types literal text against whatever currently has focus.</summary>
+    public void TypeText(string text)
+    {
+        Keyboard.Type(text);
+        System.Threading.Thread.Sleep(250);
+    }
+
     // ---- actions via menus / dialogs ----
 
     /// <summary>Opens Find (via the Edit menu), searches forward for <paramref name="text"/>, then closes it.</summary>
@@ -182,6 +245,16 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>The concatenated text labels in a dialog (used to read the Find status message).</summary>
     public string DialogText(Window dlg)
         => string.Join(" | ", dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(t => t.Name ?? "").Where(n => n.Length > 0));
+
+    /// <summary>Gives a named element inside a dialog keyboard focus ("" = its text box).</summary>
+    public void FocusInDialog(Window dlg, string name = "")
+    {
+        var element = name.Length == 0
+            ? dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))
+            : dlg.FindFirstDescendant(cf => cf.ByName(name));
+        try { element?.Focus(); } catch { /* best effort */ }
+        System.Threading.Thread.Sleep(150);
+    }
 
     /// <summary>Waits until a dialog's text labels contain <paramref name="substring"/> (find runs async).</summary>
     public bool WaitDialogText(Window dlg, string substring, int ms = 8000)

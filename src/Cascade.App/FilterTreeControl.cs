@@ -20,7 +20,7 @@ public sealed class FilterTreeControl : UserControl
     private readonly CueTextBox _search = new()
     {
         Dock = DockStyle.Top,
-        Cue = "Find filter (Enter / F3 = next, Shift+Enter = prev)\u2026"
+        Cue = "Find filter (Enter = next, Shift+Enter = previous)\u2026"
     };
     private readonly BufferedTreeView _tree = new()
     {
@@ -53,6 +53,10 @@ public sealed class FilterTreeControl : UserControl
     public event Action<Filter?>? AddRequested;
     public event Action<Filter, bool>? FindFilterRequested; // (filter, forward)
 
+    /// <summary>Raised with the search term when a filter search runs off the end of the list. The host
+    /// decides how to report it, so all the find commands give identical feedback.</summary>
+    public event Action<string>? NoFilterMatch;
+
     public FilterTreeControl()
     {
         var menu = BuildContextMenu();
@@ -80,7 +84,7 @@ public sealed class FilterTreeControl : UserControl
         _tree.DragOver += OnDragOver;
         _tree.DragDrop += OnDragDrop;
 
-        _search.TextChanged += (_, _) => JumpToMatch(fromSelection: false, forward: true);
+        _search.TextChanged += (_, _) => JumpToMatch(fromSelection: false, forward: true, announce: false);
         _search.KeyDown += OnSearchKeyDown;
 
         // A subtle left accent bar marks which sub-area (search box vs list) holds focus; the reserved
@@ -180,44 +184,51 @@ public sealed class FilterTreeControl : UserControl
 
     private void OnSearchKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.Enter) { JumpToMatch(fromSelection: true, forward: !e.Shift); e.Handled = e.SuppressKeyPress = true; }
+        if (e.KeyCode == Keys.Enter) { JumpToMatch(fromSelection: true, forward: !e.Shift, announce: true); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Escape) { _search.Clear(); _tree.Focus(); e.Handled = e.SuppressKeyPress = true; }
     }
 
     private void OnTreeKeyDown(object? sender, KeyEventArgs e)
     {
-        if (e.KeyCode == Keys.F3) { JumpToMatch(fromSelection: true, forward: !e.Shift); e.Handled = e.SuppressKeyPress = true; }
+        if (e.KeyCode == Keys.F3) { JumpToMatch(fromSelection: true, forward: !e.Shift, announce: true); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Delete) { RemoveSelected(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.Control && !e.Shift && !e.Alt && e.KeyCode is Keys.Up or Keys.Down or Keys.Left or Keys.Right)
+        {
+            MoveSelected(e.KeyCode);
+            e.Handled = e.SuppressKeyPress = true;
+        }
         else if (e.KeyCode == Keys.Enter) { if (SelectedFilter is { } f) EditRequested?.Invoke(f); e.Handled = e.SuppressKeyPress = true; }
         else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Escape && _search.TextLength > 0) { _search.Clear(); e.Handled = e.SuppressKeyPress = true; }
     }
 
-    private void JumpToMatch(bool fromSelection, bool forward)
+    private void JumpToMatch(bool fromSelection, bool forward, bool announce)
     {
         string q = _search.Text.Trim();
         _tree.Invalidate();
         if (q.Length == 0 || _flat.Count == 0) return;
 
-        int start = 0;
+        int start = forward ? 0 : _flat.Count - 1;
         if (fromSelection && _tree.SelectedNode is not null)
         {
             int cur = _flat.IndexOf(_tree.SelectedNode);
-            start = cur < 0 ? 0 : cur + (forward ? 1 : -1);
+            if (cur >= 0) start = cur + (forward ? 1 : -1);
         }
 
-        int count = _flat.Count;
-        for (int step = 0; step < count; step++)
+        // Stops at the ends instead of wrapping, so "no more matches" means the same thing here as it does
+        // for the other find commands.
+        for (int idx = start; idx >= 0 && idx < _flat.Count; idx += forward ? 1 : -1)
         {
-            int idx = ((start + (forward ? step : -step)) % count + count) % count;
-            if (Matches(_flat[idx], q))
-            {
-                _tree.SelectedNode = _flat[idx];
-                _flat[idx].EnsureVisible();
-                _tree.Invalidate();
-                return;
-            }
+            if (!Matches(_flat[idx], q)) continue;
+            _tree.SelectedNode = _flat[idx];
+            _flat[idx].EnsureVisible();
+            _tree.Invalidate();
+            return;
         }
+
+        // Typing filters incrementally, so only an explicit Enter/F3 reports the end - otherwise every
+        // keystroke of a term that does not match yet would report failure.
+        if (announce) NoFilterMatch?.Invoke(q);
     }
 
     private static bool Matches(TreeNode node, string query)
@@ -476,6 +487,56 @@ public sealed class FilterTreeControl : UserControl
         }
 
         FiltersChanged?.Invoke();
+    }
+
+    /// <summary>Ctrl+Up/Down reorders the selected filter among its siblings; Ctrl+Right nests it under the
+    /// filter above it, Ctrl+Left moves it back out one level.</summary>
+    public void MoveSelected(Keys key)
+    {
+        if (_doc is null || SelectedFilter is not { } f) return;
+        bool moved = key switch
+        {
+            Keys.Up => _doc.Filters.Reorder(f, -1),
+            Keys.Down => _doc.Filters.Reorder(f, +1),
+            Keys.Right => _doc.Filters.Indent(f),
+            Keys.Left => _doc.Filters.Outdent(f),
+            _ => false
+        };
+        if (!moved) return;   // already at an end / top level: leave the tree alone
+        SyncMovedNode(f);
+        // Nesting changes what a filter matches, and sibling order decides which filter colours a line, so
+        // the snapshot has to be rebuilt either way.
+        FiltersChanged?.Invoke();
+    }
+
+    /// <summary>Re-homes just the moved filter's node so the tree matches the model again. Rebuild() would
+    /// blank and repopulate the whole list - very visible when holding Ctrl+Up.</summary>
+    private void SyncMovedNode(Filter f)
+    {
+        var node = _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f));
+        if (node is null || _doc is null) { Rebuild(); return; }
+
+        var parentNode = f.Parent is null ? null : _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f.Parent));
+        bool wasExpanded = node.IsExpanded;
+
+        _building = true;
+        _tree.BeginUpdate();
+        node.Remove();
+        var siblings = parentNode?.Nodes ?? _tree.Nodes;
+        int index = (f.Parent?.Children ?? _doc.Filters.Roots).IndexOf(f);
+        if (index < 0 || index > siblings.Count) siblings.Add(node);
+        else siblings.Insert(index, node);
+        if (wasExpanded) node.Expand();
+        // A filter nested under a collapsed parent would simply vanish, so open it (and remember that it is
+        // open, since _building suppresses the AfterExpand handler that normally tracks this).
+        if (parentNode?.Tag is Filter parent) { _collapsed.Remove(parent.Id); parentNode.Expand(); }
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
+        _tree.EndUpdate();
+        _building = false;
+
+        _tree.SelectedNode = node;
+        node.EnsureVisible();
     }
 
     public void SetAllEnabled(bool enabled)

@@ -72,8 +72,28 @@ public sealed class FindDialog : Form
 
         Controls.Add(root);
         AcceptButton = _next;
+    }
 
-        _text.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { Run(!e.Shift); e.Handled = e.SuppressKeyPress = true; } };
+    /// <summary>Find keys work anywhere in the dialog, not just in the text box. ProcessCmdKey runs before
+    /// the default-button handling that would otherwise swallow them: Shift+Enter used to click "Find Next"
+    /// (a form's AcceptButton ignores Alt and Ctrl, but not Shift) and F3 never reached the dialog at all.
+    /// Only plain Enter defers to a focused button, so Cancel and Find Previous still activate normally.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        switch (keyData)
+        {
+            case Keys.Enter when ActiveControl is not Button:
+                Run(true);
+                return true;
+            case Keys.Shift | Keys.Enter:
+            case Keys.Shift | Keys.F3:
+                Run(false);
+                return true;
+            case Keys.F3:
+                Run(true);
+                return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     protected override bool ProcessDialogKey(Keys keyData)

@@ -20,6 +20,41 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
+    public void Filter_find_reports_progress_and_honors_cancellation()
+    {
+        // Scanning for a filter's next match decodes every line, so on a large file it has to be able to
+        // report how far it has got and to be stopped part-way; otherwise the window just freezes.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 200_000; i++) sb.Append("nope ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = new FilterCollection();
+            var absent = new Filter { Enabled = true, Match = { Text = "absent-text" } };
+            filters.Add(absent);
+            doc.SetFilters(filters);
+
+            int reports = 0;
+            double last = -1;
+            long found = doc.FindLineMatchingFilter(absent, 0, forward: true, CancellationToken.None,
+                f => { reports++; last = f; });
+
+            Assert.Equal(-1, found);
+            Assert.True(reports > 1, $"expected multiple progress callbacks, got {reports}");
+            Assert.InRange(last, 0.0, 1.0);
+
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+            Assert.Throws<OperationCanceledException>(() =>
+                doc.FindLineMatchingFilter(absent, 0, forward: true, cts.Token));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void SetFilters_before_a_file_is_open_does_not_throw()
     {
         // Auto-loading a saved filter set at startup happens BEFORE any file is open (the filter service

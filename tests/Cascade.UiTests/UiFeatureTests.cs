@@ -1,6 +1,7 @@
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Tools;
+using FlaUI.Core.WindowsAPI;
 
 namespace Cascade.UiTests;
 
@@ -146,6 +147,137 @@ public class UiFeatureTests
             Check("count back to the base set", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));
 
             Assert.True(fails.Count == 0, "Filter delete failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
+    public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
+    {
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "alpha", "beta");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+            void CheckOrder(string name, params string[] expected)
+            {
+                var roots = app.RootFilterNames();
+                bool ok = roots.Length == expected.Length;
+                for (int i = 0; ok && i < expected.Length; i++)
+                    ok = (roots[i] ?? "").Contains(expected[i], StringComparison.OrdinalIgnoreCase);
+                Check(name, ok, string.Join(" | ", roots));
+            }
+
+            CheckOrder("initial order", "MATCH", "alpha", "beta");
+
+            // Ctrl+Up / Ctrl+Down reorder within the same level.
+            app.FocusFilter("beta");
+            app.CtrlKey(VirtualKeyShort.UP);
+            CheckOrder("ctrl+up moves it above alpha", "MATCH", "beta", "alpha");
+
+            app.CtrlKey(VirtualKeyShort.DOWN);
+            CheckOrder("ctrl+down puts it back", "MATCH", "alpha", "beta");
+
+            // Ctrl+Right nests it under the filter above it.
+            app.CtrlKey(VirtualKeyShort.RIGHT);
+            CheckOrder("ctrl+right removes it from the top level", "MATCH", "alpha");
+            Check("ctrl+right nests it under alpha",
+                CascadeApp.IndexOfFilter(app.ChildFilterNames("alpha"), "beta") >= 0,
+                string.Join(" | ", app.ChildFilterNames("alpha")));
+
+            // Ctrl+Left moves it back out, directly after its old parent.
+            app.CtrlKey(VirtualKeyShort.LEFT);
+            CheckOrder("ctrl+left restores it to the top level", "MATCH", "alpha", "beta");
+
+            // The first filter has nothing above it, so both are no-ops rather than errors.
+            app.FocusFilter("MATCH");
+            app.CtrlKey(VirtualKeyShort.UP);
+            app.CtrlKey(VirtualKeyShort.RIGHT);
+            CheckOrder("no-op at the top of the list", "MATCH", "alpha", "beta");
+
+            Assert.True(fails.Count == 0, "Filter reorder failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
+    public void Find_dialog_navigates_with_enter_and_f3()
+    {
+        // These keys have to work while the Find dialog itself has focus. Enter used to be the only one:
+        // Shift+Enter hit the form's default button (AcceptButton ignores Alt/Ctrl but not Shift) and so
+        // searched forwards, and F3 was only wired up on the main window.
+        using var app = CascadeApp.Launch();
+        var fails = new List<string>();
+        void Check(string name, string expected) { if (!app.WaitStatus("Ln:", expected)) fails.Add($"{name} :: {app.StatusText("Ln:")}"); }
+
+        app.SelectLine(1);
+        var dlg = app.OpenFindDialog();
+        app.FindInDialog(dlg, "MATCH line", forward: true);   // MATCH is on 1-based lines 1, 6, 11, 16, ...
+        Check("find next from line 1", "Ln: 6 / 1,000");
+
+        // From the text box.
+        app.FocusInDialog(dlg);
+        app.Key(VirtualKeyShort.F3);
+        Check("F3 -> next", "Ln: 11 / 1,000");
+        app.ShiftKey(VirtualKeyShort.F3);
+        Check("Shift+F3 -> previous", "Ln: 6 / 1,000");
+        app.Key(VirtualKeyShort.RETURN);
+        Check("Enter -> next", "Ln: 11 / 1,000");
+        app.ShiftKey(VirtualKeyShort.RETURN);
+        Check("Shift+Enter -> previous", "Ln: 6 / 1,000");
+
+        // ...and after clicking a button, which is exactly when Shift+Enter used to go the wrong way.
+        app.FocusInDialog(dlg, "Find Next");
+        app.ShiftKey(VirtualKeyShort.RETURN);
+        Check("Shift+Enter with a button focused -> previous", "Ln: 1 / 1,000");
+        app.Key(VirtualKeyShort.F3);
+        Check("F3 with a button focused -> next", "Ln: 6 / 1,000");
+
+        try { dlg.Close(); } catch { /* modeless: hides */ }
+        Assert.True(fails.Count == 0, "Find key failures:\n  " + string.Join("\n  ", fails));
+    }
+
+    [Fact]
+    public void Reaching_the_end_of_a_search_shows_feedback()
+    {
+        // Every find command has to say so when there is nothing further that way. Two of them used to be
+        // completely silent, and Find only reported it inside a dialog that is usually closed.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond) { if (!cond) fails.Add(name); }
+
+            // 1. Marker navigation with no markers set at all.
+            app.SelectLine(1);
+            app.Key(VirtualKeyShort.KEY_1);
+            Check("marker navigation reports the end", app.WaitForFindMessage("No more marker 1"));
+
+            // 2. Per-filter find, searching backwards from the very first line.
+            app.SelectLine(1);
+            app.FilterNode("MATCH")?.AsTreeItem().Select();
+            app.FindPrevForSelectedFilter();
+            Check("per-filter find reports the end", app.WaitForFindMessage("No more matches"));
+
+            // 3. Text find for something that does not exist.
+            var dlg = app.OpenFindDialog();
+            app.FindInDialog(dlg, "zzz-not-in-this-file", forward: true);
+            Check("text find reports the end", app.WaitForFindMessage("No more matches"));
+            try { dlg.Close(); } catch { /* modeless: hides */ }
+
+            // 4. Filter search for a filter that is not in the list.
+            app.ClickMenu("View", "Focus Filter Search");
+            app.TypeText("zzz-no-such-filter");
+            app.Key(VirtualKeyShort.RETURN);
+            Check("filter search reports the end", app.WaitForFindMessage("No more filters matching"));
+
+            Assert.True(fails.Count == 0, "No end-of-search feedback for:\n  " + string.Join("\n  ", fails));
         }
         finally { File.Delete(log); File.Delete(tat); }
     }

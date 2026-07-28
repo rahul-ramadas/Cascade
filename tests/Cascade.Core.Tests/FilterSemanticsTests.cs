@@ -170,4 +170,102 @@ public class FilterSemanticsTests
         Assert.False(c.CanMove(extra, nodes[^1]));
         Assert.True(c.CanMove(extra, nodes[0]));
     }
+
+    [Fact]
+    public void Reorder_moves_a_filter_within_its_own_siblings()
+    {
+        var c = new FilterCollection();
+        Filter a = Make("a", true), b = Make("b", true), d = Make("d", true);
+        c.Add(a); c.Add(b); c.Add(d);
+
+        Assert.True(c.Reorder(b, -1));
+        Assert.Equal(new[] { b, a, d }, c.Roots);
+        Assert.True(c.Reorder(b, +1));
+        Assert.Equal(new[] { a, b, d }, c.Roots);
+
+        // The ends are hard stops, and a failed move must not disturb the order.
+        Assert.False(c.Reorder(a, -1));
+        Assert.False(c.Reorder(d, +1));
+        Assert.Equal(new[] { a, b, d }, c.Roots);
+
+        // Reordering happens within the parent, not across the whole tree.
+        var child = Make("child", true);
+        c.Add(child, a);
+        Assert.False(c.Reorder(child, -1));
+        Assert.Equal(new[] { child }, a.Children);
+    }
+
+    [Fact]
+    public void Indent_nests_a_filter_under_the_one_above_it()
+    {
+        var c = new FilterCollection();
+        Filter a = Make("a", true), b = Make("b", true);
+        c.Add(a); c.Add(b);
+
+        Assert.True(c.Indent(b));
+        Assert.Equal(a, b.Parent);
+        Assert.Equal(new[] { b }, a.Children);
+        Assert.Equal(new[] { a }, c.Roots);
+
+        // The first filter at a level has nothing above it to nest under.
+        Assert.False(c.Indent(a));
+        Assert.False(c.Indent(b));   // b is now an only child
+
+        // Indenting appends to the end of the new parent's children.
+        var e = Make("e", true);
+        c.Add(e);
+        Assert.True(c.Indent(e));
+        Assert.Equal(new[] { b, e }, a.Children);
+    }
+
+    [Fact]
+    public void Indent_refuses_to_exceed_the_depth_limit()
+    {
+        var c = new FilterCollection();
+        Filter? prev = null;
+        for (int i = 0; i < FilterCollection.MaxDepth; i++)
+        {
+            var f = Make("f" + i, true);
+            c.Add(f, prev);
+            prev = f;
+        }
+        // The chain already fills every depth, so a sibling of the deepest node cannot go one deeper.
+        var sibling = Make("x", true);
+        c.Add(sibling, prev!.Parent);
+        Assert.False(c.Indent(sibling));
+        Assert.Equal(prev.Parent, sibling.Parent);
+    }
+
+    [Fact]
+    public void Outdent_moves_a_filter_out_one_level_below_its_old_parent()
+    {
+        var c = new FilterCollection();
+        Filter a = Make("a", true), b = Make("b", true), child = Make("child", true), sib = Make("sib", true);
+        c.Add(a); c.Add(b);
+        c.Add(child, a); c.Add(sib, a);
+
+        Assert.True(c.Outdent(child));
+        Assert.Null(child.Parent);
+        Assert.Equal(new[] { a, child, b }, c.Roots);   // lands directly after its old parent
+        Assert.Equal(new[] { sib }, a.Children);
+
+        // Top-level filters have nowhere further to go.
+        Assert.False(c.Outdent(child));
+        Assert.Equal(new[] { a, child, b }, c.Roots);
+    }
+
+    [Fact]
+    public void Outdent_keeps_its_own_children()
+    {
+        var c = new FilterCollection();
+        Filter a = Make("a", true), child = Make("child", true), grand = Make("grand", true);
+        c.Add(a);
+        c.Add(child, a);
+        c.Add(grand, child);
+
+        Assert.True(c.Outdent(child));
+        Assert.Equal(new[] { a, child }, c.Roots);
+        Assert.Equal(new[] { grand }, child.Children);
+        Assert.Equal(child, grand.Parent);
+    }
 }

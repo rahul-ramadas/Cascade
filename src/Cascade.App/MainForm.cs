@@ -20,6 +20,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _srcLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left, ToolTipText = "Open filter file" };
     private readonly ToolStripStatusLabel _busyLabel = new() { AutoSize = true };
+    private readonly ToolStripStatusLabel _findMsgLabel = new() { AutoSize = true, ForeColor = Color.Firebrick };
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
@@ -39,6 +40,10 @@ public sealed class MainForm : Form
     private long _lastRowCount = -1, _lastMatched = -1;
     private bool _lastBusy;
     private bool _anchorActive;
+    private bool _findBusy;
+    private string _findWhat = "", _findMsg = "";
+    private double _findFraction;
+    private DateTime _findMsgUntil;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
@@ -76,6 +81,8 @@ public sealed class MainForm : Form
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
+        _filterTree.NoFilterMatch += q => NoMoreMatches($"No more filters matching {Quote(q)}");
+        _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
 
         _refreshTimer.Tick += (_, _) =>
         {
@@ -118,15 +125,16 @@ public sealed class MainForm : Form
     {
         if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
         if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
+        if (keyData == Keys.Escape && _findBusy) { _doc.CancelFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (!IsTextInputFocused())
         {
             switch (keyData)
             {
-                case Keys.Control | Keys.Up: SetFilterDock(FilterDock.Top); return true;
-                case Keys.Control | Keys.Down: SetFilterDock(FilterDock.Bottom); return true;
-                case Keys.Control | Keys.Left: SetFilterDock(FilterDock.Left); return true;
-                case Keys.Control | Keys.Right: SetFilterDock(FilterDock.Right); return true;
+                case Keys.Control | Keys.Shift | Keys.Up: SetFilterDock(FilterDock.Top); return true;
+                case Keys.Control | Keys.Shift | Keys.Down: SetFilterDock(FilterDock.Bottom); return true;
+                case Keys.Control | Keys.Shift | Keys.Left: SetFilterDock(FilterDock.Left); return true;
+                case Keys.Control | Keys.Shift | Keys.Right: SetFilterDock(FilterDock.Right); return true;
             }
         }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -142,6 +150,11 @@ public sealed class MainForm : Form
         if (shortcutText is not null) m.ShortcutKeyDisplayString = shortcutText;
         return m;
     }
+
+    /// <summary>A menu item that only advertises its shortcut; the key itself is handled by the control it
+    /// applies to, so it is not registered as a form-wide ShortcutKeys.</summary>
+    private static ToolStripMenuItem Hint(string text, string keys, Action onClick)
+        => new(text, null, (_, _) => onClick()) { ShortcutKeyDisplayString = keys };
 
     private void BuildMenu()
     {
@@ -210,6 +223,13 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); }));
         filters.DropDownItems.Add(Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected()));
         filters.DropDownItems.Add(new ToolStripSeparator());
+        // The keys themselves are handled by the filter tree (they only apply while it has focus), so these
+        // just advertise them.
+        filters.DropDownItems.Add(Hint("Move &Up", "Ctrl+Up", () => _filterTree.MoveSelected(Keys.Up)));
+        filters.DropDownItems.Add(Hint("Move &Down", "Ctrl+Down", () => _filterTree.MoveSelected(Keys.Down)));
+        filters.DropDownItems.Add(Hint("&Indent (nest under filter above)", "Ctrl+Right", () => _filterTree.MoveSelected(Keys.Right)));
+        filters.DropDownItems.Add(Hint("&Outdent", "Ctrl+Left", () => _filterTree.MoveSelected(Keys.Left)));
+        filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
         filters.DropDownItems.Add(Mi("Find Pre&vious Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
         filters.DropDownItems.Add(new ToolStripSeparator());
@@ -246,10 +266,10 @@ public sealed class MainForm : Form
         // handled in ProcessCmdKey, so we don't register them via ShortcutKeys here.
         static ToolStripMenuItem Item(string text, string keys, EventHandler onClick)
             => new(text, null, onClick) { ShortcutKeyDisplayString = keys };
-        m.DropDownItems.Add(Item("Dock &Bottom", "Ctrl+Down", (_, _) => SetFilterDock(FilterDock.Bottom)));
-        m.DropDownItems.Add(Item("Dock &Top", "Ctrl+Up", (_, _) => SetFilterDock(FilterDock.Top)));
-        m.DropDownItems.Add(Item("Dock &Left", "Ctrl+Left", (_, _) => SetFilterDock(FilterDock.Left)));
-        m.DropDownItems.Add(Item("Dock &Right", "Ctrl+Right", (_, _) => SetFilterDock(FilterDock.Right)));
+        m.DropDownItems.Add(Item("Dock &Bottom", "Ctrl+Shift+Down", (_, _) => SetFilterDock(FilterDock.Bottom)));
+        m.DropDownItems.Add(Item("Dock &Top", "Ctrl+Shift+Up", (_, _) => SetFilterDock(FilterDock.Top)));
+        m.DropDownItems.Add(Item("Dock &Left", "Ctrl+Shift+Left", (_, _) => SetFilterDock(FilterDock.Left)));
+        m.DropDownItems.Add(Item("Dock &Right", "Ctrl+Shift+Right", (_, _) => SetFilterDock(FilterDock.Right)));
         m.DropDownItems.Add(new ToolStripSeparator());
         m.DropDownItems.Add(Item("Show/&Hide Filter List", "Ctrl+Shift+L", (_, _) => ToggleFilterList()));
         return m;
@@ -277,6 +297,7 @@ public sealed class MainForm : Form
         _srcLabel.Name = "stat.src";
         _filterLabel.Name = "stat.filter";
         _busyLabel.Name = "stat.busy";
+        _findMsgLabel.Name = "stat.findmsg";
         _selLabel.Name = "stat.sel";
         _filLabel.Name = "stat.fil";
         _totalLabel.Name = "stat.total";
@@ -284,7 +305,7 @@ public sealed class MainForm : Form
         _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
-            _srcLabel, _filterLabel, _progress, _busyLabel,
+            _srcLabel, _filterLabel, _progress, _busyLabel, _findMsgLabel,
             _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
     }
@@ -444,15 +465,65 @@ public sealed class MainForm : Form
         if (_filterTree.SelectedFilter is { } f) FindFilterMatch(f, forward);
     }
 
-    private void FindFilterMatch(Filter filter, bool forward)
+    private async void FindFilterMatch(Filter filter, bool forward)
     {
         if (string.IsNullOrEmpty(_doc.FilePath)) return;
         long caret = _grid.CaretLine;
         long start = caret < 0 ? (forward ? 0 : _doc.CompletedLineCount - 1) : caret + (forward ? 1 : -1);
-        long found = _doc.FindLineMatchingFilter(filter, start, forward, CancellationToken.None);
+
+        // A filter scan decodes and matches every line, which on a multi-gigabyte file takes long enough
+        // that doing it inline would freeze the window with no sign of progress.
+        SetFindBusy(true, $"Searching for {Quote(filter.Match.Text)}");
+        var progress = new Progress<double>(f => _findFraction = f);
+        long found;
+        try
+        {
+            found = await _doc.FindLineMatchingFilterAsync(filter, start, forward, progress);
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a newer find, or cancelled with Esc. Only clear the bar for a genuine stop.
+            if (!_doc.IsFindRunning) SetFindBusy(false);
+            return;
+        }
+        SetFindBusy(false);
+
         if (found >= 0) GoToLine(found + 1);
-        else System.Media.SystemSounds.Beep.Play();
+        else NoMoreMatches($"No more matches for {Quote(filter.Match.Text)}");
     }
+
+    /// <summary>Shared end-of-search feedback for every find command: a very short whole-window flash for
+    /// something impossible to miss, the reason in the status bar for something readable, and a beep.</summary>
+    private void NoMoreMatches(string message)
+    {
+        AppFlash.Flash(this);
+        ShowFindMessage(message);
+        System.Media.SystemSounds.Beep.Play();
+    }
+
+    /// <summary>Puts a short-lived message in the status bar (it expires in <see cref="FindMessageSeconds"/>
+    /// seconds, cleared by the regular status refresh).</summary>
+    private void ShowFindMessage(string message)
+    {
+        _findMsg = message;
+        _findMsgUntil = DateTime.UtcNow.AddSeconds(FindMessageSeconds);
+        UpdateStatus();
+    }
+
+    private void SetFindBusy(bool busy, string? what = null)
+    {
+        _findBusy = busy;
+        _findWhat = busy ? what ?? "Searching" : "";
+        _findFraction = 0;
+        if (busy) _findMsg = "";   // a new search supersedes the last "no more matches"
+        UpdateStatus();
+    }
+
+    /// <summary>Quotes a search term for a message, shortened so the status bar stays readable.</summary>
+    internal static string Quote(string term)
+        => term.Length <= 40 ? $"\u201c{term}\u201d" : $"\u201c{term[..40]}\u2026\u201d";
+
+    private const int FindMessageSeconds = 5;
 
     private void LoadFilters()
     {
@@ -584,23 +655,63 @@ public sealed class MainForm : Form
 
     private void SetFilterDock(FilterDock dock)
     {
-        _split.SuspendLayout();
-        _split.Panel1Collapsed = false;
-        _split.Panel2Collapsed = false;
-        _split.Panel1.Controls.Clear();
-        _split.Panel2.Controls.Clear();
-
         bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
-        _split.Orientation = dock is FilterDock.Left or FilterDock.Right ? Orientation.Vertical : Orientation.Horizontal;
-        if (treeFirst) { _split.Panel1.Controls.Add(_filterTree); _split.Panel2.Controls.Add(_grid); _treePanel = 1; }
-        else { _split.Panel1.Controls.Add(_grid); _split.Panel2.Controls.Add(_filterTree); _treePanel = 2; }
+        var orientation = dock is FilterDock.Left or FilterDock.Right ? Orientation.Vertical : Orientation.Horizontal;
+        int wantedPanel = treeFirst ? 1 : 2;
 
-        int total = _split.Orientation == Orientation.Vertical ? _split.Width : _split.Height;
-        int treeSize = Math.Max(60, (int)(total * 0.3));
-        try { _split.SplitterDistance = treeFirst ? treeSize : Math.Max(1, total - treeSize - _split.SplitterWidth); }
-        catch { /* sizes not ready */ }
-        _split.ResumeLayout();
+        WithoutRedraw(() =>
+        {
+            _split.SuspendLayout();
+            _split.Panel1Collapsed = false;
+            _split.Panel2Collapsed = false;
+
+            // Re-parenting a control destroys and recreates its window handle, which is what makes the whole
+            // app flash. Top<->Left and Bottom<->Right keep the tree on the same side, so only swap the
+            // panels when the sides genuinely change; otherwise just turn the splitter.
+            if (_treePanel != wantedPanel)
+            {
+                _split.Panel1.Controls.Clear();
+                _split.Panel2.Controls.Clear();
+                if (treeFirst) { _split.Panel1.Controls.Add(_filterTree); _split.Panel2.Controls.Add(_grid); }
+                else { _split.Panel1.Controls.Add(_grid); _split.Panel2.Controls.Add(_filterTree); }
+                _treePanel = wantedPanel;
+            }
+
+            _split.Orientation = orientation;
+
+            int total = orientation == Orientation.Vertical ? _split.Width : _split.Height;
+            int treeSize = Math.Max(60, (int)(total * 0.3));
+            try { _split.SplitterDistance = treeFirst ? treeSize : Math.Max(1, total - treeSize - _split.SplitterWidth); }
+            catch { /* sizes not ready */ }
+            _split.ResumeLayout();
+        });
     }
+
+    /// <summary>Applies a layout change with painting switched off for the whole window, so it shows the
+    /// finished result in one go instead of every intermediate state. SuspendLayout alone is not enough:
+    /// it batches layout, not painting.</summary>
+    private void WithoutRedraw(Action change)
+    {
+        if (!IsHandleCreated) { change(); return; }
+        SendMessage(Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+        try { change(); }
+        finally
+        {
+            SendMessage(Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
+            RedrawWindow(Handle, IntPtr.Zero, IntPtr.Zero,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+        }
+    }
+
+    private const int WM_SETREDRAW = 0x000B;
+    private const uint RDW_INVALIDATE = 0x0001, RDW_ERASE = 0x0004, RDW_ALLCHILDREN = 0x0080, RDW_FRAME = 0x0400;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
 
     private void ToggleFilterList()
     {
@@ -700,7 +811,15 @@ public sealed class MainForm : Form
         }
         _findDialog?.SetSearching(false);
         if (found >= 0) { GoToLine(found + 1); _findDialog?.SetStatus(""); }
-        else _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet — file still loading…");
+        else
+        {
+            // The dialog is modeless and often closed (F3 repeats the search from the main window), so the
+            // status label alone would leave the user with no feedback at all.
+            _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
+            NoMoreMatches(_doc.IsIndexComplete
+                ? $"No more matches for {Quote(query.Text)}"
+                : $"No more matches yet for {Quote(query.Text)} \u2014 still loading");
+        }
     }
 
     private void RepeatFind(bool forward) { if (_lastQuery is { } q) DoFind(q, forward); else ShowFind(); }
@@ -735,7 +854,8 @@ public sealed class MainForm : Form
     private void UpdateStatusIfChanged()
     {
         if (_doc.RowCount != _lastRowCount || _doc.MatchedLineCount != _lastMatched
-            || _doc.IsBusy || _doc.IsBusy != _lastBusy)
+            || _doc.IsBusy || _doc.IsBusy != _lastBusy
+            || _findBusy || _findMsg.Length > 0)
             UpdateStatus();
     }
 
@@ -754,20 +874,35 @@ public sealed class MainForm : Form
         _busyLabel.Text = indexing ? $"  \u23f3 Indexing\u2026 {_doc.CompletedLineCount:N0}  "
             : filtering ? $"  \u23f3 Filtering\u2026 {_doc.FilterProcessedLineCount:N0}  " : "";
 
-        _progress.Visible = _doc.IsBusy;
-        if (indexing)
+        // A find reports its own progress; it is what the user just asked for, so it wins the bar.
+        if (_findBusy)
         {
-            // Total line count is unknown until indexing finishes, so animate indeterminately.
-            if (_progress.Style != ProgressBarStyle.Marquee) _progress.Style = ProgressBarStyle.Marquee;
-        }
-        else if (filtering)
-        {
+            _busyLabel.Text = $"  \u23f3 {_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc to stop)  ";
+            _progress.Visible = true;
             if (_progress.Style != ProgressBarStyle.Continuous) _progress.Style = ProgressBarStyle.Continuous;
-            long total = Math.Max(1, _doc.CompletedLineCount);
-            long done = Math.Clamp(_doc.FilterProcessedLineCount, 0, total);
             _progress.Maximum = 1000;
-            _progress.Value = (int)(1000L * done / total);
+            _progress.Value = (int)Math.Clamp(_findFraction * 1000, 0, 1000);
         }
+        else
+        {
+            _progress.Visible = _doc.IsBusy;
+            if (indexing)
+            {
+                // Total line count is unknown until indexing finishes, so animate indeterminately.
+                if (_progress.Style != ProgressBarStyle.Marquee) _progress.Style = ProgressBarStyle.Marquee;
+            }
+            else if (filtering)
+            {
+                if (_progress.Style != ProgressBarStyle.Continuous) _progress.Style = ProgressBarStyle.Continuous;
+                long total = Math.Max(1, _doc.CompletedLineCount);
+                long done = Math.Clamp(_doc.FilterProcessedLineCount, 0, total);
+                _progress.Maximum = 1000;
+                _progress.Value = (int)(1000L * done / total);
+            }
+        }
+
+        if (_findMsg.Length > 0 && DateTime.UtcNow > _findMsgUntil) _findMsg = "";
+        _findMsgLabel.Text = _findMsg;
 
         _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
         _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";
