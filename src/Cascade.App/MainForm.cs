@@ -67,6 +67,10 @@ public sealed class MainForm : Form
     // Harness only: shows the update notice without an update actually being pending.
     internal string? UpdateNoticeOverride;
 
+    /// <summary>Harness only: whether indexing or filtering is still running, so a render can wait for a
+    /// settled window instead of a flat timeout.</summary>
+    internal bool IsBusyForHarness => _doc.IsBusy;
+
     /// <summary>Null when updating is switched off. Only ever read here - the swap happens in Program after
     /// the message loop ends.</summary>
     private readonly UpdateService? _updater;

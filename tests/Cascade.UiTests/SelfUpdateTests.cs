@@ -112,7 +112,13 @@ public class SelfUpdateTests
             using (var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
                                                        ownsSettingsDir: false, env, exe))
             {
-                Thread.Sleep(3000);   // give the background check every chance to do the wrong thing
+                // Wait for proof the check really ran rather than guessing at a duration: a released build
+                // asks the stub for the latest release. A local build refuses to update at all and never
+                // asks, so there is nothing to wait for beyond letting it try.
+                if (localBuild) Thread.Sleep(500);
+                else Assert.True(WaitUntil(() => github.ReleaseRequests > 0, 10000),
+                                 "the app never asked for a release, so this proves nothing");
+
                 Assert.Equal("", app.StatusText("Will update to"));
                 app.CloseGracefully();
             }
@@ -224,7 +230,7 @@ public class SelfUpdateTests
         long originalLength = new FileInfo(exe).Length;
 
         // Long enough that the second instance starts while the first still holds the lock mid-download.
-        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion) { AssetDelayMs = 5000 };
+        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion) { AssetDelayMs = 2500 };
         string logA = TestData.WriteLogFile(), logB = TestData.WriteLogFile();
         string cfgA = CascadeApp.NewSettingsDir(), cfgB = CascadeApp.NewSettingsDir();
         var env = new Dictionary<string, string>
@@ -244,7 +250,9 @@ public class SelfUpdateTests
                 // Exactly one install happens: one image moved aside, however the two interleave.
                 Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 1),
                             "no instance installed the update");
-                Thread.Sleep(3000);   // give the one that lost the lock every chance to install a second time
+                // The loser gives up the instant it fails to take the lock, long before this point, so it
+                // needs no more than a moment to prove it is not going to install a second time.
+                Thread.Sleep(1000);
                 Assert.Single(Directory.GetFiles(dir, "Cascade.old*.exe"));
 
                 // And somebody said so.

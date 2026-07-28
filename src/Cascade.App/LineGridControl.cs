@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.Text;
 using System.Windows.Forms;
@@ -831,14 +832,24 @@ public sealed class LineGridControl : Control
 
         public override int GetChildCount() => _g.VisibleRowSpan();
 
+        // UIA walks a tree by asking a parent for its children and then matching identity to work out
+        // where it is, so handing back a fresh object per call turns a walk of N rows into an O(N^2)
+        // scan - measured at 1.2s to enumerate 54 rows, which dominated the whole UI test suite. One
+        // object per visible slot fixes that; each still resolves its row from _firstRow on demand, so
+        // the cache stays correct while scrolling. Clients call in on RPC threads, hence the concurrent
+        // dictionary.
+        private readonly ConcurrentDictionary<int, RowAccessibleObject> _rows = new();
+
         public override AccessibleObject? GetChild(int index)
-            => index >= 0 && index < _g.VisibleRowSpan() ? new RowAccessibleObject(_g, this, index) : null;
+            => index >= 0 && index < _g.VisibleRowSpan()
+                ? _rows.GetOrAdd(index, i => new RowAccessibleObject(_g, this, i))
+                : null;
 
         public override AccessibleObject? GetSelected()
         {
             if (_g._caretRow < 0) return null;
             int i = (int)(_g._caretRow - _g._firstRow);
-            return i >= 0 && i < _g.VisibleRowSpan() ? new RowAccessibleObject(_g, this, i) : null;
+            return GetChild(i);
         }
 
         public override AccessibleObject? GetFocused() => GetSelected();
@@ -867,6 +878,20 @@ public sealed class LineGridControl : Control
 
         public override AccessibleObject Parent => _parent;
         public override AccessibleRole Role => AccessibleRole.ListItem;
+
+        // Rows are leaves, and they know their own position - answering navigation directly saves the
+        // bridge from scanning the parent's children to work out where this row sits.
+        public override int GetChildCount() => 0;
+
+        public override AccessibleObject? Navigate(AccessibleNavigation direction) => direction switch
+        {
+            AccessibleNavigation.Previous or AccessibleNavigation.Up or AccessibleNavigation.Left
+                => _parent.GetChild(_visibleIndex - 1),
+            AccessibleNavigation.Next or AccessibleNavigation.Down or AccessibleNavigation.Right
+                => _parent.GetChild(_visibleIndex + 1),
+            AccessibleNavigation.FirstChild or AccessibleNavigation.LastChild => null,
+            _ => base.Navigate(direction)
+        };
 
         public override string? Name
         {

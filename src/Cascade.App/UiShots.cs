@@ -241,7 +241,13 @@ internal static class UiShots
         Application.DoEvents();
 
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 4000) { Application.DoEvents(); Thread.Sleep(15); }
+        while (sw.ElapsedMilliseconds < 4000)
+        {
+            Application.DoEvents();
+            Thread.Sleep(15);
+            // Settled: nothing left to index or filter, and the window has had a moment to lay out.
+            if (sw.ElapsedMilliseconds > 400 && !form.IsBusyForHarness) break;
+        }
 
         using (var bmp = new Bitmap(form.Width, form.Height))
         {

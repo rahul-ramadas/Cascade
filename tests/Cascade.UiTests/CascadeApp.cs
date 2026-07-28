@@ -83,10 +83,25 @@ internal sealed class CascadeApp : IDisposable
 
     // ---- status bar ----
 
+    private AutomationElement? _statusBar;
+
+    /// <summary>The label-bearing elements of the status bar and the menu bar (the update notice lives
+    /// there). Deliberately not a whole-window search: the window subtree contains every visible log row,
+    /// so walking it to read one label costs about a second on a large screen - and WaitStatus polls it.
+    /// The hosts are looked up until found, so this also copes with being called during startup.</summary>
+    private IEnumerable<AutomationElement> LabelElements()
+    {
+        _statusBar ??= Window.FindFirstDescendant(cf => cf.ByControlType(ControlType.StatusBar));
+        foreach (var host in new[] { _statusBar, MenuBarOrNull() })
+            if (host is not null)
+                foreach (var label in host.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)))
+                    yield return label;
+    }
+
     /// <summary>Text of the first status-bar label whose text starts with <paramref name="prefix"/>.</summary>
     public string StatusText(string prefix)
     {
-        foreach (var label in Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)))
+        foreach (var label in LabelElements())
         {
             string n = label.Name ?? "";
             if (n.StartsWith(prefix, StringComparison.Ordinal)) return n;
@@ -96,7 +111,7 @@ internal sealed class CascadeApp : IDisposable
 
     public bool WaitStatus(string prefix, string expected, int ms = 8000)
         => Retry.WhileFalse(() => StatusText(prefix) == expected, TimeSpan.FromMilliseconds(ms),
-               TimeSpan.FromMilliseconds(50)).Result;
+               Poll).Result;
 
     /// <summary>Waits for any status label to start with <paramref name="prefix"/>, returning its full text.</summary>
     public string WaitForStatus(string prefix, int ms = 30000)
@@ -120,13 +135,29 @@ internal sealed class CascadeApp : IDisposable
                  .FirstOrDefault(e => e.ControlType != ControlType.ListItem &&
                                       (e.Name ?? "").StartsWith(prefix, StringComparison.Ordinal));
 
-    /// <summary>Un-maximizes and resizes the window, to check layout when space runs short.</summary>
-    public void ResizeTo(int width, int height)
+    // The app repaints on a 33ms timer, so anything driven through UIA lands within a frame or two of the
+    // call returning. Waiting for the effect itself is always better and is what most helpers below do;
+    // Settle is for the few places where the effect is not observable through automation. Keep it in
+    // frames rather than round numbers so it stays tied to the reason it exists.
+    private const int FrameMs = 33;
+    private static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(25);
+    private static void Settle(int frames = 2) => System.Threading.Thread.Sleep(FrameMs * frames);
+
+    /// <summary>Un-maximizes and resizes the window, to check layout when space runs short. Waits for the
+    /// window to actually move: a resize that silently did nothing makes every later assertion pass
+    /// vacuously, which is a miserable thing to debug. A request below the form's MinimumSize legitimately
+    /// settles at that floor, so the achieved size is returned rather than demanded.</summary>
+    public Size ResizeTo(int width, int height)
     {
+        var before = Window.BoundingRectangle.Size;
         Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Normal);
-        System.Threading.Thread.Sleep(200);
         Window.Patterns.Transform.Pattern.Resize(width, height);
-        System.Threading.Thread.Sleep(400);
+        if (!Retry.WhileFalse(() => Window.BoundingRectangle.Size != before,
+                              TimeSpan.FromSeconds(5), Poll).Result)
+            throw new InvalidOperationException(
+                $"Window ignored the resize to {width}x{height}; it is still {before.Width}x{before.Height}.");
+        Settle();   // let the relayout land before anything is measured
+        return Window.BoundingRectangle.Size;
     }
 
     /// <summary>
@@ -226,7 +257,10 @@ internal sealed class CascadeApp : IDisposable
         var node = FilterNode(containsText)
             ?? throw new InvalidOperationException($"Filter '{containsText}' not in the list.");
         node.AsTreeItem().Select();
-        System.Threading.Thread.Sleep(120);
+        Retry.WhileFalse(() => node.Patterns.LegacyIAccessible.PatternOrDefault?.State.ValueOrDefault
+                                   .HasFlag(AccessibilityState.STATE_SYSTEM_SELECTED) == true,
+                         TimeSpan.FromSeconds(2), Poll);
+        Settle(1);
     }
 
     /// <summary>Waits for a status-bar message containing <paramref name="containsText"/>. The whole-window
@@ -328,7 +362,7 @@ internal sealed class CascadeApp : IDisposable
             SendMessage(hwnd, WM_KEYDOWN, (IntPtr)wParam, KeyDownLParam);
             SendMessage(hwnd, WM_KEYUP, (IntPtr)wParam, KeyUpLParam);
         }
-        System.Threading.Thread.Sleep(200);
+        Settle();
     }
 
     public void CtrlKey(AutomationElement target, VirtualKeyShort key) => SendKey(target, key, VirtualKeyShort.CONTROL);
@@ -341,7 +375,8 @@ internal sealed class CascadeApp : IDisposable
         var vp = edit.Patterns.Value.PatternOrDefault;
         if (vp is null || vp.IsReadOnly.ValueOrDefault) throw new InvalidOperationException("edit is not writable");
         vp.SetValue(text);
-        System.Threading.Thread.Sleep(200);
+        Retry.WhileFalse(() => vp.Value.ValueOrDefault == text, TimeSpan.FromSeconds(2), Poll);
+        Settle();
     }
 
     /// <summary>Current text of an edit control.</summary>
@@ -355,7 +390,8 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>The filter list's search box. Found by name rather than "the first edit", because a hidden
     /// Find dialog is still part of the window's tree and would be picked up instead.</summary>
     public AutomationElement FilterSearchBox()
-        => Window.FindFirstDescendant(cf => cf.ByName("Filter search"))
+        => Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByName("Filter search")),
+               TimeSpan.FromSeconds(5)).Result
            ?? throw new InvalidOperationException("filter search box not found");
 
     // ---- actions via menus / dialogs ----
@@ -369,7 +405,7 @@ internal sealed class CascadeApp : IDisposable
         var vp = edit?.Patterns.Value.PatternOrDefault;
         if (vp is not null && !vp.IsReadOnly.ValueOrDefault) vp.SetValue(text);
         dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))?.AsButton().Invoke();
-        System.Threading.Thread.Sleep(150);
+        Settle();
         try { dlg.Close(); } catch { /* modeless: hides */ }
     }
 
@@ -394,7 +430,7 @@ internal sealed class CascadeApp : IDisposable
         var vp = edit?.Patterns.Value.PatternOrDefault;
         if (vp is not null && !vp.IsReadOnly.ValueOrDefault) vp.SetValue(text);
         dlg.FindFirstDescendant(cf => cf.ByName(forward ? "Find Next" : "Find Previous"))?.AsButton().Invoke();
-        System.Threading.Thread.Sleep(200);
+        Settle();
     }
 
     /// <summary>The concatenated text labels in a dialog (used to read the Find status message).</summary>
@@ -410,13 +446,13 @@ internal sealed class CascadeApp : IDisposable
             : dlg.FindFirstDescendant(cf => cf.ByName(name));
         IntPtr hwnd = element?.Properties.NativeWindowHandle.ValueOrDefault ?? IntPtr.Zero;
         if (hwnd != IntPtr.Zero) GiveKeyboardFocus(hwnd);
-        System.Threading.Thread.Sleep(150);
+        Settle();
     }
 
     /// <summary>Waits until a dialog's text labels contain <paramref name="substring"/> (find runs async).</summary>
     public bool WaitDialogText(Window dlg, string substring, int ms = 8000)
         => Retry.WhileFalse(() => DialogText(dlg).Contains(substring, StringComparison.OrdinalIgnoreCase),
-               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
 
     /// <summary>Text of the currently selected log row (its full line), or "" if none selected/visible.</summary>
     public string SelectedRowText()
@@ -433,7 +469,7 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Waits until the selected log row's text contains <paramref name="substring"/> (find runs async).</summary>
     public bool WaitSelectedRowText(string substring, int ms = 8000)
         => Retry.WhileFalse(() => SelectedRowText().Contains(substring, StringComparison.Ordinal),
-               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
 
     /// <summary>Reads the system clipboard as text (on an STA thread, since the app set it cross-process).</summary>
     public static string ReadClipboardText()
@@ -454,9 +490,14 @@ internal sealed class CascadeApp : IDisposable
 
     // ---- menus ----
 
+    private AutomationElement? _menuBarCache;
+
+    private AutomationElement? MenuBarOrNull()
+        => _menuBarCache ??= Window.FindFirstDescendant(cf => cf.ByControlType(ControlType.MenuBar));
+
     private AutomationElement MenuBar()
-        => Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByControlType(ControlType.MenuBar)),
-               TimeSpan.FromSeconds(5)).Result ?? throw new InvalidOperationException("Menu bar not found.");
+        => Retry.WhileNull(MenuBarOrNull, TimeSpan.FromSeconds(5)).Result
+           ?? throw new InvalidOperationException("Menu bar not found.");
 
     private AutomationElement[] TopItems()
         => MenuBar().FindAllChildren(cf => cf.ByControlType(ControlType.MenuItem));
@@ -489,7 +530,7 @@ internal sealed class CascadeApp : IDisposable
             if (i < path.Length - 1) Expand(item);
             else Invoke(item);
         }
-        System.Threading.Thread.Sleep(150);
+        Settle();
         return true;
     }
 
@@ -502,7 +543,10 @@ internal sealed class CascadeApp : IDisposable
             ?? throw new InvalidOperationException($"Row for line {oneBasedLine} not visible; on screen: {VisibleLineRange()}.");
         var la = row.Patterns.LegacyIAccessible.Pattern;
         la.Select(3); // SELFLAG_TAKEFOCUS | SELFLAG_TAKESELECTION
-        System.Threading.Thread.Sleep(120);
+        // The grid reports selection through MSAA, not the SelectionItem pattern - see SelectedRowText.
+        Retry.WhileFalse(() => la.State.ValueOrDefault.HasFlag(AccessibilityState.STATE_SYSTEM_SELECTED),
+                         TimeSpan.FromSeconds(2), Poll);
+        Settle(1);
     }
 
     /// <summary>Scrolls the log vertically by driving the grid's vertical scrollbar (UIA RangeValue),
@@ -522,12 +566,22 @@ internal sealed class CascadeApp : IDisposable
             if (rv is not null && !rv.IsReadOnly.ValueOrDefault)
             {
                 rv.SetValue(firstRow);
-                if (firstRow == 0) { System.Threading.Thread.Sleep(150); return true; }
-                if (Retry.WhileFalse(() => FirstVisibleLine() >= firstRow,
-                        TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(50)).Result)
+                // Confirm through the scrollbar itself: FirstVisibleLine reports file line numbers, which
+                // do not start at 1 in filtered mode, so it cannot answer "did we reach the top?".
+                if (firstRow == 0)
+                {
+                    if (Retry.WhileFalse(() => rv.Value.ValueOrDefault <= 0.5,
+                            TimeSpan.FromSeconds(2), Poll).Result)
+                    {
+                        Settle(1);
+                        return true;
+                    }
+                }
+                else if (Retry.WhileFalse(() => FirstVisibleLine() >= firstRow,
+                             TimeSpan.FromSeconds(2), Poll).Result)
                     return true;
             }
-            System.Threading.Thread.Sleep(200);
+            Settle(3);
         }
         return false;
     }
@@ -544,7 +598,7 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Waits for the horizontal scroll offset to satisfy <paramref name="predicate"/>.</summary>
     public bool WaitHorizontalScroll(Func<double, bool> predicate, int ms = 5000)
         => Retry.WhileFalse(() => predicate(HorizontalScroll()),
-               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
 
     /// <summary>Scrolls so <paramref name="row"/> sits in the middle of the viewport, whatever its height.    /// Tests must never assume a window size - CI screens are far smaller than a developer's monitor, so a
     /// hard-coded first row can leave the target off-screen. Throws if the view would not move, because
@@ -573,7 +627,7 @@ internal sealed class CascadeApp : IDisposable
         var ec = item.Patterns.ExpandCollapse.PatternOrDefault;
         if (ec is not null) { try { ec.Expand(); } catch { /* fall through */ } }
         else item.Patterns.Invoke.PatternOrDefault?.Invoke();
-        System.Threading.Thread.Sleep(150);
+        Settle(1);
     }
 
     private static void Collapse(AutomationElement item)
@@ -587,16 +641,25 @@ internal sealed class CascadeApp : IDisposable
         if (inv is not null) inv.Invoke(); else item.Click();
     }
 
-    /// <summary>Menu items currently present in the window subtree (top-level items plus any open
-    /// dropdown's items — WinForms surfaces the opened dropdown inside the window's UIA tree).</summary>
+    /// <summary>Menu items currently present: the top-level items plus any open dropdown's items, which
+    /// WinForms surfaces underneath the menu bar. Searching the menu bar rather than the whole window
+    /// matters enormously - a window-wide descendant search also visits every log row, which measured
+    /// 365ms against 4ms here. The window is still searched if nothing matches, so an item hosted
+    /// somewhere unexpected is found rather than silently missed.</summary>
     private AutomationElement[] OpenDropDownItems()
-        => Window.FindAllDescendants(cf => cf.ByControlType(ControlType.MenuItem));
+    {
+        var items = MenuBar().FindAllDescendants(cf => cf.ByControlType(ControlType.MenuItem));
+        return items.Length > 0 ? items : Window.FindAllDescendants(cf => cf.ByControlType(ControlType.MenuItem));
+    }
 
     private AutomationElement? FindOpenMenuItem(string name)
         => Retry.WhileNull(() =>
-               OpenDropDownItems().FirstOrDefault(m => Norm(m.Name) == Norm(name))
-               ?? OpenDropDownItems().FirstOrDefault(m => Norm(m.Name).StartsWith(Norm(name), StringComparison.OrdinalIgnoreCase)),
-               TimeSpan.FromSeconds(2)).Result;
+           {
+               var items = OpenDropDownItems();
+               return items.FirstOrDefault(m => Norm(m.Name) == Norm(name))
+                   ?? items.FirstOrDefault(m => Norm(m.Name).StartsWith(Norm(name), StringComparison.OrdinalIgnoreCase));
+           },
+           TimeSpan.FromSeconds(2), Poll).Result;
 
     private static string Norm(string? s) => (s ?? "").Replace("&", "").Split('\t')[0].Replace("\u2026", "").Trim();
 

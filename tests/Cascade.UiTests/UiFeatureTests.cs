@@ -363,8 +363,9 @@ public class UiFeatureTests
         // ---- copy selection to clipboard ----
         app.SelectLine(9); // 1-based 9 -> 0-based line 8 = "other line 8"
         app.ClickMenu("Edit", "Copy");
-        System.Threading.Thread.Sleep(150);
-        string clip = CascadeApp.ReadClipboardText();
+        string clip = "";
+        Retry.WhileFalse(() => (clip = CascadeApp.ReadClipboardText()).Contains("other line 8", StringComparison.Ordinal),
+                         TimeSpan.FromSeconds(3), TimeSpan.FromMilliseconds(25));
         Check("copy places selected line on the clipboard", clip.Contains("other line 8", StringComparison.Ordinal), clip);
 
         // ---- docking: move the filter list around and verify the layout follows ----
