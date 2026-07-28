@@ -68,12 +68,16 @@ jobs:
           --logger "trx;LogFileName=ui.trx"
           --results-directory artifacts/test-results
 
+      # One self-contained-looking file: the runtime is still shared (framework-dependent), but the app's
+      # own assemblies and config are bundled into the exe so it can be copied around on its own.
+      # DebugType=embedded keeps line numbers in the crash log without a .pdb sitting next to it.
       - name: Publish
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet publish src/Cascade.App/Cascade.App.csproj
           -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true -p:DebugType=embedded
           -p:Version=$env:VERSION
           -o artifacts/publish
 
@@ -82,12 +86,12 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/package | Out-Null
-          Compress-Archive -Path artifacts/publish/* -DestinationPath "artifacts/package/Cascade-$env:VERSION-win-x64.zip"
+          Copy-Item artifacts/publish/Cascade.exe "artifacts/package/Cascade-$env:VERSION-win-x64.exe"
 
       - uses: actions/upload-artifact@v4
         with:
           name: cascade-win-x64
-          path: artifacts/package/*.zip
+          path: artifacts/package/*.exe
           if-no-files-found: error
 
       - name: Upload test results
@@ -121,7 +125,7 @@ jobs:
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          gh release create "v$VERSION" dist/*.zip \
+          gh release create "v$VERSION" dist/*.exe \
             --repo "$REPO" \
             --target "$SHA" \
             --title "Cascade v$VERSION" \
