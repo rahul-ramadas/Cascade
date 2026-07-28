@@ -215,6 +215,16 @@ public sealed class VisibleLineSet
         return RankBefore(idx, pages, line);
     }
 
+    /// <summary>True when <paramref name="line"/> is currently visible. Cheaper than
+    /// <see cref="RowForLine"/>: it tests the bit and skips the rank lookup.</summary>
+    public bool IsVisible(long line)
+    {
+        var idx = Volatile.Read(ref _index);
+        if (line < 0 || line >= idx.Lines) return false;
+        long[][] pages = Volatile.Read(ref _pages);
+        return (GetWord(pages, line / WordBits) & (1L << (int)(line % WordBits))) != 0;
+    }
+
     /// <summary>Row of the nearest visible line at or after <paramref name="line"/>; <see cref="Count"/> if none.</summary>
     public long RowAtOrAfterLine(long line)
     {

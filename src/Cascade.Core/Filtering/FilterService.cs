@@ -118,20 +118,17 @@ public sealed class FilterService : IDisposable
     /// <summary>How many filter changes were served entirely from cached results, with no pass over the file.</summary>
     public long CacheHits { get; private set; }
 
-    /// <summary>Answers "where is this filter's next/previous match" from the results the last full pass
-    /// already recorded, turning a re-read of the whole file into a bit scan. Returns false when the cache
-    /// cannot answer (nothing stored for this filter, or it does not cover the file yet); returns true with
-    /// <paramref name="line"/> = -1 when the cache is authoritative and there is no such match.</summary>
-    public bool TryFindMatchFromCache(FilterSnapshot snapshot, Filter filter, long from, bool forward, out long line)
+    /// <summary>The lines <paramref name="filter"/> matched during the last full pass, when those results
+    /// still cover the whole file. Answering "where is the next match" from this is a bit scan rather than a
+    /// re-read of the file. False when nothing usable is cached for it.</summary>
+    public bool TryGetMatchSet(FilterSnapshot snapshot, Filter filter, out FilterMatchCache.MatchSet set)
     {
-        line = -1;
+        set = null!;
         if (!_indexComplete()) return false;
         long lines = _completedCount();
         if (lines <= 0) return false;
         if (!snapshot.TryGetCacheKey(filter, out string key)) return false;
-        if (!_cache.TryGet(key, lines, out var set)) return false;
-        line = forward ? set.Next(from) : set.Previous(from);
-        return true;
+        return _cache.TryGet(key, lines, out set);
     }
 
     /// <summary>Cancels the current generation (if any) and goes idle. Use when there are no enabled

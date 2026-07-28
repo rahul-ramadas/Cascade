@@ -35,6 +35,10 @@ public sealed class FilteredView
     public long RowForLine(long line)
         => IsIdentity ? (line >= 0 && line < Count ? line : -1) : _set!.RowForLine(line);
 
+    /// <summary>True when this view is currently showing <paramref name="line"/>.</summary>
+    public bool IsVisible(long line)
+        => IsIdentity ? line >= 0 && line < Count : _set!.IsVisible(line);
+
     /// <summary>Row of the nearest visible line at or after <paramref name="line"/> (for preserving
     /// the current position when toggling filtered mode). Returns Count if none.</summary>
     public long RowAtOrAfterLine(long line)

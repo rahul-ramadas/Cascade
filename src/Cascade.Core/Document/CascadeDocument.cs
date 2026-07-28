@@ -79,6 +79,11 @@ public sealed class CascadeDocument : IDisposable
     public long RowAtOrAfterLine(long line)
         => FilteredMode ? MatchView.RowAtOrAfterLine(line) : Math.Clamp(line, 0, Math.Max(0, CompletedLineCount));
 
+    /// <summary>True when the view can actually show <paramref name="line"/>. In dim mode that is every
+    /// line; in filtered mode a line can match one filter and still be hidden by an exclude.</summary>
+    public bool IsLineVisible(long line)
+        => FilteredMode ? MatchView.IsVisible(line) : line >= 0 && line < CompletedLineCount;
+
     /// <summary>Resolves one whole screen of rows against a <b>single</b> consistent snapshot of the visible
     /// set, anchoring <paramref name="anchorLine"/> at <paramref name="anchorOffset"/> rows from the top and
     /// filling <paramref name="lines"/> with the file lines to paint. A streaming pass keeps adding and
@@ -296,16 +301,16 @@ public sealed class CascadeDocument : IDisposable
         {
             // The filtering pass already records which lines each filter matched, so when that is still
             // valid the answer is a bit scan - no reading, decoding or matching at all.
-            if (_filterService.TryFindMatchFromCache(snapshot, filter, from, forward, out long cached))
-                return cached;
+            if (_filterService.TryGetMatchSet(snapshot, filter, out var set))
+                return VisibleMatch(set, from, forward, count);
 
             // Nothing cached for it yet (typically because the filter is switched off). Compute it exactly
             // as switching it on would - the same automaton, the same parallel block scan - and remember the
             // result, so this costs one pass once and nothing on every later find.
             var findSnapshot = FilterSnapshot.Build(Filters, forceEnabled: filter);
             _filterService.PrimeCache(findSnapshot, ct, onProgress);
-            if (_filterService.TryFindMatchFromCache(findSnapshot, filter, from, forward, out long primed))
-                return primed;
+            if (_filterService.TryGetMatchSet(findSnapshot, filter, out var primed))
+                return VisibleMatch(primed, from, forward, count);
         }
 
         // Fallback for the cases the cache cannot serve: marker filters, a file still being indexed, or a
@@ -318,7 +323,7 @@ public sealed class CascadeDocument : IDisposable
             for (long l = from; l < count; l++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (DeepMatchesLine(reader, snapshot, filter, l)) return l;
+                if (DeepMatchesLine(reader, snapshot, filter, l) && IsLineVisible(l)) return l;
                 if (onProgress is not null && (l - from) % ProgressEvery == 0) onProgress((l - from) / (double)span);
             }
         }
@@ -328,9 +333,26 @@ public sealed class CascadeDocument : IDisposable
             for (long l = from; l >= 0; l--)
             {
                 ct.ThrowIfCancellationRequested();
-                if (DeepMatchesLine(reader, snapshot, filter, l)) return l;
+                if (DeepMatchesLine(reader, snapshot, filter, l) && IsLineVisible(l)) return l;
                 if (onProgress is not null && (from - l) % ProgressEvery == 0) onProgress((from - l) / (double)span);
             }
+        }
+        return -1;
+    }
+
+    /// <summary>Steps through cached matches from <paramref name="from"/>, skipping any the view cannot show.
+    /// A line can match one filter and still be hidden by an exclude; navigating there would strand the caret
+    /// on a neighbouring, non-matching line, and because the next search starts from the caret it would then
+    /// return that same hidden line forever.</summary>
+    private long VisibleMatch(FilterMatchCache.MatchSet set, long from, bool forward, long count)
+    {
+        long at = from;
+        while (at >= 0 && at < count)
+        {
+            long hit = forward ? set.Next(at) : set.Previous(at);
+            if (hit < 0) return -1;
+            if (IsLineVisible(hit)) return hit;
+            at = forward ? hit + 1 : hit - 1;
         }
         return -1;
     }

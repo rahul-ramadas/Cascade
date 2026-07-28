@@ -128,6 +128,64 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
+    public void Filter_find_skips_matches_the_view_is_hiding()
+    {
+        // A line can match one filter and still be hidden by an exclude. Navigating to a hidden line strands
+        // the caret on a neighbouring, non-matching line - and because the next search starts from the caret,
+        // it then returns that same hidden line forever instead of moving on.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 1000; i++)
+        {
+            if (i % 10 == 0) sb.Append("TARGET ");
+            if (i % 20 == 0) sb.Append("SKIP ");
+            sb.Append("line ").Append(i).Append('\n');
+        }
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var target = new Filter { Enabled = true, Match = { Text = "TARGET" } };
+            var skip = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "SKIP" } };
+            filters.Add(target);
+            filters.Add(skip);
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+
+            // TARGET is on every 10th line and SKIP hides every 20th, so 10, 30, 50 ... 990 remain.
+            long[] expected = Enumerable.Range(0, 50).Select(k => (long)(k * 20 + 10)).ToArray();
+
+            var forwardHits = new List<long>();
+            for (long at = 0; ;)
+            {
+                long hit = doc.FindLineMatchingFilter(target, at, forward: true, CancellationToken.None);
+                if (hit < 0) break;
+                Assert.True(forwardHits.Count < expected.Length + 5, "find never reached the end");
+                forwardHits.Add(hit);
+                at = hit + 1;
+            }
+            Assert.Equal(expected, forwardHits);
+
+            var backwardHits = new List<long>();
+            for (long at = doc.CompletedLineCount - 1; ;)
+            {
+                long hit = doc.FindLineMatchingFilter(target, at, forward: false, CancellationToken.None);
+                if (hit < 0) break;
+                Assert.True(backwardHits.Count < expected.Length + 5, "find never reached the start");
+                backwardHits.Add(hit);
+                at = hit - 1;
+            }
+            Assert.Equal(expected.Reverse(), backwardHits);
+
+            Assert.All(forwardHits, l => Assert.True(doc.IsLineVisible(l), $"line {l} is not visible"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void SetFilters_before_a_file_is_open_does_not_throw()
     {
         // Auto-loading a saved filter set at startup happens BEFORE any file is open (the filter service
