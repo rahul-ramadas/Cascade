@@ -481,25 +481,43 @@ internal sealed class CascadeApp : IDisposable
 
     /// <summary>Scrolls the log vertically by driving the grid's vertical scrollbar (UIA RangeValue),
     /// so an off-screen line can be brought into view. <paramref name="firstRow"/> is the display row
-    /// to put at the top. Returns false if the scrollbar doesn't expose a settable value.</summary>
+    /// to put at the top. Returns false if the view could not be moved there.</summary>
     public bool ScrollVerticalTo(int firstRow)
     {
-        var vbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
-                         .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width);
-        var rv = vbar?.Patterns.RangeValue.PatternOrDefault;
-        if (rv is null || rv.IsReadOnly.ValueOrDefault) return false;
-        rv.SetValue(firstRow);
-        System.Threading.Thread.Sleep(150);
-        return true;
+        // Setting the value once and sleeping is not enough: on a small CI window the scrollbar element is
+        // sometimes not exposed yet, and the grid repaints on its own 33ms timer. Silently returning false
+        // then surfaced much later as "row not visible", which is a confusing way to learn the scroll never
+        // happened - so confirm the view really moved, and retry if it did not.
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            var vbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+                             .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width);
+            var rv = vbar?.Patterns.RangeValue.PatternOrDefault;
+            if (rv is not null && !rv.IsReadOnly.ValueOrDefault)
+            {
+                rv.SetValue(firstRow);
+                if (firstRow == 0) { System.Threading.Thread.Sleep(150); return true; }
+                if (Retry.WhileFalse(() => FirstVisibleLine() >= firstRow,
+                        TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(50)).Result)
+                    return true;
+            }
+            System.Threading.Thread.Sleep(200);
+        }
+        return false;
     }
 
     /// <summary>Scrolls so <paramref name="row"/> sits in the middle of the viewport, whatever its height.
     /// Tests must never assume a window size - CI screens are far smaller than a developer's monitor, so a
-    /// hard-coded first row can leave the target off-screen.</summary>
-    public bool ScrollRowToMiddle(int row)
+    /// hard-coded first row can leave the target off-screen. Throws if the view would not move, because
+    /// every caller depends on it having worked.</summary>
+    public void ScrollRowToMiddle(int row)
     {
         int visible = Math.Max(1, Rows().Length);
-        return ScrollVerticalTo(Math.Max(0, row - visible / 2));
+        int target = Math.Max(0, row - visible / 2);
+        if (!ScrollVerticalTo(target))
+            throw new InvalidOperationException(
+                $"Could not scroll the log to row {target} (wanted line {row + 1} in view, " +
+                $"{visible} rows visible, currently showing {VisibleLineRange()}).");
     }
 
     /// <summary>The lines currently on screen, as "first-last (count)" - used in failure messages.</summary>
