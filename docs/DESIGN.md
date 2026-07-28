@@ -756,7 +756,52 @@ leading `[...]` groups"** button will offer to generate this template from a sam
 `cascade [InputFile] [/Filters:f.tat|.cascade]... [/Config:c.xml] [/Line:N] [/Clipboard]`
 (parity with the original's arguments; several `/Filters` may be supplied and are appended).
 
-### 10.6 Plug‑ins (later milestone)
+Diagnostic and internal switches, each of which returns before any window is created:
+
+| Switch | Purpose |
+| --- | --- |
+| `--version` | Prints the informational version and exits. Also how a downloaded update proves it runs. |
+| `--selftest [file] [/Filters:x]` | Headless engine + settings checks; log in `%TEMP%\cascade_selftest.log`. |
+| `--screens <dir>` | Renders every dialog and the main window to PNGs for visual review. |
+| `--cleanup <pid> <path>` | Started by the previous version as it exits, to delete the executable it ran from. |
+
+### 10.6 Updating
+
+Cascade updates itself from its GitHub releases. The check runs **once, at startup**, on a background
+thread; there is no periodic polling.
+
+- **Authentication.** The releases are private, so the app borrows the credential the user already gave
+  to git, via `git credential fill` with all interactive prompts disabled (`GIT_TERMINAL_PROMPT=0`,
+  `GCM_INTERACTIVE=never`). No token is embedded in the binary and none is stored. A machine without a
+  credential simply never updates. Note that a private asset must be fetched from the API asset endpoint
+  with `Accept: application/octet-stream` - the plain `browser_download_url` returns 404 even when
+  authenticated.
+- **Download.** The new build is parked beside the executable as `Cascade.update-<version>.exe`, so a
+  staged update survives being killed without needing a sidecar to describe it. The status bar says
+  "Will update to v… on restart" and nothing else changes.
+- **Verification.** Before it is trusted, the download must be a real PE image *and* answer `--version`
+  with a version and exit code 0. A file that cannot do that is deleted, never installed. The check is
+  killed if it does not answer promptly, so a hung or window-opening build cannot leak a process.
+- **Installation.** Windows refuses to delete a running executable but allows it to be *renamed*, and a
+  process keeps running happily from its renamed image. So the swap is: rename the running exe to
+  `Cascade.old.exe`, move the staged file into its place. This happens **after the message loop ends**,
+  never mid-session, so a long read of a log file is never interrupted. If the second move fails the
+  first is rolled back, so a failed update can never leave no executable at all.
+- **Cleanup.** The superseded image cannot delete itself, so the exiting app starts the newly installed
+  exe with `--cleanup <pid> <path>`; it waits for the old process and removes the file (measured at
+  ~3 ms after exit). A startup sweep removes anything left behind by a kill or power loss, and it runs
+  whether or not updating is enabled.
+
+Test hooks (environment variables): `CASCADE_UPDATE=off` disables updating entirely (the UI tests set
+this so a run never touches the network); `CASCADE_UPDATE_FORCE=1` installs the latest release even when
+it is not newer, and lets a local build update itself, so the whole path can be exercised without
+publishing anything; `CASCADE_UPDATE_API` and `CASCADE_UPDATE_REPO` point the updater at a stub server;
+`CASCADE_UPDATE_TOKEN` supplies a credential directly.
+
+A locally built exe reports version `1.0.0`, which would make every release look newer than it. Such
+builds never update themselves unless forced.
+
+### 10.7 Plug‑ins (later milestone)
 Keep the original's idea: a plug‑in can take responsibility for a file and produce text (e.g., decode
 a binary/compressed format). Modern form: a `ITextSourcePlugin` discovered from a `plugins/` folder,
 sandboxed via `AssemblyLoadContext`. Deferred past v1 but the `ITextSource` abstraction is designed
