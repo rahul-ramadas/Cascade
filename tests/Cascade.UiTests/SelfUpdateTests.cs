@@ -32,6 +32,7 @@ public class SelfUpdateTests
             ["CASCADE_UPDATE"] = "on",                 // LaunchExisting turns updating off by default
             ["CASCADE_UPDATE_API"] = github.Prefix,
             ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_LOG"] = Path.Combine(dir, "update.log"),
             ["CASCADE_UPDATE_FORCE"] = "1"             // a local build has no real version to compare
         };
 
@@ -44,14 +45,14 @@ public class SelfUpdateTests
                 // The app tells the user, without interrupting them. The version named is the one really
                 // on disk now, not whatever the release claimed to be.
                 string message = app.WaitForStatus("Will update to");
-                Assert.True(message.Length > 0, "no update notice appeared. Elements: " + app.DescribeTextElements());
+                Assert.True(message.Length > 0, "no update notice appeared. " + Progress(github, dir));
                 Assert.Equal($"Will update to v{VersionOf(exe)} on restart", message);
 
                 // It is installed already, not merely downloaded: there is an executable in place and the
                 // image the app is running from has been moved aside.
                 Assert.True(File.Exists(exe), "the install left no executable behind");
                 Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 1),
-                            "the running image was not moved aside, so nothing was installed");
+                            "the running image was not moved aside, so nothing was installed. " + Progress(github, dir));
                 Assert.Empty(Directory.GetFiles(dir, "*.part"));
                 Assert.False(File.Exists(Path.Combine(dir, "Cascade.new.exe")));
 
@@ -161,6 +162,7 @@ public class SelfUpdateTests
             ["CASCADE_UPDATE"] = "on",
             ["CASCADE_UPDATE_API"] = github.Prefix,
             ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_LOG"] = Path.Combine(dir, "update.log"),
             ["CASCADE_UPDATE_FORCE"] = "1"
         };
 
@@ -168,7 +170,8 @@ public class SelfUpdateTests
         {
             using var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
                                                       ownsSettingsDir: false, env, exe);
-            Assert.NotEqual("", app.WaitForStatus("Will update to"));
+            Assert.True(app.WaitForStatus("Will update to").Length > 0,
+                        "no update notice appeared. " + Progress(github, dir));
 
             var notice = app.Element("Will update to") ?? throw new InvalidOperationException("no update notice");
             var file = app.Element("File") ?? throw new InvalidOperationException("no File menu");
@@ -238,6 +241,7 @@ public class SelfUpdateTests
             ["CASCADE_UPDATE"] = "on",
             ["CASCADE_UPDATE_API"] = github.Prefix,
             ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_LOG"] = Path.Combine(dir, "update.log"),
             ["CASCADE_UPDATE_FORCE"] = "1"
         };
 
@@ -249,7 +253,7 @@ public class SelfUpdateTests
             {
                 // Exactly one install happens: one image moved aside, however the two interleave.
                 Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 1),
-                            "no instance installed the update");
+                            "no instance installed the update. " + Progress(github, dir));
                 // The loser gives up the instant it fails to take the lock, long before this point, so it
                 // needs no more than a moment to prove it is not going to install a second time.
                 Thread.Sleep(1000);
@@ -334,6 +338,23 @@ public class SelfUpdateTests
         return condition();
     }
 
+    /// <summary>How far the update actually got, for when one of these fails somewhere it cannot be
+    /// reproduced. The request counts separate "never asked" from "asked but the download or the verify
+    /// step refused it", the app's own update log gives the reason it settled on, and the directory listing
+    /// shows whether a part file or a staged build survived.</summary>
+    private static string Progress(StubGitHub github, string dir)
+    {
+        var files = Directory.GetFiles(dir)
+            .Select(f => $"{Path.GetFileName(f)} ({new FileInfo(f).Length:N0}b)")
+            .OrderBy(s => s);
+        string log = Path.Combine(dir, "update.log");
+        string crash = Path.Combine(Path.GetTempPath(), "cascade_crash.log");
+        return $"release requests={github.ReleaseRequests}, asset requests={github.AssetRequests}, " +
+               $"asset bytes sent={github.AssetBytesSent:N0}; install dir: {string.Join(", ", files)}" +
+               $"; update log: {(File.Exists(log) ? File.ReadAllText(log).Trim() : "(empty)")}" +
+               (File.Exists(crash) ? $"; crash log: {File.ReadAllText(crash)}" : "");
+    }
+
     private static void TryDeleteDir(string dir)
     {
         for (int i = 0; i < 20; i++)
@@ -349,6 +370,8 @@ public class SelfUpdateTests
         private readonly byte[] _asset;
         private readonly string _version;
         private int _releaseRequests;
+        private int _assetRequests;
+        private long _assetBytesSent;
         public string Prefix { get; }
 
         /// <summary>Slows the asset response so concurrent downloads genuinely overlap.</summary>
@@ -356,6 +379,8 @@ public class SelfUpdateTests
 
         /// <summary>How many times the app asked what the latest release is.</summary>
         public int ReleaseRequests => Volatile.Read(ref _releaseRequests);
+        public int AssetRequests => Volatile.Read(ref _assetRequests);
+        public long AssetBytesSent => Volatile.Read(ref _assetBytesSent);
 
         public StubGitHub(byte[] asset, string version)
         {
@@ -408,6 +433,7 @@ public class SelfUpdateTests
                 }
                 else if (path.Contains("/releases/assets/"))
                 {
+                    Interlocked.Increment(ref _assetRequests);
                     ctx.Response.ContentType = "application/octet-stream";
                     ctx.Response.ContentLength64 = _asset.Length;
                     if (AssetDelayMs > 0)
@@ -417,12 +443,18 @@ public class SelfUpdateTests
                         int chunk = Math.Max(1, _asset.Length / 4);
                         for (int off = 0; off < _asset.Length; off += chunk)
                         {
-                            ctx.Response.OutputStream.Write(_asset, off, Math.Min(chunk, _asset.Length - off));
+                            int n = Math.Min(chunk, _asset.Length - off);
+                            ctx.Response.OutputStream.Write(_asset, off, n);
                             ctx.Response.OutputStream.Flush();
+                            Interlocked.Add(ref _assetBytesSent, n);
                             await Task.Delay(AssetDelayMs / 4);
                         }
                     }
-                    else ctx.Response.OutputStream.Write(_asset);
+                    else
+                    {
+                        ctx.Response.OutputStream.Write(_asset);
+                        Interlocked.Add(ref _assetBytesSent, _asset.Length);
+                    }
                 }
                 else ctx.Response.StatusCode = 404;
             }

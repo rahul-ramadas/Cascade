@@ -56,7 +56,7 @@ public class AtomicFileTests : IDisposable
 
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         int writes = 0;
-        var writer = Task.Run(() =>
+        var writer = new Thread(() =>
         {
             while (!stop.IsCancellationRequested)
             {
@@ -70,6 +70,7 @@ public class AtomicFileTests : IDisposable
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             }
         });
+        writer.Start();
 
         int reads = 0;
         var bad = new List<int>();
@@ -81,7 +82,7 @@ public class AtomicFileTests : IDisposable
             reads++;
             if (seen != small && seen != large) bad.Add(seen.Length);
         }
-        writer.Wait();
+        writer.Join();
 
         Assert.True(reads > 0, "the reader never managed to open the file");
         Assert.True(writes > 0, "the writer never managed to swap a file in");

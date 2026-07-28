@@ -71,7 +71,12 @@ internal static class Program
         // process keeps running from its moved-aside image - and the new build takes effect at next launch.
         var updater = AppUpdater.Create();
         using var updateCts = new CancellationTokenSource();
-        if (updater is not null) _ = Task.Run(() => updater.RunAsync(updateCts.Token));
+        if (updater is not null)
+            _ = Task.Run(async () =>
+            {
+                await updater.RunAsync(updateCts.Token);
+                AppUpdater.LogOutcome(updater);
+            });
 
         try
         {
@@ -136,15 +141,18 @@ internal static class Program
 
         Environment:
 
-          CASCADE_SETTINGS_DIR    Directory holding settings.json (default %APPDATA%\Cascade).
+          CASCADE_SETTINGS_DIR    Directory holding settings.json and state.json
+                                  (default %APPDATA%\Cascade).
           CASCADE_UPDATE=off      Disable checking for updates at startup.
           CASCADE_UPDATE_FORCE=1  Install the latest release even if it is not newer.
           CASCADE_UPDATE_REPO     owner/name to update from.
           CASCADE_UPDATE_API      API root to update from.
           CASCADE_UPDATE_TOKEN    Credential to use instead of asking git.
+          CASCADE_UPDATE_LOG      File to append what each update attempt came to.
 
-        Settings are stored in %APPDATA%\Cascade\settings.json and can be exported and
-        imported from File > Settings.
+        Preferences are stored in %APPDATA%\Cascade\settings.json and can be exported and
+        imported from File > Settings. Recent files and the last filter file are kept
+        separately in state.json, which is never exported.
         """;
 
     private static void LogCrash(string path, Exception? ex)

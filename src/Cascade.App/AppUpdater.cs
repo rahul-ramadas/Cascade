@@ -24,6 +24,11 @@ internal static class AppUpdater
     /// <summary>Overrides the "owner/name" repository.</summary>
     public const string RepoVariable = "CASCADE_UPDATE_REPO";
 
+    /// <summary>Set to a file path to have each run append what the update attempt did. Updating is silent
+    /// by design, which makes "it just did not update" impossible to answer on a machine you cannot poke at
+    /// - a CI runner, or a user's.</summary>
+    public const string LogVariable = "CASCADE_UPDATE_LOG";
+
     private const string DefaultRepo = "rahul-ramadas/Cascade";
     private const string DefaultApi = "https://api.github.com";
     private const int VerifyTimeoutMs = 20_000;
@@ -54,6 +59,21 @@ internal static class AppUpdater
             Force = force
         };
         return new UpdateService(source, options, VerifyAsync);
+    }
+
+    /// <summary>Appends what the update attempt came to, when CASCADE_UPDATE_LOG names a file.</summary>
+    public static void LogOutcome(UpdateService updater)
+    {
+        if (Environment.GetEnvironmentVariable(LogVariable) is not { Length: > 0 } path) return;
+        try
+        {
+            File.AppendAllText(path,
+                $"{DateTime.Now:HH:mm:ss.fff} exe={AppInfo.ExePath} running={AppInfo.Version} " +
+                $"onDisk={UpdateInstaller.VersionOf(AppInfo.ExePath)?.ToString() ?? "?"} " +
+                $"pending={updater.PendingVersion?.ToString() ?? "none"} " +
+                $"error={updater.LastError ?? "none"}{Environment.NewLine}");
+        }
+        catch { /* diagnostics must never break a run */ }
     }
 
     /// <summary>
