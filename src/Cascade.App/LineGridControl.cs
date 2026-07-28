@@ -311,6 +311,35 @@ public sealed class LineGridControl : Control
 
     private int GutterWidth() => MarkerGutterWidth + LineNumberGutterWidth;
 
+    /// <summary>
+    /// Flags for every piece of scrolling line text.
+    ///
+    /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is the load-bearing one: TextRenderer draws
+    /// through GDI, which ignores the GDI+ clip region set on the Graphics unless it is asked not to. Without
+    /// it, a line scrolled right starts at a negative x and is painted straight over the marker and
+    /// line-number margins - the SetClip around the call looks like it should prevent that, and does not.
+    /// </summary>
+    private const TextFormatFlags TextFlags =
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
+
+    /// <summary>Width of the marker + line-number margin, for harnesses that check nothing paints over it.</summary>
+    internal int GutterWidthForTesting => GutterWidth();
+
+    /// <summary>
+    /// The margin that horizontal scrolling must leave pixel-identical: the marker and line-number columns,
+    /// excluding the column header and the horizontal scrollbar - that scrollbar's thumb sits under the
+    /// margin and does of course move when you scroll.
+    /// </summary>
+    internal Rectangle GutterAreaForTesting =>
+        new(0, HeaderHeight, GutterWidth(), Math.Max(0, ClientSize.Height - HeaderHeight - _hbar.Height));
+
+    /// <summary>Scrolls the view horizontally, as dragging the horizontal scrollbar does.</summary>
+    internal void ScrollHorizontallyTo(int x)
+    {
+        _hScroll = Math.Max(0, x);
+        Invalidate();
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -427,7 +456,7 @@ public sealed class LineGridControl : Control
             if (!def.Visible) continue;
             int w = def.Width > 0 ? def.Width : DefaultColumnWidth;
             TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, 1, w - 6, _rowHeight - 2),
-                Color.FromArgb(80, 80, 80), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                Color.FromArgb(80, 80, 80), TextFlags | TextFormatFlags.EndEllipsis);
             x += w;
         }
         g.Clip = clip;
@@ -444,7 +473,7 @@ public sealed class LineGridControl : Control
     {
         splitter.Split(text, _cols);
         int x = gutter - _hScroll;
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.Left;
+        var flags = TextFlags | TextFormatFlags.EndEllipsis | TextFormatFlags.Left;
         var spec = _doc!.Columns;
         for (int i = 0; i < spec.Columns.Count; i++)
         {
@@ -465,7 +494,7 @@ public sealed class LineGridControl : Control
         if (_settings.TabSize > 0 && text.IndexOf('\t') >= 0)
             text = text.Replace("\t", new string(' ', _settings.TabSize));
         var pt = new Point(gutter - _hScroll, y);
-        TextRenderer.DrawText(g, text, font, pt, fore, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(g, text, font, pt, fore, TextFlags);
         int w = TextRenderer.MeasureText(g, text, font, new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
         return w + 8;
     }

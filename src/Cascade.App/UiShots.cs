@@ -161,6 +161,18 @@ internal static class UiShots
         Settle();
         CapControl(host, dir, "state-columns");
 
+        // Scrolled right with long lines in view: nothing may be painted over the marker/line-number margin.
+        // The host is narrowed first, otherwise the content fits and there is nothing to scroll.
+        doc.Columns.Enabled = false;
+        host.ClientSize = new Size(560, 470);
+        grid.RefreshView();
+        Settle();
+        grid.ScrollHorizontallyTo(400);
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-hscroll");
+        grid.ScrollHorizontallyTo(0);
+
         host.Close();
         host.Dispose();
         doc.Dispose();

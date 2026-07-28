@@ -34,6 +34,7 @@ internal static class Program
         if (args.Length > 0 && args[0].Equals("--selftest", StringComparison.OrdinalIgnoreCase))
         {
             AttachConsole(-1); // attach to the launching console so output is visible
+            ApplicationConfiguration.Initialize(); // the render checks build real controls
             return SelfTest.Run(args.Skip(1).ToArray());
         }
 
