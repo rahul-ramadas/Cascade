@@ -220,7 +220,9 @@ public class SelfUpdateTests
         string exe = CopyAppTo(dir);
         long originalLength = new FileInfo(exe).Length;
 
-        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion);
+        // Long enough that the first instance is still downloading when the second starts its own check,
+        // which is the only way the two contend for the staging files.
+        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion) { AssetDelayMs = 5000 };
         string logA = TestData.WriteLogFile(), logB = TestData.WriteLogFile();
         string cfgA = CascadeApp.NewSettingsDir(), cfgB = CascadeApp.NewSettingsDir();
         var env = new Dictionary<string, string>
@@ -334,6 +336,9 @@ public class SelfUpdateTests
         private int _releaseRequests;
         public string Prefix { get; }
 
+        /// <summary>Slows the asset response so concurrent downloads genuinely overlap.</summary>
+        public int AssetDelayMs { get; set; }
+
         /// <summary>How many times the app asked what the latest release is.</summary>
         public int ReleaseRequests => Volatile.Read(ref _releaseRequests);
 
@@ -365,32 +370,49 @@ public class SelfUpdateTests
             {
                 HttpListenerContext ctx;
                 try { ctx = await _listener.GetContextAsync(); } catch { return; }
-                try
-                {
-                    string path = ctx.Request.Url!.AbsolutePath;
-                    if (path.EndsWith("/releases/latest"))
-                    {
-                        Interlocked.Increment(ref _releaseRequests);
-                        string json = $$"""
-                            { "tag_name": "v{{_version}}",
-                              "assets": [ { "name": "Cascade-{{_version}}-win-x64.exe", "id": 1, "size": {{_asset.Length}} } ] }
-                            """;
-                        byte[] body = Encoding.UTF8.GetBytes(json);
-                        ctx.Response.ContentType = "application/json";
-                        ctx.Response.ContentLength64 = body.Length;
-                        ctx.Response.OutputStream.Write(body);
-                    }
-                    else if (path.Contains("/releases/assets/"))
-                    {
-                        ctx.Response.ContentType = "application/octet-stream";
-                        ctx.Response.ContentLength64 = _asset.Length;
-                        ctx.Response.OutputStream.Write(_asset);
-                    }
-                    else ctx.Response.StatusCode = 404;
-                }
-                catch { /* the client went away */ }
-                try { ctx.Response.Close(); } catch { }
+                _ = Task.Run(() => Handle(ctx)); // concurrently, or two downloads would be serialised
             }
+        }
+
+        private async Task Handle(HttpListenerContext ctx)
+        {
+            try
+            {
+                string path = ctx.Request.Url!.AbsolutePath;
+                if (path.EndsWith("/releases/latest"))
+                {
+                    Interlocked.Increment(ref _releaseRequests);
+                    string json = $$"""
+                        { "tag_name": "v{{_version}}",
+                          "assets": [ { "name": "Cascade-{{_version}}-win-x64.exe", "id": 1, "size": {{_asset.Length}} } ] }
+                        """;
+                    byte[] body = Encoding.UTF8.GetBytes(json);
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = body.Length;
+                    ctx.Response.OutputStream.Write(body);
+                }
+                else if (path.Contains("/releases/assets/"))
+                {
+                    ctx.Response.ContentType = "application/octet-stream";
+                    ctx.Response.ContentLength64 = _asset.Length;
+                    if (AssetDelayMs > 0)
+                    {
+                        // Trickle the body: the client only opens its file once headers arrive, so delaying
+                        // before them would not overlap the two downloads at all.
+                        int chunk = Math.Max(1, _asset.Length / 4);
+                        for (int off = 0; off < _asset.Length; off += chunk)
+                        {
+                            ctx.Response.OutputStream.Write(_asset, off, Math.Min(chunk, _asset.Length - off));
+                            ctx.Response.OutputStream.Flush();
+                            await Task.Delay(AssetDelayMs / 4);
+                        }
+                    }
+                    else ctx.Response.OutputStream.Write(_asset);
+                }
+                else ctx.Response.StatusCode = 404;
+            }
+            catch { /* the client went away */ }
+            try { ctx.Response.Close(); } catch { }
         }
 
         public void Dispose()

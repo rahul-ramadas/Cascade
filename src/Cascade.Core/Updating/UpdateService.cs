@@ -75,7 +75,8 @@ public sealed class UpdateService
             }
 
             string staged = UpdateInstaller.StagedPath(_options.ExePath, release.Version);
-            string part = staged + ".part";
+            // Per-process, so two instances downloading at once do not fight over one file.
+            string part = $"{staged}.{Environment.ProcessId}.part";
             try
             {
                 await _source.DownloadAssetAsync(release, part, ct).ConfigureAwait(false);
@@ -87,8 +88,8 @@ public sealed class UpdateService
                     return;
                 }
 
-                if (File.Exists(staged)) TryDelete(staged);
-                File.Move(part, staged);
+                try { File.Move(part, staged, overwrite: true); }
+                catch when (File.Exists(staged)) { TryDelete(part); } // another instance staged the same build
             }
             catch
             {
