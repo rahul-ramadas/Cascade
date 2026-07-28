@@ -43,7 +43,8 @@ public sealed class MainForm : Form
     private string _findWhat = "", _findWhatDetail = "", _findMsg = "", _findMsgDetail = "";
     private double _findFraction;
     private DateTime _findMsgUntil;
-    private int _activitySlot, _progressSlot;    private (string Path, int Width) _shownSrc, _shownFilter;
+    private int _activitySlot, _progressSlot;
+    private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
@@ -339,7 +340,9 @@ public sealed class MainForm : Form
         _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
-            _srcLabel, _filterLabel, _progress, _busyLabel,
+            // The label comes before the bar so the section's divider sits on an item whose left edge never
+            // moves; with the bar first, hiding it dragged the divider left by the bar's width.
+            _srcLabel, _filterLabel, _busyLabel, _progress,
             _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
 
@@ -350,22 +353,59 @@ public sealed class MainForm : Form
 
     private int Dpi(int v) => LogicalToDeviceUnits(v);
 
-    /// <summary>Sizes each numeric field to the widest value it could currently show, so digits can grow
-    /// without pushing anything sideways. Widths only ever increase within a session.</summary>
-    private void EnsureMetricWidths()
+    /// <summary>Sizes each numeric field once and generously - a file with tens of millions of lines is
+    /// assumed from the outset - so the boxes never grow while indexing counts up. Growing them would also
+    /// shift the springing paths, which is what made the whole bar shuffle. Returns true if anything moved.
+    /// </summary>
+    private bool EnsureMetricWidths()
     {
-        string n = Math.Max(1_000, _doc.CompletedLineCount).ToString("N0");
-        Fit(_selLabel, $"Sel: {n}");
-        Fit(_filLabel, $"Fil: {n}");
-        Fit(_totalLabel, $"Total: {n}");
-        Fit(_lineLabel, $"Ln: {n} / {n}");
-        Fit(_zoomLabel, "Zoom: 400%");
+        long actual = Math.Max(1_000, _doc.CompletedLineCount);
+        long rounded = 9;
+        while (rounded < actual) rounded = rounded * 10 + 9;
 
-        void Fit(ToolStripStatusLabel label, string widest)
+        long magnitude = Math.Max(99_999_999, rounded);
+        // Only a window too narrow to afford that falls back to what this file actually needs.
+        if (_status.Width > 0 && _status.Width - TotalMetricWidth(magnitude) - _activitySlot < Dpi(300))
+            magnitude = rounded;
+
+        var labels = MetricLabels;
+        string[] samples = MetricSamples(magnitude);
+        bool changed = false;
+        for (int i = 0; i < labels.Length; i++)
         {
-            int w = TextRenderer.MeasureText(widest, label.Font).Width + Dpi(6);
-            if (w > label.Width) label.Width = w;
+            int w = TextRenderer.MeasureText(samples[i], labels[i].Font).Width + Dpi(6);
+            if (labels[i].Width != w) { labels[i].Width = w; changed = true; }
         }
+        return changed;
+    }
+
+    private ToolStripStatusLabel[] MetricLabels => new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel };
+
+    private static string[] MetricSamples(long magnitude)
+    {
+        string n = magnitude.ToString("N0");
+        return new[] { $"Sel: {n}", $"Fil: {n}", $"Total: {n}", $"Ln: {n} / {n}", "Zoom: 400%" };
+    }
+
+    private int TotalMetricWidth(long magnitude)
+    {
+        var labels = MetricLabels;
+        string[] samples = MetricSamples(magnitude);
+        int total = 0;
+        for (int i = 0; i < labels.Length; i++)
+            total += TextRenderer.MeasureText(samples[i], labels[i].Font).Width + Dpi(6) + labels[i].Margin.Horizontal;
+        return total;
+    }
+
+    /// <summary>Gives the filter slot its space only when there is a path to show. Returns true if it moved.</summary>
+    private bool EnsureFilterSlot()
+    {
+        bool has = !string.IsNullOrEmpty(_filterFilePath);
+        if (_filterLabel.Spring == has) return false;
+        _filterLabel.Spring = has;
+        if (!has)
+            _filterLabel.Width = TextRenderer.MeasureText("(no filter file)", _filterLabel.Font).Width + Dpi(14);
+        return true;
     }
 
     /// <summary>Shows as much of a path as fits, trimming the middle, with the whole thing on hover.</summary>
@@ -1007,17 +1047,17 @@ public sealed class MainForm : Form
         _lastMatched = _doc.MatchedLineCount;
         _lastBusy = _doc.IsBusy;
 
-        EnsureMetricWidths();
+        // Settle every fixed width BEFORE measuring the paths: the springs only get their real size after a
+        // layout pass, and measuring against a stale width leaves a path needlessly truncated.
+        bool structural = EnsureMetricWidths();
+        structural |= EnsureFilterSlot();
+        if (structural && !_inStatusLayout)
+        {
+            _inStatusLayout = true;
+            try { _status.PerformLayout(); } finally { _inStatusLayout = false; }
+        }
         SetPath(_srcLabel, _doc.FilePath, "(no file)", ref _shownSrc);
         SetPath(_filterLabel, _filterFilePath, "(no filter file)", ref _shownFilter);
-        // With no filter file there is nothing to shorten, so hand that space to the log's path instead.
-        bool hasFilterFile = !string.IsNullOrEmpty(_filterFilePath);
-        if (_filterLabel.Spring != hasFilterFile)
-        {
-            _filterLabel.Spring = hasFilterFile;
-            if (!hasFilterFile)
-                _filterLabel.Width = TextRenderer.MeasureText("(no filter file)", _filterLabel.Font).Width + Dpi(14);
-        }
 
         bool hasFile = !string.IsNullOrEmpty(_doc.FilePath);
         bool indexing = hasFile && !_doc.IsIndexComplete;
