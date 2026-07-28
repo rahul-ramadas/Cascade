@@ -18,9 +18,8 @@ public sealed class MainForm : Form
     private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _srcLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
-    private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left, ToolTipText = "Open filter file" };
+    private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left };
     private readonly ToolStripStatusLabel _busyLabel = new() { AutoSize = true };
-    private readonly ToolStripStatusLabel _findMsgLabel = new() { AutoSize = true, ForeColor = Color.Firebrick };
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
@@ -41,9 +40,12 @@ public sealed class MainForm : Form
     private bool _lastBusy;
     private bool _anchorActive;
     private bool _findBusy;
-    private string _findWhat = "", _findMsg = "";
+    private string _findWhat = "", _findMsg = "", _findMsgDetail = "";
     private double _findFraction;
     private DateTime _findMsgUntil;
+    private Font? _metricFont;
+    private int _activitySlot, _progressSlot;
+    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
@@ -81,7 +83,7 @@ public sealed class MainForm : Form
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
-        _filterTree.NoFilterMatch += q => NoMoreMatches($"No more filters matching {Quote(q)}");
+        _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
 
         _refreshTimer.Tick += (_, _) =>
@@ -297,7 +299,43 @@ public sealed class MainForm : Form
         _srcLabel.Name = "stat.src";
         _filterLabel.Name = "stat.filter";
         _busyLabel.Name = "stat.busy";
-        _findMsgLabel.Name = "stat.findmsg";
+
+        // The numbers get a monospaced face so their digits sit in fixed columns; the paths keep the UI font,
+        // which fits far more characters into the same space.
+        _metricFont = new Font("Consolas", _status.Font.SizeInPoints);
+
+        foreach (var l in new[] { _srcLabel, _filterLabel })
+        {
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            l.Margin = new Padding(Dpi(6), 0, Dpi(6), 0);
+        }
+
+        // One fixed-width slot for "what is happening": the bar appears inside it rather than next to it, so
+        // nothing to its right ever moves when work starts or stops.
+        _progress.Width = Dpi(70);
+        _progress.Margin = new Padding(0, Dpi(4), Dpi(4), Dpi(4));
+        _progress.Style = ProgressBarStyle.Continuous;
+        _busyLabel.AutoSize = false;
+        _busyLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _busyLabel.Margin = new Padding(Dpi(6), 0, Dpi(4), 0);
+        _busyLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+        _activitySlot = Dpi(200);
+        _progressSlot = _progress.Width + _progress.Margin.Horizontal;
+        _busyLabel.Width = _activitySlot;
+
+        // Each metric is a fixed box, so a value growing a digit never shifts its neighbours.
+        foreach (var l in new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel })
+        {
+            l.Font = _metricFont;
+            l.AutoSize = false;
+            l.TextAlign = ContentAlignment.MiddleLeft;
+            l.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
+        }
+        // Section dividers: counts, then position, then zoom.
+        _selLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+        _lineLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+        _zoomLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+
         _selLabel.Name = "stat.sel";
         _filLabel.Name = "stat.fil";
         _totalLabel.Name = "stat.total";
@@ -305,9 +343,74 @@ public sealed class MainForm : Form
         _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
-            _srcLabel, _filterLabel, _progress, _busyLabel, _findMsgLabel,
+            _srcLabel, _filterLabel, _progress, _busyLabel,
             _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
         });
+
+        EnsureMetricWidths();
+        // Spring widths only settle after a layout pass, so re-fit the paths whenever that changes.
+        _status.SizeChanged += (_, _) => UpdateStatus();
+    }
+
+    private int Dpi(int v) => LogicalToDeviceUnits(v);
+
+    /// <summary>Sizes each numeric field to the widest value it could currently show, so digits can grow
+    /// without pushing anything sideways. Widths only ever increase within a session.</summary>
+    private void EnsureMetricWidths()
+    {
+        string n = Math.Max(1_000, _doc.CompletedLineCount).ToString("N0");
+        Fit(_selLabel, $"Sel: {n}");
+        Fit(_filLabel, $"Fil: {n}");
+        Fit(_totalLabel, $"Total: {n}");
+        Fit(_lineLabel, $"Ln: {n} / {n}");
+        Fit(_zoomLabel, "Zoom: 400%");
+
+        void Fit(ToolStripStatusLabel label, string widest)
+        {
+            int w = TextRenderer.MeasureText(widest, label.Font).Width + Dpi(6);
+            if (w > label.Width) label.Width = w;
+        }
+    }
+
+    /// <summary>Shows as much of a path as fits, trimming the middle, with the whole thing on hover.</summary>
+    private void SetPath(ToolStripStatusLabel label, string? path, string whenEmpty, ref (string Path, int Width) shown)
+    {
+        string full = path ?? "";
+        int width = label.Width - label.Padding.Horizontal - Dpi(8);
+        if (shown.Path == full && shown.Width == width) return;   // measuring is not free; only redo it when it matters
+        shown = (full, width);
+
+        if (full.Length == 0) { label.Text = whenEmpty; label.ToolTipText = ""; return; }
+        label.ToolTipText = full;
+        label.Text = Shorten(full, width, label.Font);
+    }
+
+    /// <summary>Trims a path to fit, keeping the file name and as much of the head as there is room for.</summary>
+    private static string Shorten(string text, int maxWidth, Font font)
+    {
+        if (maxWidth <= 0) return "";
+        if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
+
+        int cut = text.LastIndexOfAny(new[] { '\\', '/' });
+        string tail = cut > 0 ? text[cut..] : text;
+        // Binary search the longest head that still leaves room for "head…tail".
+        int lo = 0, hi = Math.Max(0, cut);
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (TextRenderer.MeasureText(text[..mid] + "\u2026" + tail, font).Width <= maxWidth) lo = mid;
+            else hi = mid - 1;
+        }
+        string result = text[..lo] + "\u2026" + tail;
+        if (TextRenderer.MeasureText(result, font).Width <= maxWidth) return result;
+
+        // Even the file name alone does not fit: clip it from the left.
+        for (int keep = tail.Length; keep > 0; keep--)
+        {
+            string candidate = "\u2026" + tail[^keep..];
+            if (TextRenderer.MeasureText(candidate, font).Width <= maxWidth) return candidate;
+        }
+        return "\u2026";
     }
 
     // ---- file / open ----
@@ -489,23 +592,24 @@ public sealed class MainForm : Form
         SetFindBusy(false);
 
         if (found >= 0) GoToLine(found + 1);
-        else NoMoreMatches($"No more matches for {Quote(filter.Match.Text)}");
+        else NoMoreMatches("No more matches", $"No more matches for {Quote(filter.Match.Text)}");
     }
 
     /// <summary>Shared end-of-search feedback for every find command: a very short whole-window flash for
-    /// something impossible to miss, the reason in the status bar for something readable, and a beep.</summary>
-    private void NoMoreMatches(string message)
+    /// something impossible to miss, a short reason in the status bar (the detail is on hover), and a beep.</summary>
+    private void NoMoreMatches(string message, string? detail = null)
     {
         AppFlash.Flash(this);
-        ShowFindMessage(message);
+        ShowFindMessage(message, detail);
         System.Media.SystemSounds.Beep.Play();
     }
 
     /// <summary>Puts a short-lived message in the status bar (it expires in <see cref="FindMessageSeconds"/>
     /// seconds, cleared by the regular status refresh).</summary>
-    private void ShowFindMessage(string message)
+    private void ShowFindMessage(string message, string? detail = null)
     {
         _findMsg = message;
+        _findMsgDetail = detail ?? message;
         _findMsgUntil = DateTime.UtcNow.AddSeconds(FindMessageSeconds);
         UpdateStatus();
     }
@@ -816,13 +920,34 @@ public sealed class MainForm : Form
             // The dialog is modeless and often closed (F3 repeats the search from the main window), so the
             // status label alone would leave the user with no feedback at all.
             _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
-            NoMoreMatches(_doc.IsIndexComplete
-                ? $"No more matches for {Quote(query.Text)}"
-                : $"No more matches yet for {Quote(query.Text)} \u2014 still loading");
+            NoMoreMatches(_doc.IsIndexComplete ? "No more matches" : "No more matches yet",
+                _doc.IsIndexComplete
+                    ? $"No more matches for {Quote(query.Text)}"
+                    : $"No more matches yet for {Quote(query.Text)} \u2014 still loading");
         }
     }
 
     private void RepeatFind(bool forward) { if (_lastQuery is { } q) DoFind(q, forward); else ShowFind(); }
+
+    /// <summary>Writes the activity slot's text, trimming it to the space reserved for it. The untrimmed
+    /// wording stays available on hover.</summary>
+    private void SetActivity(string text, Color color, string? detail = null)
+    {
+        _busyLabel.ForeColor = color;
+        _busyLabel.ToolTipText = detail ?? text;
+        string fitted = text.Length == 0
+            ? ""
+            : Shorten(text, _busyLabel.Width - _busyLabel.Padding.Horizontal - Dpi(8), _busyLabel.Font);
+        if (_busyLabel.Text != fitted) _busyLabel.Text = fitted;
+    }
+
+    private void SetProgress(ProgressBarStyle style, double fraction)
+    {
+        if (_progress.Style != style) _progress.Style = style;
+        if (style != ProgressBarStyle.Continuous) return;
+        _progress.Maximum = 1000;
+        _progress.Value = (int)Math.Clamp(fraction * 1000, 0, 1000);
+    }
 
     private void GoTo()
     {
@@ -864,45 +989,66 @@ public sealed class MainForm : Form
         _lastRowCount = _doc.RowCount;
         _lastMatched = _doc.MatchedLineCount;
         _lastBusy = _doc.IsBusy;
-        _srcLabel.Text = string.IsNullOrEmpty(_doc.FilePath) ? "  (no file)" : "  " + _doc.FilePath;
-        _filterLabel.Text = string.IsNullOrEmpty(_filterFilePath) ? "" : "  " + _filterFilePath + "  ";
+
+        EnsureMetricWidths();
+        SetPath(_srcLabel, _doc.FilePath, "(no file)", ref _shownSrc);
+        SetPath(_filterLabel, _filterFilePath, "(no filter file)", ref _shownFilter);
+        // With no filter file there is nothing to shorten, so hand that space to the log's path instead.
+        bool hasFilterFile = !string.IsNullOrEmpty(_filterFilePath);
+        if (_filterLabel.Spring != hasFilterFile)
+        {
+            _filterLabel.Spring = hasFilterFile;
+            if (!hasFilterFile)
+                _filterLabel.Width = TextRenderer.MeasureText("(no filter file)", _filterLabel.Font).Width + Dpi(14);
+        }
 
         bool hasFile = !string.IsNullOrEmpty(_doc.FilePath);
         bool indexing = hasFile && !_doc.IsIndexComplete;
         bool filtering = hasFile && _doc.IsIndexComplete && !_doc.IsFilterIdle;
 
-        _busyLabel.Text = indexing ? $"  \u23f3 Indexing\u2026 {_doc.CompletedLineCount:N0}  "
-            : filtering ? $"  \u23f3 Filtering\u2026 {_doc.FilterProcessedLineCount:N0}  " : "";
+        // ---- the activity slot: one fixed-width region, so nothing to its right ever moves ----
+        if (_findMsg.Length > 0 && DateTime.UtcNow > _findMsgUntil) _findMsg = "";
 
-        // A find reports its own progress; it is what the user just asked for, so it wins the bar.
+        bool showBar = _findBusy || indexing || filtering;
+        if (showBar != _progress.Visible)
+        {
+            _progress.Visible = showBar;
+            _busyLabel.Width = _activitySlot - (showBar ? _progressSlot : 0);
+        }
+
         if (_findBusy)
         {
-            _busyLabel.Text = $"  \u23f3 {_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc to stop)  ";
-            _progress.Visible = true;
-            if (_progress.Style != ProgressBarStyle.Continuous) _progress.Style = ProgressBarStyle.Continuous;
-            _progress.Maximum = 1000;
-            _progress.Value = (int)Math.Clamp(_findFraction * 1000, 0, 1000);
+            // A find is what the user just asked for, so it wins the slot.
+            SetActivity($"{_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc)", SystemColors.ControlText);
+            SetProgress(ProgressBarStyle.Continuous, _findFraction);
+        }
+        else if (_findMsg.Length > 0)
+        {
+            SetActivity(_findMsg, Color.Firebrick, _findMsgDetail);
+            if (showBar) SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
+        }
+        else if (indexing)
+        {
+            SetActivity($"Indexing\u2026 {_doc.CompletedLineCount:N0}", SystemColors.ControlText);
+            // The total is unknown until indexing finishes, so animate indeterminately.
+            SetProgress(ProgressBarStyle.Marquee, 0);
+        }
+        else if (filtering)
+        {
+            SetActivity($"Filtering\u2026 {_doc.FilterProcessedLineCount:N0}", SystemColors.ControlText);
+            SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
         }
         else
         {
-            _progress.Visible = _doc.IsBusy;
-            if (indexing)
-            {
-                // Total line count is unknown until indexing finishes, so animate indeterminately.
-                if (_progress.Style != ProgressBarStyle.Marquee) _progress.Style = ProgressBarStyle.Marquee;
-            }
-            else if (filtering)
-            {
-                if (_progress.Style != ProgressBarStyle.Continuous) _progress.Style = ProgressBarStyle.Continuous;
-                long total = Math.Max(1, _doc.CompletedLineCount);
-                long done = Math.Clamp(_doc.FilterProcessedLineCount, 0, total);
-                _progress.Maximum = 1000;
-                _progress.Value = (int)(1000L * done / total);
-            }
+            SetActivity("", SystemColors.ControlText);
         }
 
-        if (_findMsg.Length > 0 && DateTime.UtcNow > _findMsgUntil) _findMsg = "";
-        _findMsgLabel.Text = _findMsg;
+        double Fraction(bool ix, bool ft)
+        {
+            if (!ft) return 0;
+            long total = Math.Max(1, _doc.CompletedLineCount);
+            return Math.Clamp(_doc.FilterProcessedLineCount / (double)total, 0, 1);
+        }
 
         _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
         _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";

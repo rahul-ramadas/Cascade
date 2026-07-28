@@ -275,7 +275,7 @@ public class UiFeatureTests
             app.ClickMenu("View", "Focus Filter Search");
             app.TypeText("zzz-no-such-filter");
             app.Key(VirtualKeyShort.RETURN);
-            Check("filter search reports the end", app.WaitForFindMessage("No more filters matching"));
+            Check("filter search reports the end", app.WaitForFindMessage("No more filters"));
 
             Assert.True(fails.Count == 0, "No end-of-search feedback for:\n  " + string.Join("\n  ", fails));
         }
