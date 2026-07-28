@@ -20,6 +20,11 @@ defaults:
   run:
     shell: pwsh
 
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
 jobs:
   build:
     name: Build and test
@@ -30,7 +35,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Installing an SDK costs ~45s, almost all of it extracting a 300MB archive. The runner image
+      # normally ships one already, so only fall back to setup-dotnet when it does not.
+      - name: Look for a preinstalled .NET 10 SDK
+        id: sdk
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $sdks = @()
+          try { $sdks = & dotnet --list-sdks 2>$null } catch { }
+          Write-Host ($sdks -join "`n")
+          $found = [bool]($sdks | Where-Object { $_ -match '^10\.' })
+          Write-Host ".NET 10 SDK preinstalled: $found"
+          "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - uses: actions/setup-dotnet@v4
+        if: steps.sdk.outputs.found != 'True'
         with:
           dotnet-version: '10.0.x'
 
@@ -51,26 +70,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: dotnet build Cascade.slnx -c Release --no-restore -p:Version=$env:VERSION
 
-      - name: Core tests
-        run: >
-          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
-          -c Release --no-build
-          --logger "trx;LogFileName=core.trx"
-          --results-directory artifacts/test-results
-
-      # These drive the real Cascade.exe through UI Automation, so they need the runner's desktop
-      # session. Capped so a hung window cannot burn the whole job's time budget.
-      - name: UI tests
-        timeout-minutes: 15
-        run: >
-          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
-          -c Release --no-build
-          --logger "trx;LogFileName=ui.trx"
-          --results-directory artifacts/test-results
-
       # One self-contained-looking file: the runtime is still shared (framework-dependent), but the app's
       # own assemblies and config are bundled into the exe so it can be copied around on its own.
       # DebugType=embedded keeps line numbers in the crash log without a .pdb sitting next to it.
+      # Published before the tests so they can run against the exe that actually ships.
       - name: Publish
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -81,18 +84,27 @@ jobs:
           -p:Version=$env:VERSION
           -o artifacts/publish
 
-      # The run above tested the multi-file build output in bin/. The published exe is a different
-      # layout - assemblies and embedded resources come out of the bundle rather than off disk - so the
-      # whole suite is repeated against the artifact we actually ship. CASCADE_TEST_EXE redirects
-      # TestData.AppExe(), which every UI test launches, including the --selftest and --screens harnesses.
-      - name: UI tests against the published exe
+      - name: Core tests
+        run: >
+          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          -c Release --no-build
+          --logger "trx;LogFileName=core.trx"
+          --results-directory artifacts/test-results
+
+      # Run against the PUBLISHED exe, not the build output in bin/. The published bundle resolves its
+      # assemblies and embedded resources differently, and it is what users get, so testing the other
+      # layout as well only bought faster blame attribution - not coverage - for another ~80s.
+      # CASCADE_TEST_EXE redirects TestData.AppExe(), which every UI test launches.
+      # These drive the real Cascade.exe through UI Automation, so they need the runner's desktop
+      # session. Capped so a hung window cannot burn the whole job's time budget.
+      - name: UI tests (published exe)
         timeout-minutes: 15
         env:
           CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
         run: >
           dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
           -c Release --no-build
-          --logger "trx;LogFileName=ui-published.trx"
+          --logger "trx;LogFileName=ui.trx"
           --results-directory artifacts/test-results
 
       - name: Package
