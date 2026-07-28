@@ -52,6 +52,7 @@ internal static class UiShots
         ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
+        ShotDialog(new AboutDialog(null), outDir, "about");
 
         ShotMainForm(outDir, file, tat);
         ShotGridStates(outDir);

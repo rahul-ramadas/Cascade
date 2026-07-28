@@ -1,0 +1,259 @@
+using System.Diagnostics;
+using System.Net;
+using System.Text;
+using Xunit;
+
+namespace Cascade.UiTests;
+
+/// <summary>
+/// Drives a real update through the real application: a stub GitHub serves a release, the app downloads it
+/// while the user works, says so in the status bar, and swaps it in only once the window closes - then the
+/// executable it was running from disappears without anyone opening the app again.
+///
+/// The app under test is a COPY in a temp directory. The update genuinely replaces that file, so pointing
+/// this at the build output would rewrite the binary every other test depends on.
+/// </summary>
+public class SelfUpdateTests
+{
+    private const string NewVersion = "9999.1.1";
+
+    [Fact]
+    public void An_update_is_downloaded_while_running_and_installed_on_exit()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_upd_ui_" + Guid.NewGuid().ToString("N"));
+        string exe = CopyAppTo(dir);
+        string staged = Path.Combine(dir, $"Cascade.update-{NewVersion}.exe");
+
+        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion);
+        string log = TestData.WriteLogFile();
+        string settingsDir = CascadeApp.NewSettingsDir();
+
+        var env = new Dictionary<string, string>
+        {
+            ["CASCADE_UPDATE"] = "on",                 // LaunchExisting turns updating off by default
+            ["CASCADE_UPDATE_API"] = github.Prefix,
+            ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_FORCE"] = "1"             // a local build has no real version to compare
+        };
+
+        bool closed;
+        try
+        {
+            using (var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
+                                                       ownsSettingsDir: false, env, exe))
+            {
+                // The app tells the user, without interrupting them.
+                string message = app.WaitForStatus("Will update to");
+                Assert.Equal($"Will update to v{NewVersion} on restart", message);
+
+                // ...and the download really is on disk, parked next to the executable.
+                Assert.True(File.Exists(staged), "the update was announced but never staged on disk");
+
+                // Nothing is swapped while the user is still working.
+                Assert.Equal(File.ReadAllBytes(exe).Length, new FileInfo(exe).Length);
+                Assert.True(File.Exists(exe));
+
+                closed = app.CloseGracefully();
+            }
+            Assert.True(closed, "the app did not exit cleanly, so the update could not be installed");
+
+            // The swap consumes the staged file...
+            Assert.True(WaitUntil(() => !File.Exists(staged)),
+                        "the staged update was not installed when the app closed");
+            Assert.True(File.Exists(exe), "the update left no executable behind");
+
+            // ...and the superseded image deletes itself without waiting for the next launch.
+            Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 0),
+                        "the old executable was left behind: " +
+                        string.Join(", ", Directory.GetFiles(dir, "Cascade.old*.exe").Select(Path.GetFileName)));
+
+            // The installed file is a working build, not a corpse.
+            Assert.Equal(0, RunVersion(exe));
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { }
+            try { Directory.Delete(settingsDir, true); } catch { }
+            TryDeleteDir(dir);
+        }
+    }
+
+    /// <summary>
+    /// Two ways an update must NOT happen, both checked here because which one applies depends on the build
+    /// under test. A locally built exe reports no real version, so every release looks newer than it and the
+    /// updater must not run at all - otherwise a test run would replace the developer's own binary. A
+    /// released build does run the check, and must then ignore a release that is not newer.
+    /// </summary>
+    [Fact]
+    public void A_release_that_is_not_newer_is_never_installed()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_upd_ui_" + Guid.NewGuid().ToString("N"));
+        string exe = CopyAppTo(dir);
+        bool localBuild = VersionOf(exe).Major < 2000;
+
+        // 0.0.1 cannot be newer than anything, whichever build this is.
+        using var github = new StubGitHub(File.ReadAllBytes(exe), "0.0.1");
+        string log = TestData.WriteLogFile();
+        string settingsDir = CascadeApp.NewSettingsDir();
+
+        var env = new Dictionary<string, string>
+        {
+            ["CASCADE_UPDATE"] = "on",
+            ["CASCADE_UPDATE_API"] = github.Prefix,
+            ["CASCADE_UPDATE_REPO"] = "owner/repo"
+            // deliberately no CASCADE_UPDATE_FORCE
+        };
+
+        try
+        {
+            using (var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false,
+                                                       ownsSettingsDir: false, env, exe))
+            {
+                Thread.Sleep(3000);   // give the background check every chance to do the wrong thing
+                Assert.Equal("", app.StatusText("Will update to"));
+                app.CloseGracefully();
+            }
+
+            Assert.Empty(Directory.GetFiles(dir, "Cascade.update-*"));
+            Assert.Empty(Directory.GetFiles(dir, "Cascade.old*.exe"));
+            Assert.Equal(0, RunVersion(exe));   // still the build we started with, and still runnable
+
+            if (localBuild)
+                Assert.True(github.ReleaseRequests == 0,
+                            "a local build asked for a release; it must not update itself at all");
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { }
+            try { Directory.Delete(settingsDir, true); } catch { }
+            TryDeleteDir(dir);
+        }
+    }
+
+    // ---- helpers ----
+
+    /// <summary>Copies the application under test into its own directory. Works for both layouts: the
+    /// multi-file build output and the single published exe.</summary>
+    private static string CopyAppTo(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        string source = TestData.AppExe();
+        string sourceDir = Path.GetDirectoryName(source)!;
+        foreach (string f in Directory.GetFiles(sourceDir))
+            File.Copy(f, Path.Combine(dir, Path.GetFileName(f)), overwrite: true);
+        return Path.Combine(dir, Path.GetFileName(source));
+    }
+
+    private static int RunVersion(string exe)
+    {
+        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true };
+        psi.ArgumentList.Add("--version");
+        using var p = Process.Start(psi)!;
+        p.WaitForExit(30000);
+        return p.ExitCode;
+    }
+
+    /// <summary>Asks the executable under test what it is, rather than assuming which build CI is running.</summary>
+    private static Version VersionOf(string exe)
+    {
+        var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true };
+        psi.ArgumentList.Add("--version");
+        using var p = Process.Start(psi)!;
+        string text = p.StandardOutput.ReadToEnd();
+        p.WaitForExit(30000);
+        return Version.TryParse(text.Trim().Split('+')[0], out var v) ? v : new Version(0, 0, 0);
+    }
+
+    private static bool WaitUntil(Func<bool> condition, int ms = 20000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            if (condition()) return true;
+            Thread.Sleep(100);
+        }
+        return condition();
+    }
+
+    private static void TryDeleteDir(string dir)
+    {
+        for (int i = 0; i < 20; i++)
+        {
+            try { Directory.Delete(dir, true); return; } catch { Thread.Sleep(100); }
+        }
+    }
+
+    /// <summary>The smallest GitHub that will satisfy the updater: one release, one executable asset.</summary>
+    private sealed class StubGitHub : IDisposable
+    {
+        private readonly HttpListener _listener = new();
+        private readonly byte[] _asset;
+        private readonly string _version;
+        private int _releaseRequests;
+        public string Prefix { get; }
+
+        /// <summary>How many times the app asked what the latest release is.</summary>
+        public int ReleaseRequests => Volatile.Read(ref _releaseRequests);
+
+        public StubGitHub(byte[] asset, string version)
+        {
+            _asset = asset;
+            _version = version;
+            int port = 0;
+            for (int p = 39_200; p < 39_400; p++)
+            {
+                try
+                {
+                    _listener.Prefixes.Clear();
+                    _listener.Prefixes.Add($"http://127.0.0.1:{p}/");
+                    _listener.Start();
+                    port = p;
+                    break;
+                }
+                catch (HttpListenerException) { }
+            }
+            if (port == 0) throw new InvalidOperationException("No free port for the stub GitHub.");
+            Prefix = $"http://127.0.0.1:{port}";
+            _ = Task.Run(Serve);
+        }
+
+        private async Task Serve()
+        {
+            while (_listener.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = await _listener.GetContextAsync(); } catch { return; }
+                try
+                {
+                    string path = ctx.Request.Url!.AbsolutePath;
+                    if (path.EndsWith("/releases/latest"))
+                    {
+                        Interlocked.Increment(ref _releaseRequests);
+                        string json = $$"""
+                            { "tag_name": "v{{_version}}",
+                              "assets": [ { "name": "Cascade-{{_version}}-win-x64.exe", "id": 1, "size": {{_asset.Length}} } ] }
+                            """;
+                        byte[] body = Encoding.UTF8.GetBytes(json);
+                        ctx.Response.ContentType = "application/json";
+                        ctx.Response.ContentLength64 = body.Length;
+                        ctx.Response.OutputStream.Write(body);
+                    }
+                    else if (path.Contains("/releases/assets/"))
+                    {
+                        ctx.Response.ContentType = "application/octet-stream";
+                        ctx.Response.ContentLength64 = _asset.Length;
+                        ctx.Response.OutputStream.Write(_asset);
+                    }
+                    else ctx.Response.StatusCode = 404;
+                }
+                catch { /* the client went away */ }
+                try { ctx.Response.Close(); } catch { }
+            }
+        }
+
+        public void Dispose()
+        {
+            try { _listener.Stop(); _listener.Close(); } catch { }
+        }
+    }
+}

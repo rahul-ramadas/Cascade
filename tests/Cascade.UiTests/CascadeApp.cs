@@ -49,12 +49,18 @@ internal sealed class CascadeApp : IDisposable
     /// user's real config. When <paramref name="ownsFiles"/> is false the caller owns
     /// <paramref name="log"/>/<paramref name="tat"/> (needed for multi-launch scenarios such as auto-load,
     /// where the same files must survive across two app instances).</summary>
-    public static CascadeApp LaunchExisting(string log, string? tat, string settingsDir, bool ownsFiles, bool ownsSettingsDir)
+    public static CascadeApp LaunchExisting(string log, string? tat, string settingsDir, bool ownsFiles, bool ownsSettingsDir,
+                                            IDictionary<string, string>? environment = null, string? exePath = null)
     {
-        string exe = TestData.AppExe();
+        string exe = exePath ?? TestData.AppExe();
         string args = tat is null ? $"\"{log}\"" : $"\"{log}\" /Filters:\"{tat}\"";
         var psi = new ProcessStartInfo(exe, args) { UseShellExecute = false };
         psi.EnvironmentVariables["CASCADE_SETTINGS_DIR"] = settingsDir;
+        // No test may reach out to GitHub: it would be slow, flaky offline, and could actually replace the
+        // executable under test. The update tests opt back in explicitly, against a local stub server.
+        psi.EnvironmentVariables["CASCADE_UPDATE"] = "off";
+        if (environment is not null)
+            foreach (var kv in environment) psi.EnvironmentVariables[kv.Key] = kv.Value;
         var app = Application.Launch(psi);
         var automation = new UIA3Automation();
         var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(20))
@@ -91,6 +97,26 @@ internal sealed class CascadeApp : IDisposable
     public bool WaitStatus(string prefix, string expected, int ms = 8000)
         => Retry.WhileFalse(() => StatusText(prefix) == expected, TimeSpan.FromMilliseconds(ms),
                TimeSpan.FromMilliseconds(50)).Result;
+
+    /// <summary>Waits for any status label to start with <paramref name="prefix"/>, returning its full text.</summary>
+    public string WaitForStatus(string prefix, int ms = 30000)
+        => Retry.WhileEmpty(() => StatusText(prefix), TimeSpan.FromMilliseconds(ms),
+               TimeSpan.FromMilliseconds(100)).Result ?? "";
+
+    /// <summary>
+    /// Closes the window and waits for the process to actually exit. <see cref="Dispose"/> kills the
+    /// process, which skips everything the app does on the way out - including installing an update.
+    /// </summary>
+    public bool CloseGracefully(int ms = 30000)
+    {
+        try { Window.Close(); } catch { /* it may already be going */ }
+        try
+        {
+            using var p = Process.GetProcessById(_app.ProcessId);
+            return p.WaitForExit(ms);
+        }
+        catch { return true; }   // already gone
+    }
 
     // ---- log grid accessibility ----
 

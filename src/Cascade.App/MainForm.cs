@@ -6,6 +6,7 @@ using Cascade.Core.Document;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
+using Cascade.Core.Updating;
 
 namespace Cascade.App;
 
@@ -25,6 +26,8 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _lineLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _zoomLabel = new() { AutoSize = true };
+    // Hidden until a downloaded update is waiting, which happens at most once in a session.
+    private readonly ToolStripStatusLabel _updateLabel = new() { AutoSize = true, Visible = false, BorderSides = ToolStripStatusLabelBorderSides.Left };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Marquee, Visible = false, MarqueeAnimationSpeed = 30, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
@@ -51,11 +54,16 @@ public sealed class MainForm : Form
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
     internal bool NoSavePrompt;
 
+    /// <summary>Null when updating is switched off. Only ever read here - the swap happens in Program after
+    /// the message loop ends.</summary>
+    private readonly UpdateService? _updater;
+
     private enum FilterDock { Bottom, Top, Left, Right }
 
-    public MainForm(AppSettings settings, string[] args)
+    public MainForm(AppSettings settings, string[] args, UpdateService? updater = null)
     {
         _settings = settings;
+        _updater = updater;
         Text = "Cascade";
         WindowState = FormWindowState.Maximized;
         MinimumSize = new Size(700, 400);
@@ -358,12 +366,16 @@ public sealed class MainForm : Form
         _totalLabel.Name = "stat.total";
         _lineLabel.Name = "stat.line";
         _zoomLabel.Name = "stat.zoom";
+        _updateLabel.Name = "stat.update";
+        _updateLabel.ForeColor = Color.SeaGreen;
+        _updateLabel.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
         _status.Items.AddRange(new ToolStripItem[]
         {
             // The label comes before the bar so the section's divider sits on an item whose left edge never
             // moves; with the bar first, hiding it dragged the divider left by the bar's width.
             _srcLabel, _filterLabel, _busyLabel, _progress,
-            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
+            // Last, so that appearing takes room from the springing paths rather than shifting every metric.
+            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel, _updateLabel
         });
 
         EnsureMetricWidths();
@@ -1096,7 +1108,8 @@ public sealed class MainForm : Form
     {
         if (_doc.RowCount != _lastRowCount || _doc.MatchedLineCount != _lastMatched
             || _doc.IsBusy || _doc.IsBusy != _lastBusy
-            || _findBusy || _findMsg.Length > 0)
+            || _findBusy || _findMsg.Length > 0
+            || (_updater?.PendingVersion is not null) != _updateLabel.Visible)
             UpdateStatus();
     }
 
@@ -1175,6 +1188,18 @@ public sealed class MainForm : Form
         long caretLine = _grid.CaretLine;
         _lineLabel.Text = caretLine >= 0 ? $"Ln: {caretLine + 1:N0} / {_doc.CompletedLineCount:N0}" : "Ln: \u2014";
         _zoomLabel.Text = $"Zoom: {_settings.ZoomPercent}%";
+
+        // A downloaded update is worth saying once, quietly, and leaving on show.
+        if (_updater?.PendingVersion is { } pending)
+        {
+            _updateLabel.Text = $"Will update to v{pending} on restart";
+            _updateLabel.ToolTipText = $"Cascade {pending} has been downloaded and will be installed when this window closes.";
+            _updateLabel.Visible = true;
+        }
+        else if (_updateLabel.Visible)
+        {
+            _updateLabel.Visible = false;
+        }
     }
 
     private void UpdateTitle()
@@ -1204,8 +1229,8 @@ public sealed class MainForm : Form
     }
 
     private void ShowAbout()
-        => MessageBox.Show(this,
-            "Cascade\nA fast, hierarchical-filtering log/text analyzer.\n\n" +
-            "Memory-mapped streaming load · hierarchical filters · columns · markers.\n.NET 10 · WinForms/GDI.",
-            "About Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    {
+        using var d = new AboutDialog(_updater);
+        d.ShowDialog(this);
+    }
 }
