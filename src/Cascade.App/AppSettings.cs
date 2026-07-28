@@ -7,7 +7,19 @@ namespace Cascade.App;
 
 public enum MarkerVisibilityMode { Always, Never, WhenInUse }
 
-/// <summary>User preferences, persisted to <c>%APPDATA%\Cascade\settings.json</c>.</summary>
+/// <summary>Where the preferences and the per-machine state both live. Overridable with
+/// <c>CASCADE_SETTINGS_DIR</c> so tests never touch the user's real configuration.</summary>
+internal static class SettingsFolder
+{
+    public static string Dir =>
+        Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR") is { Length: > 0 } dir
+            ? dir
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cascade");
+}
+
+/// <summary>Machine-agnostic user preferences, persisted to <c>%APPDATA%\Cascade\settings.json</c>. Holds
+/// nothing that is tied to one machine - see <see cref="MachineState"/> - so the whole file can be carried
+/// to another machine as-is.</summary>
 public sealed class AppSettings
 {
     public string FontFamily { get; set; } = "Consolas";
@@ -26,13 +38,7 @@ public sealed class AppSettings
     public bool ShowLineNumbers { get; set; } = true;
     public MarkerVisibilityMode MarkerVisibility { get; set; } = MarkerVisibilityMode.WhenInUse;
 
-    public List<string> RecentFiles { get; set; } = new();
-    public List<string> RecentFilterFiles { get; set; } = new();
-
-    /// <summary>The filter file (.cascade or .tat) last loaded/saved; auto-loaded on the next launch.</summary>
-    public string? LastFilterFile { get; set; }
-
-    /// <summary>When true, <see cref="LastFilterFile"/> is reloaded automatically at startup.</summary>
+    /// <summary>When true, <see cref="MachineState.LastFilterFile"/> is reloaded automatically at startup.</summary>
     public bool AutoLoadLastFilterFile { get; set; } = true;
 
     [System.Text.Json.Serialization.JsonIgnore]
@@ -46,25 +52,10 @@ public sealed class AppSettings
     [System.Text.Json.Serialization.JsonIgnore] public Color SelectionFore => Color.FromArgb(SelectionForeArgb);
     [System.Text.Json.Serialization.JsonIgnore] public Color DimForeground => Color.FromArgb(DimForegroundArgb);
 
-    private static string SettingsDir =>
-        Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR") is { Length: > 0 } dir
-            ? dir
-            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cascade");
-
-    private static string SettingsPath => Path.Combine(SettingsDir, "settings.json");
+    private static string SettingsPath => Path.Combine(SettingsFolder.Dir, "settings.json");
 
     /// <summary>Where the settings actually live, so the user can be told.</summary>
     public static string FilePath => SettingsPath;
-
-    public void AddRecentFile(string path) => AddRecent(RecentFiles, path);
-    public void AddRecentFilterFile(string path) => AddRecent(RecentFilterFiles, path);
-
-    private static void AddRecent(List<string> list, string path)
-    {
-        list.RemoveAll(p => string.Equals(p, path, StringComparison.OrdinalIgnoreCase));
-        list.Insert(0, path);
-        while (list.Count > 12) list.RemoveAt(list.Count - 1);
-    }
 
     public static AppSettings Load()
     {
@@ -87,12 +78,13 @@ public sealed class AppSettings
         catch { /* best-effort */ }
     }
 
-    /// <summary>Writes every setting to <paramref name="path"/> - the same content as the settings file, so
-    /// it can be carried to another machine or kept as a backup.</summary>
+    /// <summary>Writes every preference to <paramref name="path"/> - the same content as the settings file.
+    /// Nothing machine-specific is in here, so the result can be imported on another machine as-is.</summary>
     public void ExportTo(string path)
         => File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
 
-    /// <summary>Replaces every setting from a previously exported file. Throws if the file is not one.</summary>
+    /// <summary>Replaces every preference from a previously exported file, leaving this machine's state
+    /// (recent files, last filter file) alone. Throws if the file is not one.</summary>
     public void ImportFrom(string path)
     {
         AppSettings? loaded;

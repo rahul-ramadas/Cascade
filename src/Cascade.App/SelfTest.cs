@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Drawing;
+using System.Reflection;
 using System.Text;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
@@ -31,6 +32,7 @@ internal static class SelfTest
 
             bool ok = RunEngineChecks();
             ok &= RunSettingsChecks();
+            ok &= RunMachineStateChecks();
             ok &= RunRenderChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
@@ -189,7 +191,8 @@ internal static class SelfTest
 
     /// <summary>Exported settings must come back exactly, or carrying them to another machine silently
     /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one
-    /// is covered automatically.</summary>
+    /// is covered automatically. The export must also stay free of anything machine-specific, or importing
+    /// it elsewhere plants paths that do not exist there.</summary>
     private static bool RunSettingsChecks()
     {
         Line("-- settings export/import --");
@@ -207,11 +210,8 @@ internal static class SelfTest
                 MarkerVisibility = MarkerVisibilityMode.Never,
                 ForegroundArgb = Color.Teal.ToArgb(),
                 BackgroundArgb = Color.Ivory.ToArgb(),
-                AutoLoadLastFilterFile = false,
-                LastFilterFile = @"C:\somewhere\filters.cascade"
+                AutoLoadLastFilterFile = false
             };
-            original.AddRecentFile(@"C:\logs\a.log");
-            original.AddRecentFilterFile(@"C:\logs\f.cascade");
 
             string file = Path.Combine(dir, "exported.json");
             original.ExportTo(file);
@@ -229,6 +229,14 @@ internal static class SelfTest
                 ok &= Check($"round-trips {p.Name}", same);
             }
 
+            // Nothing in the export may name this machine. Checked against the state class by reflection so
+            // that a property moved into it later cannot quietly start leaking.
+            string exported = File.ReadAllText(file);
+            foreach (var p in typeof(MachineState).GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                                                  .Where(p => p.CanWrite))
+                ok &= Check($"export leaves out {p.Name}",
+                            !exported.Contains($"\"{p.Name}\"", StringComparison.Ordinal));
+
             // Something that is not a settings file must be refused, not allowed to wipe the preferences.
             string junk = Path.Combine(dir, "junk.json");
             File.WriteAllText(junk, "definitely not json");
@@ -239,6 +247,55 @@ internal static class SelfTest
             return ok;
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    /// <summary>Per-machine state lives in its own file and survives a save/load round trip. Importing
+    /// someone else's preferences must leave it untouched.</summary>
+    private static bool RunMachineStateChecks()
+    {
+        Line("-- machine state --");
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_st_state_" + Guid.NewGuid().ToString("N"));
+        string? previous = Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR");
+        Directory.CreateDirectory(dir);
+        Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", dir);
+        try
+        {
+            var state = new MachineState { LastFilterFile = @"C:\somewhere\filters.cascade" };
+            state.AddRecentFile(@"C:\logs\a.log");
+            state.AddRecentFilterFile(@"C:\logs\f.cascade");
+            state.Save();
+
+            bool ok = Check("state is a separate file", File.Exists(MachineState.FilePath)
+                                                        && MachineState.FilePath != AppSettings.FilePath);
+
+            var reloaded = MachineState.Load();
+            ok &= Check("round-trips RecentFiles", reloaded.RecentFiles.SequenceEqual(state.RecentFiles));
+            ok &= Check("round-trips RecentFilterFiles", reloaded.RecentFilterFiles.SequenceEqual(state.RecentFilterFiles));
+            ok &= Check("round-trips LastFilterFile", reloaded.LastFilterFile == state.LastFilterFile);
+
+            // Importing preferences from another machine must not disturb any of it.
+            string exported = Path.Combine(dir, "exported.json");
+            new AppSettings { FontFamily = "Cascadia Mono" }.ExportTo(exported);
+            new AppSettings().ImportFrom(exported);
+            var afterImport = MachineState.Load();
+            ok &= Check("import leaves recent files alone", afterImport.RecentFiles.SequenceEqual(state.RecentFiles));
+            ok &= Check("import leaves the last filter file alone", afterImport.LastFilterFile == state.LastFilterFile);
+
+            // Upgrading from the single-file layout must carry the old lists across rather than drop them.
+            File.Delete(MachineState.FilePath);
+            File.WriteAllText(AppSettings.FilePath,
+                """{"FontFamily":"Consolas","RecentFiles":["C:\\logs\\old.log"],"LastFilterFile":"C:\\old.cascade"}""");
+            var migrated = MachineState.Load();
+            ok &= Check("reads state left in an old settings file",
+                        migrated.RecentFiles.SequenceEqual([@"C:\logs\old.log"])
+                        && migrated.LastFilterFile == @"C:\old.cascade");
+            return ok;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", previous);
+            try { Directory.Delete(dir, true); } catch { }
+        }
     }
 
     private static bool RunEngineChecks()

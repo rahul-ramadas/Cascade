@@ -20,6 +20,7 @@ public sealed class AboutDialog : DialogBase
         rows.Add(("Runtime", $"{AppInfo.Runtime} ({AppInfo.Architecture})"));
         rows.Add(("Location", AppInfo.ExePath));
         rows.Add(("Settings", AppSettings.FilePath));
+        rows.Add(("State", MachineState.FilePath));
         rows.Add(("Updates", UpdateStatusText(updater)));
 
         // Size the value column to what it actually has to show - a truncated install path is exactly the

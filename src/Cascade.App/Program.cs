@@ -61,6 +61,7 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) => LogCrash(crashLog, e.ExceptionObject as Exception);
 
         var settings = AppSettings.Load();
+        var state = MachineState.Load();
 
         // Tidy up after previous runs first, and do it whether or not updating is switched on: turning
         // updates off must not strand a superseded executable or a half-finished download forever.
@@ -74,7 +75,7 @@ internal static class Program
 
         try
         {
-            Application.Run(new MainForm(settings, args, updater));
+            Application.Run(new MainForm(settings, state, args, updater));
         }
         catch (Exception ex)
         {

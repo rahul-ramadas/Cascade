@@ -226,7 +226,7 @@ internal static class UiShots
         if (tat is not null) argList.Add("/Filters:" + tat);
         argList.Add("/demo");
 
-        var form = new MainForm(settings, argList.ToArray())
+        var form = new MainForm(settings, MachineState.Load(), argList.ToArray())
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(0, 0),

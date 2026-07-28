@@ -755,6 +755,18 @@ leading `[...]` groups"** button will offer to generate this template from a sam
   DPI/multi‑monitor scaling, filter‑column widths, remember window position.
 - Import/Export config XML (parity), plus the new `.cascade` workspace.
 
+Two files, both under `%APPDATA%\Cascade` (overridable with `CASCADE_SETTINGS_DIR`):
+
+| File | Holds | Carries to another machine? |
+| --- | --- | --- |
+| `settings.json` | Preferences: font, zoom, colors, tab size, line numbers, marker visibility, whether to auto-load the last filter file. | Yes — this is exactly what **Export settings** writes and **Import settings** reads. |
+| `state.json` | This machine's state: recent files, recent filter files, the last filter file. | No. Never exported, never touched by an import. |
+
+The split is what makes export/import safe: a preferences file has no paths in it, so importing it on
+another machine cannot plant a recent-files list full of folders that do not exist there. On first run
+after the split, `state.json` is seeded from whatever the old combined `settings.json` still holds, so
+nobody loses their recent files.
+
 ### 10.5 Command line
 
 **Implemented today:**

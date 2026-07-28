@@ -13,6 +13,7 @@ namespace Cascade.App;
 public sealed class MainForm : Form
 {
     private readonly AppSettings _settings;
+    private readonly MachineState _state;
     private readonly CascadeDocument _doc = new();
     private readonly LineGridControl _grid = new() { Dock = DockStyle.Fill };
     private readonly FilterTreeControl _filterTree = new() { Dock = DockStyle.Fill };
@@ -77,9 +78,10 @@ public sealed class MainForm : Form
 
     private enum FilterDock { Bottom, Top, Left, Right }
 
-    public MainForm(AppSettings settings, string[] args, UpdateService? updater = null)
+    public MainForm(AppSettings settings, MachineState state, string[] args, UpdateService? updater = null)
     {
         _settings = settings;
+        _state = state;
         _updater = updater;
         Text = "Cascade";
         WindowState = FormWindowState.Maximized;
@@ -510,8 +512,8 @@ public sealed class MainForm : Form
 
         // If no filter file was given on the command line, reload the one the user last had open.
         if (filterFile is null && _settings.AutoLoadLastFilterFile
-            && !string.IsNullOrEmpty(_settings.LastFilterFile) && File.Exists(_settings.LastFilterFile))
-            filterFile = _settings.LastFilterFile;
+            && !string.IsNullOrEmpty(_state.LastFilterFile) && File.Exists(_state.LastFilterFile))
+            filterFile = _state.LastFilterFile;
 
         if (filterFile is not null && File.Exists(filterFile)) LoadFiltersFrom(filterFile);
         if (demo)
@@ -537,7 +539,7 @@ public sealed class MainForm : Form
             _doc.Open(path, enc);
             _grid.Attach(_doc, _settings);
             _filterTree.Attach(_doc);
-            _settings.AddRecentFile(path);
+            _state.AddRecentFile(path);
             RefreshRecentMenus();
             UpdateTitle();
             _lastRowCount = _lastMatched = -1;
@@ -735,11 +737,11 @@ public sealed class MainForm : Form
                 _doc.SetFilters(filters);
                 if (cols is not null) { _doc.Columns.Columns.Clear(); foreach (var c in cols.Columns) _doc.Columns.Columns.Add(c); CopyColumnSpec(cols, _doc.Columns); }
                 _filterFilePath = path;
-                _settings.AddRecentFilterFile(path);
+                _state.AddRecentFilterFile(path);
             }
             _filtersDirty = false;
-            _settings.LastFilterFile = path; // remember for auto-load next launch
-            _settings.Save();
+            _state.LastFilterFile = path; // remember for auto-load next launch
+            _state.Save();
             _filterTree.Attach(_doc);
             SyncFilteredModeMenu();
             _grid.RefreshView();
@@ -789,8 +791,8 @@ public sealed class MainForm : Form
         _doc.SetFilters(new FilterCollection());
         _filterFilePath = null;
         _filtersDirty = false;
-        _settings.LastFilterFile = null;
-        _settings.Save();
+        _state.LastFilterFile = null;
+        _state.Save();
         _filterTree.Attach(_doc);
         SyncFilteredModeMenu();
         _grid.RefreshView();
@@ -813,9 +815,9 @@ public sealed class MainForm : Form
             CascadeFile.Save(path, _doc.Filters, _doc.Columns);
             _filterFilePath = path;
             _filtersDirty = false;
-            _settings.AddRecentFilterFile(path);
-            _settings.LastFilterFile = path; // remember for auto-load next launch
-            _settings.Save();
+            _state.AddRecentFilterFile(path);
+            _state.LastFilterFile = path; // remember for auto-load next launch
+            _state.Save();
             RefreshRecentMenus();
             UpdateTitle();
             UpdateStatus();
@@ -1114,6 +1116,7 @@ public sealed class MainForm : Form
         }
         _refreshTimer.Stop();
         _settings.Save();
+        _state.Save();
         _doc.Dispose();
     }
 
@@ -1236,10 +1239,10 @@ public sealed class MainForm : Form
             }
             menu.Enabled = items.Count > 0;
         }
-        Fill(_recentFilesMenu, _settings.RecentFiles, p => OpenFile(p, null), "Clear Recent Files",
-            () => { _settings.RecentFiles.Clear(); _settings.Save(); RefreshRecentMenus(); });
-        Fill(_recentFilterFilesMenu, _settings.RecentFilterFiles, LoadFiltersFrom, "Clear Recent Filter Files",
-            () => { _settings.RecentFilterFiles.Clear(); _settings.Save(); RefreshRecentMenus(); });
+        Fill(_recentFilesMenu, _state.RecentFiles, p => OpenFile(p, null), "Clear Recent Files",
+            () => { _state.RecentFiles.Clear(); _state.Save(); RefreshRecentMenus(); });
+        Fill(_recentFilterFilesMenu, _state.RecentFilterFiles, LoadFiltersFrom, "Clear Recent Filter Files",
+            () => { _state.RecentFilterFiles.Clear(); _state.Save(); RefreshRecentMenus(); });
     }
 
     private void ShowAbout()
