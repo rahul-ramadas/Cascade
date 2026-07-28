@@ -1,1 +1,0 @@
-Make it a single binary if that doesn't have any downsides.
