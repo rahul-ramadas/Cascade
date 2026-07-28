@@ -12,6 +12,43 @@ namespace Cascade.UiTests;
 /// </summary>
 public class UiFeatureTests
 {
+    /// <summary>
+    /// Home and End jump the view to the far left and far right of the log. Ctrl+Home and Ctrl+End keep
+    /// their existing meaning - first and last line - so this guards both at once.
+    /// </summary>
+    [Fact]
+    public void Home_and_end_scroll_the_log_to_its_left_and_right_edges()
+    {
+        // Lines wide enough to overflow any screen; on a 4K monitor a shorter line fits entirely and there
+        // would be nothing to scroll, so the test would pass without proving anything.
+        string log = TestData.WriteLogFile(minWidth: 1000);
+        using var app = CascadeApp.LaunchExisting(log, null, CascadeApp.NewSettingsDir(),
+                                                  ownsFiles: true, ownsSettingsDir: true);
+        app.ClickMenu("View", "Focus Text Area");
+        var grid = app.Grid();
+
+        Assert.Equal(0, app.HorizontalScroll());
+
+        app.Key(grid, VirtualKeyShort.END);
+        Assert.True(app.WaitHorizontalScroll(v => v > 0), "End did not scroll the view right");
+        double rightEdge = app.HorizontalScroll();
+
+        // Already at the extreme: pressing End again must not creep further.
+        app.Key(grid, VirtualKeyShort.END);
+        Assert.Equal(rightEdge, app.HorizontalScroll());
+
+        app.Key(grid, VirtualKeyShort.HOME);
+        Assert.True(app.WaitHorizontalScroll(v => v == 0), "Home did not return the view to the left edge");
+
+        // The Ctrl variants still move the caret rather than the view.
+        app.CtrlKey(grid, VirtualKeyShort.END);
+        Assert.True(app.WaitStatus("Ln:", $"Ln: {TestData.LineCount:N0} / {TestData.LineCount:N0}"),
+                    "Ctrl+End no longer goes to the last line: " + app.StatusText("Ln:"));
+        app.CtrlKey(grid, VirtualKeyShort.HOME);
+        Assert.True(app.WaitStatus("Ln:", $"Ln: 1 / {TestData.LineCount:N0}"),
+                    "Ctrl+Home no longer goes to the first line: " + app.StatusText("Ln:"));
+    }
+
     [Fact]
     public void Keeps_selected_line_selected_and_centered_when_toggling_filtered_mode()
     {

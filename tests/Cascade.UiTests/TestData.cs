@@ -26,6 +26,24 @@ internal static class TestData
         return path;
     }
 
+    /// <summary>
+    /// As <see cref="WriteLogFile()"/>, but every line is padded out to <paramref name="minWidth"/>
+    /// characters so the view has something to scroll horizontally. Must be wide enough to overflow any
+    /// screen the tests might run on, or a large monitor fits the whole line and there is nothing to scroll.
+    /// </summary>
+    public static string WriteLogFile(int minWidth)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < LineCount; i++)
+        {
+            string head = (IsMatchLine(i) ? "MATCH line " : "other line ") + i + " ";
+            sb.Append(head).Append('=', Math.Max(0, minWidth - head.Length)).Append('\n');
+        }
+        string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        return path;
+    }
+
     /// <summary>A .tat with a single enabled include filter matching "MATCH".</summary>
     public static string WriteFilterFile() => WriteFilterFile("MATCH");
 

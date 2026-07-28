@@ -111,6 +111,9 @@ parity checklist.
 **Keyboard (line display)**: `Space`/`Shift+Space` next/prev matching line; `1‑8`/`Shift+1‑8` next/prev
 marker; `Ctrl+1‑8` toggle marker; `A‑Z`/`Shift+A‑Z` next/prev by filter; `Ctrl+Shift+A‑Z` toggle
 filter; `Ctrl+H` filtered mode; `Ctrl+F` find; zoom with `Ctrl+Wheel`.
+Scrolling: `Ctrl+Up`/`Ctrl+Down` scroll a line without moving the caret; `Left`/`Right` scroll sideways
+by four characters and `Home`/`End` jump to the left and right extremes, while `Ctrl+Home`/`Ctrl+End` go
+to the first and last line.
 
 **Known limitation we intend to fix**: the original *"keeps the entire data set in memory at all
 times"*, so files larger than RAM cause it to struggle. Cascade's memory‑mapped design directly

@@ -506,8 +506,21 @@ internal sealed class CascadeApp : IDisposable
         return false;
     }
 
-    /// <summary>Scrolls so <paramref name="row"/> sits in the middle of the viewport, whatever its height.
-    /// Tests must never assume a window size - CI screens are far smaller than a developer's monitor, so a
+    /// <summary>How far the log view is scrolled sideways, read from the horizontal scrollbar.</summary>
+    public double HorizontalScroll()
+    {
+        var hbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+                         .FirstOrDefault(s => s.BoundingRectangle.Width > s.BoundingRectangle.Height)
+                   ?? throw new InvalidOperationException("Horizontal scrollbar not found.");
+        return hbar.Patterns.RangeValue.Pattern.Value.Value;
+    }
+
+    /// <summary>Waits for the horizontal scroll offset to satisfy <paramref name="predicate"/>.</summary>
+    public bool WaitHorizontalScroll(Func<double, bool> predicate, int ms = 5000)
+        => Retry.WhileFalse(() => predicate(HorizontalScroll()),
+               TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(50)).Result;
+
+    /// <summary>Scrolls so <paramref name="row"/> sits in the middle of the viewport, whatever its height.    /// Tests must never assume a window size - CI screens are far smaller than a developer's monitor, so a
     /// hard-coded first row can leave the target off-screen. Throws if the view would not move, because
     /// every caller depends on it having worked.</summary>
     public void ScrollRowToMiddle(int row)

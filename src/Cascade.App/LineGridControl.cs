@@ -334,9 +334,20 @@ public sealed class LineGridControl : Control
         new(0, HeaderHeight, GutterWidth(), Math.Max(0, ClientSize.Height - HeaderHeight - _hbar.Height));
 
     /// <summary>Scrolls the view horizontally, as dragging the horizontal scrollbar does.</summary>
-    internal void ScrollHorizontallyTo(int x)
+    internal void ScrollHorizontallyTo(int x) => SetHScroll(x);
+
+    /// <summary>The furthest right the view can go: the scrollbar's own limit, so it can never be driven
+    /// past the longest line currently measured.</summary>
+    private int MaxHScroll => Math.Max(0, _hbar.Maximum - _hbar.LargeChange + 1);
+
+    /// <summary>The single way the view scrolls sideways - clamped, and with the scrollbar kept in step so
+    /// the thumb never disagrees with what is drawn.</summary>
+    private void SetHScroll(int x)
     {
-        _hScroll = Math.Max(0, x);
+        int clamped = Math.Clamp(x, 0, MaxHScroll);
+        if (clamped == _hScroll) return;
+        _hScroll = clamped;
+        _hbar.Value = clamped;
         Invalidate();
     }
 
@@ -617,8 +628,11 @@ public sealed class LineGridControl : Control
             case Keys.PageDown: MoveCaret(page, e.Shift); break;
             case Keys.Home when e.Control: MoveCaretTo(0, e.Shift); break;
             case Keys.End when e.Control: MoveCaretTo(rows - 1, e.Shift); break;
-            case Keys.Left: _hScroll = Math.Max(0, _hScroll - _charWidth * 4); _hbar.Value = _hScroll; Invalidate(); break;
-            case Keys.Right: _hScroll = Math.Min(Math.Max(0, _hbar.Maximum - _hbar.LargeChange + 1), _hScroll + _charWidth * 4); _hbar.Value = _hScroll; Invalidate(); break;
+            // Plain Home/End jump the view to the far left and far right of the longest line on screen.
+            case Keys.Home: SetHScroll(0); break;
+            case Keys.End: SetHScroll(MaxHScroll); break;
+            case Keys.Left: SetHScroll(_hScroll - _charWidth * 4); break;
+            case Keys.Right: SetHScroll(_hScroll + _charWidth * 4); break;
             case Keys.A when e.Control: _sel.SelectAll(rows); Invalidate(); SelectionChanged?.Invoke(); break;
             case Keys.C when e.Control: CopySelection(false); break;
             case >= Keys.D1 and <= Keys.D8 when e.Control: ToggleMarker(e.KeyCode - Keys.D1); break;
