@@ -20,6 +20,7 @@ public sealed class FilterTreeControl : UserControl
     private readonly CueTextBox _search = new()
     {
         Dock = DockStyle.Top,
+        AccessibleName = "Filter search",
         Cue = "Find filter (Enter = next, Shift+Enter = previous)\u2026"
     };
     private readonly BufferedTreeView _tree = new()

@@ -98,14 +98,24 @@ public sealed class FindDialog : Form
 
     protected override bool ProcessDialogKey(Keys keyData)
     {
-        if (keyData == Keys.Escape) { Hide(); return true; }
+        if (keyData == Keys.Escape) { HideAndReturnFocus(); return true; }
         return base.ProcessDialogKey(keyData);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
+        if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideAndReturnFocus(); }
         base.OnFormClosing(e);
+    }
+
+    /// <summary>Hides the bar and hands the keyboard back to the window behind it. Without the explicit
+    /// activation the hidden dialog stays the application's active form, and keystrokes go nowhere until
+    /// something is clicked.</summary>
+    private void HideAndReturnFocus()
+    {
+        var owner = Owner;
+        Hide();
+        try { owner?.Activate(); } catch { /* the window may be closing */ }
     }
 
     private void Run(bool forward)

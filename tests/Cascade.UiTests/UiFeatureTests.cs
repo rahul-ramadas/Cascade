@@ -174,28 +174,29 @@ public class UiFeatureTests
             CheckOrder("initial order", "MATCH", "alpha", "beta");
 
             // Ctrl+Up / Ctrl+Down reorder within the same level.
+            var tree = app.Tree();
             app.FocusFilter("beta");
-            app.CtrlKey(VirtualKeyShort.UP);
+            app.CtrlKey(tree, VirtualKeyShort.UP);
             CheckOrder("ctrl+up moves it above alpha", "MATCH", "beta", "alpha");
 
-            app.CtrlKey(VirtualKeyShort.DOWN);
+            app.CtrlKey(tree, VirtualKeyShort.DOWN);
             CheckOrder("ctrl+down puts it back", "MATCH", "alpha", "beta");
 
             // Ctrl+Right nests it under the filter above it.
-            app.CtrlKey(VirtualKeyShort.RIGHT);
+            app.CtrlKey(tree, VirtualKeyShort.RIGHT);
             CheckOrder("ctrl+right removes it from the top level", "MATCH", "alpha");
             Check("ctrl+right nests it under alpha",
                 CascadeApp.IndexOfFilter(app.ChildFilterNames("alpha"), "beta") >= 0,
                 string.Join(" | ", app.ChildFilterNames("alpha")));
 
             // Ctrl+Left moves it back out, directly after its old parent.
-            app.CtrlKey(VirtualKeyShort.LEFT);
+            app.CtrlKey(tree, VirtualKeyShort.LEFT);
             CheckOrder("ctrl+left restores it to the top level", "MATCH", "alpha", "beta");
 
             // The first filter has nothing above it, so both are no-ops rather than errors.
             app.FocusFilter("MATCH");
-            app.CtrlKey(VirtualKeyShort.UP);
-            app.CtrlKey(VirtualKeyShort.RIGHT);
+            app.CtrlKey(tree, VirtualKeyShort.UP);
+            app.CtrlKey(tree, VirtualKeyShort.RIGHT);
             CheckOrder("no-op at the top of the list", "MATCH", "alpha", "beta");
 
             Assert.True(fails.Count == 0, "Filter reorder failures:\n  " + string.Join("\n  ", fails));
@@ -218,22 +219,25 @@ public class UiFeatureTests
         app.FindInDialog(dlg, "MATCH line", forward: true);   // MATCH is on 1-based lines 1, 6, 11, 16, ...
         Check("find next from line 1", "Ln: 6 / 1,000");
 
-        // From the text box.
+        // From the text box. These are handled in the dialog's ProcessCmdKey, so they have to go through the
+        // message loop rather than straight to a control.
         app.FocusInDialog(dlg);
-        app.Key(VirtualKeyShort.F3);
+        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3);
         Check("F3 -> next", "Ln: 11 / 1,000");
-        app.ShiftKey(VirtualKeyShort.F3);
+        app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
         Check("Shift+F3 -> previous", "Ln: 6 / 1,000");
-        app.Key(VirtualKeyShort.RETURN);
+        app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
         Check("Enter -> next", "Ln: 11 / 1,000");
-        app.ShiftKey(VirtualKeyShort.RETURN);
+        app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN, VirtualKeyShort.SHIFT);
         Check("Shift+Enter -> previous", "Ln: 6 / 1,000");
 
-        // ...and after clicking a button, which is exactly when Shift+Enter used to go the wrong way.
+        // ...and with a button focused, which is exactly when Shift+Enter used to go the wrong way.
+        var nextButton = dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))!;
         app.FocusInDialog(dlg, "Find Next");
-        app.ShiftKey(VirtualKeyShort.RETURN);
+        app.SendKeyAsDialogKey(nextButton, VirtualKeyShort.RETURN, VirtualKeyShort.SHIFT);
         Check("Shift+Enter with a button focused -> previous", "Ln: 1 / 1,000");
-        app.Key(VirtualKeyShort.F3);
+        app.SendKeyAsDialogKey(nextButton, VirtualKeyShort.F3);
         Check("F3 with a button focused -> next", "Ln: 6 / 1,000");
 
         try { dlg.Close(); } catch { /* modeless: hides */ }
@@ -256,7 +260,7 @@ public class UiFeatureTests
 
             // 1. Marker navigation with no markers set at all.
             app.SelectLine(1);
-            app.Key(VirtualKeyShort.KEY_1);
+            app.Key(app.Grid(), VirtualKeyShort.KEY_1);
             Check("marker navigation reports the end", app.WaitForFindMessage("No more marker 1"));
 
             // 2. Per-filter find, searching backwards from the very first line.
@@ -271,10 +275,11 @@ public class UiFeatureTests
             Check("text find reports the end", app.WaitForFindMessage("No more matches"));
             try { dlg.Close(); } catch { /* modeless: hides */ }
 
-            // 4. Filter search for a filter that is not in the list.
-            app.ClickMenu("View", "Focus Filter Search");
-            app.TypeText("zzz-no-such-filter");
-            app.Key(VirtualKeyShort.RETURN);
+            // 4. Filter search for a filter that is not in the list. Deliberately after the Find bar, which
+            // has to hand the keyboard back when it hides.
+            var search = app.FilterSearchBox();
+            app.SetText(search, "zzz-no-such-filter");
+            app.Key(search, VirtualKeyShort.RETURN);
             Check("filter search reports the end", app.WaitForFindMessage("No more filters"));
 
             Assert.True(fails.Count == 0, "No end-of-search feedback for:\n  " + string.Join("\n  ", fails));
@@ -292,20 +297,18 @@ public class UiFeatureTests
         // Start in the middle, so there is room to scroll both ways.
         app.ScrollRowToMiddle(500);
         app.SelectLine(501);
-        // Driving the scrollbar and the row accessibility leaves focus somewhere else, and these keys only
-        // apply while the log has it.
-        app.ClickMenu("View", "Focus Text Area");
+        var grid = app.Grid();
         string selected = app.StatusText("Ln:");
         int top = app.FirstVisibleLine();
         Check("a line is selected to begin with", selected == "Ln: 501 / 1,000", selected);
 
-        for (int i = 0; i < 5; i++) app.CtrlKey(VirtualKeyShort.DOWN);
+        for (int i = 0; i < 5; i++) app.CtrlKey(grid, VirtualKeyShort.DOWN);
         int afterDown = app.FirstVisibleLine();
         Check("ctrl+down scrolls the view", afterDown > top, $"top {top} -> {afterDown}");
         Check("ctrl+down leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));
         Check("ctrl+down leaves the selection alone", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
 
-        for (int i = 0; i < 5; i++) app.CtrlKey(VirtualKeyShort.UP);
+        for (int i = 0; i < 5; i++) app.CtrlKey(grid, VirtualKeyShort.UP);
         int afterUp = app.FirstVisibleLine();
         Check("ctrl+up scrolls back", afterUp == top, $"top {top} -> {afterDown} -> {afterUp}");
         Check("ctrl+up leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));

@@ -61,12 +61,14 @@ internal sealed class CascadeApp : IDisposable
                      ?? throw new InvalidOperationException("Main window did not appear.");
         var harness = new CascadeApp(app, automation, window,
             ownsFiles ? log : "", ownsFiles ? (tat ?? "") : "", ownsSettingsDir ? settingsDir : "");
-        harness.Activate();
+        // Deliberately NOT brought to the foreground: everything here drives the app through automation
+        // patterns or messages sent straight to its windows, so a run never takes focus from the user.
         // Wait for indexing to finish (Total shows the full line count).
         harness.WaitStatus("Total:", $"Total: {TestData.LineCount:N0}", 20000);
         return harness;
     }
 
+    /// <summary>Brings the window to the front. Only for debugging a run by eye - the tests do not need it.</summary>
     public void Activate()
     {
         try { Window.SetForeground(); } catch { /* best effort */ }
@@ -172,7 +174,6 @@ internal sealed class CascadeApp : IDisposable
         var node = FilterNode(containsText)
             ?? throw new InvalidOperationException($"Filter '{containsText}' not in the list.");
         node.AsTreeItem().Select();
-        try { node.Focus(); } catch { /* selection is what matters */ }
         System.Threading.Thread.Sleep(120);
     }
 
@@ -184,33 +185,126 @@ internal sealed class CascadeApp : IDisposable
                            .Any(t => (t.Name ?? "").Contains(containsText, StringComparison.OrdinalIgnoreCase)),
                TimeSpan.FromMilliseconds(ms), TimeSpan.FromMilliseconds(40)).Result;
 
-    /// <summary>Presses Ctrl + <paramref name="key"/> against whatever currently has focus.</summary>
-    public void CtrlKey(VirtualKeyShort key)
+    // ---- keyboard that does not need the foreground ----
+
+    private const uint WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101;
+    private const int KeyDownLParam = 0x0000_0001;          // repeat count 1
+    private const int KeyUpLParam = unchecked((int)0xC000_0001); // repeat 1, previously down, transition up
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint attach, uint attachTo, bool doAttach);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
+
+    /// <summary>
+    /// Gives a control the application's keyboard focus without taking the desktop's foreground away from
+    /// whatever the user is doing. Attaching our input queue to the application's makes SetFocus apply to its
+    /// queue; WinForms then routes posted key messages exactly as it would for a real keypress.
+    /// </summary>
+    private static void GiveKeyboardFocus(IntPtr hwnd)
     {
-        Keyboard.TypeSimultaneously(VirtualKeyShort.CONTROL, key);
+        uint target = GetWindowThreadProcessId(hwnd, out _);
+        uint self = GetCurrentThreadId();
+        if (target == 0) return;
+        if (target == self) { SetFocus(hwnd); return; }
+
+        AttachThreadInput(self, target, true);
+        try { SetFocus(hwnd); }
+        finally { AttachThreadInput(self, target, false); }
+    }
+
+    /// <summary>
+    /// Delivers a keystroke straight to <paramref name="target"/>'s window procedure, which is how a control
+    /// receives one it handles in KeyDown. Nothing here depends on the foreground or on which window the
+    /// application considers active, so a test using it keeps working whatever else is going on - unlike
+    /// synthesised global input, which simply goes wherever the foreground happens to be.
+    /// <para>
+    /// Modifiers are folded into wParam rather than pressed separately: injected key messages do not update
+    /// the thread's key state, so GetKeyState - and therefore WinForms' ModifierKeys - would still report
+    /// nothing held. WinForms builds its key data as <c>(Keys)wParam | ModifierKeys</c>, so setting the
+    /// modifier bits in wParam produces exactly the KeyEventArgs a real keypress would.
+    /// </para>
+    /// </summary>
+    public void SendKey(AutomationElement target, VirtualKeyShort key, params VirtualKeyShort[] modifiers)
+        => DeliverKey(target, key, modifiers, viaMessageLoop: false);
+
+    /// <summary>
+    /// Same, but routed through the message loop so the pre-processing that drives ProcessCmdKey, dialog keys
+    /// and access keys runs. Needed for shortcuts handled at form level rather than in a control's KeyDown -
+    /// but it only arrives while the target's window is the one the application considers active.
+    /// </summary>
+    public void SendKeyAsDialogKey(AutomationElement target, VirtualKeyShort key, params VirtualKeyShort[] modifiers)
+        => DeliverKey(target, key, modifiers, viaMessageLoop: true);
+
+    private void DeliverKey(AutomationElement target, VirtualKeyShort key, VirtualKeyShort[] modifiers, bool viaMessageLoop)
+    {
+        IntPtr hwnd = target.Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd == IntPtr.Zero)
+            throw new InvalidOperationException($"'{target.Name}' has no window to send keys to.");
+        GiveKeyboardFocus(hwnd);
+
+        int wParam = (int)key;
+        foreach (var m in modifiers)
+            wParam |= m switch
+            {
+                VirtualKeyShort.CONTROL or VirtualKeyShort.LCONTROL or VirtualKeyShort.RCONTROL => 0x0002_0000, // Keys.Control
+                VirtualKeyShort.SHIFT or VirtualKeyShort.LSHIFT or VirtualKeyShort.RSHIFT => 0x0001_0000,       // Keys.Shift
+                VirtualKeyShort.ALT or VirtualKeyShort.LMENU or VirtualKeyShort.RMENU => 0x0004_0000,           // Keys.Alt
+                _ => throw new ArgumentException($"unsupported modifier {m}")
+            };
+
+        if (viaMessageLoop)
+        {
+            PostMessage(hwnd, WM_KEYDOWN, (IntPtr)wParam, KeyDownLParam);
+            PostMessage(hwnd, WM_KEYUP, (IntPtr)wParam, KeyUpLParam);
+        }
+        else
+        {
+            SendMessage(hwnd, WM_KEYDOWN, (IntPtr)wParam, KeyDownLParam);
+            SendMessage(hwnd, WM_KEYUP, (IntPtr)wParam, KeyUpLParam);
+        }
         System.Threading.Thread.Sleep(200);
     }
 
-    /// <summary>Presses <paramref name="key"/> on its own against whatever currently has focus.</summary>
-    public void Key(VirtualKeyShort key)
+    public void CtrlKey(AutomationElement target, VirtualKeyShort key) => SendKey(target, key, VirtualKeyShort.CONTROL);
+    public void Key(AutomationElement target, VirtualKeyShort key) => SendKey(target, key);
+    public void ShiftKey(AutomationElement target, VirtualKeyShort key) => SendKey(target, key, VirtualKeyShort.SHIFT);
+
+    /// <summary>Puts text into an edit control through its value pattern, which needs no focus at all.</summary>
+    public void SetText(AutomationElement edit, string text)
     {
-        Keyboard.Type(key);
+        var vp = edit.Patterns.Value.PatternOrDefault;
+        if (vp is null || vp.IsReadOnly.ValueOrDefault) throw new InvalidOperationException("edit is not writable");
+        vp.SetValue(text);
         System.Threading.Thread.Sleep(200);
     }
 
-    /// <summary>Presses Shift + <paramref name="key"/> against whatever currently has focus.</summary>
-    public void ShiftKey(VirtualKeyShort key)
-    {
-        Keyboard.TypeSimultaneously(VirtualKeyShort.SHIFT, key);
-        System.Threading.Thread.Sleep(200);
-    }
+    /// <summary>Current text of an edit control.</summary>
+    public string TextOf(AutomationElement edit) => edit.Patterns.Value.PatternOrDefault?.Value.ValueOrDefault ?? "";
 
-    /// <summary>Types literal text against whatever currently has focus.</summary>
-    public void TypeText(string text)
-    {
-        Keyboard.Type(text);
-        System.Threading.Thread.Sleep(250);
-    }
+    /// <summary>Every non-empty status-bar field, for diagnosing a failed expectation.</summary>
+    public string AllStatusText()
+        => string.Join(" | ", Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
+                                    .Select(t => t.Name ?? "").Where(n => n.Length > 0));
+
+    /// <summary>The filter list's search box. Found by name rather than "the first edit", because a hidden
+    /// Find dialog is still part of the window's tree and would be picked up instead.</summary>
+    public AutomationElement FilterSearchBox()
+        => Window.FindFirstDescendant(cf => cf.ByName("Filter search"))
+           ?? throw new InvalidOperationException("filter search box not found");
 
     // ---- actions via menus / dialogs ----
 
@@ -255,13 +349,15 @@ internal sealed class CascadeApp : IDisposable
     public string DialogText(Window dlg)
         => string.Join(" | ", dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(t => t.Name ?? "").Where(n => n.Length > 0));
 
-    /// <summary>Gives a named element inside a dialog keyboard focus ("" = its text box).</summary>
+    /// <summary>Gives a named element inside a dialog keyboard focus ("" = its text box), without taking the
+    /// desktop's foreground.</summary>
     public void FocusInDialog(Window dlg, string name = "")
     {
         var element = name.Length == 0
             ? dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))
             : dlg.FindFirstDescendant(cf => cf.ByName(name));
-        try { element?.Focus(); } catch { /* best effort */ }
+        IntPtr hwnd = element?.Properties.NativeWindowHandle.ValueOrDefault ?? IntPtr.Zero;
+        if (hwnd != IntPtr.Zero) GiveKeyboardFocus(hwnd);
         System.Threading.Thread.Sleep(150);
     }
 
