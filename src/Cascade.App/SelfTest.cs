@@ -139,6 +139,21 @@ internal static class SelfTest
             ok &= Check("scrolling right with columns leaves the margin untouched" +
                         (colDiff is null ? "" : $" [first differs at x={colDiff.Value.X},y={colDiff.Value.Y}]"),
                         colDiff is null);
+
+            // An automated or assistive scroll sets the scrollbar's Value, which raises ValueChanged but not
+            // Scroll. If that path does not drop the view anchor, the next refresh re-applies the anchor and
+            // puts the view straight back - scrolling silently does nothing, which is what happened on a
+            // machine slow enough for a filter pass to still be running.
+            doc.Columns.Enabled = false;
+            grid.RefreshView();
+            Pump();
+            grid.ClearViewAnchor();
+            grid.SetViewAnchor(new ViewAnchor(0, 0, -1), select: false);
+            grid.SetVerticalScrollValue(15);
+            grid.RefreshView();
+            Pump();
+            ok &= Check($"an automated scroll survives an armed view anchor (row {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == 15);
             return ok;
         }
         finally

@@ -68,7 +68,17 @@ public sealed class LineGridControl : Control
         Controls.Add(_vbar);
         Controls.Add(_hbar);
         _vbar.Scroll += (_, e) => { ClearViewAnchor(); _firstRow = e.NewValue; Invalidate(); };
-        _vbar.ValueChanged += (_, _) => { if (_syncingScroll) return; _firstRow = _vbar.Value; Invalidate(); };
+        // Setting Value programmatically - which is what an accessibility tool or UI automation does, since
+        // Scroll only fires for a physical drag - is just as much a deliberate move as dragging the thumb,
+        // so it must drop the view anchor too. Without that, the next refresh re-applies the anchor and
+        // snaps the view straight back, and scrolling appears to do nothing at all.
+        _vbar.ValueChanged += (_, _) =>
+        {
+            if (_syncingScroll) return;
+            ClearViewAnchor();
+            _firstRow = _vbar.Value;
+            Invalidate();
+        };
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
         TabStop = true;
@@ -324,6 +334,13 @@ public sealed class LineGridControl : Control
 
     /// <summary>Width of the marker + line-number margin, for harnesses that check nothing paints over it.</summary>
     internal int GutterWidthForTesting => GutterWidth();
+
+    /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
+    internal long FirstRowForTesting => _firstRow;
+
+    /// <summary>Drives the vertical scrollbar the way UI Automation does: by setting Value, which raises
+    /// ValueChanged but never Scroll.</summary>
+    internal void SetVerticalScrollValue(int firstRow) => _vbar.Value = firstRow;
 
     /// <summary>
     /// The margin that horizontal scrolling must leave pixel-identical: the marker and line-number columns,
