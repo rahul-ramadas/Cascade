@@ -206,6 +206,72 @@ public class SelfUpdateTests
         }
     }
 
+    /// <summary>
+    /// Two instances running from the same directory both stage the same update and both try to install it
+    /// as they exit. The one thing that must never happen is ending up without a working executable: the
+    /// first mover renames it out of the way, so a second mover that assumed it was still there could leave
+    /// nothing to launch. Also checks the swap is not applied twice and that nothing is left lying about
+    /// once a later run has had its chance to sweep.
+    /// </summary>
+    [Fact]
+    public void Two_instances_updating_at_once_leave_exactly_one_working_executable()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_upd_ui_" + Guid.NewGuid().ToString("N"));
+        string exe = CopyAppTo(dir);
+        long originalLength = new FileInfo(exe).Length;
+
+        using var github = new StubGitHub(File.ReadAllBytes(exe), NewVersion);
+        string logA = TestData.WriteLogFile(), logB = TestData.WriteLogFile();
+        string cfgA = CascadeApp.NewSettingsDir(), cfgB = CascadeApp.NewSettingsDir();
+        var env = new Dictionary<string, string>
+        {
+            ["CASCADE_UPDATE"] = "on",
+            ["CASCADE_UPDATE_API"] = github.Prefix,
+            ["CASCADE_UPDATE_REPO"] = "owner/repo",
+            ["CASCADE_UPDATE_FORCE"] = "1"
+        };
+
+        try
+        {
+            var a = CascadeApp.LaunchExisting(logA, null, cfgA, ownsFiles: false, ownsSettingsDir: false, env, exe);
+            var b = CascadeApp.LaunchExisting(logB, null, cfgB, ownsFiles: false, ownsSettingsDir: false, env, exe);
+            try
+            {
+                // Both must see the update; they share one staging path, so this is the contended case.
+                Assert.NotEqual("", a.WaitForStatus("Will update to"));
+                Assert.NotEqual("", b.WaitForStatus("Will update to"));
+
+                a.CloseGracefully();
+                Assert.True(WaitUntil(() => RunVersion(exe) == 0),
+                            "after the first instance installed the update the executable did not run");
+
+                b.CloseGracefully();
+            }
+            finally { a.Dispose(); b.Dispose(); }
+
+            // The invariant that matters: one executable, and it works.
+            Assert.True(File.Exists(exe), "the update left no executable behind");
+            Assert.Equal(0, RunVersion(exe));
+            Assert.True(new FileInfo(exe).Length == originalLength,
+                        "the installed executable is not the size of the one that was served");
+
+            Assert.Empty(Directory.GetFiles(dir, "*.part"));
+            Assert.Empty(Directory.GetFiles(dir, "Cascade.update-*.exe"));
+
+            // The image the second instance was still running from cannot be deleted until it exits, so it
+            // falls to whichever instance leaves last - no waiting for the next launch.
+            Assert.True(WaitUntil(() => Directory.GetFiles(dir, "Cascade.old*.exe").Length == 0),
+                        "a superseded executable was left behind: " +
+                        string.Join(", ", Directory.GetFiles(dir, "Cascade.old*.exe").Select(Path.GetFileName)));
+        }
+        finally
+        {
+            foreach (string f in new[] { logA, logB }) { try { File.Delete(f); } catch { } }
+            foreach (string d in new[] { cfgA, cfgB }) { try { Directory.Delete(d, true); } catch { } }
+            TryDeleteDir(dir);
+        }
+    }
+
     // ---- helpers ----
 
     /// <summary>Copies the application under test into its own directory. Works for both layouts: the

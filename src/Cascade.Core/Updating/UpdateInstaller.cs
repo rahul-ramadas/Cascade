@@ -127,6 +127,18 @@ public static class UpdateInstaller
         catch { /* the startup sweep will get it next time */ }
     }
 
+    /// <summary>
+    /// Hands every superseded image to a cleanup helper as this process exits. Covers more than the swap
+    /// this process just made: a second instance keeps the old image alive, so its deletion fails and it
+    /// falls to whichever instance leaves last.
+    /// </summary>
+    public static void CleanUpSupersededImages(string exePath)
+    {
+        if (!File.Exists(exePath)) return;
+        foreach (string f in Safe(() => Directory.EnumerateFiles(Dir(exePath), $"{Stem(exePath)}.old*.exe")))
+            LaunchCleanup(exePath, f);
+    }
+
     /// <summary>The <c>--cleanup</c> entry point: wait for the old app to exit, then delete its image.</summary>
     public static int RunCleanup(int pid, string oldPath)
     {

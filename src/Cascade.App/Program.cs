@@ -84,6 +84,7 @@ internal static class Program
         {
             updateCts.Cancel();
             updater?.ApplyPending();
+            UpdateInstaller.CleanUpSupersededImages(AppInfo.ExePath);
         }
         return 0;
     }

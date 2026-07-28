@@ -118,11 +118,7 @@ public sealed class UpdateService
             if (staged is null) return null;
 
             var version = UpdateInstaller.StagedVersionOf(_options.ExePath, staged);
-            string? oldPath = UpdateInstaller.Apply(_options.ExePath, staged);
-            if (oldPath is null) return null;
-
-            UpdateInstaller.LaunchCleanup(_options.ExePath, oldPath);
-            return version;
+            return UpdateInstaller.Apply(_options.ExePath, staged) is null ? null : version;
         }
         catch { return null; }
     }
