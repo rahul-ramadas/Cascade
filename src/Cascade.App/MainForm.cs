@@ -103,7 +103,7 @@ public sealed class MainForm : Form
 
         _doc.Updated += () => _pendingRefresh = true;
         _grid.SelectionChanged += UpdateStatus;
-        _grid.ZoomChanged += UpdateStatus;
+        _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); };
         _grid.LineDoubleClicked += CreateFilterFromLine;
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.EditRequested += EditFilter;
@@ -118,6 +118,7 @@ public sealed class MainForm : Form
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
             if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.ClearViewAnchor(); _anchorActive = false; }
             UpdateStatusIfChanged();
+            FlushConfig();
         };
         _refreshTimer.Start();
 
@@ -232,6 +233,7 @@ public sealed class MainForm : Form
             _settings.ShowLineNumbers = !_settings.ShowLineNumbers;
             _miLineNumbers.Checked = _settings.ShowLineNumbers;
             _grid.RefreshView();
+            SaveSettingsSoon();
         })
         { Checked = _settings.ShowLineNumbers };
         view.DropDownItems.Add(_miFilteredMode);
@@ -290,6 +292,7 @@ public sealed class MainForm : Form
                 _settings.MarkerVisibility = mode;
                 SyncMarkersMenu();
                 _grid.RefreshView();
+                SaveSettingsSoon();
             })
             { Tag = mode });
         Item("Always", MarkerVisibilityMode.Always);
@@ -540,6 +543,7 @@ public sealed class MainForm : Form
             _grid.Attach(_doc, _settings);
             _filterTree.Attach(_doc);
             _state.AddRecentFile(path);
+            SaveStateSoon();
             RefreshRecentMenus();
             UpdateTitle();
             _lastRowCount = _lastMatched = -1;
@@ -958,7 +962,7 @@ public sealed class MainForm : Form
     private void ShowPreferences()
     {
         using var dlg = new PreferencesDialog(_settings);
-        if (dlg.ShowDialog(this) == DialogResult.OK) ApplySettingsEverywhere();
+        if (dlg.ShowDialog(this) == DialogResult.OK) { ApplySettingsEverywhere(); SaveSettingsSoon(); }
     }
 
     /// <summary>Pushes the current settings into every part of the window that reads them, and re-ticks the
@@ -1115,9 +1119,27 @@ public sealed class MainForm : Form
             if (r == DialogResult.Yes) SaveFilters(false);
         }
         _refreshTimer.Stop();
-        _settings.Save();
-        _state.Save();
+        _settingsDirty = _stateDirty = true;   // a clean exit rewrites both, as it always has
+        FlushConfig(force: true);
         _doc.Dispose();
+    }
+
+    // Preferences and recent files are written as they change, coalesced onto the refresh timer, because
+    // waiting for FormClosing loses the lot when the app is ended from Task Manager - which is a
+    // reasonable way to skip the save-filters prompt.
+    private bool _settingsDirty, _stateDirty;
+    private long _lastConfigSave;
+
+    private void SaveSettingsSoon() => _settingsDirty = true;
+    private void SaveStateSoon() => _stateDirty = true;
+
+    private void FlushConfig(bool force = false)
+    {
+        if (!_settingsDirty && !_stateDirty) return;
+        if (!force && Environment.TickCount64 - _lastConfigSave < 1000) return;   // Ctrl+Wheel zooms in bursts
+        _lastConfigSave = Environment.TickCount64;
+        if (_settingsDirty) { _settingsDirty = false; _settings.Save(); }
+        if (_stateDirty) { _stateDirty = false; _state.Save(); }
     }
 
     private void UpdateStatusIfChanged()

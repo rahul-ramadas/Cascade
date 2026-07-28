@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Cascade.Core.IO;
 
 namespace Cascade.App;
 
@@ -15,6 +16,14 @@ internal static class SettingsFolder
         Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR") is { Length: > 0 } dir
             ? dir
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Cascade");
+
+    /// <summary>Moves a file that would not parse out of the way rather than letting the next save
+    /// overwrite it. What is in it is usually readable by hand, and a silent reset to defaults is not
+    /// something anyone can recover from.</summary>
+    public static void SetAside(string path)
+    {
+        try { File.Move(path, path + ".bad", overwrite: true); } catch { /* best-effort */ }
+    }
 }
 
 /// <summary>Machine-agnostic user preferences, persisted to <c>%APPDATA%\Cascade\settings.json</c>. Holds
@@ -64,7 +73,8 @@ public sealed class AppSettings
             if (File.Exists(SettingsPath))
                 return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
         }
-        catch { /* fall back to defaults */ }
+        catch (JsonException) { SettingsFolder.SetAside(SettingsPath); }
+        catch { /* unreadable right now - leave it where it is and use defaults for this run */ }
         return new AppSettings();
     }
 
@@ -73,7 +83,7 @@ public sealed class AppSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            AtomicFile.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, Indented));
         }
         catch { /* best-effort */ }
     }
@@ -81,7 +91,9 @@ public sealed class AppSettings
     /// <summary>Writes every preference to <paramref name="path"/> - the same content as the settings file.
     /// Nothing machine-specific is in here, so the result can be imported on another machine as-is.</summary>
     public void ExportTo(string path)
-        => File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+        => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(this, Indented));
+
+    private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
     /// <summary>Replaces every preference from a previously exported file, leaving this machine's state
     /// (recent files, last filter file) alone. Throws if the file is not one.</summary>

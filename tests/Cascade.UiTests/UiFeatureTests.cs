@@ -483,4 +483,50 @@ public class UiFeatureTests
             try { Directory.Delete(cfg, true); } catch { /* ignore */ }
         }
     }
+
+    [Fact]
+    public void A_forced_kill_keeps_what_the_session_changed()
+    {
+        // Ending Cascade from Task Manager is a reasonable way to skip the save-filters prompt, so nothing
+        // the user changed may depend on the window closing tidily. Dispose kills the process outright -
+        // the same TerminateProcess that End Task uses - so this is the real thing, not a simulation.
+        string log = TestData.WriteLogFile();
+        string cfg = CascadeApp.NewSettingsDir();
+        string settingsFile = Path.Combine(cfg, "settings.json");
+        string stateFile = Path.Combine(cfg, "state.json");
+        try
+        {
+            using (var a = CascadeApp.LaunchExisting(log, null, cfg, ownsFiles: false, ownsSettingsDir: false))
+            {
+                Assert.True(a.ClickMenu("View", "Zoom In"), "the View menu stopped working");
+                Assert.True(a.WaitStatus("Zoom:", "Zoom: 110%"), a.StatusText("Zoom:"));
+
+                // Both files must reach disk while the app is still running, not on the way out.
+                Assert.True(Retry.WhileFalse(() => Contains(settingsFile, "\"ZoomPercent\": 110"),
+                                             TimeSpan.FromSeconds(10)).Result,
+                            $"zoom never reached {settingsFile}: {Read(settingsFile)}");
+                Assert.True(Retry.WhileFalse(() => Contains(stateFile, Path.GetFileName(log)),
+                                             TimeSpan.FromSeconds(10)).Result,
+                            $"the opened file never reached {stateFile}: {Read(stateFile)}");
+            }
+
+            using var b = CascadeApp.LaunchExisting(log, null, cfg, ownsFiles: false, ownsSettingsDir: false);
+            Assert.True(b.WaitStatus("Zoom:", "Zoom: 110%"),
+                        $"the killed session's zoom was not remembered: {b.StatusText("Zoom:")}");
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { /* ignore */ }
+            try { Directory.Delete(cfg, true); } catch { /* ignore */ }
+        }
+    }
+
+    private static string Read(string path)
+    {
+        try { return File.Exists(path) ? File.ReadAllText(path) : "(no such file)"; }
+        catch (IOException) { return "(being written)"; }
+    }
+
+    private static bool Contains(string path, string text)
+        => Read(path).Contains(text, StringComparison.Ordinal);
 }

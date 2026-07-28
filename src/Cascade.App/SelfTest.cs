@@ -289,6 +289,12 @@ internal static class SelfTest
             ok &= Check("reads state left in an old settings file",
                         migrated.RecentFiles.SequenceEqual([@"C:\logs\old.log"])
                         && migrated.LastFilterFile == @"C:\old.cascade");
+
+            // A file that will not parse is kept, not quietly replaced by defaults on the next save.
+            File.WriteAllText(AppSettings.FilePath, """{"FontFamily":"Cascadia Mono","Fon""");
+            _ = AppSettings.Load();
+            ok &= Check("keeps an unparseable settings file aside",
+                        File.Exists(AppSettings.FilePath + ".bad"));
             return ok;
         }
         finally

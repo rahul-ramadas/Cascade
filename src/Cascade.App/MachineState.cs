@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Cascade.Core.IO;
 
 namespace Cascade.App;
 
@@ -37,7 +38,8 @@ public sealed class MachineState
         {
             if (File.Exists(path)) return JsonSerializer.Deserialize<MachineState>(File.ReadAllText(path));
         }
-        catch { /* fall back to defaults */ }
+        catch (JsonException) { SettingsFolder.SetAside(path); }
+        catch { /* unreadable right now - leave it where it is and use defaults for this run */ }
         return null;
     }
 
@@ -46,7 +48,7 @@ public sealed class MachineState
         try
         {
             Directory.CreateDirectory(SettingsFolder.Dir);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch { /* best-effort */ }
     }

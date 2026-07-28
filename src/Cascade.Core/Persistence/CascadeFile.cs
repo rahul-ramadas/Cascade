@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Cascade.Core.Columns;
+using Cascade.Core.IO;
 using Cascade.Core.Model;
 
 namespace Cascade.Core.Persistence;
@@ -28,7 +29,7 @@ public static class CascadeFile
             Filters = filters.Roots.Select(ToDto).ToList(),
             Columns = columns is null ? null : ToDto(columns)
         };
-        File.WriteAllText(path, JsonSerializer.Serialize(dto, Options));
+        AtomicFile.WriteAllText(path, JsonSerializer.Serialize(dto, Options));
     }
 
     public static (FilterCollection Filters, ColumnSpec? Columns) Load(string path)
