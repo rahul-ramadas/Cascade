@@ -1,5 +1,7 @@
 using System.Drawing;
+using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Cascade.App;
 
@@ -51,6 +53,9 @@ public sealed class AppSettings
 
     private static string SettingsPath => Path.Combine(SettingsDir, "settings.json");
 
+    /// <summary>Where the settings actually live, so the user can be told.</summary>
+    public static string FilePath => SettingsPath;
+
     public void AddRecentFile(string path) => AddRecent(RecentFiles, path);
     public void AddRecentFilterFile(string path) => AddRecent(RecentFilterFiles, path);
 
@@ -81,6 +86,34 @@ public sealed class AppSettings
         }
         catch { /* best-effort */ }
     }
+
+    /// <summary>Writes every setting to <paramref name="path"/> - the same content as the settings file, so
+    /// it can be carried to another machine or kept as a backup.</summary>
+    public void ExportTo(string path)
+        => File.WriteAllText(path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+
+    /// <summary>Replaces every setting from a previously exported file. Throws if the file is not one.</summary>
+    public void ImportFrom(string path)
+    {
+        AppSettings? loaded;
+        try { loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path)); }
+        catch (JsonException ex) { throw new InvalidDataException("That is not a Cascade settings file.", ex); }
+        if (loaded is null) throw new InvalidDataException("That settings file is empty.");
+        CopyFrom(loaded);
+    }
+
+    /// <summary>Copies every persisted property in place - the whole application already holds a reference to
+    /// this instance, so it must be updated rather than replaced. Done by reflection so that adding a setting
+    /// cannot silently leave it out of an import.</summary>
+    public void CopyFrom(AppSettings other)
+    {
+        foreach (var p in Persisted) p.SetValue(this, p.GetValue(other));
+    }
+
+    internal static IEnumerable<PropertyInfo> Persisted =>
+        typeof(AppSettings)
+            .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(p => p.CanRead && p.CanWrite && p.GetCustomAttribute<JsonIgnoreAttribute>() is null);
 
     /// <summary>The 8 marker colors (index 0..7).</summary>
     public static readonly Color[] MarkerColors =

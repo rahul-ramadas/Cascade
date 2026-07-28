@@ -179,6 +179,11 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(_recentFilesMenu);
         file.DropDownItems.Add(_recentFilterFilesMenu);
         file.DropDownItems.Add(new ToolStripSeparator());
+        var settingsMenu = new ToolStripMenuItem("Se&ttings");
+        settingsMenu.DropDownItems.Add(Mi("&Export…", (_, _) => ExportSettings()));
+        settingsMenu.DropDownItems.Add(Mi("&Import…", (_, _) => ImportSettings()));
+        file.DropDownItems.Add(settingsMenu);
+        file.DropDownItems.Add(new ToolStripSeparator());
         file.DropDownItems.Add(Mi("E&xit", (_, _) => Close()));
 
         var edit = new ToolStripMenuItem("&Edit");
@@ -926,15 +931,53 @@ public sealed class MainForm : Form
     private void ShowPreferences()
     {
         using var dlg = new PreferencesDialog(_settings);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            _miLineNumbers.Checked = _settings.ShowLineNumbers;
-            SyncMarkersMenu();
-            _grid.ApplySettings(_settings);
-            _filterTree.SetSettings(_settings);
-            UpdateStatus();
-        }
+        if (dlg.ShowDialog(this) == DialogResult.OK) ApplySettingsEverywhere();
     }
+
+    /// <summary>Pushes the current settings into every part of the window that reads them, and re-ticks the
+    /// menus that mirror one. Used after Preferences and after importing a settings file.</summary>
+    private void ApplySettingsEverywhere()
+    {
+        _miLineNumbers.Checked = _settings.ShowLineNumbers;
+        SyncMarkersMenu();
+        _grid.ApplySettings(_settings);
+        _filterTree.SetSettings(_settings);
+        RefreshRecentMenus();
+        UpdateStatus();
+    }
+
+    private void ExportSettings()
+    {
+        using var dlg = new SaveFileDialog
+        {
+            Title = "Export settings",
+            Filter = "Cascade settings (*.json)|*.json|All files (*.*)|*.*",
+            FileName = "cascade-settings.json"
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try { _settings.ExportTo(dlg.FileName); }
+        catch (Exception ex) { Warn("Could not export settings", ex); }
+    }
+
+    private void ImportSettings()
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Import settings",
+            Filter = "Cascade settings (*.json)|*.json|All files (*.*)|*.*"
+        };
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        try
+        {
+            _settings.ImportFrom(dlg.FileName);
+            _settings.Save();
+            ApplySettingsEverywhere();
+        }
+        catch (Exception ex) { Warn("Could not import settings", ex); }
+    }
+
+    private void Warn(string what, Exception ex) =>
+        MessageBox.Show(this, $"{what}:\n\n{ex.Message}", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 
     // ---- find / goto ----
 

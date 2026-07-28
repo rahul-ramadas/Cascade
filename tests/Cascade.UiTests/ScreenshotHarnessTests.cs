@@ -30,4 +30,24 @@ public class ScreenshotHarnessTests
             try { Directory.Delete(outDir, recursive: true); } catch { /* ignore */ }
         }
     }
+
+    /// <summary>
+    /// <c>Cascade.exe --selftest</c> checks the engine end to end and round-trips every persisted setting
+    /// through an export and import. Running it here keeps those checks honest: they live in the app rather
+    /// than in this project, which cannot reference it.
+    /// </summary>
+    [Fact]
+    public void Self_test_passes()
+    {
+        var psi = new ProcessStartInfo(TestData.AppExe(), "--selftest") { UseShellExecute = false };
+        using var app = Process.Start(psi) ?? throw new InvalidOperationException("Could not start Cascade.exe.");
+        try
+        {
+            Assert.True(app.WaitForExit(120_000), "--selftest never finished");
+            string log = Path.Combine(Path.GetTempPath(), "cascade_selftest.log");
+            string detail = File.Exists(log) ? "\n\n" + File.ReadAllText(log) : "";
+            Assert.True(app.ExitCode == 0, $"--selftest failed (exit {app.ExitCode}){detail}");
+        }
+        finally { try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ } }
+    }
 }

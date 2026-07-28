@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Drawing;
 using System.Text;
 using Cascade.Core.Document;
 using Cascade.Core.Model;
@@ -28,6 +29,7 @@ internal static class SelfTest
             string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
 
             bool ok = RunEngineChecks();
+            ok &= RunSettingsChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -40,6 +42,60 @@ internal static class SelfTest
             return 2;
         }
         finally { _log.Dispose(); }
+    }
+
+    /// <summary>Exported settings must come back exactly, or carrying them to another machine silently
+    /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one
+    /// is covered automatically.</summary>
+    private static bool RunSettingsChecks()
+    {
+        Line("-- settings export/import --");
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_st_cfg_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var original = new AppSettings
+            {
+                FontFamily = "Cascadia Mono",
+                FontSize = 13.5f,
+                ZoomPercent = 130,
+                TabSize = 7,
+                ShowLineNumbers = false,
+                MarkerVisibility = MarkerVisibilityMode.Never,
+                ForegroundArgb = Color.Teal.ToArgb(),
+                BackgroundArgb = Color.Ivory.ToArgb(),
+                AutoLoadLastFilterFile = false,
+                LastFilterFile = @"C:\somewhere\filters.cascade"
+            };
+            original.AddRecentFile(@"C:\logs\a.log");
+            original.AddRecentFilterFile(@"C:\logs\f.cascade");
+
+            string file = Path.Combine(dir, "exported.json");
+            original.ExportTo(file);
+
+            var restored = new AppSettings();          // starts at defaults
+            restored.ImportFrom(file);
+
+            bool ok = true;
+            foreach (var p in AppSettings.Persisted)
+            {
+                object? a = p.GetValue(original), b = p.GetValue(restored);
+                bool same = a is IEnumerable<string> left && b is IEnumerable<string> right
+                    ? left.SequenceEqual(right)
+                    : Equals(a, b);
+                ok &= Check($"round-trips {p.Name}", same);
+            }
+
+            // Something that is not a settings file must be refused, not allowed to wipe the preferences.
+            string junk = Path.Combine(dir, "junk.json");
+            File.WriteAllText(junk, "definitely not json");
+            bool refused = false;
+            try { new AppSettings().ImportFrom(junk); }
+            catch (InvalidDataException) { refused = true; }
+            ok &= Check("refuses a file that is not settings", refused);
+            return ok;
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     private static bool RunEngineChecks()
