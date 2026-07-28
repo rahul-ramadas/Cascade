@@ -120,9 +120,9 @@ public sealed class UpdateService
 
     private void Install(string exe, string staged, Version? version)
     {
-        if (UpdateInstaller.Apply(exe, staged) is null)
+        if (UpdateInstaller.Apply(exe, staged, out string? why) is null)
         {
-            _lastError = "The update was downloaded but could not be installed.";
+            _lastError = $"The update was downloaded but could not be installed ({why}).";
             return;
         }
         _pendingVersion = version;

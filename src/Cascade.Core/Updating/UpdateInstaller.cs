@@ -76,17 +76,55 @@ public static class UpdateInstaller
     /// Installs <paramref name="stagedPath"/> under the executable's own name, returning the path the
     /// running image was moved to, or null if nothing was installed.
     /// </summary>
-    public static string? Apply(string exePath, string stagedPath)
+    public static string? Apply(string exePath, string stagedPath) => Apply(exePath, stagedPath, out _);
+
+    /// <summary>
+    /// As <see cref="Apply(string, string)"/>, reporting why it could not be done. Updating is silent, so
+    /// without this a failed install is indistinguishable from no update being available.
+    /// </summary>
+    public static string? Apply(string exePath, string stagedPath, out string? error)
     {
+        error = null;
         if (!File.Exists(stagedPath) || !File.Exists(exePath)) return null;
 
-        string oldPath = FreeOldPath(exePath);
-        try
+        for (int attempt = 0; ; attempt++)
         {
-            File.Replace(stagedPath, exePath, oldPath, ignoreMetadataErrors: true);
-            return oldPath;
+            string oldPath = FreeOldPath(exePath);
+
+            // ReplaceFileW is the tidy one: it keeps the destination's attributes and ACLs. It also wants
+            // more of the staged file than Windows allows while that file is still held as a recently-run
+            // image - which it always is, because it was executed moments ago to verify it.
+            try
+            {
+                File.Replace(stagedPath, exePath, oldPath, ignoreMetadataErrors: true);
+                return oldPath;
+            }
+            catch (Exception replaceFailure)
+            {
+                error = $"replace: {replaceFailure.Message}";
+            }
+
+            // Renaming needs nothing but delete access, which Windows does grant for an image in use - a
+            // running executable can be moved aside and carries on from its new name. Undo the first move
+            // if the second fails, or there would be no executable under the app's own name at all.
+            try
+            {
+                File.Move(exePath, oldPath);
+                try
+                {
+                    File.Move(stagedPath, exePath);
+                    return oldPath;
+                }
+                catch { File.Move(oldPath, exePath); throw; }
+            }
+            catch (Exception renameFailure)
+            {
+                error += $"; rename: {renameFailure.Message}";
+            }
+
+            if (attempt >= 10) return null;
+            Thread.Sleep(100);
         }
-        catch { return null; }
     }
 
     /// <summary>A backup name that is free. The usual one may still be in use by a process from an earlier

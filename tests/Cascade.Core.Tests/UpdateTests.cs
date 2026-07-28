@@ -151,6 +151,42 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
+    public void The_staged_build_being_held_as_a_recently_run_image_does_not_block_the_install()
+    {
+        // The staged file was executed moments earlier to verify it, and Windows holds the image open for
+        // a while after that process exits - with exactly this sharing. Renaming is still permitted, which
+        // is why the install must not depend on ReplaceFileW alone.
+        string staged = WriteStaged("the new build");
+
+        using (File.Open(staged, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+        {
+            string? old = UpdateInstaller.Apply(_exe, staged);
+
+            Assert.NotNull(old);
+            Assert.Equal("the new build", File.ReadAllText(_exe));
+            Assert.Equal("running build", File.ReadAllText(old!));
+        }
+    }
+
+    [Fact]
+    public void The_running_image_being_held_open_does_not_block_the_install()
+    {
+        // Windows keeps a running executable open for reading and deleting, and so do scanners. That is
+        // more sharing than ReplaceFileW will accept, so on some machines - a GitHub runner among them -
+        // the tidy swap fails and the install has to fall back to renaming the image out of the way.
+        string staged = WriteStaged("the new build");
+
+        using (File.Open(_exe, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+        {
+            string? old = UpdateInstaller.Apply(_exe, staged);
+
+            Assert.NotNull(old);
+            Assert.Equal("the new build", File.ReadAllText(_exe));
+            Assert.Equal("running build", File.ReadAllText(old!));
+        }
+    }
+
+    [Fact]
     public void Apply_does_nothing_when_there_is_no_staged_build()
         => Assert.Null(UpdateInstaller.Apply(_exe, UpdateInstaller.StagedPath(_exe)));
 
