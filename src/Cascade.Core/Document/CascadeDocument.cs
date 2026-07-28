@@ -288,12 +288,33 @@ public sealed class CascadeDocument : IDisposable
         if (!snapshot.TryGetIndex(filter, out _)) return -1; // filter not in the current snapshot
         long count = CompletedLineCount;
         if (count <= 0) return -1;
+        // A superseded or cancelled find must not come back with an answer, even a cached one.
+        ct.ThrowIfCancellationRequested();
+        long from = forward ? Math.Max(0, startLine) : Math.Min(startLine, count - 1);
 
+        if (_filterService is not null)
+        {
+            // The filtering pass already records which lines each filter matched, so when that is still
+            // valid the answer is a bit scan - no reading, decoding or matching at all.
+            if (_filterService.TryFindMatchFromCache(snapshot, filter, from, forward, out long cached))
+                return cached;
+
+            // Nothing cached for it yet (typically because the filter is switched off). Compute it exactly
+            // as switching it on would - the same automaton, the same parallel block scan - and remember the
+            // result, so this costs one pass once and nothing on every later find.
+            var findSnapshot = FilterSnapshot.Build(Filters, forceEnabled: filter);
+            _filterService.PrimeCache(findSnapshot, ct, onProgress);
+            if (_filterService.TryFindMatchFromCache(findSnapshot, filter, from, forward, out long primed))
+                return primed;
+        }
+
+        // Fallback for the cases the cache cannot serve: marker filters, a file still being indexed, or a
+        // cache already at its memory budget.
         const int ProgressEvery = 64 * 1024;
         var reader = new LineReader(_src, _enc.Encoding);
         if (forward)
         {
-            long from = Math.Max(0, startLine), span = Math.Max(1, count - from);
+            long span = Math.Max(1, count - from);
             for (long l = from; l < count; l++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -303,7 +324,7 @@ public sealed class CascadeDocument : IDisposable
         }
         else
         {
-            long from = Math.Min(startLine, count - 1), span = Math.Max(1, from + 1);
+            long span = Math.Max(1, from + 1);
             for (long l = from; l >= 0; l--)
             {
                 ct.ThrowIfCancellationRequested();

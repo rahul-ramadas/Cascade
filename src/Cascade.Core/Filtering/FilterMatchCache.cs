@@ -22,11 +22,15 @@ public sealed class FilterMatchCache
 
     private readonly Dictionary<string, MatchSet> _sets = new(StringComparer.Ordinal);
     private readonly long _budgetBytes;
+    // Written by the filter worker, read by per-filter find on its own background thread.
+    private readonly object _sync = new();
 
     public FilterMatchCache(long budgetBytes = DefaultBudgetBytes) => _budgetBytes = budgetBytes;
 
-    public long UsedBytes { get; private set; }
-    public int Count => _sets.Count;
+    public long UsedBytes { get { lock (_sync) return _usedBytes; } }
+    public int Count { get { lock (_sync) return _sets.Count; } }
+
+    private long _usedBytes;
 
     /// <summary>The lines a filter matched. Read sequentially by <see cref="Combine"/> via a word cursor.</summary>
     public sealed class MatchSet
@@ -65,6 +69,66 @@ public sealed class FilterMatchCache
             return false;
         }
 
+        /// <summary>The first matching line at or after <paramref name="from"/>, or -1. This is what makes
+        /// "find the filter's next match" a bit scan instead of a re-read of the file.</summary>
+        public long Next(long from)
+        {
+            if (from < 0) from = 0;
+            if (from >= Covered) return -1;
+
+            if (_dense is ulong[] dense)
+            {
+                long w = from >> 6;
+                ulong word = dense[w] & (ulong.MaxValue << (int)(from & 63));
+                while (true)
+                {
+                    if (word != 0)
+                    {
+                        long line = (w << 6) + BitOperations.TrailingZeroCount(word);
+                        return line < Covered ? line : -1;
+                    }
+                    if (++w >= dense.LongLength) return -1;
+                    word = dense[w];
+                }
+            }
+
+            int lo = 0, hi = _sparseCount - 1, found = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse![mid] >= from) { found = mid; hi = mid - 1; } else lo = mid + 1;
+            }
+            return found < 0 ? -1 : _sparse![found];
+        }
+
+        /// <summary>The last matching line at or before <paramref name="from"/>, or -1.</summary>
+        public long Previous(long from)
+        {
+            if (from >= Covered) from = Covered - 1;
+            if (from < 0) return -1;
+
+            if (_dense is ulong[] dense)
+            {
+                long w = Math.Min(from >> 6, dense.LongLength - 1);
+                int bit = (int)(from & 63);
+                ulong word = dense[w] & (bit == 63 ? ulong.MaxValue : (1UL << (bit + 1)) - 1);
+                while (true)
+                {
+                    if (word != 0) return (w << 6) + (63 - BitOperations.LeadingZeroCount(word));
+                    if (--w < 0) return -1;
+                    word = dense[w];
+                }
+            }
+
+            int lo = 0, hi = _sparseCount - 1, found = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse![mid] <= from) { found = mid; lo = mid + 1; } else hi = mid - 1;
+            }
+            return found < 0 ? -1 : _sparse![found];
+        }
+
         /// <summary>Walks the set 64 lines at a time. Words must be requested in ascending order.</summary>
         internal struct Cursor
         {
@@ -89,22 +153,31 @@ public sealed class FilterMatchCache
     }
 
     /// <summary>Returns the cached set for <paramref name="key"/> if it covers at least
-    /// <paramref name="requiredLines"/> lines.</summary>
+    /// <paramref name="requiredLines"/> lines. <see cref="MatchSet"/> is immutable, so the result stays
+    /// valid outside the lock.</summary>
     public bool TryGet(string key, long requiredLines, out MatchSet set)
-        => _sets.TryGetValue(key, out set!) && set.Covered >= requiredLines;
+    {
+        lock (_sync) return _sets.TryGetValue(key, out set!) && set.Covered >= requiredLines;
+    }
 
     public void Clear()
     {
-        _sets.Clear();
-        UsedBytes = 0;
+        lock (_sync)
+        {
+            _sets.Clear();
+            _usedBytes = 0;
+        }
     }
 
     internal void Store(string key, MatchSet set)
     {
-        if (_sets.TryGetValue(key, out var old)) UsedBytes -= old.Bytes;
-        else if (UsedBytes + set.Bytes > _budgetBytes) return;   // over budget: simply do not cache
-        _sets[key] = set;
-        UsedBytes += set.Bytes;
+        lock (_sync)
+        {
+            if (_sets.TryGetValue(key, out var old)) _usedBytes -= old.Bytes;
+            else if (_usedBytes + set.Bytes > _budgetBytes) return;   // over budget: simply do not cache
+            _sets[key] = set;
+            _usedBytes += set.Bytes;
+        }
     }
 
     /// <summary>Accumulates one filter's matching lines during a pass, switching from a sorted list to a bit

@@ -22,8 +22,8 @@ public class DocumentIntegrationTests
     [Fact]
     public void Filter_find_reports_progress_and_honors_cancellation()
     {
-        // Scanning for a filter's next match decodes every line, so on a large file it has to be able to
-        // report how far it has got and to be stopped part-way; otherwise the window just freezes.
+        // Finding a filter's next match runs the same pass that enabling the filter would, and remembers the
+        // result: the first search does the work (and reports progress), every later one is a bit scan.
         var sb = new StringBuilder();
         for (int i = 0; i < 200_000; i++) sb.Append("nope ").Append(i).Append('\n');
         string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
@@ -32,8 +32,10 @@ public class DocumentIntegrationTests
             using var doc = new CascadeDocument();
             doc.Open(path);
             doc.WaitForIndex();
+
+            // Disabled, and the only filter there is - so no filtering pass runs and nothing is cached yet.
             var filters = new FilterCollection();
-            var absent = new Filter { Enabled = true, Match = { Text = "absent-text" } };
+            var absent = new Filter { Enabled = false, Match = { Text = "absent-text" } };
             filters.Add(absent);
             doc.SetFilters(filters);
 
@@ -46,10 +48,81 @@ public class DocumentIntegrationTests
             Assert.True(reports > 1, $"expected multiple progress callbacks, got {reports}");
             Assert.InRange(last, 0.0, 1.0);
 
+            // The pass is remembered, so asking again does no work at all.
+            int again = 0;
+            Assert.Equal(-1, doc.FindLineMatchingFilter(absent, 0, forward: true, CancellationToken.None,
+                _ => again++));
+            Assert.Equal(0, again);
+
             using var cts = new CancellationTokenSource();
             cts.Cancel();
             Assert.Throws<OperationCanceledException>(() =>
                 doc.FindLineMatchingFilter(absent, 0, forward: true, cts.Token));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Filter_find_from_the_cache_agrees_with_the_data()
+    {
+        // "disk" nested under "ERROR" deep-matches a line only when both match, i.e. every 21st line. The
+        // expected answer is therefore computable from the data alone - a reference that owes nothing to the
+        // implementation being tested. Checked for the cached path and for the path that has to compute it.
+        const int Lines = 50_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < Lines; i++)
+        {
+            sb.Append(i % 3 == 0 ? "ERROR " : "INFO ");
+            if (i % 7 == 0) sb.Append("disk ");
+            sb.Append("line ").Append(i).Append('\n');
+        }
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        static long Expected(long start, bool forward)
+        {
+            if (forward)
+            {
+                for (long l = Math.Max(0, start); l < Lines; l++) if (l % 21 == 0) return l;
+                return -1;
+            }
+            for (long l = Math.Min(start, Lines - 1); l >= 0; l--) if (l % 21 == 0) return l;
+            return -1;
+        }
+
+        static (CascadeDocument Doc, Filter Target) Open(string path, bool enabled)
+        {
+            var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = new FilterCollection();
+            var error = new Filter { Enabled = enabled, Match = { Text = "ERROR" } };
+            var disk = new Filter { Enabled = enabled, Match = { Text = "disk" } };
+            filters.Add(error);
+            filters.Add(disk, error);
+            doc.SetFilters(filters);
+            return (doc, disk);
+        }
+
+        try
+        {
+            // Enabled: a completed pass has already recorded the answer.
+            var (cached, cachedTarget) = Open(path, enabled: true);
+            // Disabled: nothing is cached, so the find has to compute it the way enabling would.
+            var (computed, computedTarget) = Open(path, enabled: false);
+            using (cached)
+            using (computed)
+            {
+                WaitFilter(cached);
+                foreach (long start in new long[] { 0, 1, 20, 21, 22, 1000, 25_000, 49_998, 49_999 })
+                {
+                    foreach (bool forward in new[] { true, false })
+                    {
+                        long expected = Expected(start, forward);
+                        Assert.Equal(expected, cached.FindLineMatchingFilter(cachedTarget, start, forward, CancellationToken.None));
+                        Assert.Equal(expected, computed.FindLineMatchingFilter(computedTarget, start, forward, CancellationToken.None));
+                    }
+                }
+            }
         }
         finally { File.Delete(path); }
     }

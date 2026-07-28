@@ -151,6 +151,18 @@ public sealed class FilterSnapshot
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
     public bool TryGetIndex(Filter filter, out int index) => _index.TryGetValue(filter, out index);
 
+    /// <summary>The key identifying a filter's deep-match results in the match cache. False when the filter
+    /// is not in this snapshot, or its chain involves a marker (whose results must never be reused).</summary>
+    public bool TryGetCacheKey(Filter filter, out string key)
+    {
+        key = "";
+        if (!_index.TryGetValue(filter, out int index)) return false;
+        var node = _nodesByIndex[index];
+        if (!node.Cacheable) return false;
+        key = node.CacheKey;
+        return true;
+    }
+
     /// <summary>True if <paramref name="target"/> <i>deep-matches</i> the line: its own predicate and
     /// every ancestor's predicate match (independent of enabled state). Used by per-filter find.</summary>
     public bool DeepMatches(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, Filter target)
@@ -171,7 +183,12 @@ public sealed class FilterSnapshot
         return true;
     }
 
-    public static FilterSnapshot Build(FilterCollection filters)
+    public static FilterSnapshot Build(FilterCollection filters) => Build(filters, null);
+
+    /// <summary>Builds a snapshot in which <paramref name="forceEnabled"/> takes part in evaluation even when
+    /// the user has it switched off. Used by "find this filter's next match", which has to compute exactly
+    /// what enabling the filter would compute without changing what the view shows.</summary>
+    public static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled)
     {
         bool anyEnabled = false, anyInclude = false, anyMarker = false;
         int counter = 0;
@@ -180,13 +197,14 @@ public sealed class FilterSnapshot
 
         Node Convert(Filter f, int depth, string parentKey, bool parentCacheable)
         {
+            bool enabled = f.Enabled || ReferenceEquals(f, forceEnabled);
             var node = new Node
             {
                 Type = f.Match.Type,
                 Text = f.Match.Text,
                 CaseSensitive = f.Match.CaseSensitive,
                 MarkerIndex = f.Match.MarkerIndex,
-                Enabled = f.Enabled,
+                Enabled = enabled,
                 Kind = f.Kind,
                 Depth = depth,
                 Index = counter++,
@@ -220,7 +238,7 @@ public sealed class FilterSnapshot
             node.IsRegex = f.Match.Type == FilterMatchType.Text && f.Match.Regex;
             node.Comparison = f.Match.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
 
-            if (f.Enabled)
+            if (enabled)
             {
                 anyEnabled = true;
                 if (f.Kind == FilterKind.Include) anyInclude = true;
@@ -230,7 +248,7 @@ public sealed class FilterSnapshot
             for (int i = 0; i < f.Children.Count; i++) children[i] = Convert(f.Children[i], depth + 1, node.CacheKey, node.Cacheable);
             node.Children = children;
 
-            node.SubtreeHasEnabled = f.Enabled;
+            node.SubtreeHasEnabled = enabled;
             foreach (var c in children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
             if (node.Type == FilterMatchType.Marker && node.SubtreeHasEnabled) anyMarker = true;
             return node;

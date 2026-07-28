@@ -3,6 +3,7 @@ using System.Text;
 using Cascade.Core.Indexing;
 using Cascade.Core.IO;
 using Cascade.Core.Markers;
+using Cascade.Core.Model;
 
 namespace Cascade.Core.Filtering;
 
@@ -116,6 +117,22 @@ public sealed class FilterService : IDisposable
 
     /// <summary>How many filter changes were served entirely from cached results, with no pass over the file.</summary>
     public long CacheHits { get; private set; }
+
+    /// <summary>Answers "where is this filter's next/previous match" from the results the last full pass
+    /// already recorded, turning a re-read of the whole file into a bit scan. Returns false when the cache
+    /// cannot answer (nothing stored for this filter, or it does not cover the file yet); returns true with
+    /// <paramref name="line"/> = -1 when the cache is authoritative and there is no such match.</summary>
+    public bool TryFindMatchFromCache(FilterSnapshot snapshot, Filter filter, long from, bool forward, out long line)
+    {
+        line = -1;
+        if (!_indexComplete()) return false;
+        long lines = _completedCount();
+        if (lines <= 0) return false;
+        if (!snapshot.TryGetCacheKey(filter, out string key)) return false;
+        if (!_cache.TryGet(key, lines, out var set)) return false;
+        line = forward ? set.Next(from) : set.Previous(from);
+        return true;
+    }
 
     /// <summary>Cancels the current generation (if any) and goes idle. Use when there are no enabled
     /// filters so <see cref="IsIdle"/> reports true at once and the UI can clear its "busy" state and
@@ -302,16 +319,40 @@ public sealed class FilterService : IDisposable
     private void ProcessBlock(Generation gen, long start, int len, CancellationToken ct)
     {
         bool[] shown = ArrayPool<bool>.Shared.Rent(len);
-        long[] blockCounts = new long[gen.Counts.Length];
+        try
+        {
+            long[] blockCounts = ScanBlock(gen.Snapshot, start, len, shown, gen.CacheBuild, gen.CacheFilters, ct);
+
+            // Update the visible set IN PLACE for this block: lines that still match keep their place, lines
+            // that stopped matching are dropped, new matches are added. Then publish the refreshed rank index
+            // so readers see a complete, coherent view of the whole file at every instant.
+            _visible.ApplyRange(start, shown.AsSpan(0, len));
+            _visible.Publish();
+
+            lock (gen.CountsSync)
+                for (int i = 0; i < blockCounts.Length; i++) gen.Counts[i] += blockCounts[i];
+        }
+        finally { ArrayPool<bool>.Shared.Return(shown); }
+    }
+
+    /// <summary>Evaluates one block of lines in parallel: fills <paramref name="shown"/> (when asked), feeds
+    /// each filter's matching lines to <paramref name="builders"/> (when caching) and returns the per-filter
+    /// match counts. Shared by the live filtering pass and by <see cref="PrimeCache"/>, so a find computes
+    /// results exactly the same way enabling the filter would.</summary>
+    private long[] ScanBlock(FilterSnapshot snapshot, long start, int len, bool[]? shown,
+        FilterMatchCache.SetBuilder?[]? builders, List<FilterSnapshot.CacheableFilter>? cacheFilters,
+        CancellationToken ct)
+    {
+        long[] blockCounts = new long[snapshot.FilterCount];
         object mergeLock = new();
 
-        // When a cache build is in flight, each 64-line group records which filters deep-matched its lines.
-        // Groups own whole words, so they can be written in parallel without any synchronisation.
-        bool caching = gen.CacheBuild is not null;
-        int deepWords = caching ? gen.Snapshot.DeepMatchWords : 0;   // words in one line's bitset
-        int filterCount = gen.Snapshot.FilterCount;
+        // When caching, each 64-line group records which filters deep-matched its lines. Groups own whole
+        // words, so they can be written in parallel without any synchronisation.
+        bool caching = builders is not null && cacheFilters is not null;
+        int deepWords = caching ? snapshot.DeepMatchWords : 0;   // words in one line's bitset
+        int filterCount = snapshot.FilterCount;
         int groups = (len + 63) / 64;
-        int deepLength = caching ? filterCount * groups : 0;         // one word per (filter, group)
+        int deepLength = caching ? filterCount * groups : 0;     // one word per (filter, group)
         ulong[]? deepBits = caching ? ArrayPool<ulong>.Shared.Rent(deepLength) : null;
         if (deepBits is not null) Array.Clear(deepBits, 0, deepLength);
 
@@ -327,8 +368,8 @@ public sealed class FilterService : IDisposable
                 () => new Worker
                 {
                     Reader = new LineReader(_src, _encoding),
-                    Counts = new long[gen.Counts.Length],
-                    Context = gen.Snapshot.GetThreadContext(),
+                    Counts = new long[snapshot.FilterCount],
+                    Context = snapshot.GetThreadContext(),
                     Deep = deepWords == 0 ? Array.Empty<ulong>() : new ulong[deepWords]
                 },
                 (g, _, w) =>
@@ -343,12 +384,14 @@ public sealed class FilterService : IDisposable
 
                         if (deepBits is null)
                         {
-                            shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
+                            bool hit = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
+                            if (shown is not null) shown[k] = hit;
                             continue;
                         }
 
                         Array.Clear(w.Deep);
-                        shown[k] = gen.Snapshot.Evaluate(span, line, _markers, w.Counts, w.Context, w.Deep).Shown;
+                        bool visible = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context, w.Deep).Shown;
+                        if (shown is not null) shown[k] = visible;
 
                         // Transpose this line's deep matches into per-filter words. Only set bits are visited,
                         // and a line matches very few filters, so this stays cheap.
@@ -368,14 +411,8 @@ public sealed class FilterService : IDisposable
                 },
                 w => { lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i]; });
 
-            // Update the visible set IN PLACE for this block: lines that still match keep their place, lines
-            // that stopped matching are dropped, new matches are added. Then publish the refreshed rank index
-            // so readers see a complete, coherent view of the whole file at every instant.
-            _visible.ApplyRange(start, shown.AsSpan(0, len));
-            _visible.Publish();
-
-            // Hand this block's per-filter results to the cache being built for this pass.
-            if (deepBits is not null && gen.CacheBuild is { } builders && gen.CacheFilters is { } cacheFilters)
+            // Hand this block's per-filter results to the sets being built.
+            if (deepBits is not null && builders is not null && cacheFilters is not null)
             {
                 long firstWord = start / 64;   // blocks are word-aligned
                 foreach (var filter in cacheFilters)
@@ -391,14 +428,38 @@ public sealed class FilterService : IDisposable
                 }
             }
 
-            lock (gen.CountsSync)
-                for (int i = 0; i < blockCounts.Length; i++) gen.Counts[i] += blockCounts[i];
+            return blockCounts;
         }
         finally
         {
-            ArrayPool<bool>.Shared.Return(shown);
             if (deepBits is not null) ArrayPool<ulong>.Shared.Return(deepBits);
         }
+    }
+
+    /// <summary>Computes and stores every cacheable filter's matching lines for <paramref name="snapshot"/>
+    /// using the same parallel, automaton-driven scan a filter change uses - but without touching the
+    /// visible view. This is what makes "find this filter's next match" cost the same as switching the
+    /// filter on once, and nothing at all after that.</summary>
+    public void PrimeCache(FilterSnapshot snapshot, CancellationToken ct, Action<double>? onProgress = null)
+    {
+        if (!_indexComplete()) return;                       // partial coverage is never stored
+        long lines = _completedCount();
+        if (lines <= 0) return;
+        if (!snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return;
+
+        var builders = new FilterMatchCache.SetBuilder?[snapshot.FilterCount];
+        foreach (var f in filters) builders[f.Index] = new FilterMatchCache.SetBuilder(lines);
+
+        for (long start = 0; start < lines; start += Block)
+        {
+            ct.ThrowIfCancellationRequested();
+            int len = (int)Math.Min(Block, lines - start);
+            ScanBlock(snapshot, start, len, null, builders, filters, ct);
+            onProgress?.Invoke((start + len) / (double)lines);
+        }
+
+        foreach (var f in filters)
+            if (builders[f.Index] is { } builder) _cache.Store(f.Key, builder.Build(lines));
     }
 
     public void Dispose()
