@@ -77,3 +77,21 @@ $RECYCLE.BIN/
 # but ignore any stray copies just in case.
 cascade_crash.log
 cascade_selftest.log
+# Squad: ignore runtime state (logs, inbox, sessions)
+# Note: .squad/casting/* is identity and MUST be committed to main, not ignored
+.squad/orchestration-log/
+.squad/log/
+.squad/decisions/inbox/
+.squad/sessions/
+.squad/.scratch/
+.squad/.cache/
+# Squad: GitHub automation is intentionally disabled in this repo.
+# `squad upgrade` unconditionally rewrites .github/workflows/ from the CLI's
+# template dir with no opt-out, so these are ignored rather than merely deleted.
+# Ignoring them means an upgrade can recreate them locally but they can never be
+# committed, never reach GitHub, and never trigger. Delete them after any upgrade.
+.github/workflows/squad-*.yml
+.github/workflows/sync-squad-labels.yml
+.github/copilot-instructions.md
+# Squad: SubSquad activation file (local to this machine)
+.squad-workstream
