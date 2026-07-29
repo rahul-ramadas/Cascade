@@ -84,6 +84,21 @@ jobs:
           -p:Version=$env:VERSION
           -o artifacts/publish
 
+      - name: Verify publish stayed framework-dependent
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'artifacts\publish\Cascade.exe'
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Published executable was not found at $exe."
+          }
+
+          $thresholdBytes = 5MB
+          $actualBytes = (Get-Item -LiteralPath $exe).Length
+          Write-Host "Published Cascade.exe size: $actualBytes bytes (threshold: $thresholdBytes bytes)."
+
+          if ($actualBytes -gt $thresholdBytes) {
+            throw "Published Cascade.exe is $actualBytes bytes, exceeding the $thresholdBytes byte guardrail. The likely cause is the publish becoming self-contained; expected framework-dependent single-file output is about 573 KB, while accidental self-contained output is about 116 MB."
+          }
+
       - name: Core tests
         run: >
           dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
