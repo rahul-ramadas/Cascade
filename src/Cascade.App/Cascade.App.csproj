@@ -20,6 +20,8 @@
     <ApplicationIcon>Assets\cascade.ico</ApplicationIcon>
     <AssemblyName>Cascade</AssemblyName>
     <RootNamespace>Cascade.App</RootNamespace>
+    <!-- PublishSingleFile with a runtime identifier defaults to a self-contained publish, and some SDKs ignore the false self-contained CLI switch, so the framework-dependent shape is declared here where MSBuild is authoritative. -->
+    <SelfContained>false</SelfContained>
   </PropertyGroup>
 
 </Project>
