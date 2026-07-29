@@ -261,6 +261,17 @@ internal static class SelfTest
             ok &= Check($"the same holds in a pane too narrow for any of it " +
                         $"(pattern {squeezed.DescX}px of {squeezed.CountX}px)",
                         squeezed.DescX * 2 >= squeezed.CountX);
+
+            // Descriptions far shorter than the word "Description": the column still has to be able to show
+            // its own heading, or it reads as broken however well the content fits.
+            host.ClientSize = new Size(400, 200);
+            longFilter.Description = "a";
+            other.Description = "b";
+            SetFilters(doc, tree, longFilter, other);
+            var tiny = tree.ColumnsForTesting;
+            ok &= Check($"a column is at least as wide as its own heading " +
+                        $"(description {tiny.DescriptionWidth}px, heading needs {tree.HeaderWidthForTesting("Description")}px)",
+                        tiny.DescriptionWidth >= tree.HeaderWidthForTesting("Description"));
             return ok;
         }
         finally

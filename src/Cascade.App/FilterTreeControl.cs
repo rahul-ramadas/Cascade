@@ -278,7 +278,7 @@ public sealed class FilterTreeControl : UserControl
         foreach (var n in _flat)
             if (n.Tag is Filter f && !string.IsNullOrWhiteSpace(f.Description))
                 widest = Math.Max(widest, Measure(f.Description, Pick(FontStyle.Bold)));
-        _descDesired = widest == 0 ? 0 : widest + Inset * 2;
+        _descDesired = widest == 0 ? 0 : Math.Max(widest, HeaderWidth("Description")) + Inset * 2;
         LayoutColumns();
     }
 
@@ -298,8 +298,12 @@ public sealed class FilterTreeControl : UserControl
     }
 
     /// <summary>A column is never narrower than its own title: a header reading "C…" looks broken however
-    /// well the numbers underneath it fit.</summary>
+    /// well the numbers underneath it fit. Only the half-the-space cap below can overrule it, and only
+    /// because there is genuinely nowhere else for the width to come from.</summary>
     private int HeaderWidth(string title) => TextRenderer.MeasureText(title, _header.Font, Unbounded, MeasureFlags).Width;
+
+    /// <summary>Test seam: how much a heading needs, so a test can assert a column left room for its own.</summary>
+    internal int HeaderWidthForTesting(string title) => HeaderWidth(title);
 
     /// <summary>Count is whatever the longest count needs, never less than its own heading. Of what is left,
     /// the description takes what it needs up to half; the pattern gets the rest, so it always has at least
