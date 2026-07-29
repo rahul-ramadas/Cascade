@@ -115,6 +115,9 @@ internal static class SelfTest
                                               $"{unscrolled.GetPixel(diff.Value.X, diff.Value.Y)} -> " +
                                               $"{scrolled.GetPixel(diff.Value.X, diff.Value.Y)}]"),
                         diff is null);
+            if (diff is not null)
+                WriteRenderDiagnostics("scrolling right leaves the line-number margin untouched",
+                    host, grid, margin, diff.Value, unscrolled, scrolled);
 
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
@@ -142,6 +145,9 @@ internal static class SelfTest
             ok &= Check("scrolling right with columns leaves the margin untouched" +
                         (colDiff is null ? "" : $" [first differs at x={colDiff.Value.X},y={colDiff.Value.Y}]"),
                         colDiff is null);
+            if (colDiff is not null)
+                WriteRenderDiagnostics("scrolling right with columns leaves the margin untouched",
+                    host, grid, colMargin, colDiff.Value, colUnscrolled, colScrolled);
 
             // An automated or assistive scroll sets the scrollbar's Value, which raises ValueChanged but not
             // Scroll. If that path does not drop the view anchor, the next refresh re-applies the anchor and
@@ -307,6 +313,90 @@ internal static class SelfTest
             for (int x = r.Left; x < r.Right && x < a.Width; x++)
                 if (a.GetPixel(x, y) != b.GetPixel(x, y)) return new Point(x, y);
         return null;
+    }
+
+    private static void WriteRenderDiagnostics(string check, Form host, LineGridControl grid, Rectangle area,
+        Point diff, Bitmap before, Bitmap after)
+    {
+        try
+        {
+            TryDiagnosticLine("  render diagnostics:");
+            WriteDiagnosticValue("check", () => check);
+            WriteDiagnosticValue("terminal server session", () => SystemInformation.TerminalServerSession.ToString());
+            WriteDiagnosticValue("dpi", () =>
+            {
+                using var graphics = host.CreateGraphics();
+                return $"device={host.DeviceDpi}, graphics={graphics.DpiX:F1}x{graphics.DpiY:F1}";
+            });
+            WriteDiagnosticValue("host", () => $"client={host.ClientSize.Width}x{host.ClientSize.Height}, bounds={host.Bounds}");
+            WriteDiagnosticValue("grid metrics", () =>
+                $"gutter={grid.GutterWidthForTesting}, gutterTop/headerHeight={area.Top}, " +
+                $"rowHeight={PrivateInt(grid, "_rowHeight")?.ToString() ?? "unknown"}, gutterArea={area}");
+            WriteDiagnosticValue("first difference", () =>
+            {
+                Color beforePixel = before.GetPixel(diff.X, diff.Y);
+                Color afterPixel = after.GetPixel(diff.X, diff.Y);
+                return $"x={diff.X}, y={diff.Y}, before=0x{beforePixel.ToArgb():X8} ({beforePixel}), " +
+                       $"after=0x{afterPixel.ToArgb():X8} ({afterPixel})";
+            });
+            WriteScreenDiagnostics();
+            WriteDiagnosticValue("font smoothing", FontSmoothingSettings);
+        }
+        catch (Exception ex)
+        {
+            TryDiagnosticLine("  render diagnostics unavailable: " + ExceptionSummary(ex));
+        }
+    }
+
+    private static void WriteDiagnosticValue(string label, Func<string> value)
+    {
+        try { TryDiagnosticLine($"    {label}: {value()}"); }
+        catch (Exception ex) { TryDiagnosticLine($"    {label}: diagnostics unavailable ({ExceptionSummary(ex)})"); }
+    }
+
+    private static void TryDiagnosticLine(string text)
+    {
+        try { Line(text); }
+        catch { }
+    }
+
+    private static void WriteScreenDiagnostics()
+    {
+        Screen[] screens;
+        try { screens = Screen.AllScreens; }
+        catch (Exception ex)
+        {
+            TryDiagnosticLine("    screens: diagnostics unavailable (" + ExceptionSummary(ex) + ")");
+            return;
+        }
+
+        for (int i = 0; i < screens.Length; i++)
+        {
+            Screen screen = screens[i];
+            WriteDiagnosticValue("screen", () =>
+                $"{screen.DeviceName}, primary={screen.Primary}, bounds={screen.Bounds}, bpp={screen.BitsPerPixel}");
+        }
+    }
+
+    private static string ExceptionSummary(Exception ex) => ex.GetType().Name + ": " + ex.Message;
+
+    private static int? PrivateInt(object target, string fieldName)
+    {
+        object? value = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(target);
+        return value is int i ? i : null;
+    }
+
+    private static string FontSmoothingSettings()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop");
+            if (key is null) return "registry key unavailable";
+            string Value(string name) => $"{name}={key.GetValue(name) ?? "unset"}";
+            return string.Join(", ", Value("FontSmoothing"), Value("FontSmoothingType"),
+                Value("FontSmoothingGamma"), Value("FontSmoothingOrientation"));
+        }
+        catch (Exception ex) { return ex.GetType().Name + ": " + ex.Message; }
     }
 
     private static void Pump()

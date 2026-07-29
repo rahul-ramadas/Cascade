@@ -399,7 +399,7 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Opens Find (via the Edit menu), searches forward for <paramref name="text"/>, then closes it.</summary>
     public void FindText(string text)
     {
-        ClickMenu("Edit", "Find");
+        ClickMenuOrThrow("Edit", "Find");
         var dlg = FindDialog("Find") ?? throw new InvalidOperationException("Find dialog did not open.");
         var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
         var vp = edit?.Patterns.Value.PatternOrDefault;
@@ -409,17 +409,35 @@ internal sealed class CascadeApp : IDisposable
         try { dlg.Close(); } catch { /* modeless: hides */ }
     }
 
-    public void ToggleFilteredMode() => ClickMenu("View", "Show Only Filtered Lines");
+    public void ToggleFilteredMode()
+    {
+        bool expected = TryReadFilteredModeFromMenu() is { } current ? !current : !VisibleRowsLookFiltered();
+        ClickMenuOrThrow("View", "Show Only Filtered Lines");
+        WaitForFilteredMode(expected);
+    }
+
+    /// <summary>Sets filtered/dim mode to the requested state, verifying an observable end state.</summary>
+    public void SetFilteredMode(bool expected)
+    {
+        bool? current = TryReadFilteredModeFromMenu();
+        if (current == expected || (current is null && FilteredModeLooksLike(expected))) return;
+
+        ClickMenuOrThrow("View", "Show Only Filtered Lines");
+        WaitForFilteredMode(expected);
+    }
+
+    /// <summary>True when visible test rows all come from the imported MATCH filter.</summary>
+    public bool VisibleRowsLookFiltered() => RowsAreOnlyMatchLines();
 
     /// <summary>File -&gt; Close Filters: clears filters, detaches the filter file, and stops auto-load.</summary>
-    public void CloseFilters() => ClickMenu("File", "Close Filters");
-    public void FindNextForSelectedFilter() => ClickMenu("Filters", "Find Next Match");
-    public void FindPrevForSelectedFilter() => ClickMenu("Filters", "Find Previous Match");
+    public void CloseFilters() => ClickMenuOrThrow("File", "Close Filters");
+    public void FindNextForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Next Match");
+    public void FindPrevForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Previous Match");
 
     /// <summary>Opens the (modeless) Find dialog via the Edit menu and returns its window.</summary>
     public Window OpenFindDialog()
     {
-        ClickMenu("Edit", "Find");
+        ClickMenuOrThrow("Edit", "Find");
         return FindDialog("Find") ?? throw new InvalidOperationException("Find dialog did not open.");
     }
 
@@ -533,6 +551,72 @@ internal sealed class CascadeApp : IDisposable
         Settle();
         return true;
     }
+
+    public void ClickMenuOrThrow(params string[] path)
+    {
+        if (!ClickMenu(path))
+            throw new InvalidOperationException("MENU ACTION failed: " + string.Join(" > ", path) +
+                                                ". The requested menu item was not found or could not be invoked.");
+    }
+
+    private bool? TryReadFilteredModeFromMenu()
+    {
+        var top = TopItems().FirstOrDefault(m => Norm(m.Name) == Norm("View"));
+        if (top is null) return null;
+        Expand(top);
+        try
+        {
+            var item = FindOpenMenuItem("Show Only Filtered Lines");
+            if (item is null) return null;
+
+            var toggle = item.Patterns.Toggle.PatternOrDefault;
+            if (toggle is not null)
+                return toggle.ToggleState.ValueOrDefault == ToggleState.On;
+
+            var legacy = item.Patterns.LegacyIAccessible.PatternOrDefault;
+            if (legacy is not null)
+                return legacy.State.ValueOrDefault.HasFlag(AccessibilityState.STATE_SYSTEM_CHECKED);
+
+            return null;
+        }
+        finally { Collapse(top); Settle(1); }
+    }
+
+    private void WaitForFilteredMode(bool expected, int ms = 8000)
+    {
+        if (!Retry.WhileFalse(() => FilteredModeLooksLike(expected), TimeSpan.FromMilliseconds(ms), Poll).Result)
+            throw new InvalidOperationException(
+                $"Filtered-mode change did not reach expected state {expected}. " +
+                $"Menu checked={TryReadFilteredModeFromMenu()?.ToString() ?? "unknown"}; " +
+                $"visible rows: {VisibleRowSample()}");
+    }
+
+    private bool FilteredModeLooksLike(bool expected)
+    {
+        bool? menu = TryReadFilteredModeFromMenu();
+        if (menu is not null) return menu.Value == expected;
+        return VisibleRowsLookFiltered() == expected;
+    }
+
+    private bool RowsAreOnlyMatchLines()
+    {
+        var rows = Rows();
+        if (rows.Length == 0) return false;
+        foreach (var r in rows)
+        {
+            string name = r.Name ?? "";
+            if (!name.Contains("MATCH", StringComparison.Ordinal)) return false;
+        }
+        return true;
+    }
+
+    private string VisibleRowSample()
+        => string.Join(" | ", Rows().Take(8).Select(r =>
+        {
+            string line = r.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault ?? "?";
+            string text = r.Name ?? "";
+            return $"{line}:{(text.Length <= 40 ? text : text[..40])}";
+        }));
 
     /// <summary>Selects the given 1-based file line via the grid's accessibility (no dialog/foreground).</summary>
     public void SelectLine(int oneBasedLine)
