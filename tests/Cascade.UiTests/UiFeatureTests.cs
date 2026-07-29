@@ -24,7 +24,7 @@ public class UiFeatureTests
         string log = TestData.WriteLogFile(minWidth: 1000);
         using var app = CascadeApp.LaunchExisting(log, null, CascadeApp.NewSettingsDir(),
                                                   ownsFiles: true, ownsSettingsDir: true);
-        app.ClickMenu("View", "Focus Text Area");
+        app.ClickMenuOrThrow("View", "Focus Text Area");
         var grid = app.Grid();
 
         Assert.Equal(0, app.HorizontalScroll());
@@ -132,11 +132,11 @@ public class UiFeatureTests
         Check("per-filter find prev -> line 6", app.WaitStatus("Ln:", "Ln: 6 / 1,000"), app.StatusText("Ln:"));
 
         // ---- zoom (menu) ----
-        app.ClickMenu("View", "Reset Zoom");
+        app.ClickMenuOrThrow("View", "Reset Zoom");
         Check("zoom reset 100%", app.WaitStatus("Zoom:", "Zoom: 100%"), app.StatusText("Zoom:"));
-        app.ClickMenu("View", "Zoom In");
+        app.ClickMenuOrThrow("View", "Zoom In");
         Check("zoom in 110%", app.WaitStatus("Zoom:", "Zoom: 110%"), app.StatusText("Zoom:"));
-        app.ClickMenu("View", "Zoom Out");
+        app.ClickMenuOrThrow("View", "Zoom Out");
         Check("zoom out 100%", app.StatusText("Zoom:") == "Zoom: 100%", app.StatusText("Zoom:"));
 
         // ---- add-filter entry points present (the modal dialog's layout is covered by --screens) ----
@@ -168,7 +168,7 @@ public class UiFeatureTests
 
             // Remove the middle one.
             app.FilterNode("line 999")!.AsTreeItem().Select();
-            app.ClickMenu("Filters", "Remove Filter");
+            app.ClickMenuOrThrow("Filters", "Remove Filter");
 
             Check("deleted filter is gone", app.FilterNode("line 999") is null);
             Check("filter above survives", app.FilterNode("MATCH") is not null);
@@ -177,7 +177,7 @@ public class UiFeatureTests
 
             // Again, so repeated in-place deletes are covered too.
             app.FilterNode("line 998")!.AsTreeItem().Select();
-            app.ClickMenu("Filters", "Remove Filter");
+            app.ClickMenuOrThrow("Filters", "Remove Filter");
 
             Check("second delete removes it", app.FilterNode("line 998") is null);
             Check("original filter still listed", app.FilterNode("MATCH") is not null);
@@ -362,19 +362,19 @@ public class UiFeatureTests
 
         // ---- copy selection to clipboard ----
         app.SelectLine(9); // 1-based 9 -> 0-based line 8 = "other line 8"
-        app.ClickMenu("Edit", "Copy");
+        app.ClickMenuOrThrow("Edit", "Copy");
         string clip = "";
         Retry.WhileFalse(() => (clip = CascadeApp.ReadClipboardText()).Contains("other line 8", StringComparison.Ordinal),
                          TimeSpan.FromSeconds(3), TimeSpan.FromMilliseconds(25));
         Check("copy places selected line on the clipboard", clip.Contains("other line 8", StringComparison.Ordinal), clip);
 
         // ---- docking: move the filter list around and verify the layout follows ----
-        app.ClickMenu("View", "Filter List Location", "Dock Left");
+        app.ClickMenuOrThrow("View", "Filter List Location", "Dock Left");
         Check("dock left puts the filter list left of the log",
             app.Tree().BoundingRectangle.Left < app.Grid().BoundingRectangle.Left,
             $"tree={app.Tree().BoundingRectangle} grid={app.Grid().BoundingRectangle}");
 
-        app.ClickMenu("View", "Filter List Location", "Dock Bottom");
+        app.ClickMenuOrThrow("View", "Filter List Location", "Dock Bottom");
         Check("dock bottom puts the filter list below the log",
             app.Tree().BoundingRectangle.Top > app.Grid().BoundingRectangle.Top,
             $"tree={app.Tree().BoundingRectangle} grid={app.Grid().BoundingRectangle}");
@@ -412,13 +412,15 @@ public class UiFeatureTests
         Check("dim no more matches -> selection unchanged", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
 
         // --- filtered mode: the highlighted line must STILL contain the query ---
-        app.ToggleFilteredMode();
+        app.SetFilteredMode(true);
         app.FindInDialog(dlg, "MATCH line 500", forward: true);
         Check("filtered: matched-line search -> Ln 501", app.WaitStatus("Ln:", "Ln: 501 / 1,000"), app.StatusText("Ln:"));
         Check("filtered: selected line contains query", app.WaitSelectedRowText("MATCH line 500"), app.SelectedRowText());
 
         // text that only exists on a HIDDEN (filtered-out) line, AHEAD of the caret, must NOT jump to a
         // wrong (visible) line — the highlighted line must always contain the query.
+        Check("filtered precondition: visible rows are MATCH rows before hidden-only search",
+            app.VisibleRowsLookFiltered(), app.SelectedRowText());
         app.FindInDialog(dlg, "other line 733", forward: true);
         Check("filtered: hidden-only text reports not found",
             app.WaitDialogText(dlg, "Not found"), app.DialogText(dlg));
