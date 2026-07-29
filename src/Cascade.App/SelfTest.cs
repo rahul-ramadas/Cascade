@@ -248,13 +248,19 @@ internal static class SelfTest
             SetFilters(doc, tree, longFilter, other);
             ok &= Check("the description column returns when one is set", tree.ColumnsForTesting.HasDescription);
 
-            // The original defect: in a pane this narrow the fixed-width description column left the pattern
-            // column no room at all, and a column of zero width cannot clip anything drawn into it.
+            // Half of whatever the count did not want belongs to the pattern, however long the descriptions
+            // are. DescX is the pattern's width and CountX is the space left after the count.
+            var wide = tree.ColumnsForTesting;
+            ok &= Check($"the description takes at most half the space left after the count " +
+                        $"(pattern {wide.DescX}px of {wide.CountX}px)",
+                        wide.DescX * 2 >= wide.CountX);
+
             host.ClientSize = new Size(150, 200);
             Pump();
             var squeezed = tree.ColumnsForTesting;
-            ok &= Check($"the pattern column survives a very narrow pane ({squeezed.FilterRight}px of 150)",
-                        squeezed.FilterRight >= 60);
+            ok &= Check($"the same holds in a pane too narrow for any of it " +
+                        $"(pattern {squeezed.DescX}px of {squeezed.CountX}px)",
+                        squeezed.DescX * 2 >= squeezed.CountX);
             return ok;
         }
         finally

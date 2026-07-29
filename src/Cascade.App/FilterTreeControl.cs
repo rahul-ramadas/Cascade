@@ -246,7 +246,6 @@ public sealed class FilterTreeControl : UserControl
     // ---- columns: measured from what is actually in them ----
 
     private FilterColumns _columns;
-    private int _patternDesired; // widest pattern, indent included
     private int _descDesired;    // widest description; only changes with the list or the font
     private int _countDesired;   // widest count; grows as filtering streams results in
 
@@ -254,10 +253,6 @@ public sealed class FilterTreeControl : UserControl
     private const TextFormatFlags MeasureFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
 
     private int Inset => LogicalToDeviceUnits(4);
-
-    /// <summary>The pattern column never gives up everything: a filter you cannot read at all is worse than
-    /// a description that has to be truncated.</summary>
-    private int FilterFloor => LogicalToDeviceUnits(90);
 
     private int Measure(string text, Font font) => TextRenderer.MeasureText(text, font, Unbounded, MeasureFlags).Width;
 
@@ -279,24 +274,13 @@ public sealed class FilterTreeControl : UserControl
     private void MeasureDescriptions()
     {
         EnsureFonts();
-        int widestPattern = 0, widestDesc = 0;
+        int widest = 0;
         foreach (var n in _flat)
-        {
-            if (n.Tag is not Filter f) continue;
-            string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + n.Text;
-            widestPattern = Math.Max(widestPattern, LeftOf(n) + Measure(pattern, Pick(FontStyle.Bold)));
-            if (!string.IsNullOrWhiteSpace(f.Description))
-                widestDesc = Math.Max(widestDesc, Measure(f.Description, Pick(FontStyle.Bold)));
-        }
-        _patternDesired = Math.Max(widestPattern, HeaderWidth("Filter")) + Inset * 2;
-        _descDesired = widestDesc == 0 ? 0 : Math.Max(widestDesc, HeaderWidth("Description")) + Inset * 2;
+            if (n.Tag is Filter f && !string.IsNullOrWhiteSpace(f.Description))
+                widest = Math.Max(widest, Measure(f.Description, Pick(FontStyle.Bold)));
+        _descDesired = widest == 0 ? 0 : widest + Inset * 2;
         LayoutColumns();
     }
-
-    /// <summary>Where a node's text starts. Bounds are empty for a node inside a collapsed parent, and the
-    /// columns must not jump about when one is expanded, so fall back to what the indent will be.</summary>
-    private int LeftOf(TreeNode n)
-        => n.Bounds.Left > 0 ? n.Bounds.Left : _tree.Indent * (n.Level + 1) + LogicalToDeviceUnits(20);
 
     private void MeasureCounts()
     {
@@ -317,24 +301,15 @@ public sealed class FilterTreeControl : UserControl
     /// well the numbers underneath it fit.</summary>
     private int HeaderWidth(string title) => TextRenderer.MeasureText(title, _header.Font, Unbounded, MeasureFlags).Width;
 
-    /// <summary>Count takes what it needs. If the pattern and the description both fit, both get their full
-    /// width and every spare pixel goes to the pattern. If they do not, the description gives way first -
-    /// down to its own minimum, and past that only far enough to leave the pattern its floor.</summary>
+    /// <summary>Count is whatever the longest count needs, never less than its own heading. Of what is left,
+    /// the description takes what it needs up to half; the pattern gets the rest, so it always has at least
+    /// half of the space the count did not want.</summary>
     private void LayoutColumns()
     {
         int available = _tree.ClientSize.Width;
-        int count = Math.Min(_countDesired, Math.Max(0, available / 3));
+        int count = Math.Clamp(_countDesired, 0, Math.Max(0, available));
         int room = Math.Max(0, available - count);
-
-        int desc;
-        if (_descDesired == 0) desc = 0;
-        else if (_patternDesired + _descDesired <= room) desc = _descDesired;
-        else
-        {
-            int descMin = Math.Min(_descDesired, HeaderWidth("Description") + Inset * 2);
-            desc = Math.Clamp(room - _patternDesired, descMin, _descDesired);
-            if (room - desc < FilterFloor) desc = Math.Max(0, room - FilterFloor);
-        }
+        int desc = _descDesired == 0 ? 0 : Math.Min(_descDesired, room / 2);
 
         var columns = new FilterColumns(available - count - desc, available - count, desc, count);
         if (columns == _columns) return;
