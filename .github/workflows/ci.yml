@@ -35,23 +35,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Installing an SDK costs ~45s, almost all of it extracting a 300MB archive. The runner image
-      # normally ships one already, so only fall back to setup-dotnet when it does not.
-      - name: Look for a preinstalled .NET 10 SDK
+      # Installing an SDK costs ~45s, almost all of it extracting a 300MB archive. Delegate SDK
+      # resolution to dotnet itself so the probe obeys global.json and its roll-forward rules.
+      - name: Check whether global.json SDK is already available
         id: sdk
         run: |
           $ErrorActionPreference = 'Continue'
-          $sdks = @()
-          try { $sdks = & dotnet --list-sdks 2>$null } catch { }
-          Write-Host ($sdks -join "`n")
-          $found = [bool]($sdks | Where-Object { $_ -match '^10\.' })
-          Write-Host ".NET 10 SDK preinstalled: $found"
+          Write-Host "Resolving the SDK requested by global.json from $env:GITHUB_WORKSPACE."
+          $resolvedSdk = & dotnet --version 2>&1
+          $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 }
+
+          if ($exitCode -eq 0) {
+            $found = $true
+            Write-Host "global.json SDK is already available."
+            Write-Host "Resolved SDK: $resolvedSdk"
+          } else {
+            $found = $false
+            Write-Host "global.json SDK is not available yet; setup-dotnet must install it."
+            Write-Host "dotnet --version exit code: $exitCode"
+            $resolvedSdk | ForEach-Object { Write-Host $_ }
+          }
+
+          Write-Host "global.json SDK preinstalled: $found"
           "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit 0
 
       - uses: actions/setup-dotnet@v4
         if: steps.sdk.outputs.found != 'True'
         with:
-          dotnet-version: '10.0.x'
+          global-json-file: global.json
+
+      - name: Record .NET SDK used
+        run: |
+          $resolvedSdk = dotnet --version
+          Write-Host "dotnet --version (SDK resolved through global.json): $resolvedSdk"
+
+          Write-Host "dotnet --list-sdks:"
+          $sdkList = dotnet --list-sdks
+          $sdkList | ForEach-Object { Write-Host $_ }
+
+          Write-Host "dotnet msbuild -version:"
+          $msbuildVersion = dotnet msbuild -version
+          $msbuildVersion | ForEach-Object { Write-Host $_ }
+
+          @(
+            '### .NET SDK used by CI'
+            ''
+            '| Item | Value |'
+            '| --- | --- |'
+            "| SDK resolved by global.json | ``$resolvedSdk`` |"
+            "| MSBuild version | ``$(($msbuildVersion | Where-Object { $_ } | Select-Object -Last 1))`` |"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       # CalVer: <year>.<month>.<run number>. Always increasing, never needs bumping by hand.
       - name: Compute version
