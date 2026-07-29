@@ -34,6 +34,7 @@ internal static class SelfTest
             ok &= RunSettingsChecks();
             ok &= RunMachineStateChecks();
             ok &= RunRenderChecks();
+            ok &= RunFilterListChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -164,6 +165,113 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>The filter list draws three columns into one owner-drawn row, and TextRenderer goes through
+    /// GDI, which ignores the GDI+ clip the columns rely on unless told not to. The symptom was a long
+    /// pattern painting straight across the description and the count.</summary>
+    private static bool RunFilterListChecks()
+    {
+        Line("-- filter list columns --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_filters_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 200; i++) sb.Append($"ERROR SomeVeryLongComponentName line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(260, 200),   // narrow enough that a long pattern cannot fit
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            var longFilter = new Filter
+            {
+                Description = "a description that also needs room",
+                Match = new FilterMatch { Text = "SomeVeryLongComponentName that runs on well past the column edge" }
+            };
+            var other = new Filter { Description = "another description", Match = new FilterMatch { Text = "ERROR" } };
+            SetFilters(doc, tree, longFilter, other);
+            var columns = tree.ColumnsForTesting;
+            bool ok = Check("the description column is shown when a filter has one", columns.HasDescription);
+            if (!ok) return false;
+
+            using var withLongPattern = Capture(host);
+
+            // Swap in a pattern that is just as far too long, so the columns land in exactly the same place
+            // and the only thing that changed is the glyphs in the pattern column. Anything that differs
+            // from there rightwards is the pattern painting outside its own column.
+            longFilter.Match.Text = "ZZZZZZZZZZZZZZZZZZZZZZZZZ that also runs on well past the column edge";
+            SetFilters(doc, tree, longFilter, other);
+            using var withOtherPattern = Capture(host);
+
+            ok &= Check("the columns did not move, so the comparison is about the text alone",
+                        tree.ColumnsForTesting == columns);
+
+            var area = tree.TreeAreaForTesting;
+            var patternArea = new Rectangle(area.Left, area.Top, columns.FilterRight, Math.Min(area.Height, 80));
+            ok &= Check("changing the pattern changed the pattern column",
+                        !SameRegion(withLongPattern, withOtherPattern, patternArea));
+
+            var rightOfPattern = new Rectangle(area.Left + columns.FilterRight, area.Top,
+                                               Math.Max(1, area.Width - columns.FilterRight), Math.Min(area.Height, 80));
+            var bleed = FirstDifference(withLongPattern, withOtherPattern, rightOfPattern);
+            ok &= Check($"a pattern too long for its column does not paint over the ones beside it" +
+                        (bleed is null ? "" : $" [first differs at x={bleed.Value.X},y={bleed.Value.Y}]"),
+                        bleed is null);
+
+            // With nothing to put in it, the description column is not shown at all - and comes back when a
+            // description does.
+            longFilter.Description = "";
+            other.Description = "";
+            SetFilters(doc, tree, longFilter, other);
+            ok &= Check("the description column is dropped when no filter has one",
+                        !tree.ColumnsForTesting.HasDescription);
+            ok &= Check("dropping it gives the space to the pattern",
+                        tree.ColumnsForTesting.FilterRight > columns.FilterRight);
+
+            other.Description = "back again";
+            SetFilters(doc, tree, longFilter, other);
+            ok &= Check("the description column returns when one is set", tree.ColumnsForTesting.HasDescription);
+
+            // The original defect: in a pane this narrow the fixed-width description column left the pattern
+            // column no room at all, and a column of zero width cannot clip anything drawn into it.
+            host.ClientSize = new Size(150, 200);
+            Pump();
+            var squeezed = tree.ColumnsForTesting;
+            ok &= Check($"the pattern column survives a very narrow pane ({squeezed.FilterRight}px of 150)",
+                        squeezed.FilterRight >= 60);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    private static void SetFilters(CascadeDocument doc, FilterTreeControl tree, params Filter[] filters)
+    {
+        var collection = new FilterCollection();
+        foreach (var f in filters) collection.Roots.Add(f);
+        doc.SetFilters(collection);
+        tree.Rebuild();
+        Pump();
     }
 
     private static Bitmap Capture(Form host)

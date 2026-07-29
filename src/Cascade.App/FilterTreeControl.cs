@@ -32,6 +32,7 @@ public sealed class FilterTreeControl : UserControl
         DrawMode = TreeViewDrawMode.OwnerDrawText,
         AllowDrop = true,
         ShowLines = true,
+        ShowNodeToolTips = true,   // the only way to read a pattern too long for the column
         BorderStyle = BorderStyle.None // client origin matches the header so column dividers line up
     };
     private readonly FilterListHeader _header = new() { Dock = DockStyle.Top };
@@ -67,11 +68,9 @@ public sealed class FilterTreeControl : UserControl
         Controls.Add(_header);
         Controls.Add(_search);
 
-        _header.ContentRight = () => _tree.ClientSize.Width;
-        _header.WidthsChanged += () => _tree.Invalidate();
-        // The header derives its column x-positions from the tree's client width, which shrinks when a
-        // vertical scrollbar appears; repaint it so the dividers stay aligned with the rows.
-        _tree.ClientSizeChanged += (_, _) => _header.Invalidate();
+        // The columns are sized from the rows' content, and the tree's client width shrinks when a vertical
+        // scrollbar appears, so any size change means measuring again.
+        _tree.ClientSizeChanged += (_, _) => LayoutColumns();
 
         _tree.AfterCheck += OnAfterCheck;
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
@@ -133,6 +132,8 @@ public sealed class FilterTreeControl : UserControl
     public void SetSettings(AppSettings settings)
     {
         _settings = settings;
+        MeasureDescriptions();
+        MeasureCounts();
         _tree.Invalidate();
     }
 
@@ -159,6 +160,9 @@ public sealed class FilterTreeControl : UserControl
             var top = _flat.FirstOrDefault(n => (n.Tag as Filter)?.Id == topId);
             if (top is not null) _tree.TopNode = top;
         }
+
+        MeasureDescriptions();
+        MeasureCounts();
     }
 
     private TreeNode BuildNode(Filter f)
@@ -239,6 +243,125 @@ public sealed class FilterTreeControl : UserControl
             || f.Match.Text.Contains(query, StringComparison.OrdinalIgnoreCase);
     }
 
+    // ---- columns: measured from what is actually in them ----
+
+    private FilterColumns _columns;
+    private int _patternDesired; // widest pattern, indent included
+    private int _descDesired;    // widest description; only changes with the list or the font
+    private int _countDesired;   // widest count; grows as filtering streams results in
+
+    private static readonly Size Unbounded = new(int.MaxValue, int.MaxValue);
+    private const TextFormatFlags MeasureFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+
+    private int Inset => LogicalToDeviceUnits(4);
+
+    /// <summary>The pattern column never gives up everything: a filter you cannot read at all is worse than
+    /// a description that has to be truncated.</summary>
+    private int FilterFloor => LogicalToDeviceUnits(90);
+
+    private int Measure(string text, Font font) => TextRenderer.MeasureText(text, font, Unbounded, MeasureFlags).Width;
+
+    /// <summary>Test seam: where the columns ended up, in tree client coordinates.</summary>
+    internal FilterColumns ColumnsForTesting => _columns;
+
+    /// <summary>Test seam: the tree's own bounds inside this control, for pixel comparisons.</summary>
+    internal Rectangle TreeAreaForTesting => _tree.Bounds;
+
+    /// <summary>What the count column shows for a filter, or "" when it shows nothing.</summary>
+    private string CountTextFor(Filter f)
+    {
+        if (!f.Enabled || _doc is null) return "";
+        long count = _doc.MatchCountFor(f);
+        bool busy = !_doc.IsFilterIdle;
+        return count >= 0 ? (busy ? $"{count:N0}\u2026" : $"{count:N0}") : (busy ? "\u2026" : "");
+    }
+
+    private void MeasureDescriptions()
+    {
+        EnsureFonts();
+        int widestPattern = 0, widestDesc = 0;
+        foreach (var n in _flat)
+        {
+            if (n.Tag is not Filter f) continue;
+            string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + n.Text;
+            widestPattern = Math.Max(widestPattern, LeftOf(n) + Measure(pattern, Pick(FontStyle.Bold)));
+            if (!string.IsNullOrWhiteSpace(f.Description))
+                widestDesc = Math.Max(widestDesc, Measure(f.Description, Pick(FontStyle.Bold)));
+        }
+        _patternDesired = Math.Max(widestPattern, HeaderWidth("Filter")) + Inset * 2;
+        _descDesired = widestDesc == 0 ? 0 : Math.Max(widestDesc, HeaderWidth("Description")) + Inset * 2;
+        LayoutColumns();
+    }
+
+    /// <summary>Where a node's text starts. Bounds are empty for a node inside a collapsed parent, and the
+    /// columns must not jump about when one is expanded, so fall back to what the indent will be.</summary>
+    private int LeftOf(TreeNode n)
+        => n.Bounds.Left > 0 ? n.Bounds.Left : _tree.Indent * (n.Level + 1) + LogicalToDeviceUnits(20);
+
+    private void MeasureCounts()
+    {
+        EnsureFonts();
+        int widest = 0;
+        foreach (var n in _flat)
+            if (n.Tag is Filter f && CountTextFor(f) is { Length: > 0 } text)
+                widest = Math.Max(widest, Measure(text, Pick(FontStyle.Bold)));
+        int desired = widest == 0 ? 0 : Math.Max(widest, HeaderWidth("Count")) + Inset * 2;
+
+        // Counts only climb during a pass, and a column that narrows and widens again on the way is far more
+        // distracting than one that is briefly a few pixels too wide. Shrink only once the pass is over.
+        _countDesired = (_doc?.IsFilterIdle ?? true) ? desired : Math.Max(_countDesired, desired);
+        LayoutColumns();
+    }
+
+    /// <summary>A column is never narrower than its own title: a header reading "C…" looks broken however
+    /// well the numbers underneath it fit.</summary>
+    private int HeaderWidth(string title) => TextRenderer.MeasureText(title, _header.Font, Unbounded, MeasureFlags).Width;
+
+    /// <summary>Count takes what it needs. If the pattern and the description both fit, both get their full
+    /// width and every spare pixel goes to the pattern. If they do not, the description gives way first -
+    /// down to its own minimum, and past that only far enough to leave the pattern its floor.</summary>
+    private void LayoutColumns()
+    {
+        int available = _tree.ClientSize.Width;
+        int count = Math.Min(_countDesired, Math.Max(0, available / 3));
+        int room = Math.Max(0, available - count);
+
+        int desc;
+        if (_descDesired == 0) desc = 0;
+        else if (_patternDesired + _descDesired <= room) desc = _descDesired;
+        else
+        {
+            int descMin = Math.Min(_descDesired, HeaderWidth("Description") + Inset * 2);
+            desc = Math.Clamp(room - _patternDesired, descMin, _descDesired);
+            if (room - desc < FilterFloor) desc = Math.Max(0, room - FilterFloor);
+        }
+
+        var columns = new FilterColumns(available - count - desc, available - count, desc, count);
+        if (columns == _columns) return;
+        _columns = columns;
+        _header.SetColumns(columns);
+        UpdateTooltips();
+        _tree.Invalidate();
+    }
+
+    /// <summary>Only the rows that had to be cut short get a tooltip - there is no scrolling to reach the
+    /// rest of the text, and a tooltip on everything would just be noise.</summary>
+    private void UpdateTooltips()
+    {
+        EnsureFonts();
+        foreach (var n in _flat)
+        {
+            if (n.Tag is not Filter f) { n.ToolTipText = ""; continue; }
+            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset;
+            bool patternCut = Measure(n.Text, Pick(FontStyle.Bold)) > patternRoom;
+            bool descCut = !string.IsNullOrWhiteSpace(f.Description)
+                           && Measure(f.Description, Pick(FontStyle.Bold)) > _columns.DescriptionWidth - Inset * 2;
+            n.ToolTipText = patternCut || descCut
+                ? (string.IsNullOrWhiteSpace(f.Description) ? n.Text : $"{n.Text}\n{f.Description}")
+                : "";
+        }
+    }
+
     // ---- owner draw (color swatch, exclude style, bold search matches, drop indicator) ----
 
     private void OnDrawNode(object? sender, DrawTreeNodeEventArgs e)
@@ -269,8 +392,9 @@ public sealed class FilterTreeControl : UserControl
         }
 
         int rightEdge = _tree.ClientSize.Width;
-        int countX = rightEdge - _header.CountWidth;
-        int descX = countX - _header.DescriptionWidth;
+        int countX = _columns.CountX;
+        int descX = _columns.DescX;
+        int filterRight = _columns.FilterRight;
 
         using (var b = new SolidBrush(bg)) g.FillRectangle(b, contentLeft, bounds.Top, Math.Max(0, rightEdge - contentLeft), h);
 
@@ -279,35 +403,31 @@ public sealed class FilterTreeControl : UserControl
         string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + e.Node.Text;
 
         var savedClip = g.Clip;
-        g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, descX - 2), bounds.Bottom));
-        DrawWithSearchHighlight(g, pattern, new Point(contentLeft, textY), fg, style);
+        g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, filterRight - Inset), bounds.Bottom));
+        DrawWithSearchHighlight(g, pattern, new Point(contentLeft, textY),
+                                filterRight - Inset - contentLeft, fg, style);
 
-        if (!string.IsNullOrEmpty(f.Description))
+        if (_columns.HasDescription && !string.IsNullOrEmpty(f.Description))
         {
-            g.SetClip(Rectangle.FromLTRB(descX + 4, bounds.Top, Math.Max(descX + 4, countX - 2), bounds.Bottom));
-            TextRenderer.DrawText(g, f.Description, Pick(style), new Point(descX + 4, textY), fg,
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+            g.SetClip(Rectangle.FromLTRB(descX + Inset, bounds.Top, Math.Max(descX + Inset, countX - 2), bounds.Bottom));
+            TextRenderer.DrawText(g, f.Description, Pick(style),
+                new Rectangle(descX + Inset, textY, Math.Max(0, _columns.DescriptionWidth - Inset * 2), textHeight), fg,
+                TextFlags | TextFormatFlags.EndEllipsis);
         }
 
-        if (f.Enabled && _doc is not null)
+        if (_columns.HasCount && CountTextFor(f) is { Length: > 0 } countText)
         {
-            long count = _doc.MatchCountFor(f);
-            bool busy = !_doc.IsFilterIdle;
-            string countText = count >= 0 ? (busy ? $"{count:N0}\u2026" : $"{count:N0}") : (busy ? "\u2026" : "");
-            if (countText.Length > 0)
-            {
-                g.SetClip(Rectangle.FromLTRB(countX + 2, bounds.Top, rightEdge, bounds.Bottom));
-                TextRenderer.DrawText(g, countText, Pick(style),
-                    new Rectangle(countX + 2, textY, Math.Max(0, _header.CountWidth - 6), textHeight), fg,
-                    TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Right);
-            }
+            g.SetClip(Rectangle.FromLTRB(countX + 2, bounds.Top, rightEdge, bounds.Bottom));
+            TextRenderer.DrawText(g, countText, Pick(style),
+                new Rectangle(countX + Inset, textY, Math.Max(0, _columns.CountWidth - Inset * 2), textHeight), fg,
+                TextFlags | TextFormatFlags.Right);
         }
         g.Clip = savedClip;
 
         using (var pen = new Pen(Color.FromArgb(40, Color.Gray)))
         {
-            g.DrawLine(pen, descX, bounds.Top, descX, bounds.Bottom);
-            g.DrawLine(pen, countX, bounds.Top, countX, bounds.Bottom);
+            if (_columns.HasDescription) g.DrawLine(pen, descX, bounds.Top, descX, bounds.Bottom);
+            if (_columns.HasCount) g.DrawLine(pen, countX, bounds.Top, countX, bounds.Bottom);
         }
 
         if (selected)
@@ -338,16 +458,22 @@ public sealed class FilterTreeControl : UserControl
         style.HasFlag(FontStyle.Bold) ? _fBold :
         style.HasFlag(FontStyle.Italic) ? _fItalic : _fReg;
 
-    private int DrawWithSearchHighlight(Graphics g, string text, Point pt, Color color, FontStyle style)
+    /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is the load-bearing one: TextRenderer draws
+    /// through GDI, which knows nothing about the GDI+ clip these columns are set up with, so without it
+    /// every column's text paints straight across the ones beside it.
+    private const TextFormatFlags TextFlags =
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
+
+    private int DrawWithSearchHighlight(Graphics g, string text, Point pt, int maxWidth, Color color, FontStyle style)
     {
+        text = Ellipsize(text, Pick(style), maxWidth);
         string q = _search.Text.Trim();
-        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
         int x = pt.X;
         void Draw(string s, Font f)
         {
             if (s.Length == 0) return;
-            TextRenderer.DrawText(g, s, f, new Point(x, pt.Y), color, flags);
-            x += TextRenderer.MeasureText(g, s, f, new Size(int.MaxValue, 200), flags).Width;
+            TextRenderer.DrawText(g, s, f, new Point(x, pt.Y), color, TextFlags);
+            x += TextRenderer.MeasureText(g, s, f, new Size(int.MaxValue, 200), MeasureFlags).Width;
         }
 
         int matchStart = q.Length == 0 ? -1 : text.IndexOf(q, StringComparison.OrdinalIgnoreCase);
@@ -357,6 +483,22 @@ public sealed class FilterTreeControl : UserControl
         Draw(text.Substring(matchStart, q.Length), Pick(style | FontStyle.Bold));
         Draw(text[(matchStart + q.Length)..], Pick(style));
         return x;
+    }
+
+    /// <summary>Trims text to fit, ending in an ellipsis. Binary search rather than a walk from the end -
+    /// this runs for every visible row on every repaint.</summary>
+    private string Ellipsize(string text, Font font, int maxWidth)
+    {
+        if (maxWidth <= 0) return "";
+        if (Measure(text, font) <= maxWidth) return text;
+
+        int lo = 0, hi = text.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (Measure(text[..mid] + "\u2026", font) <= maxWidth) lo = mid; else hi = mid - 1;
+        }
+        return lo == 0 ? "\u2026" : text[..lo] + "\u2026";
     }
 
     private void DrawDropIndicator(Graphics g, TreeNode node, Rectangle bounds)
@@ -590,5 +732,9 @@ public sealed class FilterTreeControl : UserControl
     public bool ListHasFocus => _tree.Focused;
 
     /// <summary>Repaints nodes so live match counts refresh while filtering streams.</summary>
-    public void RefreshCounts() => _tree.Invalidate();
+    public void RefreshCounts()
+    {
+        MeasureCounts();
+        _tree.Invalidate();
+    }
 }
