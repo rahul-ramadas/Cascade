@@ -15,6 +15,7 @@ public abstract class DialogBase : Form
         MinimizeBox = false;
         MaximizeBox = false;
         ShowInTaskbar = false;
+        ShowIcon = false;   // a fixed dialog shows none anyway; this keeps the resizable ones matching
         StartPosition = FormStartPosition.CenterParent;
         AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
