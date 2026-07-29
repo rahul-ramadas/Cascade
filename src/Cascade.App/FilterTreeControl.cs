@@ -12,7 +12,6 @@ namespace Cascade.App;
 /// </summary>
 public sealed class FilterTreeControl : UserControl
 {
-    private enum DropMode { None, Before, After, Onto }
 
     // The placeholder uses the native Win32 cue banner (see CueTextBox), NOT WinForms' PlaceholderText:
     // the managed PlaceholderText is redrawn in WM_PAINT and flickers on the box's hover/paint cycles,
@@ -47,8 +46,11 @@ public sealed class FilterTreeControl : UserControl
     private readonly HashSet<string> _collapsed = new(); // filter ids the user has collapsed
 
     private TreeNode? _dragNode;
-    private TreeNode? _dropTarget;
-    private DropMode _dropMode;
+    private (Filter? Parent, int Index)? _dragOrigin;
+    private int _dragGrabX;
+    private int _dragGrabLevel;
+    private readonly System.Windows.Forms.Timer _autoScroll = new() { Interval = 60 };
+    private int _autoScrollStep;
     private bool _editPending;
 
     public event Action? FiltersChanged;
@@ -84,6 +86,10 @@ public sealed class FilterTreeControl : UserControl
         _tree.DragEnter += (_, e) => e.Effect = DragDropEffects.Move;
         _tree.DragOver += OnDragOver;
         _tree.DragDrop += OnDragDrop;
+        _tree.DragLeave += (_, _) => StopAutoScroll();
+        // On the source, not the tree: DoDragDrop is called on this control, so this is where Escape lands.
+        QueryContinueDrag += (_, e) => { if (e.EscapePressed) { CancelDrag(); e.Action = DragAction.Cancel; } };
+        _autoScroll.Tick += (_, _) => ScrollBy(_autoScrollStep);
 
         _search.TextChanged += (_, _) => JumpToMatch(fromSelection: false, forward: true, announce: false);
         _search.KeyDown += OnSearchKeyDown;
@@ -384,6 +390,12 @@ public sealed class FilterTreeControl : UserControl
             style = FontStyle.Regular;
         }
 
+        if (_dragNode is not null && IsSelfOrDescendantOfDrag(e.Node))
+        {
+            fg = Fade(fg, bg);
+            selected = false;   // the fade is the state to read, not a selection frame
+        }
+
         int rightEdge = _tree.ClientSize.Width;
         int countX = _columns.CountX;
         int descX = _columns.DescX;
@@ -428,8 +440,6 @@ public sealed class FilterTreeControl : UserControl
             using var selPen = new Pen(SystemColors.Highlight);
             g.DrawRectangle(selPen, 0, bounds.Top, Math.Max(1, rightEdge - 1), h - 1);
         }
-
-        DrawDropIndicator(g, e.Node, bounds);
     }
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
@@ -494,88 +504,193 @@ public sealed class FilterTreeControl : UserControl
         return lo == 0 ? "\u2026" : text[..lo] + "\u2026";
     }
 
-    private void DrawDropIndicator(Graphics g, TreeNode node, Rectangle bounds)
-    {
-        if (_dropTarget != node || _dropMode == DropMode.None) return;
-        using var pen = new Pen(Color.FromArgb(0, 120, 215), 2);
-        switch (_dropMode)
-        {
-            case DropMode.Before: g.DrawLine(pen, bounds.Left, bounds.Top, bounds.Right, bounds.Top); break;
-            case DropMode.After: g.DrawLine(pen, bounds.Left, bounds.Bottom - 1, bounds.Right, bounds.Bottom - 1); break;
-            case DropMode.Onto: g.DrawRectangle(pen, bounds.Left, bounds.Top, bounds.Width - 1, bounds.Height - 1); break;
-        }
-    }
+    /// <summary>The dragged filter and everything under it are drawn faded while the drag is in progress:
+    /// the list already shows them where they would land, and the fade is what says "not yet committed".</summary>
+    private static Color Fade(Color c, Color towards) =>
+        Color.FromArgb((c.R + towards.R * 2) / 3, (c.G + towards.G * 2) / 3, (c.B + towards.B * 2) / 3);
 
     // ---- drag & drop reorder + nest ----
 
     private void OnItemDrag(object? sender, ItemDragEventArgs e)
     {
-        if (e.Item is TreeNode n) { _dragNode = n; DoDragDrop(n, DragDropEffects.Move); }
+        if (_doc is null || e.Item is not TreeNode n || n.Tag is not Filter f) return;
+
+        _dragNode = n;
+        _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc.Filters.Roots).IndexOf(f));
+        _dragGrabX = _tree.PointToClient(Control.MousePosition).X;
+        _dragGrabLevel = n.Level;
+        _tree.SelectedNode = n;
+        _tree.Invalidate();
+        try { DoDragDrop(n, DragDropEffects.Move); }
+        finally { StopAutoScroll(); }
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
     {
-        var pt = _tree.PointToClient(new Point(e.X, e.Y));
-        var target = _tree.GetNodeAt(pt);
-        _dropTarget = target;
-        _dropMode = DropMode.None;
+        if (_doc is null || _dragNode?.Tag is not Filter dragged) { e.Effect = DragDropEffects.None; return; }
+        e.Effect = DragDropEffects.Move;
 
-        if (_dragNode is null || target is null || ReferenceEquals(target, _dragNode))
+        var pt = _tree.PointToClient(new Point(e.X, e.Y));
+        AutoScrollFor(pt);
+
+        var rows = new List<TreeNode>();
+        for (var n = _tree.Nodes.Count > 0 ? _tree.Nodes[0] : null; n is not null; n = n.NextVisibleNode)
+            if (!IsSelfOrDescendantOfDrag(n)) rows.Add(n);
+
+        // Nesting follows how far right the pointer has travelled since the grab, not where it happens to
+        // be: dragging straight down must not re-nest an item just because it was picked up by its middle.
+        var spot = DropPlacement.For(
+            rows.Select(n => new DropRow(n.Level, n.Bounds.Top, n.Bounds.Height)).ToList(),
+            pt.Y, _dragGrabLevel * _tree.Indent + (pt.X - _dragGrabX), _tree.Indent);
+
+        // Turn the slot into a parent and a position among that parent's children.
+        Filter? parent = null;
+        if (spot.Slot > 0)
         {
-            e.Effect = DragDropEffects.None;
-            _tree.Invalidate();
-            return;
+            var above = (Filter)rows[spot.Slot - 1].Tag!;
+            for (int level = rows[spot.Slot - 1].Level; level >= spot.Level; level--) above = above.Parent!;
+            parent = spot.Level == 0 ? null : above;
+        }
+        var siblings = parent?.Children ?? _doc.Filters.Roots;
+        int index = spot.Slot == 0 ? 0 : IndexAfter(siblings, (Filter)rows[spot.Slot - 1].Tag!, spot.Level, rows[spot.Slot - 1].Level);
+
+        MoveLive(dragged, parent, index);
+    }
+
+    /// <summary>The slot in <paramref name="siblings"/> just after the row above the drop, once that row has
+    /// been walked up to the level being dropped at.</summary>
+    private static int IndexAfter(List<Filter> siblings, Filter above, int dropLevel, int aboveLevel)
+    {
+        var anchor = above;
+        for (int level = aboveLevel; level > dropLevel; level--) anchor = anchor.Parent!;
+        int i = siblings.IndexOf(anchor);
+        return i < 0 ? siblings.Count : i + 1;
+    }
+
+    private bool IsSelfOrDescendantOfDrag(TreeNode n)
+    {
+        for (var p = n; p is not null; p = p.Parent)
+            if (ReferenceEquals(p, _dragNode)) return true;
+        return false;
+    }
+
+    /// <summary>Puts the filter where it would land if dropped now - in the model and in the tree - so the
+    /// list always shows the outcome rather than a hint of it. The tree node is moved rather than rebuilt:
+    /// rebuilding blanks and repopulates the whole list, which flickers on every mouse move.</summary>
+    private void MoveLive(Filter dragged, Filter? parent, int index)
+    {
+        if (_doc is null || _dragNode is null) return;
+
+        var currentList = dragged.Parent?.Children ?? _doc.Filters.Roots;
+        var targetList = parent?.Children ?? _doc.Filters.Roots;
+        int currentIndex = currentList.IndexOf(dragged);
+        if (ReferenceEquals(currentList, targetList) && (index == currentIndex || index == currentIndex + 1)) return;
+        if (!_doc.Filters.Move(dragged, parent, index)) return;
+
+        _building = true;
+        _tree.BeginUpdate();
+        try
+        {
+            _dragNode.Remove();
+            var nodes = parent is null ? _tree.Nodes : NodeFor(parent)?.Nodes;
+            if (nodes is null) { _doc.Filters.Move(dragged, currentList == _doc.Filters.Roots ? null : dragged.Parent, currentIndex); return; }
+
+            int at = (parent?.Children ?? _doc.Filters.Roots).IndexOf(dragged);
+            nodes.Insert(Math.Clamp(at, 0, nodes.Count), _dragNode);
+            RestoreExpansion(_dragNode);
+            NodeFor(parent)?.Expand();
+        }
+        finally
+        {
+            _tree.EndUpdate();
+            _building = false;
         }
 
-        int rel = pt.Y - target.Bounds.Top;
-        int third = Math.Max(4, target.Bounds.Height / 3);
-        _dropMode = rel < third ? DropMode.Before : rel > target.Bounds.Height - third ? DropMode.After : DropMode.Onto;
-
-        var dragged = (Filter)_dragNode.Tag!;
-        var targetFilter = (Filter)target.Tag!;
-        Filter? newParent = _dropMode == DropMode.Onto ? targetFilter : targetFilter.Parent;
-        e.Effect = _doc is not null && _doc.Filters.CanMove(dragged, newParent) ? DragDropEffects.Move : DragDropEffects.None;
-        if (e.Effect == DragDropEffects.None) _dropMode = DropMode.None;
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
+        _tree.SelectedNode = _dragNode;
         _tree.Invalidate();
+    }
+
+    private TreeNode? NodeFor(Filter? f)
+        => f is null ? null : _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f)) ?? FindNode(_tree.Nodes, f);
+
+    private static TreeNode? FindNode(TreeNodeCollection nodes, Filter f)
+    {
+        foreach (TreeNode n in nodes)
+        {
+            if (ReferenceEquals(n.Tag, f)) return n;
+            if (FindNode(n.Nodes, f) is { } hit) return hit;
+        }
+        return null;
+    }
+
+    /// <summary>Re-inserting a node collapses it, so put back what the user had open.</summary>
+    private void RestoreExpansion(TreeNode node)
+    {
+        if (node.Tag is Filter f && node.Nodes.Count > 0 && !_collapsed.Contains(f.Id)) node.Expand();
+        foreach (TreeNode child in node.Nodes) RestoreExpansion(child);
     }
 
     private void OnDragDrop(object? sender, DragEventArgs e)
     {
-        if (_doc is null || _dragNode?.Tag is not Filter dragged || _dropTarget?.Tag is not Filter target || _dropMode == DropMode.None)
-        {
-            ResetDrag();
-            return;
-        }
+        StopAutoScroll();
+        bool moved = _dragNode is not null && _doc is not null && _dragOrigin is { } origin
+                     && _dragNode.Tag is Filter f
+                     && (!ReferenceEquals(f.Parent, origin.Parent)
+                         || (f.Parent?.Children ?? _doc.Filters.Roots).IndexOf(f) != origin.Index);
+        ResetDrag();
+        if (moved) FiltersChanged?.Invoke();   // the only re-evaluation: none of the live moves triggered one
+    }
 
-        Filter? newParent;
-        int index;
-        if (_dropMode == DropMode.Onto)
-        {
-            newParent = target;
-            index = target.Children.Count;
-        }
-        else
-        {
-            newParent = target.Parent;
-            List<Filter> siblings = newParent?.Children ?? _doc.Filters.Roots;
-            index = siblings.IndexOf(target) + (_dropMode == DropMode.After ? 1 : 0);
-        }
-
-        if (_doc.Filters.Move(dragged, newParent, index))
-        {
-            ResetDrag();
-            Rebuild();
-            FiltersChanged?.Invoke();
-        }
-        else ResetDrag();
+    /// <summary>Escape during a drag, or dropping nowhere, puts the filter back where it started.</summary>
+    private void CancelDrag()
+    {
+        StopAutoScroll();
+        if (_doc is not null && _dragNode?.Tag is Filter f && _dragOrigin is { } origin)
+            MoveLive(f, origin.Parent, origin.Index);
+        ResetDrag();
     }
 
     private void ResetDrag()
     {
         _dragNode = null;
-        _dropTarget = null;
-        _dropMode = DropMode.None;
+        _dragOrigin = null;
+        StopAutoScroll();
         _tree.Invalidate();
+    }
+
+    // ---- auto-scroll while dragging ----
+
+    /// <summary>Dragging into the top or bottom edge scrolls the list, so a filter can be taken somewhere
+    /// that is not on screen when the drag starts. The nearer the edge, the faster it goes.</summary>
+    private void AutoScrollFor(Point pt)
+    {
+        int zone = Math.Max(_tree.ItemHeight, LogicalToDeviceUnits(24));
+        int step = pt.Y < zone ? -1 : pt.Y > _tree.ClientSize.Height - zone ? 1 : 0;
+        if (step != 0)
+        {
+            int depth = step < 0 ? zone - pt.Y : pt.Y - (_tree.ClientSize.Height - zone);
+            step *= depth > zone / 2 ? 3 : 1;
+        }
+
+        _autoScrollStep = step;
+        if (step == 0) _autoScroll.Stop();
+        else if (!_autoScroll.Enabled) { ScrollBy(step); _autoScroll.Start(); }
+    }
+
+    private void StopAutoScroll()
+    {
+        _autoScroll.Stop();
+        _autoScrollStep = 0;
+    }
+
+    private void ScrollBy(int rows)
+    {
+        var top = _tree.TopNode;
+        for (int i = 0; i < Math.Abs(rows) && top is not null; i++)
+            top = rows < 0 ? top.PrevVisibleNode ?? top : top.NextVisibleNode ?? top;
+        if (top is not null && !ReferenceEquals(top, _tree.TopNode)) _tree.TopNode = top;
     }
 
     // ---- context menu / edits ----
