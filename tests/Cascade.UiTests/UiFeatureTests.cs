@@ -521,6 +521,32 @@ public class UiFeatureTests
         }
     }
 
+    [Fact]
+    public void Enter_on_a_selected_filter_opens_the_edit_dialog()
+    {
+        // The dialog used to be opened from inside the key handler, which ran its message loop before
+        // WinForms could discard the WM_CHAR belonging to that same Enter - so the tree beeped every time.
+        // It is deferred now, and this is what proves the deferral still ends up opening the thing.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            app.FocusFilter("MATCH");
+            app.Key(app.Tree(), VirtualKeyShort.RETURN);
+
+            var dialog = app.FindDialog("Edit Filter");
+            Assert.True(dialog is not null, "Enter did not open the filter edit dialog");
+            app.SendKeyAsDialogKey(dialog!, VirtualKeyShort.ESCAPE);
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { /* ignore */ }
+            try { File.Delete(tat); } catch { /* ignore */ }
+        }
+    }
+
     private static string Read(string path)
     {
         try { return File.Exists(path) ? File.ReadAllText(path) : "(no such file)"; }

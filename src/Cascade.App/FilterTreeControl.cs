@@ -49,6 +49,7 @@ public sealed class FilterTreeControl : UserControl
     private TreeNode? _dragNode;
     private TreeNode? _dropTarget;
     private DropMode _dropMode;
+    private bool _editPending;
 
     public event Action? FiltersChanged;
     public event Action<Filter>? EditRequested;
@@ -202,7 +203,20 @@ public sealed class FilterTreeControl : UserControl
             MoveSelected(e.KeyCode);
             e.Handled = e.SuppressKeyPress = true;
         }
-        else if (e.KeyCode == Keys.Enter) { if (SelectedFilter is { } f) EditRequested?.Invoke(f); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.Enter)
+        {
+            e.Handled = e.SuppressKeyPress = true;
+            // Not opened here. The dialog runs its own message loop, which pumps the WM_CHAR belonging to
+            // this very keystroke before WinForms gets to discard it - and the tree beeps at a character it
+            // has no use for. SuppressKeyPress cannot help: the discard happens after this returns. Letting
+            // the key finish first is what actually silences it. The guard is for a held Enter, which would
+            // otherwise queue a second dialog on top of the first.
+            if (!_editPending && SelectedFilter is { } f)
+            {
+                _editPending = true;
+                BeginInvoke(() => { try { EditRequested?.Invoke(f); } finally { _editPending = false; } });
+            }
+        }
         else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Escape && _search.TextLength > 0) { _search.Clear(); e.Handled = e.SuppressKeyPress = true; }
     }
