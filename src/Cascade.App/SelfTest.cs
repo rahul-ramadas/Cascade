@@ -35,6 +35,7 @@ internal static class SelfTest
             ok &= RunMachineStateChecks();
             ok &= RunRenderChecks();
             ok &= RunFilterListChecks();
+            ok &= RunDropPlacementChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -295,6 +296,38 @@ internal static class SelfTest
         doc.SetFilters(collection);
         tree.Rebuild();
         Pump();
+    }
+
+    /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the
+    /// gap, horizontal picks the nesting. Every rule here is a judgement about how the list should feel.</summary>
+    private static bool RunDropPlacementChecks()
+    {
+        Line("-- drag placement --");
+        const int h = 20, indent = 16;
+        // level 0 / level 1 / level 0, twenty pixels each.
+        var rows = new List<DropRow> { new(0, 0, h), new(1, h, h), new(0, h * 2, h) };
+
+        DropSpot At(int y, int x) => DropPlacement.For(rows, y, x, indent);
+
+        bool ok = Check("above the middle of the first row drops before it", At(5, 0).Slot == 0);
+        ok &= Check("below the middle of the first row drops after it", At(15, 0).Slot == 1);
+        ok &= Check("past the last row drops at the end", At(55, 0).Slot == 3);
+
+        // In the gap between a level-0 row and its level-1 child there is only one legal depth: any
+        // shallower and the child below would be orphaned from the parent above.
+        ok &= Check("a gap with only one legal depth ignores the pointer's x",
+                    At(15, 0).Level == 1 && At(15, indent * 5).Level == 1);
+
+        // Between the level-1 child and the next level-0 row, anything from 0 to 2 is legal.
+        ok &= Check("x at the left edge drops at the top level", At(35, 0).Level == 0);
+        ok &= Check("x one indent in nests one level", At(35, indent).Level == 1);
+        ok &= Check("x two indents in nests under the row above", At(35, indent * 2).Level == 2);
+        ok &= Check("x beyond the row above's depth is clamped", At(35, indent * 9).Level == 2);
+
+        // Nothing can be nested under a row that is not there.
+        ok &= Check("the first gap of all can only be top level",
+                    At(-5, indent * 4).Level == 0 && At(-5, 0).Slot == 0);
+        return ok;
     }
 
     private static Bitmap Capture(Form host)
