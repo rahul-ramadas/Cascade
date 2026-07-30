@@ -285,6 +285,10 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>How much of the file the current search term has been swept for, 0..1.</summary>
     public double FindProgress => _search?.Progress ?? 1;
 
+    /// <summary>How much of the direction a search is going has been swept, 0..1 - the honest measure of how
+    /// far along that search is, since it never waits on the opposite direction.</summary>
+    public double FindProgressFor(bool forward) => _search?.ProgressFor(forward) ?? 1;
+
     /// <summary>True once every line has been examined for the current term.</summary>
     public bool FindComplete => _search?.Complete ?? true;
 
