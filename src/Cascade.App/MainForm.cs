@@ -1200,6 +1200,9 @@ public sealed class MainForm : Form
             double fraction = _findProgress?.Invoke() ?? _findFraction;
             SetActivity($"{_findWhat}\u2026 {fraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
             SetProgress(ProgressBarStyle.Continuous, fraction);
+            // Fed from the same tick as the status bar so the two can never disagree. The dialog ignores
+            // this unless its own bar is showing, so a per-filter find does not drive it.
+            _findDialog?.SetProgress(fraction);
         }
         else if (_findMsg.Length > 0)
         {
