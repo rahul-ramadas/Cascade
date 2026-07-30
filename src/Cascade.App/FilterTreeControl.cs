@@ -50,6 +50,8 @@ public sealed class FilterTreeControl : UserControl
     private int _dragGrabX;
     private int _dragGrabLevel;
     private Point _dragPoint;
+    private TreeNode? _pressed;
+    private Point _pressedAt;
     private readonly System.Windows.Forms.Timer _autoScroll = new() { Interval = 60 };
     private int _autoScrollStep;
     private bool _editPending;
@@ -81,9 +83,10 @@ public sealed class FilterTreeControl : UserControl
         _tree.AfterCollapse += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Add(f.Id); };
         _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node?.Tag is Filter f) EditRequested?.Invoke(f); };
         _tree.MouseDown += OnTreeMouseDown;
+        _tree.MouseMove += OnTreeMouseMove;
+        _tree.MouseUp += (_, _) => _pressed = null;
         _tree.KeyDown += OnTreeKeyDown;
         _tree.DrawNode += OnDrawNode;
-        _tree.ItemDrag += OnItemDrag;
         _tree.DragEnter += (_, e) => e.Effect = DragDropEffects.Move;
         _tree.DragOver += OnDragOver;
         _tree.DragDrop += OnDragDrop;
@@ -129,7 +132,16 @@ public sealed class FilterTreeControl : UserControl
         // FullRowSelect is off, so make the whole colored row clickable for selection.
         var node = _tree.GetNodeAt(0, e.Y);
         if (node is not null && !ReferenceEquals(_tree.SelectedNode, node)) _tree.SelectedNode = node;
+
+        // Anywhere in the row's content can pick the filter up, blank space included. Left of that is the
+        // checkbox and the expander, where a press has to keep meaning tick and unfold.
+        _pressed = e.Button == MouseButtons.Left && node is not null && e.X >= ContentLeft(node) ? node : null;
+        _pressedAt = e.Location;
     }
+
+    /// <summary>Where the row's own content starts: just right of the checkbox, never over it. The paint
+    /// and the grab have to agree on this or the row would be draggable somewhere it does not look it.</summary>
+    private static int ContentLeft(TreeNode n) => n.Bounds.Left + 2;
 
     public Filter? SelectedFilter => _tree.SelectedNode?.Tag as Filter;
 
@@ -374,7 +386,7 @@ public sealed class FilterTreeControl : UserControl
         Rectangle bounds = e.Bounds;
         bool selected = (e.State & TreeNodeStates.Selected) != 0;
         int h = bounds.Height;
-        int contentLeft = e.Node.Bounds.Left + 2; // start just right of the checkbox (never overlap it)
+        int contentLeft = ContentLeft(e.Node);
 
         // Resolve the filter's effective style so the row previews exactly how a matching line looks.
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
@@ -514,12 +526,20 @@ public sealed class FilterTreeControl : UserControl
 
     // ---- drag & drop reorder + nest ----
 
-    private void OnItemDrag(object? sender, ItemDragEventArgs e)
+    private void OnTreeMouseMove(object? sender, MouseEventArgs e)
     {
-        if (_doc is null || e.Item is not TreeNode n || n.Tag is not Filter f) return;
+        if (_pressed is null || e.Button != MouseButtons.Left || _dragNode is not null) return;
 
-        BeginDrag(n, f, _tree.PointToClient(Control.MousePosition).X);
-        try { DoDragDrop(n, DragDropEffects.Move); }
+        // The system's own threshold, so a press that wobbles still reads as a click.
+        var slop = SystemInformation.DragSize;
+        if (Math.Abs(e.X - _pressedAt.X) < slop.Width && Math.Abs(e.Y - _pressedAt.Y) < slop.Height) return;
+
+        var node = _pressed;
+        _pressed = null;
+        if (_doc is null || node.Tag is not Filter f) return;
+
+        BeginDrag(node, f, _pressedAt.X);
+        try { DoDragDrop(node, DragDropEffects.Move); }
         finally { StopAutoScroll(); }
     }
 
@@ -554,7 +574,18 @@ public sealed class FilterTreeControl : UserControl
 
     internal int RowHeightForTesting => _tree.ItemHeight;
     internal int TreeHeightForTesting => _tree.ClientSize.Height;
+    internal int TreeWidthForTesting => _tree.ClientSize.Width;
     internal bool IsExpandedForTesting(Filter f) => NodeFor(f)?.IsExpanded ?? false;
+    internal Rectangle RowBoundsForTesting(Filter f) => NodeFor(f)?.Bounds ?? Rectangle.Empty;
+
+    /// <summary>Whether pressing here would pick the filter up, by way of the real handler.</summary>
+    internal bool PressArmsDragForTesting(Point at)
+    {
+        OnTreeMouseDown(_tree, new MouseEventArgs(MouseButtons.Left, 1, at.X, at.Y, 0));
+        bool armed = _pressed is not null;
+        _pressed = null;
+        return armed;
+    }
 
     /// <summary>Test seam: the filters on screen, top first.</summary>
     internal List<Filter> VisibleFiltersForTesting

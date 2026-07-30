@@ -385,6 +385,19 @@ internal static class SelfTest
                             viewport / rowH < filters.Roots.Count);
             if (!ok) return false;
 
+            // A filter can be picked up anywhere in its own content, the blank space between and after the
+            // columns included - but not on the checkbox, where a press has to keep meaning tick.
+            var row = tree.RowBoundsForTesting(filters.Roots[0]);
+            int mid = row.Top + row.Height / 2;
+            ok &= Check("a press on the filter's own text picks it up",
+                        tree.PressArmsDragForTesting(new Point(row.Left + 2, mid)));
+            ok &= Check("so does one out in the empty space to the right of it",
+                        tree.PressArmsDragForTesting(new Point(tree.TreeWidthForTesting - 4, mid)));
+            ok &= Check("a press on the checkbox does not",
+                        !tree.PressArmsDragForTesting(new Point(row.Left - 2, mid)));
+            ok &= Check("nor does one to the left of the checkbox",
+                        !tree.PressArmsDragForTesting(new Point(0, mid)));
+
             // Grab the tall subtree, which sits last, and walk the pointer up a row at a time.
             tree.StartDragForTesting(carried, new Point(20, viewport - rowH));
             ok &= Check("a subtree is carried collapsed, so it cannot fill the pane it moves through",
