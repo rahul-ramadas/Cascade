@@ -46,6 +46,7 @@ public abstract class DialogBase : Form
         var row = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,        // the pair belongs on one line, however narrow the space offered
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
