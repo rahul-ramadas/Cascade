@@ -1104,7 +1104,11 @@ public sealed class MainForm : Form
         if (_progress.Style != style) _progress.Style = style;
         if (style != ProgressBarStyle.Continuous) return;
         _progress.Maximum = 1000;
-        _progress.Value = (int)Math.Clamp(fraction * 1000, 0, 1000);
+        int v = (int)Math.Clamp(fraction * 1000, 0, 1000);
+        // Set from just above: Windows slides the fill towards a rising value and lags badly behind a fast
+        // job, but a step DOWN lands at once. Same reason as the find dialog's bar.
+        if (v < _progress.Maximum) { _progress.Value = v + 1; _progress.Value = v; }
+        else _progress.Value = v;
     }
 
     private void GoTo()

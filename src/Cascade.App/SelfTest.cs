@@ -39,6 +39,7 @@ internal static class SelfTest
             ok &= RunFilterDragChecks();
             ok &= RunFilterEnableChecks();
             ok &= RunDialogKeyboardChecks();
+            ok &= RunProgressPaintChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -776,6 +777,65 @@ internal static class SelfTest
         var editDlg = new FilterEditDialog(broken, isNew: true);
         ok &= NothingShifts("filter", editDlg, () => editDlg.SetTextForTesting("((unclosed"));
         return ok;
+    }
+
+    /// <summary>Windows slides a progress bar's fill towards a rising value over a few hundred milliseconds,
+    /// so a job that finishes quickly is over long before the fill arrives - the find bar crawled to a
+    /// seventh full while the search itself was four fifths done. What is PAINTED is the only thing that
+    /// matters here, and WM_PRINT (what DrawToBitmap uses) reports the slid position, not the value.</summary>
+    private static bool RunProgressPaintChecks()
+    {
+        Line("-- progress bars paint what they are told --");
+
+        var dlg = new FindDialog((_, _) => { });
+        dlg.StartPosition = FormStartPosition.Manual;
+        dlg.Location = new Point(0, 0);
+        dlg.Opacity = 0;
+        dlg.Show();
+        Pump();
+        dlg.SetSearching(true);
+        Pump();
+
+        var bar = AllControls(dlg).OfType<ProgressBar>().FirstOrDefault();
+        bool ok = Check("find: the searching state has a progress bar", bar is not null);
+        if (bar is not null)
+        {
+            // Straight from empty to most of the way along - the jump the slide is slowest to follow.
+            dlg.SetProgress(0.8);
+            double painted = PaintedFraction(bar);
+            ok &= Check($"find: it paints the figure it was given at once, rather than crawling towards it " +
+                        $"(asked 80%, painted {painted:P0})", Math.Abs(painted - 0.8) <= 0.1);
+        }
+
+        dlg.Close();
+        dlg.Dispose();
+        Pump();
+        return ok;
+    }
+
+    private static IEnumerable<Control> AllControls(Control root)
+    {
+        foreach (Control c in root.Controls)
+        {
+            yield return c;
+            foreach (var d in AllControls(c)) yield return d;
+        }
+    }
+
+    /// <summary>How much of a progress bar's width is actually coloured in, 0..1.</summary>
+    private static double PaintedFraction(ProgressBar bar)
+    {
+        using var bmp = new Bitmap(Math.Max(1, bar.Width), Math.Max(1, bar.Height));
+        bar.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        int y = bmp.Height / 2;
+        var empty = bmp.GetPixel(bmp.Width - 2, y);   // the far end, which 80% never reaches
+        int filled = 0;
+        for (int x = 0; x < bmp.Width; x++)
+        {
+            var c = bmp.GetPixel(x, y);
+            if (Math.Abs(c.R - empty.R) + Math.Abs(c.G - empty.G) + Math.Abs(c.B - empty.B) > 40) filled++;
+        }
+        return (double)filled / bmp.Width;
     }
 
     private static Bitmap Capture(Form host)    {

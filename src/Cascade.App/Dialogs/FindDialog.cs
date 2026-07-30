@@ -232,7 +232,12 @@ public sealed class FindDialog : Form
     public void SetProgress(double fraction)
     {
         if (!_progress.Visible) return;
-        _progress.Value = (int)Math.Clamp(fraction * 1000, 0, 1000);
+        int v = (int)Math.Clamp(fraction * 1000, 0, 1000);
+        // Windows slides the fill towards a rising value, and a search ends long before the slide arrives -
+        // the bar crawled to a seventh full while the search was already at four fifths. Stepping DOWN is
+        // immediate, so it is set from just above to snap it to the real figure.
+        if (v < _progress.Maximum) { _progress.Value = v + 1; _progress.Value = v; }
+        else _progress.Value = v;
     }
 
     public void FocusInput() { _text.Focus(); _text.SelectAll(); }
