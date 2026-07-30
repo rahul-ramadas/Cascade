@@ -53,21 +53,24 @@ public sealed class FilterEditDialog : DialogBase
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        int rows = 0;
 
         void Row(string label, Control field)
         {
-            root.Controls.Add(FieldLabel(label));
+            root.Controls.Add(FieldLabel(label), 0, rows);
             field.Margin = new Padding(0, Dpi(4), 0, Dpi(4));
-            root.Controls.Add(field);
+            root.Controls.Add(field, 1, rows);
+            rows++;
         }
 
-        // An empty Label still stands a text line tall, so rows with nothing in the label column need a
-        // spacer with no size at all or they leave a band of dead space.
+        // The field column only. Cells are given explicitly throughout: left to place things itself, a
+        // TableLayoutPanel deals its cells out to the VISIBLE controls in order, so the error line appearing
+        // would take the cell next to it and shift everything along.
         void NoteRow(Control field)
         {
-            root.Controls.Add(new Panel { Margin = Padding.Empty, Size = Size.Empty, AutoSize = false });
             field.Margin = new Padding(0, Dpi(2), 0, Dpi(2));
-            root.Controls.Add(field);
+            root.Controls.Add(field, 1, rows);
+            rows++;
         }
 
         static FlowLayoutPanel Strip(params Control[] items)
@@ -95,7 +98,7 @@ public sealed class FilterEditDialog : DialogBase
         NoteRow(_regexError);
 
         var buttons = OkCancelRow(out var ok, out _);
-        root.Controls.Add(buttons);
+        root.Controls.Add(buttons, 0, rows);
         root.SetColumnSpan(buttons, 2);
 
         Controls.Add(root);
@@ -114,8 +117,10 @@ public sealed class FilterEditDialog : DialogBase
         LoadFromFilter();
     }
 
-    protected override void OnLoad(EventArgs e)
-    {
+    /// <summary>Test seam: types into the pattern field, so a check can watch the error line appear.</summary>
+    internal void SetTextForTesting(string text) => _text.Text = text;
+
+    protected override void OnLoad(EventArgs e)    {
         base.OnLoad(e);                    // DialogBase AutoSize has fit the form to its content
         Size naturalClient = ClientSize;   // content size, independent of the border style
         AutoSize = false;                  // allow a manual width and free resizing

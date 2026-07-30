@@ -55,6 +55,11 @@ public sealed class FindDialog : Form
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        // Every cell is given explicitly. Left to place things itself, a TableLayoutPanel deals its cells
+        // out to the VISIBLE controls in order - so the moment the status label appears it takes the label
+        // column's cell and shoves the whole field column sideways.
+        root.RowCount = 5;
+        for (int i = 0; i < root.RowCount; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var findLabel = new Label
         {
@@ -65,8 +70,8 @@ public sealed class FindDialog : Form
         };
         _text.Margin = new Padding(0, Dpi(4), 0, Dpi(4));
         _text.MinimumSize = new Size(Dpi(340), 0);
-        root.Controls.Add(findLabel);
-        root.Controls.Add(_text);
+        root.Controls.Add(findLabel, 0, 0);
+        root.Controls.Add(_text, 1, 0);
 
         var options = new FlowLayoutPanel
         {
@@ -79,8 +84,7 @@ public sealed class FindDialog : Form
         _case.Margin = new Padding(0, Dpi(3), 0, Dpi(3));
         options.Controls.Add(_regex);
         options.Controls.Add(_case);
-        root.Controls.Add(Spacer());
-        root.Controls.Add(options);
+        root.Controls.Add(options, 1, 1);
 
         foreach (var b in new[] { _next, _prev, _cancel })
         {
@@ -110,21 +114,16 @@ public sealed class FindDialog : Form
         _progress.Margin = new Padding(0, Dpi(8), 0, 0);
         _status.Margin = new Padding(0, Dpi(6), 0, 0);
         _status.Visible = false;
-        root.Controls.Add(Spacer());
-        root.Controls.Add(_progress);
-        root.Controls.Add(Spacer());
-        root.Controls.Add(_status);
+        root.Controls.Add(_progress, 1, 2);
+        root.Controls.Add(_status, 1, 3);
 
-        root.Controls.Add(buttons);
+        root.Controls.Add(buttons, 0, 4);
         root.SetColumnSpan(buttons, 2);
 
         Controls.Add(root);
         AcceptButton = _next;
         MinimumSize = new Size(Dpi(460), 0);
     }
-
-    /// <summary>A cell that takes no room, for rows with nothing in the label column.</summary>
-    private static Panel Spacer() => new() { Margin = Padding.Empty, Size = Size.Empty, AutoSize = false };
 
     /// <summary>Find keys work anywhere in the dialog, not just in the text box. ProcessCmdKey runs before
     /// the default-button handling that would otherwise swallow them: Shift+Enter used to click "Find Next"

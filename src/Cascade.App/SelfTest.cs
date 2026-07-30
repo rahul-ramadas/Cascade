@@ -717,6 +717,57 @@ internal static class SelfTest
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
                           "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
         ok &= CheckDialog("find", new FindDialog((_, _) => { }), "&Find Next", "Find &Previous", "Fi&nd:");
+
+        // A message appearing must not shove the rest of the dialog sideways. A TableLayoutPanel hands out
+        // its cells to the VISIBLE controls in order, so a control that appears can take a cell meant for
+        // something else and drag a whole column along with it.
+        bool NothingShifts(string name, Form dlg, Action show)
+        {
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(0, 0);
+            dlg.Opacity = 0;
+            dlg.Show();
+            Pump();
+
+            List<(string Label, Rectangle Bounds)> Snapshot()
+            {
+                var list = new List<(string, Rectangle)>();
+                int i = 0;
+                foreach (var c in Walk(dlg))
+                {
+                    string text = c.Text.Replace("&", "");
+                    list.Add(($"{c.GetType().Name}#{i++}{(text.Length > 0 ? $" \"{text}\"" : "")}", c.Bounds));
+                }
+                return list;
+            }
+
+            var before = Snapshot();
+            show();
+            Pump();
+            var after = Snapshot();
+
+            var moved = new List<string>();
+            foreach (var (label, bounds) in before)
+            {
+                var now = after.FirstOrDefault(a => a.Label == label);
+                if (now.Label is not null && now.Bounds.X != bounds.X) moved.Add($"{label} x{bounds.X}->{now.Bounds.X}");
+            }
+            bool good = Check($"{name}: showing a message moves nothing sideways" +
+                              (moved.Count > 0 ? " [" + string.Join("; ", moved) + "]" : ""),
+                              moved.Count == 0);
+            dlg.Close();
+            dlg.Dispose();
+            Pump();
+            return good;
+        }
+
+        var findDlg = new FindDialog((_, _) => { });
+        ok &= NothingShifts("find", findDlg, () => findDlg.SetStatus("Not found."));
+
+        // The filter dialog's regex error line is the same shape of thing.
+        var broken = new Filter { Match = { Text = "fine", Regex = true } };
+        var editDlg = new FilterEditDialog(broken, isNew: true);
+        ok &= NothingShifts("filter", editDlg, () => editDlg.SetTextForTesting("((unclosed"));
         return ok;
     }
 
