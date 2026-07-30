@@ -203,6 +203,10 @@ public sealed class FilterTreeControl : UserControl
     private void OnAfterCheck(object? sender, TreeViewEventArgs e)
     {
         if (_building || e.Node?.Tag is not Filter f) return;
+        // Shift takes everything below along with it. On its own the checkbox stays strictly per filter:
+        // a disabled parent still scopes its children (its pattern is required of them either way), so
+        // "off here, on underneath" is a real thing to want and cascading by default would destroy it.
+        if ((ModifierKeys & Keys.Shift) == Keys.Shift) { SetSubtreeEnabled(e.Node, e.Node.Checked); return; }
         f.Enabled = e.Node.Checked;
         FiltersChanged?.Invoke();
     }
@@ -219,6 +223,13 @@ public sealed class FilterTreeControl : UserControl
     {
         if (e.KeyCode == Keys.F3) { JumpToMatch(fromSelection: true, forward: !e.Shift, announce: true); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Delete) { RemoveSelected(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.Space && e.Shift && !e.Control && !e.Alt && _tree.SelectedNode is { } sel)
+        {
+            // Handled here rather than left to the tree's own Space, so the gesture does not depend on
+            // what the native control makes of a modified Space.
+            SetSubtreeEnabled(sel, !sel.Checked);
+            e.Handled = e.SuppressKeyPress = true;
+        }
         else if (e.Control && !e.Shift && !e.Alt && e.KeyCode is Keys.Up or Keys.Down or Keys.Left or Keys.Right)
         {
             MoveSelected(e.KeyCode);
@@ -577,6 +588,10 @@ public sealed class FilterTreeControl : UserControl
     internal int TreeWidthForTesting => _tree.ClientSize.Width;
     internal bool IsExpandedForTesting(Filter f) => NodeFor(f)?.IsExpanded ?? false;
     internal Rectangle RowBoundsForTesting(Filter f) => NodeFor(f)?.Bounds ?? Rectangle.Empty;
+    internal bool IsCheckedForTesting(Filter f) => NodeFor(f)?.Checked ?? false;
+    internal void SelectForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.SelectedNode = n; }
+    internal void PressKeyForTesting(Keys key) => OnTreeKeyDown(_tree, new KeyEventArgs(key));
+    internal void ToggleCheckboxForTesting(Filter f) { if (NodeFor(f) is { } n) n.Checked = !n.Checked; }
 
     /// <summary>Whether pressing here would pick the filter up, by way of the real handler.</summary>
     internal bool PressArmsDragForTesting(Point at)
@@ -810,6 +825,9 @@ public sealed class FilterTreeControl : UserControl
         menu.Items.Add(new ToolStripMenuItem("Find next matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
         menu.Items.Add(new ToolStripMenuItem("Find previous matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); }) { ShortcutKeyDisplayString = "Shift+F4" });
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(new ToolStripMenuItem("Enable this and everything under it", null, (_, _) => SetSelectedSubtreeEnabled(true)) { ShortcutKeyDisplayString = "Shift+Space" });
+        menu.Items.Add(new ToolStripMenuItem("Disable this and everything under it", null, (_, _) => SetSelectedSubtreeEnabled(false)) { ShortcutKeyDisplayString = "Shift+Space" });
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Enable all", null, (_, _) => SetAllEnabled(true));
         menu.Items.Add("Disable all", null, (_, _) => SetAllEnabled(false));
         menu.Items.Add("Remove all", null, (_, _) => RemoveAll());
@@ -912,6 +930,33 @@ public sealed class FilterTreeControl : UserControl
         _building = false;
         _tree.Invalidate();
         FiltersChanged?.Invoke();
+    }
+
+    /// <summary>Sets the selected filter and everything nested under it to one state - the Shift+Space and
+    /// Shift+click gesture, and the menu entries for it.</summary>
+    public void SetSelectedSubtreeEnabled(bool enabled)
+    {
+        if (_tree.SelectedNode is { } n) SetSubtreeEnabled(n, enabled);
+    }
+
+    private void SetSubtreeEnabled(TreeNode root, bool enabled)
+    {
+        if (_doc is null) return;
+        // Same in-place rule as enable/disable-all: only the checkboxes change, so mutate them rather than
+        // rebuilding, and let _building swallow the per-node AfterCheck so this raises one change, not many.
+        _building = true;
+        _tree.BeginUpdate();
+        try { ApplyEnabled(root, enabled); }
+        finally { _tree.EndUpdate(); _building = false; }
+        _tree.Invalidate();
+        FiltersChanged?.Invoke();
+    }
+
+    private static void ApplyEnabled(TreeNode node, bool enabled)
+    {
+        if (node.Tag is Filter f) f.Enabled = enabled;
+        node.Checked = enabled;
+        foreach (TreeNode child in node.Nodes) ApplyEnabled(child, enabled);
     }
 
     public void RemoveAll()

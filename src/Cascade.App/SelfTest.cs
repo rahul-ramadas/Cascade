@@ -37,6 +37,7 @@ internal static class SelfTest
             ok &= RunFilterListChecks();
             ok &= RunDropPlacementChecks();
             ok &= RunFilterDragChecks();
+            ok &= RunFilterEnableChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -504,8 +505,102 @@ internal static class SelfTest
         }
     }
 
-    private static Bitmap Capture(Form host)
+    /// <summary>A filter's checkbox has to keep meaning that filter and nothing else: a parent's pattern is
+    /// required of its children whether or not the parent is on, so "off here, on underneath" is a real and
+    /// useful arrangement that cascading by default would wipe out. Shift is what asks for the subtree.</summary>
+    private static bool RunFilterEnableChecks()
     {
+        Line("-- enabling a filter and its subtree --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_enable_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(300, 400),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            var filters = new FilterCollection();
+            var parent = new Filter { Match = new FilterMatch { Text = "parent" } };
+            var other = new Filter { Match = new FilterMatch { Text = "other" } };
+            filters.Roots.Add(parent);
+            filters.Roots.Add(other);
+            var kids = new List<Filter>();
+            for (int i = 0; i < 3; i++)
+            {
+                var kid = new Filter { Match = new FilterMatch { Text = $"kid{i}" } };
+                filters.Roots.Add(kid);
+                filters.Move(kid, parent, parent.Children.Count);
+                kids.Add(kid);
+            }
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            int changes = 0;
+            tree.FiltersChanged += () => changes++;
+            bool Uniform(bool on) => parent.Enabled == on && kids.All(k => k.Enabled == on);
+            bool ShownAsStored() => tree.IsCheckedForTesting(parent) == parent.Enabled &&
+                                    kids.All(k => tree.IsCheckedForTesting(k) == k.Enabled);
+
+            // The checkbox on its own: that filter, nothing else.
+            tree.ToggleCheckboxForTesting(parent);
+            bool ok = Check("ticking a filter turns on that filter and no other",
+                            parent.Enabled && kids.All(k => !k.Enabled) && !other.Enabled);
+
+            // Shift+Space: the whole subtree, to a single state rather than each flipped in turn.
+            tree.SelectForTesting(parent);
+            changes = 0;
+            tree.PressKeyForTesting(Keys.Space | Keys.Shift);
+            ok &= Check($"shift+space with the parent on turns the subtree off together",
+                        Uniform(false));
+            ok &= Check($"and reports the change once, not once per filter (raised {changes})", changes == 1);
+
+            tree.PressKeyForTesting(Keys.Space | Keys.Shift);
+            ok &= Check("shift+space again turns the subtree on together", Uniform(true));
+            ok &= Check("a filter outside the subtree is left alone", !other.Enabled);
+            ok &= Check("the checkboxes show what is actually stored", ShownAsStored());
+
+            // A mixed subtree settles on one state. Flipping each in turn would leave this one odd.
+            tree.ToggleCheckboxForTesting(kids[1]);
+            ok &= Check("a single child can still be turned off on its own",
+                        parent.Enabled && !kids[1].Enabled && kids[0].Enabled);
+            tree.SelectForTesting(parent);
+            tree.PressKeyForTesting(Keys.Space | Keys.Shift);
+            ok &= Check($"a subtree in a mix of states settles on one, rather than each being flipped " +
+                        $"[{string.Join(" ", new[] { parent }.Concat(kids).Select(f => f.Enabled ? "on" : "off"))}]",
+                        Uniform(false) && ShownAsStored());
+
+            // From a child, it is that child's own subtree - not the parent's.
+            tree.SelectForTesting(kids[0]);
+            tree.PressKeyForTesting(Keys.Space | Keys.Shift);
+            ok &= Check("from a leaf it is just that leaf", kids[0].Enabled && !parent.Enabled && !kids[1].Enabled);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    private static Bitmap Capture(Form host)    {
         var bmp = new Bitmap(host.ClientSize.Width, host.ClientSize.Height);
         host.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
         return bmp;
