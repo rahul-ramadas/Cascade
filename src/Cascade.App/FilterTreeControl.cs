@@ -427,7 +427,14 @@ public sealed class FilterTreeControl : UserControl
         int descX = _columns.DescX;
         int filterRight = _columns.FilterRight;
 
-        using (var b = new SolidBrush(bg)) g.FillRectangle(b, contentLeft, bounds.Top, Math.Max(0, rightEdge - contentLeft), h);
+        using (var b = new SolidBrush(bg))
+        {
+            // Fill from the label's own left edge, not from where the text starts. Windows has already
+            // painted its selection across the whole label, so any part left uncovered shows through as a
+            // stripe between the checkbox and the text.
+            int fill = e.Node.Bounds.Left;
+            g.FillRectangle(b, fill, bounds.Top, Math.Max(0, rightEdge - fill), h);
+        }
 
         int textHeight = TextRenderer.MeasureText(g, "Xg", _fReg, new Size(int.MaxValue, h), TextFormatFlags.NoPadding).Height;
         int textY = bounds.Top + Math.Max(0, (h - textHeight) / 2);

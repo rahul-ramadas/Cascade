@@ -281,6 +281,33 @@ internal static class SelfTest
             ok &= Check($"a column is at least as wide as its own heading " +
                         $"(description {tiny.DescriptionWidth}px, heading needs {tree.HeaderWidthForTesting("Description")}px)",
                         tiny.DescriptionWidth >= tree.HeaderWidthForTesting("Description"));
+
+            // Selecting a row outlines it, and the outline has to be just that. Windows paints its own
+            // selection across the whole label before the row is drawn over the top, so a row that starts
+            // painting even a couple of pixels in leaves a stripe of it between the checkbox and the text.
+            tree.SelectForTesting(other);
+            Pump();
+            var selArea = tree.TreeAreaForTesting;
+            var rowRect = tree.RowBoundsForTesting(other);
+            using var selected = Capture(host);
+            int worst = 0, worstX = -1;
+            for (int x = Math.Max(0, rowRect.Left - 8); x < rowRect.Left + 8; x++)
+            {
+                int run = 0;
+                for (int y = rowRect.Top; y < rowRect.Bottom; y++)
+                {
+                    int hx = selArea.Left + x, hy = selArea.Top + y;
+                    if (hx >= selected.Width || hy >= selected.Height) continue;
+                    var px = selected.GetPixel(hx, hy);
+                    if (px.R == SystemColors.Highlight.R && px.G == SystemColors.Highlight.G &&
+                        px.B == SystemColors.Highlight.B) run++;
+                }
+                if (run > worst) { worst = run; worstX = x; }
+            }
+            // Two is the outline itself crossing the column: one pixel at the top, one at the bottom.
+            ok &= Check($"the selection outline is a plain box, with no stripe left in it beside the " +
+                        $"checkbox (worst column x={worstX} is highlighted down {worst} of {rowRect.Height} pixels)",
+                        worst <= 2);
             return ok;
         }
         finally
