@@ -36,6 +36,7 @@ internal static class SelfTest
             ok &= RunRenderChecks();
             ok &= RunFilterListChecks();
             ok &= RunDropPlacementChecks();
+            ok &= RunFilterDragChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -328,6 +329,166 @@ internal static class SelfTest
         ok &= Check("the first gap of all can only be top level",
                     At(-5, indent * 4).Level == 0 && At(-5, 0).Slot == 0);
         return ok;
+    }
+
+    /// <summary>Dragging a filter rearranges the list under the pointer, which is exactly what makes it
+    /// easy to break: re-homing the node scrolls the list, and a subtree at full height fills the pane it
+    /// is being dragged through. Either one slides the rows out from under a pointer that has not moved,
+    /// so the filter leaps several places at once instead of walking. These checks pin the walk.</summary>
+    private static bool RunFilterDragChecks()
+    {
+        Line("-- dragging a filter --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_drag_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                // Deliberately shorter than the list: the bugs this guards only appear once the list
+                // has to scroll, so a pane that shows everything would pass no matter what.
+                ClientSize = new Size(300, 520),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            var filters = new FilterCollection();
+            for (int i = 0; i < 60; i++)
+                filters.Roots.Add(new Filter { Match = new FilterMatch { Text = $"f{i:00}" } });
+            var carried = filters.Roots[^1];
+            for (int c = 0; c < 6; c++)
+            {
+                var kid = new Filter { Match = new FilterMatch { Text = $"kid{c}" } };
+                filters.Roots.Add(kid);
+                filters.Move(kid, carried, carried.Children.Count);
+            }
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            int rowH = tree.RowHeightForTesting;
+            int viewport = tree.TreeHeightForTesting;
+            bool ok = Check($"the pane is too short for the list, so dragging has to scroll " +
+                            $"({viewport / rowH} rows of {filters.Roots.Count + carried.Children.Count})",
+                            viewport / rowH < filters.Roots.Count);
+            if (!ok) return false;
+
+            // Grab the tall subtree, which sits last, and walk the pointer up a row at a time.
+            tree.StartDragForTesting(carried, new Point(20, viewport - rowH));
+            ok &= Check("a subtree is carried collapsed, so it cannot fill the pane it moves through",
+                        !tree.IsExpandedForTesting(carried));
+
+            var seen = new List<int>();
+            var tops = new List<string>();
+            // Stay clear of the edges: the auto-scroll zone is a row deep at each end, and scrolling is
+            // meant to move the list, which would confuse a check about the pointer alone.
+            var stops = new List<int>();
+            for (int y = viewport - rowH * 2; y >= rowH * 2; y -= rowH) stops.Add(y);
+            foreach (int y in stops)
+            {
+                tree.DragToForTesting(new Point(20, y));
+                Pump();
+                seen.Add(doc.Filters.Roots.IndexOf(carried));
+                tops.Add(tree.VisibleFiltersForTesting.FirstOrDefault()?.Match.Text ?? "?");
+            }
+
+            int biggestStep = 0;
+            for (int i = 1; i < seen.Count; i++) biggestStep = Math.Max(biggestStep, seen[i - 1] - seen[i]);
+            ok &= Check($"one row of travel moves the filter one place [{string.Join(" ", seen)}]",
+                        seen.Count > 2 && biggestStep == 1);
+            ok &= Check($"it walks up rather than wandering [{string.Join(" ", seen)}]",
+                        seen[^1] < seen[0] && seen.SequenceEqual(seen.OrderByDescending(v => v)));
+            ok &= Check($"placing the filter does not scroll the list out from under the pointer " +
+                        $"[{string.Join(" ", tops.Distinct())}]",
+                        tops.Distinct().Count() == 1);
+
+            // Back down the exact same positions. Where the filter lands has to follow from where the
+            // pointer is rather than from how it got there, give or take the one place the filter itself
+            // takes up in the list - drifting further than that is what "it jumped somewhere I did not
+            // mean it to go" actually feels like.
+            var back = new List<int>();
+            for (int i = stops.Count - 1; i >= 0; i--)
+            {
+                tree.DragToForTesting(new Point(20, stops[i]));
+                Pump();
+                back.Add(doc.Filters.Roots.IndexOf(carried));
+            }
+            back.Reverse();
+            int drift = seen.Zip(back, (d, u) => Math.Abs(d - u)).Max();
+            ok &= Check($"the same pointer position gives the same place on the way back, within the one " +
+                        $"place the filter itself occupies [down {string.Join(" ", seen)}] [up {string.Join(" ", back)}]",
+                        drift <= 1);
+
+            tree.DropForTesting();
+            Pump();
+            ok &= Check("dropping puts back what the user had open", tree.IsExpandedForTesting(carried));
+            ok &= Check("the children came along", carried.Children.Count == 6);
+
+            // The other half of it: a filter has to be able to reach somewhere that was not on screen
+            // when the drag started. Holding at the bottom edge scrolls the list, and the filter has to
+            // travel with it rather than being left behind while the view slides past. Start it at the
+            // very top so the journey is far longer than one paneful.
+            doc.Filters.Move(carried, null, 0);
+            tree.Rebuild();
+            Pump();
+            tree.StartDragForTesting(carried, new Point(20, rowH));
+            // Where every other filter sits relative to its neighbours cannot change during the drag, so
+            // this is a fixed ruler to read the view's travel against.
+            var ruler = doc.Filters.Roots.Where(r => !ReferenceEquals(r, carried)).ToList();
+            List<int> Travel(int y, int ticks)
+            {
+                var seenAt = new List<int>();
+                // Point at the edge once and then hold perfectly still: with the mouse stationary the drag
+                // events stop arriving, so everything from here has to come from the scroll itself.
+                tree.DragToForTesting(new Point(20, y));
+                for (int i = 0; i < ticks; i++)
+                {
+                    tree.AutoScrollTickForTesting();
+                    Pump();
+                    // Read the travel off the topmost row that is NOT the one being dragged: at the top
+                    // edge the dragged filter is legitimately the first row, and it moves by design.
+                    var settled = tree.VisibleFiltersForTesting.FirstOrDefault(f => !ReferenceEquals(f, carried));
+                    if (settled is not null && ruler.IndexOf(settled) is var ix && ix >= 0) seenAt.Add(ix);
+                }
+                return seenAt;
+            }
+
+            var down = Travel(viewport - 2, 80);
+            ok &= Check($"holding at the bottom edge carries the filter all the way to the end " +
+                        $"(place {doc.Filters.Roots.IndexOf(carried)} of {doc.Filters.Roots.Count - 1})",
+                        doc.Filters.Roots.IndexOf(carried) == doc.Filters.Roots.Count - 1);
+            ok &= Check($"the view slides steadily down the list instead of jumping about " +
+                        $"[{string.Join(" ", down.Distinct())}]",
+                        down.Count > 2 && down.SequenceEqual(down.OrderBy(v => v)));
+
+            // And back the other way, which is the direction that used to fling it about.
+            var up = Travel(2, 80);
+            ok &= Check($"holding at the top edge carries it all the way back to the start " +
+                        $"(place {doc.Filters.Roots.IndexOf(carried)})",
+                        doc.Filters.Roots.IndexOf(carried) == 0);
+            ok &= Check($"and slides steadily back up [{string.Join(" ", up.Distinct())}]",
+                        up.Count > 2 && up.SequenceEqual(up.OrderByDescending(v => v)));
+            tree.DropForTesting();
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     private static Bitmap Capture(Form host)

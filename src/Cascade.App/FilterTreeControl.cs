@@ -49,6 +49,7 @@ public sealed class FilterTreeControl : UserControl
     private (Filter? Parent, int Index)? _dragOrigin;
     private int _dragGrabX;
     private int _dragGrabLevel;
+    private Point _dragPoint;
     private readonly System.Windows.Forms.Timer _autoScroll = new() { Interval = 60 };
     private int _autoScrollStep;
     private bool _editPending;
@@ -89,7 +90,9 @@ public sealed class FilterTreeControl : UserControl
         _tree.DragLeave += (_, _) => StopAutoScroll();
         // On the source, not the tree: DoDragDrop is called on this control, so this is where Escape lands.
         QueryContinueDrag += (_, e) => { if (e.EscapePressed) { CancelDrag(); e.Action = DragAction.Cancel; } };
-        _autoScroll.Tick += (_, _) => ScrollBy(_autoScrollStep);
+        // Re-place as it scrolls, so holding at the edge carries the filter along instead of just moving
+        // the view past it. The pointer has not moved, so the last one it reported is where it still is.
+        _autoScroll.Tick += (_, _) => AutoScrollTick();
 
         _search.TextChanged += (_, _) => JumpToMatch(fromSelection: false, forward: true, announce: false);
         _search.KeyDown += OnSearchKeyDown;
@@ -515,23 +518,83 @@ public sealed class FilterTreeControl : UserControl
     {
         if (_doc is null || e.Item is not TreeNode n || n.Tag is not Filter f) return;
 
-        _dragNode = n;
-        _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc.Filters.Roots).IndexOf(f));
-        _dragGrabX = _tree.PointToClient(Control.MousePosition).X;
-        _dragGrabLevel = n.Level;
-        _tree.SelectedNode = n;
-        _tree.Invalidate();
+        BeginDrag(n, f, _tree.PointToClient(Control.MousePosition).X);
         try { DoDragDrop(n, DragDropEffects.Move); }
         finally { StopAutoScroll(); }
     }
 
+    private void BeginDrag(TreeNode n, Filter f, int grabX)
+    {
+        _dragNode = n;
+        _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc!.Filters.Roots).IndexOf(f));
+        _dragGrabX = grabX;
+        _dragGrabLevel = n.Level;
+        _tree.SelectedNode = n;
+        SetDragSubtreeCollapsed(true);
+        _tree.Invalidate();
+    }
+
+    /// <summary>Test seams: a real drag is a modal DoDragDrop loop, which a test cannot run - these drive
+    /// the same code from the outside. Everything after the grab is shared with the real thing.</summary>
+    internal void StartDragForTesting(Filter f, Point at)
+    {
+        if (_doc is not null && NodeFor(f) is { } n) BeginDrag(n, f, at.X);
+    }
+
+    internal void DragToForTesting(Point at)
+    {
+        AutoScrollFor(at);
+        UpdateDropPosition(at);
+    }
+
+    internal void DropForTesting() => ResetDrag();
+
+    /// <summary>One beat of the auto-scroll timer, which a test cannot wait on reliably.</summary>
+    internal void AutoScrollTickForTesting() => AutoScrollTick();
+
+    internal int RowHeightForTesting => _tree.ItemHeight;
+    internal int TreeHeightForTesting => _tree.ClientSize.Height;
+    internal bool IsExpandedForTesting(Filter f) => NodeFor(f)?.IsExpanded ?? false;
+
+    /// <summary>Test seam: the filters on screen, top first.</summary>
+    internal List<Filter> VisibleFiltersForTesting
+    {
+        get
+        {
+            var list = new List<Filter>();
+            for (var n = _tree.TopNode; n is not null && n.Bounds.Top < _tree.ClientSize.Height; n = n.NextVisibleNode)
+                if (n.Tag is Filter f) list.Add(f);
+            return list;
+        }
+    }
+
+    /// <summary>A subtree is carried collapsed, the way outliners do it. At full height it fills the pane
+    /// it is being dragged through, leaving almost no rows to aim between - so the filter sits still for
+    /// most of the pane and then leaps several places at once. This is presentation only: <c>_building</c>
+    /// keeps it out of the user's own collapsed set, and dropping puts back exactly what they had open.</summary>
+    private void SetDragSubtreeCollapsed(bool collapsed)
+    {
+        if (_dragNode is null || _dragNode.Nodes.Count == 0) return;
+        _building = true;
+        _tree.BeginUpdate();
+        try { if (collapsed) _dragNode.Collapse(); else RestoreExpansion(_dragNode); }
+        finally { _tree.EndUpdate(); _building = false; }
+    }
+
     private void OnDragOver(object? sender, DragEventArgs e)
     {
-        if (_doc is null || _dragNode?.Tag is not Filter dragged) { e.Effect = DragDropEffects.None; return; }
+        if (_doc is null || _dragNode is null) { e.Effect = DragDropEffects.None; return; }
         e.Effect = DragDropEffects.Move;
 
         var pt = _tree.PointToClient(new Point(e.X, e.Y));
         AutoScrollFor(pt);
+        UpdateDropPosition(pt);
+    }
+
+    private void UpdateDropPosition(Point pt)
+    {
+        if (_doc is null || _dragNode?.Tag is not Filter dragged) return;
+        _dragPoint = pt;
 
         var rows = new List<TreeNode>();
         for (var n = _tree.Nodes.Count > 0 ? _tree.Nodes[0] : null; n is not null; n = n.NextVisibleNode)
@@ -597,7 +660,6 @@ public sealed class FilterTreeControl : UserControl
 
             int at = (parent?.Children ?? _doc.Filters.Roots).IndexOf(dragged);
             nodes.Insert(Math.Clamp(at, 0, nodes.Count), _dragNode);
-            RestoreExpansion(_dragNode);
             NodeFor(parent)?.Expand();
         }
         finally
@@ -654,6 +716,7 @@ public sealed class FilterTreeControl : UserControl
 
     private void ResetDrag()
     {
+        SetDragSubtreeCollapsed(false);
         _dragNode = null;
         _dragOrigin = null;
         StopAutoScroll();
@@ -685,12 +748,22 @@ public sealed class FilterTreeControl : UserControl
         _autoScrollStep = 0;
     }
 
+    private void AutoScrollTick()
+    {
+        ScrollBy(_autoScrollStep);
+        if (_dragNode is not null) UpdateDropPosition(_dragPoint);
+    }
+
     private void ScrollBy(int rows)
     {
-        var top = _tree.TopNode;
-        for (int i = 0; i < Math.Abs(rows) && top is not null; i++)
-            top = rows < 0 ? top.PrevVisibleNode ?? top : top.NextVisibleNode ?? top;
-        if (top is not null && !ReferenceEquals(top, _tree.TopNode)) _tree.TopNode = top;
+        if (_tree.TopNode is not { } top) return;
+        for (int i = 0; i < Math.Abs(rows); i++)
+        {
+            var next = rows < 0 ? top.PrevVisibleNode : top.NextVisibleNode;
+            if (next is null) break;
+            top = next;
+        }
+        if (!ReferenceEquals(top, _tree.TopNode)) _tree.TopNode = top;
     }
 
     // ---- context menu / edits ----
