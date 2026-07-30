@@ -268,6 +268,9 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
         filters.DropDownItems.Add(Mi("Find Pre&vious Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
         filters.DropDownItems.Add(new ToolStripSeparator());
+        filters.DropDownItems.Add(Hint("Ena&ble Filter and Everything Under It", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(true)));
+        filters.DropDownItems.Add(Hint("Disa&ble Filter and Everything Under It", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(false)));
+        filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Enable All", (_, _) => _filterTree.SetAllEnabled(true)));
         filters.DropDownItems.Add(Mi("Disable All", (_, _) => _filterTree.SetAllEnabled(false)));
         filters.DropDownItems.Add(Mi("Remove All", (_, _) => _filterTree.RemoveAll()));
