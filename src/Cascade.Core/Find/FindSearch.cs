@@ -51,6 +51,19 @@ public sealed class FindSearch : IDisposable
         get { lock (_sync) return _lines <= 0 ? 1 : Math.Clamp((double)(_hi - _lo) / _lines, 0, 1); }
     }
 
+    /// <summary>How much of ONE direction has been examined, 0..1. A search only ever waits on the way it is
+    /// going, so this is what its progress bar must show: whole-file coverage stops short of 100% whenever
+    /// the other side has less ground to cover, which is most of the time.</summary>
+    public double ProgressFor(bool forward)
+    {
+        lock (_sync)
+        {
+            long span = forward ? _lines - _start : _start;
+            long done = forward ? _hi - _start : _start - _lo;
+            return span <= 0 ? 1 : Math.Clamp((double)done / span, 0, 1);
+        }
+    }
+
     public bool Complete { get { lock (_sync) return _lo <= 0 && _hi >= _lines; } }
 
     /// <summary>Matches found so far. Only meaningful once <see cref="Complete"/>.</summary>

@@ -143,6 +143,32 @@ public class FindSearchTests
         Assert.Equal(-1, await pending);
     }
 
+    /// <summary>The progress a search reports has to fill up as THAT search finishes. Coverage of the whole
+    /// file is the wrong measure: the sweep runs both ways, and the opposite side has less ground to cover
+    /// whenever the caret is past the middle - so a forward search from three quarters in reported 50% and
+    /// then simply stopped. The opposite direction is held here so whole-file coverage cannot reach 1 by
+    /// luck and let this pass.</summary>
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(250_000, true)]
+    [InlineData(750_000, true)]
+    [InlineData(999_999, true)]
+    [InlineData(250_000, false)]
+    [InlineData(750_000, false)]
+    [InlineData(999_999, false)]
+    public async Task A_search_reaches_full_progress_wherever_it_started(long start, bool forward)
+    {
+        var gate = new SemaphoreSlim(0);
+        var fake = new Fake(_ => false, gate, from => forward ? from < start : from >= start);
+        using var search = Started(1_000_000, start, fake);
+
+        // The start line itself belongs to the forward sweep, so a backward query has to begin below it -
+        // asking from the start line would (rightly) wait for the forward sweep this test is holding.
+        long from = forward ? start : start - 1;
+        Assert.Equal(-1, await search.NextAsync(from, forward, null, CancellationToken.None));
+        Assert.Equal(1, search.ProgressFor(forward));
+    }
+
     [Fact]
     public async Task It_will_not_answer_out_of_a_part_of_the_file_it_has_not_examined_yet()
     {

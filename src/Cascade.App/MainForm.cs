@@ -1036,7 +1036,7 @@ public sealed class MainForm : Form
 
         // F3 usually repeats the search with the dialog closed, so the progress has to reach the status bar
         // too - a search that is waiting on the sweep would otherwise look like the window had locked up.
-        SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgress);
+        SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgressFor(forward));
         _findDialog?.SetSearching(true);
         long found;
         try
