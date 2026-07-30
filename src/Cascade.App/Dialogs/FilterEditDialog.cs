@@ -18,7 +18,7 @@ public sealed class FilterEditDialog : DialogBase
     private readonly CheckBox _regex = new() { Text = "&Regular expression", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly CheckBox _caseSensitive = new() { Text = "&Case sensitive", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly CheckBox _excluding = new() { Text = "&Excluding filter (hides matching lines)", AutoSize = true, Margin = new Padding(0, 3, 0, 3) };
-    private readonly Label _regexError = new() { ForeColor = Color.Firebrick, AutoSize = true, Visible = false };
+    private readonly Label _regexError = new() { ForeColor = Color.Firebrick, AutoSize = false, AutoEllipsis = true };
 
     private readonly CheckBox _setFore = new() { Text = "Text col&or", AutoSize = true, Margin = new Padding(0, 4, 6, 3) };
     private readonly Button _foreBtn = new() { FlatStyle = FlatStyle.Flat };
@@ -95,11 +95,34 @@ public sealed class FilterEditDialog : DialogBase
             AutoSize = true,
             ForeColor = Color.Gray
         });
-        NoteRow(_regexError);
 
+        // The error shares the button row rather than having one of its own: that row is as tall as the
+        // buttons whatever else is in it, so a bad pattern cannot push them down the dialog.
         var buttons = OkCancelRow(out var ok, out _);
-        root.Controls.Add(buttons, 0, rows);
-        root.SetColumnSpan(buttons, 2);
+        buttons.Dock = DockStyle.None;
+        buttons.Anchor = AnchorStyles.Right;    // centred against the error text, not pinned to the row's top
+        buttons.Margin = new Padding(0);
+        _regexError.Dock = DockStyle.Fill;
+        _regexError.TextAlign = ContentAlignment.MiddleLeft;
+        _regexError.Margin = new Padding(0, 0, Dpi(12), 0);
+        _regexError.Height = Dpi(24);
+
+        var bottom = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, Dpi(12), 0, 0)
+        };
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bottom.Controls.Add(_regexError, 0, 0);
+        bottom.Controls.Add(buttons, 1, 0);
+
+        root.Controls.Add(bottom, 0, rows);
+        root.SetColumnSpan(bottom, 2);
 
         Controls.Add(root);
         MinimumSize = new Size(Dpi(560), 0);
@@ -200,7 +223,6 @@ public sealed class FilterEditDialog : DialogBase
             catch (ArgumentException ex) { message = "Invalid regex: " + ex.Message; }
         }
         _regexError.Text = message;
-        _regexError.Visible = message.Length > 0;   // an empty row would otherwise sit there as a gap
     }
 
     private void Apply()

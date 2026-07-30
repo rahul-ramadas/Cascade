@@ -11,7 +11,7 @@ public sealed class FindDialog : Form
     private readonly TextBox _text = new() { Dock = DockStyle.Fill };
     private readonly CheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly Label _status = new() { AutoSize = true, ForeColor = Color.Gray, Anchor = AnchorStyles.Left };
+    private readonly Label _status = new() { AutoSize = true, ForeColor = Color.Gray };
     private readonly ProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Maximum = 1000, Visible = false };
     private readonly Button _next = new() { Text = "&Find Next" };
     private readonly Button _prev = new() { Text = "Find &Previous" };
@@ -58,7 +58,7 @@ public sealed class FindDialog : Form
         // Every cell is given explicitly. Left to place things itself, a TableLayoutPanel deals its cells
         // out to the VISIBLE controls in order - so the moment the status label appears it takes the label
         // column's cell and shoves the whole field column sideways.
-        root.RowCount = 5;
+        root.RowCount = 3;
         for (int i = 0; i < root.RowCount; i++) root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var findLabel = new Label
@@ -77,14 +77,37 @@ public sealed class FindDialog : Form
         {
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            WrapContents = true,
-            Margin = new Padding(0, Dpi(2), 0, Dpi(2))
+            WrapContents = false,
+            Margin = new Padding(0)
         };
         _regex.Margin = new Padding(0, Dpi(3), Dpi(24), Dpi(3));
         _case.Margin = new Padding(0, Dpi(3), 0, Dpi(3));
         options.Controls.Add(_regex);
         options.Controls.Add(_case);
-        root.Controls.Add(options, 1, 1);
+
+        // The message shares the checkbox row instead of having one of its own. That row stands as tall as
+        // the checkboxes whether or not there is anything to report, so a message costs no height - and the
+        // width left over beside two checkboxes is far more than a row of its own would have given it.
+        _status.AutoSize = false;
+        _status.Dock = DockStyle.Fill;
+        _status.TextAlign = ContentAlignment.MiddleRight;
+        _status.AutoEllipsis = true;
+        _status.Margin = new Padding(Dpi(16), 0, 0, 0);
+
+        var optionRow = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, Dpi(2), 0, Dpi(2))
+        };
+        optionRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        optionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        optionRow.Controls.Add(options, 0, 0);
+        optionRow.Controls.Add(_status, 1, 0);
+        root.Controls.Add(optionRow, 1, 1);
 
         foreach (var b in new[] { _next, _prev, _cancel })
         {
@@ -95,30 +118,47 @@ public sealed class FindDialog : Form
         _next.Click += (_, _) => Run(true);
         _prev.Click += (_, _) => Run(false);
         _cancel.Click += (_, _) => CancelRequested?.Invoke();
+        // Kept on screen and merely disabled: appearing and disappearing would shuffle the buttons beside it.
+        _cancel.Visible = true;
+        _cancel.Enabled = false;
 
         // Right-aligned, like every other dialog's buttons; they used to hang off the left with a wide gap.
         var buttons = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.RightToLeft,
-            Dock = DockStyle.Fill,
+            WrapContents = false,        // or they stack up one per line inside an auto-sized column
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Margin = new Padding(0, Dpi(10), 0, 0)
+            Margin = new Padding(0)
         };
         buttons.Controls.Add(_next);     // rightmost, and the default
         buttons.Controls.Add(_prev);
         buttons.Controls.Add(_cancel);
 
-        _progress.Height = Dpi(6);
-        _progress.Dock = DockStyle.Fill;
-        _progress.Margin = new Padding(0, Dpi(8), 0, 0);
-        _status.Margin = new Padding(0, Dpi(6), 0, 0);
-        _status.Visible = false;
-        root.Controls.Add(_progress, 1, 2);
-        root.Controls.Add(_status, 1, 3);
+        // The progress bar sits in the empty half of the button row for the same reason: that row is as tall
+        // as the buttons whatever else is in it, so the bar arriving cannot push them down the dialog. It is
+        // deliberately given a small size and left to stretch - at its full width it would instead widen the
+        // dialog on the way in, since an auto-sized column asks a stretched child how big it currently is.
+        _progress.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        _progress.Size = new Size(Dpi(60), Dpi(6));
+        _progress.Margin = new Padding(0, 0, Dpi(16), 0);
 
-        root.Controls.Add(buttons, 0, 4);
-        root.SetColumnSpan(buttons, 2);
+        var bottom = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, Dpi(12), 0, 0)
+        };
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        bottom.Controls.Add(_progress, 0, 0);
+        bottom.Controls.Add(buttons, 1, 0);
+
+        root.Controls.Add(bottom, 0, 2);
+        root.SetColumnSpan(bottom, 2);
 
         Controls.Add(root);
         AcceptButton = _next;
@@ -175,11 +215,7 @@ public sealed class FindDialog : Form
         _search(new FindQuery(_text.Text, _regex.Checked, _case.Checked), forward);
     }
 
-    public void SetStatus(string text)
-    {
-        _status.Text = text;
-        _status.Visible = text.Length > 0;   // an empty label still stands a text line tall
-    }
+    public void SetStatus(string text) => _status.Text = text;
 
     /// <summary>Shows/hides the in-progress UI (progress bar + Cancel) and enables/disables the find
     /// buttons while a background search runs.</summary>
@@ -187,7 +223,8 @@ public sealed class FindDialog : Form
     {
         _searching = searching;
         _next.Enabled = _prev.Enabled = !searching;
-        _cancel.Visible = _progress.Visible = searching;
+        _cancel.Enabled = searching;
+        _progress.Visible = searching;
         if (searching) { _progress.Value = 0; SetStatus("Searching\u2026"); }
     }
 

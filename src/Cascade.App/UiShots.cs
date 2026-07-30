@@ -41,7 +41,17 @@ internal static class UiShots
             Style = { Foreground = new RgbColor(0xFF, 0xFF, 0xFF), Background = new RgbColor(0x9C, 0x27, 0xB0) }
         };
         ShotDialog(new FilterEditDialog(demoFilter, isNew: false), outDir, "filter-edit");
+
+        var badFilter = new Filter { Enabled = true, Match = { Text = @"\[OrderService\].+Disk", Regex = true } };
+        var filterError = new FilterEditDialog(badFilter, isNew: false);
+        filterError.SetTextForTesting(@"\[OrderService\].+(Disk");
+        ShotDialog(filterError, outDir, "filter-edit-error");
+
         ShotDialog(new FindDialog((_, _) => { }), outDir, "find");
+
+        var findMissed = new FindDialog((_, _) => { });
+        findMissed.SetStatus("Not found.");
+        ShotDialog(findMissed, outDir, "find-notfound");
 
         var findSearching = new FindDialog((_, _) => { });
         findSearching.SetSearching(true);

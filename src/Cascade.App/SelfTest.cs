@@ -729,14 +729,14 @@ internal static class SelfTest
             dlg.Show();
             Pump();
 
-            List<(string Label, Rectangle Bounds)> Snapshot()
+            List<(string Label, Rectangle Bounds, bool Shown)> Snapshot()
             {
-                var list = new List<(string, Rectangle)>();
+                var list = new List<(string, Rectangle, bool)>();
                 int i = 0;
                 foreach (var c in Walk(dlg))
                 {
                     string text = c.Text.Replace("&", "");
-                    list.Add(($"{c.GetType().Name}#{i++}{(text.Length > 0 ? $" \"{text}\"" : "")}", c.Bounds));
+                    list.Add(($"{c.GetType().Name}#{i++}{(text.Length > 0 ? $" \"{text}\"" : "")}", c.Bounds, c.Visible));
                 }
                 return list;
             }
@@ -747,12 +747,14 @@ internal static class SelfTest
             var after = Snapshot();
 
             var moved = new List<string>();
-            foreach (var (label, bounds) in before)
+            foreach (var (label, bounds, shown) in before)
             {
+                if (!shown) continue;   // something appearing has to take up its place; the rest must not move
                 var now = after.FirstOrDefault(a => a.Label == label);
-                if (now.Label is not null && now.Bounds.X != bounds.X) moved.Add($"{label} x{bounds.X}->{now.Bounds.X}");
+                if (now.Label is null || now.Bounds.Location == bounds.Location) continue;
+                moved.Add($"{label} {bounds.X},{bounds.Y}->{now.Bounds.X},{now.Bounds.Y}");
             }
-            bool good = Check($"{name}: showing a message moves nothing sideways" +
+            bool good = Check($"{name}: showing a message moves nothing that was already on screen" +
                               (moved.Count > 0 ? " [" + string.Join("; ", moved) + "]" : ""),
                               moved.Count == 0);
             dlg.Close();
@@ -763,6 +765,11 @@ internal static class SelfTest
 
         var findDlg = new FindDialog((_, _) => { });
         ok &= NothingShifts("find", findDlg, () => findDlg.SetStatus("Not found."));
+
+        // Searching brings up the progress bar and turns the Cancel button on, which is the other thing that
+        // used to push the buttons about.
+        var busyDlg = new FindDialog((_, _) => { });
+        ok &= NothingShifts("find (searching)", busyDlg, () => { busyDlg.SetSearching(true); busyDlg.SetProgress(0.4); });
 
         // The filter dialog's regex error line is the same shape of thing.
         var broken = new Filter { Match = { Text = "fine", Regex = true } };
