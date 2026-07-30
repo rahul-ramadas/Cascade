@@ -8,13 +8,13 @@ namespace Cascade.App;
 /// and reports status (e.g. still-loading) back via <see cref="SetStatus"/>.</summary>
 public sealed class FindDialog : Form
 {
-    private readonly TextBox _text = new();
-    private readonly CheckBox _regex = new() { Text = "Regex", AutoSize = true, Margin = new Padding(12, 4, 0, 3) };
-    private readonly CheckBox _case = new() { Text = "Case", AutoSize = true, Margin = new Padding(12, 4, 0, 3) };
-    private readonly Label _status = new() { AutoSize = true, ForeColor = Color.Gray, Margin = new Padding(0, 6, 0, 0) };
+    private readonly TextBox _text = new() { Dock = DockStyle.Fill };
+    private readonly CheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly Label _status = new() { AutoSize = true, ForeColor = Color.Gray, Anchor = AnchorStyles.Left };
     private readonly ProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Maximum = 1000, Visible = false };
-    private readonly Button _next = new() { Text = "Find Next" };
-    private readonly Button _prev = new() { Text = "Find Previous" };
+    private readonly Button _next = new() { Text = "&Find Next" };
+    private readonly Button _prev = new() { Text = "Find &Previous" };
     private readonly Button _cancel = new() { Text = "Cancel", Visible = false };
     private readonly Action<FindQuery, bool> _search;
     private bool _searching;
@@ -40,39 +40,91 @@ public sealed class FindDialog : Form
         Font = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
 
         int Dpi(int v) => LogicalToDeviceUnits(v);
-        _text.Width = Dpi(240);
         _text.Font = new Font("Consolas", 9.75f);
+        _text.AccessibleName = "Find what";
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Padding = new Padding(Dpi(12)) };
+        // Two columns: a label column that sizes itself, and a field column that takes the rest. Everything
+        // then lines up down the dialog instead of each row finding its own left edge.
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            Padding = new Padding(Dpi(14), Dpi(12), Dpi(14), Dpi(10))
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        var findRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0) };
-        findRow.Controls.Add(new Label { Text = "Find:", AutoSize = true, Margin = new Padding(0, 6, 6, 3) });
-        findRow.Controls.Add(_text);
-        findRow.Controls.Add(_regex);
-        findRow.Controls.Add(_case);
-        root.Controls.Add(findRow);
+        var findLabel = new Label
+        {
+            Text = "Fi&nd:",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, Dpi(7), Dpi(10), Dpi(4))
+        };
+        _text.Margin = new Padding(0, Dpi(4), 0, Dpi(4));
+        _text.MinimumSize = new Size(Dpi(340), 0);
+        root.Controls.Add(findLabel);
+        root.Controls.Add(_text);
 
-        _next.AutoSize = true; _next.MinimumSize = new Size(Dpi(92), Dpi(26)); _next.Margin = new Padding(0, Dpi(8), Dpi(6), 0);
-        _prev.AutoSize = true; _prev.MinimumSize = new Size(Dpi(104), Dpi(26)); _prev.Margin = new Padding(0, Dpi(8), Dpi(6), 0);
-        _cancel.AutoSize = true; _cancel.MinimumSize = new Size(Dpi(80), Dpi(26)); _cancel.Margin = new Padding(0, Dpi(8), 0, 0);
+        var options = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = true,
+            Margin = new Padding(0, Dpi(2), 0, Dpi(2))
+        };
+        _regex.Margin = new Padding(0, Dpi(3), Dpi(24), Dpi(3));
+        _case.Margin = new Padding(0, Dpi(3), 0, Dpi(3));
+        options.Controls.Add(_regex);
+        options.Controls.Add(_case);
+        root.Controls.Add(Spacer());
+        root.Controls.Add(options);
+
+        foreach (var b in new[] { _next, _prev, _cancel })
+        {
+            b.AutoSize = true;
+            b.MinimumSize = new Size(Dpi(104), Dpi(26));
+            b.Margin = new Padding(Dpi(6), 0, 0, 0);
+        }
         _next.Click += (_, _) => Run(true);
         _prev.Click += (_, _) => Run(false);
         _cancel.Click += (_, _) => CancelRequested?.Invoke();
-        var buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0) };
-        buttons.Controls.Add(_next);
+
+        // Right-aligned, like every other dialog's buttons; they used to hang off the left with a wide gap.
+        var buttons = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.RightToLeft,
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, Dpi(10), 0, 0)
+        };
+        buttons.Controls.Add(_next);     // rightmost, and the default
         buttons.Controls.Add(_prev);
         buttons.Controls.Add(_cancel);
-        root.Controls.Add(buttons);
 
-        _progress.Width = Dpi(320);
-        _progress.Height = Dpi(8);
-        _progress.Margin = new Padding(0, Dpi(10), 0, 0);
+        _progress.Height = Dpi(6);
+        _progress.Dock = DockStyle.Fill;
+        _progress.Margin = new Padding(0, Dpi(8), 0, 0);
+        _status.Margin = new Padding(0, Dpi(6), 0, 0);
+        _status.Visible = false;
+        root.Controls.Add(Spacer());
         root.Controls.Add(_progress);
+        root.Controls.Add(Spacer());
         root.Controls.Add(_status);
+
+        root.Controls.Add(buttons);
+        root.SetColumnSpan(buttons, 2);
 
         Controls.Add(root);
         AcceptButton = _next;
+        MinimumSize = new Size(Dpi(460), 0);
     }
+
+    /// <summary>A cell that takes no room, for rows with nothing in the label column.</summary>
+    private static Panel Spacer() => new() { Margin = Padding.Empty, Size = Size.Empty, AutoSize = false };
 
     /// <summary>Find keys work anywhere in the dialog, not just in the text box. ProcessCmdKey runs before
     /// the default-button handling that would otherwise swallow them: Shift+Enter used to click "Find Next"
@@ -124,7 +176,11 @@ public sealed class FindDialog : Form
         _search(new FindQuery(_text.Text, _regex.Checked, _case.Checked), forward);
     }
 
-    public void SetStatus(string text) => _status.Text = text;
+    public void SetStatus(string text)
+    {
+        _status.Text = text;
+        _status.Visible = text.Length > 0;   // an empty label still stands a text line tall
+    }
 
     /// <summary>Shows/hides the in-progress UI (progress bar + Cancel) and enables/disables the find
     /// buttons while a background search runs.</summary>
@@ -133,7 +189,7 @@ public sealed class FindDialog : Form
         _searching = searching;
         _next.Enabled = _prev.Enabled = !searching;
         _cancel.Visible = _progress.Visible = searching;
-        if (searching) { _progress.Value = 0; _status.Text = "Searching\u2026"; }
+        if (searching) { _progress.Value = 0; SetStatus("Searching\u2026"); }
     }
 
     /// <summary>Updates the search progress bar (fraction 0..1).</summary>

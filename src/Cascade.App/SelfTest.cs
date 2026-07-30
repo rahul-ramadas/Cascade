@@ -38,6 +38,7 @@ internal static class SelfTest
             ok &= RunDropPlacementChecks();
             ok &= RunFilterDragChecks();
             ok &= RunFilterEnableChecks();
+            ok &= RunDialogKeyboardChecks();
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -625,6 +626,98 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Every option in a dialog should be reachable with Alt+letter, and no two may claim the same
+    /// letter - a duplicate silently makes one of them unreachable, which is invisible on screen because
+    /// Windows only underlines the letters while Alt is held.</summary>
+    private static bool RunDialogKeyboardChecks()
+    {
+        Line("-- dialog keyboard access --");
+
+        static IEnumerable<Control> Walk(Control root)
+        {
+            foreach (Control c in root.Controls)
+            {
+                yield return c;
+                foreach (var d in Walk(c)) yield return d;
+            }
+        }
+
+        // The same call WinForms makes for Alt+letter, so this exercises the real dispatch rather than
+        // just looking for an ampersand in the caption.
+        static bool AltKey(Form form, char ch)
+            => (bool)typeof(Control)
+                .GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(form, new object[] { ch })!;
+
+        static char? MnemonicOf(string text)
+        {
+            int i = text.IndexOf('&');
+            return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
+        }
+
+        bool ok = true;
+
+        bool CheckDialog(string name, Form dlg, params string[] mustBeReachable)
+        {
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(0, 0);
+            dlg.Opacity = 0;
+            dlg.Show();
+            Pump();
+
+            var claimed = new Dictionary<char, string>();
+            var clashes = new List<string>();
+            foreach (var c in Walk(dlg))
+            {
+                if (c is not (ButtonBase or Label) || MnemonicOf(c.Text) is not { } m) continue;
+                if (claimed.TryGetValue(m, out string? already)) clashes.Add($"'{m}' on both \"{already}\" and \"{c.Text}\"");
+                else claimed[m] = c.Text;
+            }
+            bool good = Check($"{name}: no two controls claim the same Alt key" +
+                              (clashes.Count > 0 ? " [" + string.Join("; ", clashes) + "]" : $" ({claimed.Count} keys)"),
+                              clashes.Count == 0);
+
+            // Every tick box has to be operable from the keyboard, and pressing its key has to move it.
+            foreach (var box in Walk(dlg).OfType<CheckBox>())
+            {
+                if (MnemonicOf(box.Text) is not { } m)
+                {
+                    good &= Check($"{name}: \"{box.Text}\" has an Alt key", false);
+                    continue;
+                }
+                var before = box.CheckState;
+                bool handled = AltKey(dlg, m);
+                good &= Check($"{name}: Alt+{char.ToUpperInvariant(m)} works {box.Text}",
+                              handled && box.CheckState != before);
+            }
+
+            foreach (string caption in mustBeReachable)
+            {
+                var hit = Walk(dlg).FirstOrDefault(c => c.Text == caption);
+                good &= Check($"{name}: \"{caption.Replace("&", "")}\" can be reached with Alt",
+                              hit is not null && MnemonicOf(caption) is not null);
+            }
+
+            // Everything is sized from the font and from DPI-scaled values, so at any scaling the frame has
+            // to be at least as big as what it holds. A fixed size would clip here first.
+            var content = dlg.Controls.Count > 0 ? dlg.Controls[0].PreferredSize : Size.Empty;
+            good &= Check($"{name}: nothing is clipped at this DPI " +
+                          $"(frame {dlg.ClientSize.Width}x{dlg.ClientSize.Height}, content {content.Width}x{content.Height})",
+                          dlg.ClientSize.Width >= content.Width && dlg.ClientSize.Height >= content.Height);
+
+            dlg.Close();
+            dlg.Dispose();
+            Pump();
+            return good;
+        }
+
+        var filter = new Filter { Match = { Text = "sample text" } };
+        ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
+                          "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
+        ok &= CheckDialog("find", new FindDialog((_, _) => { }), "&Find Next", "Find &Previous", "Fi&nd:");
+        return ok;
     }
 
     private static Bitmap Capture(Form host)    {
