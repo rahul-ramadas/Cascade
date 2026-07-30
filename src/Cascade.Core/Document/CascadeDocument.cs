@@ -30,6 +30,9 @@ public sealed class CascadeDocument : IDisposable
     private FilterService.Generation? _generation;
     private CancellationTokenSource? _findCts;
     private Task<long>? _findTask;
+    private FindSearch? _search;
+    private ThreadLocal<FindEngine.FindMatcher>? _searchMatchers;
+    private ThreadLocal<LineReader>? _searchReaders;
 
     public CascadeDocument()
     {
@@ -261,26 +264,98 @@ public sealed class CascadeDocument : IDisposable
         return FindEngine.FindInRows(reader, _index, _src.Length, rows, view.LineAt, query, startRow, forward, ct, onProgress);
     }
 
-    /// <summary>True while a background find started by <see cref="FindLineAsync"/> is still running.</summary>
+    /// <summary>True while a background find is still running.</summary>
     public bool IsFindRunning => _findTask is { IsCompleted: false };
 
-    /// <summary>Runs <see cref="FindLine"/> on a background thread so the UI stays responsive, cancelling
-    /// any previous in-flight find. Scan progress (0..1) is reported via <paramref name="progress"/>. The
-    /// returned task is cancelled (throws <see cref="OperationCanceledException"/>) if superseded by another
-    /// call or by <see cref="CancelFind"/>.</summary>
-    public Task<long> FindLineAsync(FindQuery query, long startLine, bool forward, IProgress<double>? progress = null)
+    /// <summary>Cancels a background find in progress (if any).</summary>
+    public void CancelFind() => _findCts?.Cancel();
+
+    /// <summary>Runs the search under the shared find cancellation, so <see cref="IsFindRunning"/> and
+    /// <see cref="CancelFind"/> cover it too.</summary>
+    public Task<long> FindNextAsync(FindQuery query, long fromLine, bool forward)
     {
         _findCts?.Cancel();
         var cts = new CancellationTokenSource();
         _findCts = cts;
-        Action<double>? onProgress = progress is null ? null : progress.Report;
-        var task = Task.Run(() => FindLine(query, startLine, forward, cts.Token, onProgress), cts.Token);
+        var task = FindNextAsync(query, fromLine, forward, cts.Token);
         _findTask = task;
         return task;
     }
 
-    /// <summary>Cancels a background find in progress (if any).</summary>
-    public void CancelFind() => _findCts?.Cancel();
+    /// <summary>How much of the file the current search term has been swept for, 0..1.</summary>
+    public double FindProgress => _search?.Progress ?? 1;
+
+    /// <summary>True once every line has been examined for the current term.</summary>
+    public bool FindComplete => _search?.Complete ?? true;
+
+    /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
+    /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept
+    /// until the term changes - so asking again costs nothing and no line is ever examined twice.
+    ///
+    /// Waits when the sweep has not reached the answer yet, which is why -1 always means "no more" rather
+    /// than "not found yet".</summary>
+    public async Task<long> FindNextAsync(FindQuery query, long fromLine, bool forward, CancellationToken ct)
+    {
+        if (_src is null) return -1;
+
+        // Until the whole file is indexed there is no fixed set of lines to sweep, so fall back to the plain
+        // scan - reading a file while it indexes is the point of the thing.
+        if (!IsIndexComplete)
+            return await Task.Run(() => FindLine(query, fromLine, forward, ct), ct).ConfigureAwait(false);
+
+        var search = SearchFor(query, fromLine);
+        if (search is null) return -1;      // an empty term, or a regex that will not parse
+        return await search.NextAsync(fromLine, forward, IsLineVisible, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The search for a term, started if this is the first time it has been asked for. Replacing the
+    /// term throws the old one away, which is what keeps one file's worth of results in memory at most.</summary>
+    private FindSearch? SearchFor(FindQuery query, long startLine)
+    {
+        if (_search is { } current && current.Query == query) return current;
+
+        DropSearch();
+        if (FindEngine.CompileQuery(query) is null) return null;
+
+        var src = _src!;
+        var index = _index;
+        var encoding = _enc.Encoding;
+        long length = src.Length;
+        // One matcher and one reader per thread: a Regex shared across threads hands out a single cached
+        // runner, so all but one caller would allocate a fresh one on every line.
+        var matchers = new ThreadLocal<FindEngine.FindMatcher>(() => FindEngine.CompileQuery(query)!);
+        var readers = new ThreadLocal<LineReader>(() => new LineReader(src, encoding));
+
+        void ScanRange(long from, long count, List<long> hits, CancellationToken ct)
+        {
+            var matcher = matchers.Value!;
+            var reader = readers.Value!;
+            long end = from + count;
+            for (long line = from; line < end; line++)
+            {
+                if ((line & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
+                long s = index.Get(line);
+                long e = (line + 1 < index.Count) ? index.Get(line + 1) : length;
+                if (matcher.Matches(reader.GetChars(s, e))) hits.Add(line);
+            }
+        }
+
+        _searchMatchers = matchers;
+        _searchReaders = readers;
+        _search = new FindSearch(query, CompletedLineCount, startLine, ScanRange);
+        _search.Start();
+        return _search;
+    }
+
+    private void DropSearch()
+    {
+        _search?.Dispose();          // stops the sweep before anything it reads can be freed
+        _search = null;
+        _searchMatchers?.Dispose();
+        _searchMatchers = null;
+        _searchReaders?.Dispose();
+        _searchReaders = null;
+    }
 
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via
     /// the caller's +/-1) that deep-matches <paramref name="filter"/>, or -1 if none. Scans decoded
@@ -358,8 +433,8 @@ public sealed class CascadeDocument : IDisposable
     }
 
     /// <summary>Runs <see cref="FindLineMatchingFilter"/> on a background thread so the window stays
-    /// responsive, cancelling any find already in flight. Shares its cancellation with
-    /// <see cref="FindLineAsync"/>, so <see cref="IsFindRunning"/> and <see cref="CancelFind"/> cover both.</summary>
+    /// responsive, cancelling any find already in flight. Shares its cancellation with the text find, so
+    /// <see cref="IsFindRunning"/> and <see cref="CancelFind"/> cover both.</summary>
     public Task<long> FindLineMatchingFilterAsync(Filter filter, long startLine, bool forward,
         IProgress<double>? progress = null)
     {
@@ -389,6 +464,7 @@ public sealed class CascadeDocument : IDisposable
         try { _findCts?.Cancel(); } catch { /* ignore */ }
         try { _findTask?.Wait(2000); } catch { /* ignore */ }
         _findTask = null;
+        try { DropSearch(); } catch { /* ignore */ }
         try { _indexCts.Cancel(); } catch { /* ignore */ }
         try { _indexTask.Wait(1000); } catch { /* ignore */ }
         _filterService?.Dispose();

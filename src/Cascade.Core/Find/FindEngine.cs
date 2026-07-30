@@ -64,6 +64,25 @@ public static class FindEngine
     private static bool IsHit(ReadOnlySpan<char> span, FindQuery query, Regex? rx, StringComparison cmp)
         => rx is not null ? rx.IsMatch(span) : span.Contains(query.Text, cmp);
 
+    /// <summary>One query, ready to test lines against. Not shared between threads: a Regex hands out a
+    /// single cached runner, so sharing one across a parallel scan makes every thread but one allocate.</summary>
+    public sealed class FindMatcher
+    {
+        private readonly Regex? _rx;
+        private readonly string _text;
+        private readonly StringComparison _cmp;
+
+        internal FindMatcher(Regex? rx, string text, StringComparison cmp) { _rx = rx; _text = text; _cmp = cmp; }
+
+        public bool Matches(ReadOnlySpan<char> line)
+            => _rx is not null ? _rx.IsMatch(line) : line.Contains(_text, _cmp);
+    }
+
+    /// <summary>Compiles a query, or returns null when it can never match anything: an empty term, or a
+    /// regular expression that will not parse. Both mean "not found" rather than an error.</summary>
+    public static FindMatcher? CompileQuery(FindQuery query)
+        => Compile(query) is var (rx, cmp) ? new FindMatcher(rx, query.Text, cmp) : null;
+
     /// <summary>Builds the regex (if any) and comparison for a query, or returns null for an empty /
     /// invalid-regex query (which matches nothing).</summary>
     private static (Regex? Rx, StringComparison Cmp)? Compile(FindQuery query)

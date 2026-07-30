@@ -54,6 +54,7 @@ public sealed class MainForm : Form
     private bool _lastBusy;
     private bool _anchorActive;
     private bool _findBusy;
+    private Func<double>? _findProgress;
     private string _findWhat = "", _findWhatDetail = "", _findMsg = "", _findMsgDetail = "";
     private double _findFraction;
     private DateTime _findMsgUntil;
@@ -704,9 +705,10 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    private void SetFindBusy(bool busy, string? what = null, string? detail = null)
+    private void SetFindBusy(bool busy, string? what = null, string? detail = null, Func<double>? progress = null)
     {
         _findBusy = busy;
+        _findProgress = busy ? progress : null;
         _findWhat = busy ? what ?? "Searching" : "";
         _findWhatDetail = busy ? detail ?? _findWhat : "";
         _findFraction = 0;
@@ -1032,26 +1034,32 @@ public sealed class MainForm : Form
         long start = _grid.CaretLine;
         start = start < 0 ? 0 : start + (forward ? 1 : -1);
 
+        // F3 usually repeats the search with the dialog closed, so the progress has to reach the status bar
+        // too - a search that is waiting on the sweep would otherwise look like the window had locked up.
+        SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgress);
         _findDialog?.SetSearching(true);
-        var progress = new Progress<double>(f => _findDialog?.SetProgress(f));
         long found;
         try
         {
-            found = await _doc.FindLineAsync(query, start, forward, progress);
+            found = await _doc.FindNextAsync(query, start, forward);
         }
         catch (OperationCanceledException)
         {
-            // The user cancelled, or a newer search superseded this one. Only reset the dialog when no
-            // search is still running (i.e. a genuine cancel, not a supersede that already re-armed it).
-            if (!_doc.IsFindRunning) { _findDialog?.SetSearching(false); _findDialog?.SetStatus("Canceled."); }
+            // The user cancelled, or a newer search superseded this one. Only reset when nothing is still
+            // running (i.e. a genuine cancel, not a supersede that already re-armed it).
+            if (!_doc.IsFindRunning)
+            {
+                SetFindBusy(false);
+                _findDialog?.SetSearching(false);
+                _findDialog?.SetStatus("Canceled.");
+            }
             return;
         }
+        SetFindBusy(false);
         _findDialog?.SetSearching(false);
         if (found >= 0) { GoToLine(found + 1); _findDialog?.SetStatus(""); }
         else
         {
-            // The dialog is modeless and often closed (F3 repeats the search from the main window), so the
-            // status label alone would leave the user with no feedback at all.
             _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
             NoMoreMatches(_doc.IsIndexComplete ? "No more matches" : "No more matches yet",
                 _doc.IsIndexComplete
@@ -1189,8 +1197,9 @@ public sealed class MainForm : Form
         if (_findBusy)
         {
             // A find is what the user just asked for, so it wins the slot.
-            SetActivity($"{_findWhat}\u2026 {_findFraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
-            SetProgress(ProgressBarStyle.Continuous, _findFraction);
+            double fraction = _findProgress?.Invoke() ?? _findFraction;
+            SetActivity($"{_findWhat}\u2026 {fraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
+            SetProgress(ProgressBarStyle.Continuous, fraction);
         }
         else if (_findMsg.Length > 0)
         {

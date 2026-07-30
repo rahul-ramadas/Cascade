@@ -322,7 +322,7 @@ public class DocumentIntegrationTests
         {
             doc.Open(a);
             doc.WaitForIndex();
-            var find = doc.FindLineAsync(new FindQuery("absent-string", false, false), 0, true); // long scan
+            var find = doc.FindNextAsync(new FindQuery("absent-string", false, false), 0, true); // long sweep
 
             doc.Open(b); // disposes A's mmap; must cancel + join the find first
             doc.WaitForIndex();
