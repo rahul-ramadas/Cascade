@@ -42,6 +42,7 @@ public sealed class FilterTreeControl : UserControl
 
     private CascadeDocument? _doc;
     private bool _building;
+    private bool _tooltipsQueued;
     private readonly List<TreeNode> _flat = new();
     private readonly HashSet<string> _collapsed = new(); // filter ids the user has collapsed
 
@@ -77,6 +78,7 @@ public sealed class FilterTreeControl : UserControl
         // The columns are sized from the rows' content, and the tree's client width shrinks when a vertical
         // scrollbar appears, so any size change means measuring again.
         _tree.ClientSizeChanged += (_, _) => LayoutColumns();
+        _tree.HandleCreated += (_, _) => QueueTooltipUpdate();
 
         _tree.AfterCheck += OnAfterCheck;
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
@@ -365,14 +367,26 @@ public sealed class FilterTreeControl : UserControl
         if (columns == _columns) return;
         _columns = columns;
         _header.SetColumns(columns);
-        UpdateTooltips();
+        QueueTooltipUpdate();
         _tree.Invalidate();
+    }
+
+    /// <summary>Tooltips are worked out from a posted message rather than in place, because measuring a row
+    /// asks the tree for its bounds and the tree answers that by DRAWING - and drawing part way through a
+    /// layout, or through its own window being created, fails outright in GDI+. Nothing needs them sooner
+    /// than the next turn of the message loop.</summary>
+    private void QueueTooltipUpdate()
+    {
+        if (_tooltipsQueued || !_tree.IsHandleCreated) return;
+        _tooltipsQueued = true;
+        _tree.BeginInvoke(() => { _tooltipsQueued = false; UpdateTooltips(); });
     }
 
     /// <summary>Only the rows that had to be cut short get a tooltip - there is no scrolling to reach the
     /// rest of the text, and a tooltip on everything would just be noise.</summary>
     private void UpdateTooltips()
     {
+        if (!_tree.IsHandleCreated) return;
         EnsureFonts();
         foreach (var n in _flat)
         {

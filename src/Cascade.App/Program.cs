@@ -43,6 +43,7 @@ internal static class Program
         {
             AttachConsole(-1); // attach to the launching console so output is visible
             ApplicationConfiguration.Initialize(); // the render checks build real controls
+            FailFastOnUiException();
             return SelfTest.Run(args.Skip(1).ToArray());
         }
 
@@ -50,6 +51,7 @@ internal static class Program
         {
             AttachConsole(-1);
             ApplicationConfiguration.Initialize();
+            FailFastOnUiException();
             return UiShots.Run(args.Skip(1).ToArray());
         }
 
@@ -154,6 +156,12 @@ internal static class Program
         imported from File > Settings. Recent files and the last filter file are kept
         separately in state.json, which is never exported.
         """;
+
+    /// <summary>A headless run has nobody to dismiss anything, so a UI exception must end it. Left to
+    /// itself WinForms puts up its error dialog and waits for ever, which reads as a hung harness with no
+    /// clue as to why - and on a hidden desktop the dialog cannot even be seen.</summary>
+    private static void FailFastOnUiException()
+        => Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
 
     private static void LogCrash(string path, Exception? ex)
     {
