@@ -131,8 +131,9 @@ internal static class Program
 
           --help, -h, /?    Show this text.
           --version         Print the version and exit.
-          --selftest [file] [/Filters:<path>]
+          --selftest [file] [/Filters:<path>] [--only=<text>]
                             Run headless engine, settings and rendering checks.
+                            --only runs just the check groups whose name contains <text>.
                             Log: %TEMP%\cascade_selftest.log. Exit 0 pass, 1 fail, 2 error.
           --screens [outDir] [file] [file.tat]
                             Render every dialog and the main window to PNGs.

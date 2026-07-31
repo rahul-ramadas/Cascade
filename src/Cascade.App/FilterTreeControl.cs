@@ -83,7 +83,7 @@ public sealed class FilterTreeControl : UserControl
         _tree.AfterCheck += OnAfterCheck;
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
         _tree.AfterCollapse += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Add(f.Id); };
-        _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node?.Tag is Filter f) EditRequested?.Invoke(f); };
+        _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node is not null) HandleDoubleClick(e.Node, e.X); };
         _tree.MouseDown += OnTreeMouseDown;
         _tree.MouseMove += OnTreeMouseMove;
         _tree.MouseUp += (_, _) => _pressed = null;
@@ -144,6 +144,13 @@ public sealed class FilterTreeControl : UserControl
     /// <summary>Where the row's own content starts: just right of the checkbox, never over it. The paint
     /// and the grab have to agree on this or the row would be draggable somewhere it does not look it.</summary>
     private static int ContentLeft(TreeNode n) => n.Bounds.Left + 2;
+
+    /// <summary>Only the row's own content opens the editor. The checkbox and the expander to its left have
+    /// jobs of their own, and clicking either twice means doing that twice - not "edit this".</summary>
+    private void HandleDoubleClick(TreeNode node, int x)
+    {
+        if (x >= ContentLeft(node) && node.Tag is Filter f) EditRequested?.Invoke(f);
+    }
 
     public Filter? SelectedFilter => _tree.SelectedNode?.Tag as Filter;
 
@@ -625,6 +632,34 @@ public sealed class FilterTreeControl : UserControl
         _pressed = null;
         return armed;
     }
+
+    /// <summary>Double-clicks here through the real handler, and reports the filter it asked to edit.</summary>
+    internal Filter? DoubleClickForTesting(Point at)
+    {
+        Filter? asked = null;
+        void Watch(Filter f) => asked = f;
+        EditRequested += Watch;
+        try { if (_tree.GetNodeAt(at) is { } node) HandleDoubleClick(node, at.X); }
+        finally { EditRequested -= Watch; }
+        return asked;
+    }
+
+    /// <summary>Sends the whole message sequence a real double-click produces - down, up, double-click, up -
+    /// because it is the tree's handling of that last pair which used to leave a checkbox and its filter
+    /// disagreeing. A lone double-click message is ignored and would prove nothing.</summary>
+    internal void SendDoubleClickForTesting(Point at)
+    {
+        var lParam = (IntPtr)((at.Y << 16) | (at.X & 0xFFFF));
+        SendMessage(_tree.Handle, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam);
+        SendMessage(_tree.Handle, WM_LBUTTONUP, IntPtr.Zero, lParam);
+        SendMessage(_tree.Handle, WM_LBUTTONDBLCLK, (IntPtr)MK_LBUTTON, lParam);
+        SendMessage(_tree.Handle, WM_LBUTTONUP, IntPtr.Zero, lParam);
+    }
+
+    private const int WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, MK_LBUTTON = 0x0001;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
 
     /// <summary>Test seam: the filters on screen, top first.</summary>
     internal List<Filter> VisibleFiltersForTesting

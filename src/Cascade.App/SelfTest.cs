@@ -18,11 +18,16 @@ internal static class SelfTest
 {
     private static readonly string LogPath = Path.Combine(Path.GetTempPath(), "cascade_selftest.log");
     private static StreamWriter _log = null!;
+    private static string? _only;
+    private static int _skipped;
 
     /// <summary>Runs a group of checks and records how long it took, so a self-test that starts dragging
-    /// says where the time went rather than leaving it to be guessed at.</summary>
+    /// says where the time went rather than leaving it to be guessed at. Groups whose name does not contain
+    /// <c>--only</c>'s text are skipped, which is how you iterate on one of them without paying for the
+    /// drag checks every time.</summary>
     private static bool Timed(string name, Func<bool> checks)
     {
+        if (_only is not null && !name.Contains(_only, StringComparison.OrdinalIgnoreCase)) { _skipped++; return true; }
         var clock = System.Diagnostics.Stopwatch.StartNew();
         bool ok = checks();
         clock.Stop();
@@ -40,6 +45,9 @@ internal static class SelfTest
 
             string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--"));
             string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
+            _only = args.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.OrdinalIgnoreCase))?["--only=".Length..].Trim('"');
+            _skipped = 0;
+            if (_only is not null) Line($"(only groups matching \"{_only}\")");
 
             bool ok = Timed("engine", RunEngineChecks);
             ok &= Timed("settings", RunSettingsChecks);
@@ -56,7 +64,8 @@ internal static class SelfTest
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
-            Line(ok ? "RESULT: PASSED" : "RESULT: FAILED");
+            // Says so plainly, so a filtered run can never be mistaken for a clean full one.
+            Line((ok ? "RESULT: PASSED" : "RESULT: FAILED") + (_skipped > 0 ? $" ({_skipped} groups skipped by --only)" : ""));
             return ok ? 0 : 1;
         }
         catch (Exception ex)
@@ -632,6 +641,35 @@ internal static class SelfTest
             tree.SelectForTesting(kids[0]);
             tree.PressKeyForTesting(Keys.Space | Keys.Shift);
             ok &= Check("from a leaf it is just that leaf", kids[0].Enabled && !parent.Enabled && !kids[1].Enabled);
+
+            // ---- double-clicking a row ----
+            var row = tree.RowBoundsForTesting(other);
+            int mid = row.Top + row.Height / 2;
+            ok &= Check("double-clicking a filter's text asks to edit it",
+                        ReferenceEquals(tree.DoubleClickForTesting(new Point(row.Left + 2, mid)), other));
+            ok &= Check("so does double-clicking the empty space out to its right",
+                        ReferenceEquals(tree.DoubleClickForTesting(new Point(tree.TreeWidthForTesting - 4, mid)), other));
+            ok &= Check("double-clicking the checkbox does not",
+                        tree.DoubleClickForTesting(new Point(row.Left - 2, mid)) is null);
+            ok &= Check("nor does double-clicking left of it",
+                        tree.DoubleClickForTesting(new Point(0, mid)) is null);
+
+            // The real message sequence, because the tree's own handling of it is what used to leave the
+            // tick and the filter disagreeing: it flipped the box and reported nothing.
+            other.Enabled = false;
+            tree.Rebuild();
+            Pump();
+            row = tree.RowBoundsForTesting(other);
+            mid = row.Top + row.Height / 2;
+            bool boxBefore = tree.IsCheckedForTesting(other);
+            tree.SendDoubleClickForTesting(new Point(row.Left - 2, mid));
+            Pump();
+            bool boxAfter = tree.IsCheckedForTesting(other);
+            ok &= Check($"two quick clicks on a checkbox tick it twice, leaving it as it was " +
+                        $"({(boxBefore ? "on" : "off")} -> {(boxAfter ? "on" : "off")})", boxAfter == boxBefore);
+            ok &= Check($"and the filter still agrees with its tick " +
+                        $"(filter {(other.Enabled ? "on" : "off")}, box {(boxAfter ? "on" : "off")})",
+                        other.Enabled == boxAfter);
             return ok;
         }
         finally
