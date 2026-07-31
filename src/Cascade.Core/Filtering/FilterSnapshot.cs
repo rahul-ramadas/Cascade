@@ -148,6 +148,17 @@ public sealed class FilterSnapshot
         return true;
     }
 
+    /// <summary>Every cache key this filter set could ask for, disabled filters included - their results
+    /// are exactly what makes re-enabling them instant. Anything the cache holds beyond these belongs to a
+    /// filter that has been deleted or edited and is dead weight.</summary>
+    public HashSet<string> CacheKeys()
+    {
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in _nodesByIndex)
+            if (node.Cacheable) keys.Add(node.CacheKey);
+        return keys;
+    }
+
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
     public bool TryGetIndex(Filter filter, out int index) => _index.TryGetValue(filter, out index);
 

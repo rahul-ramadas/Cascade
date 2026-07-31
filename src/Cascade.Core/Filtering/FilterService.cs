@@ -108,12 +108,18 @@ public sealed class FilterService : IDisposable
             _current = gen;
             _processed = 0;
         }
+        // A filter that has just been deleted or edited can never be asked about again, so its results are
+        // dropped here rather than being kept for the life of the file.
+        _cache.RetainOnly(snapshot.CacheKeys());
         _wake.Set();
         return gen;
     }
 
     /// <summary>Bytes currently held by the per-filter match cache.</summary>
     public long CacheBytes => _cache.UsedBytes;
+
+    /// <summary>How many filters currently have results cached.</summary>
+    public int CacheCount => _cache.Count;
 
     /// <summary>How many filter changes were served entirely from cached results, with no pass over the file.</summary>
     public long CacheHits { get; private set; }
