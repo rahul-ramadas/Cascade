@@ -19,6 +19,17 @@ internal static class SelfTest
     private static readonly string LogPath = Path.Combine(Path.GetTempPath(), "cascade_selftest.log");
     private static StreamWriter _log = null!;
 
+    /// <summary>Runs a group of checks and records how long it took, so a self-test that starts dragging
+    /// says where the time went rather than leaving it to be guessed at.</summary>
+    private static bool Timed(string name, Func<bool> checks)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        bool ok = checks();
+        clock.Stop();
+        Line($"   ({name}: {clock.ElapsedMilliseconds:N0} ms)");
+        return ok;
+    }
+
     public static int Run(string[] args)
     {
         _log = new StreamWriter(LogPath, false) { AutoFlush = true };
@@ -30,16 +41,16 @@ internal static class SelfTest
             string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--"));
             string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
 
-            bool ok = RunEngineChecks();
-            ok &= RunSettingsChecks();
-            ok &= RunMachineStateChecks();
-            ok &= RunRenderChecks();
-            ok &= RunFilterListChecks();
-            ok &= RunDropPlacementChecks();
-            ok &= RunFilterDragChecks();
-            ok &= RunFilterEnableChecks();
-            ok &= RunDialogKeyboardChecks();
-            ok &= RunProgressPaintChecks();
+            bool ok = Timed("engine", RunEngineChecks);
+            ok &= Timed("settings", RunSettingsChecks);
+            ok &= Timed("machine state", RunMachineStateChecks);
+            ok &= Timed("render", RunRenderChecks);
+            ok &= Timed("filter list", RunFilterListChecks);
+            ok &= Timed("drop placement", RunDropPlacementChecks);
+            ok &= Timed("filter drag", RunFilterDragChecks);
+            ok &= Timed("filter enable", RunFilterEnableChecks);
+            ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
+            ok &= Timed("progress paint", RunProgressPaintChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -939,10 +950,36 @@ internal static class SelfTest
         catch (Exception ex) { return ex.GetType().Name + ": " + ex.Message; }
     }
 
+    /// <summary>Lets the UI finish whatever it has queued, and comes back as soon as it goes quiet. It used
+    /// to wait a flat 250ms every time; the drag checks alone call it about 190 times, so nearly the whole
+    /// self-test was spent sitting idle. The old wait is kept as the cap.</summary>
     private static void Pump()
     {
-        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;) { Application.DoEvents(); Thread.Sleep(10); }
+        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;)
+        {
+            Application.DoEvents();
+            if (PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) { Thread.Sleep(1); continue; }
+            // Quiet once is not the same as settled - a timer may be about to post. Ask again after a pause.
+            Thread.Sleep(15);
+            Application.DoEvents();
+            if (!PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) return;
+        }
     }
+
+    private const uint PM_NOREMOVE = 0;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr Hwnd;
+        public uint Message;
+        public IntPtr WParam, LParam;
+        public uint Time;
+        public int X, Y;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool PeekMessage(out MSG message, IntPtr window, uint first, uint last, uint remove);
 
     /// <summary>Exported settings must come back exactly, or carrying them to another machine silently
     /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one

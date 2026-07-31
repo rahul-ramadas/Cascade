@@ -198,10 +198,35 @@ internal static class UiShots
         }
     }
 
+    /// <summary>Lets a form finish laying out and painting before it is captured, returning as soon as it
+    /// goes quiet rather than always waiting a flat quarter-second - that wait, once per shot, was most of
+    /// what a render run cost. The old wait remains the cap.</summary>
     private static void Settle()
     {
-        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;) { Application.DoEvents(); Thread.Sleep(10); }
+        for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;)
+        {
+            Application.DoEvents();
+            if (PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) { Thread.Sleep(1); continue; }
+            Thread.Sleep(15);
+            Application.DoEvents();
+            if (!PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) return;
+        }
     }
+
+    private const uint PM_NOREMOVE = 0;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MSG
+    {
+        public IntPtr Hwnd;
+        public uint Message;
+        public IntPtr WParam, LParam;
+        public uint Time;
+        public int X, Y;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool PeekMessage(out MSG message, IntPtr window, uint first, uint last, uint remove);
 
     private static void CapControl(Form host, string dir, string name)
     {
