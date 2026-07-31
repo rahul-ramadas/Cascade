@@ -242,6 +242,17 @@ internal sealed class CascadeApp : IDisposable
     public static int IndexOfFilter(string[] names, string containsText)
         => Array.FindIndex(names, n => n.Contains(containsText, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Waits for a filter to appear in the list. The tree is rebuilt on the UI thread in response
+    /// to a keystroke, so an immediate read can beat it.</summary>
+    public bool WaitForFilter(string containsText, int ms = 5000)
+        => Retry.WhileFalse(() => FilterNode(containsText) is not null, TimeSpan.FromMilliseconds(ms), Poll).Result;
+
+    public bool WaitForNoFilter(string containsText, int ms = 5000)
+        => Retry.WhileFalse(() => FilterNode(containsText) is null, TimeSpan.FromMilliseconds(ms), Poll).Result;
+
+    public bool WaitForFilterCount(int expected, int ms = 5000)
+        => Retry.WhileFalse(() => RootFilterNames().Length == expected, TimeSpan.FromMilliseconds(ms), Poll).Result;
+
     /// <summary>The lowest 1-based file line currently on screen, or -1 when nothing is visible.</summary>
     public int FirstVisibleLine()
     {

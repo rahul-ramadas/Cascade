@@ -13,6 +13,44 @@ public sealed class FilterCollection
 
     public IReadOnlyList<Filter> ChildrenOf(Filter? parent) => parent?.Children ?? (IReadOnlyList<Filter>)Roots;
 
+    /// <summary>A deep copy of the whole tree that keeps every filter's id, so it can be put back and
+    /// anything keyed on identity - the tree's expansion state, the match cache's predicate chains - still
+    /// lines up. Used by undo/redo.</summary>
+    public List<Filter> CloneRoots() => Roots.Select(f => f.Clone(newIds: false)).ToList();
+
+    /// <summary>Replaces the whole tree (the other half of <see cref="CloneRoots"/>). Collection-level state
+    /// such as <see cref="ShowOnlyFilteredLines"/> and the presets are deliberately left alone.</summary>
+    public void ReplaceRoots(IEnumerable<Filter> roots)
+    {
+        Roots.Clear();
+        foreach (var f in roots)
+        {
+            f.Parent = null;
+            Roots.Add(f);
+        }
+    }
+
+    /// <summary>Whether two trees agree on everything an edit can change.
+    /// <see cref="Filter.Enabled"/> is deliberately excluded: turning a filter on and off is not an edit and
+    /// must never land on the undo stack, so comparing without it means a path that forgets that rule still
+    /// cannot record one.</summary>
+    public static bool SameStructure(IReadOnlyList<Filter> a, IReadOnlyList<Filter> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            Filter x = a[i], y = b[i];
+            if (x.Id != y.Id || x.Description != y.Description || x.Kind != y.Kind) return false;
+            if (x.Match.Type != y.Match.Type || x.Match.Text != y.Match.Text ||
+                x.Match.CaseSensitive != y.Match.CaseSensitive || x.Match.Regex != y.Match.Regex ||
+                x.Match.MarkerIndex != y.Match.MarkerIndex) return false;
+            if (x.Style.Foreground != y.Style.Foreground || x.Style.Background != y.Style.Background ||
+                x.Style.Bold != y.Style.Bold || x.Style.Italic != y.Style.Italic) return false;
+            if (!SameStructure(x.Children, y.Children)) return false;
+        }
+        return true;
+    }
+
     public void Add(Filter filter, Filter? parent = null, int index = -1)
     {
         filter.Parent = parent;
@@ -119,3 +157,4 @@ public sealed class FilterCollection
 
     public int EnabledCount => EnumerateDepthFirst().Count(f => f.Enabled);
 }
+

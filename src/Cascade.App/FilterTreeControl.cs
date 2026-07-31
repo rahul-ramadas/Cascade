@@ -62,6 +62,11 @@ public sealed class FilterTreeControl : UserControl
     public event Action<Filter?>? AddRequested;
     public event Action<Filter, bool>? FindFilterRequested; // (filter, forward)
 
+    /// <summary>Raised with a label for the menu ("Remove Filter") immediately before the list changes the
+    /// tree, so the host can snapshot it for undo. Raised speculatively - a move that turns out to be
+    /// illegal, or a drag the user cancels, still announces itself and simply changes nothing.</summary>
+    public event Action<string>? BeforeFiltersEdited;
+
     /// <summary>Raised with the search term when a filter search runs off the end of the list. The host
     /// decides how to report it, so all the find commands give identical feedback.</summary>
     public event Action<string>? NoFilterMatch;
@@ -587,6 +592,7 @@ public sealed class FilterTreeControl : UserControl
 
     private void BeginDrag(TreeNode n, Filter f, int grabX)
     {
+        BeforeFiltersEdited?.Invoke("Move Filter");
         _dragNode = n;
         _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc!.Filters.Roots).IndexOf(f));
         _dragGrabX = grabX;
@@ -899,6 +905,7 @@ public sealed class FilterTreeControl : UserControl
         menu.Items.Add("Add Filter…", null, (_, _) => AddRequested?.Invoke(null));
         menu.Items.Add("Add Child Filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
         menu.Items.Add("Edit Filter…", null, (_, _) => { if (SelectedFilter is { } f) EditRequested?.Invoke(f); });
+        menu.Items.Add(new ToolStripMenuItem("Duplicate Filter", null, (_, _) => DuplicateSelected()) { ShortcutKeyDisplayString = "Ctrl+D" });
         menu.Items.Add("Remove Filter", null, (_, _) => RemoveSelected());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Find Next Match", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
@@ -916,6 +923,7 @@ public sealed class FilterTreeControl : UserControl
     public void RemoveSelected()
     {
         if (_doc is null || SelectedFilter is not { } f) return;
+        BeforeFiltersEdited?.Invoke("Remove Filter");
         var node = _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f));
         _doc.Filters.Remove(f);
 
@@ -946,6 +954,7 @@ public sealed class FilterTreeControl : UserControl
     public void MoveSelected(Keys key)
     {
         if (_doc is null || SelectedFilter is not { } f) return;
+        BeforeFiltersEdited?.Invoke("Move Filter");
         bool moved = key switch
         {
             Keys.Up => _doc.Filters.Reorder(f, -1),
@@ -989,6 +998,21 @@ public sealed class FilterTreeControl : UserControl
 
         _tree.SelectedNode = node;
         node.EnsureVisible();
+    }
+
+    /// <summary>Copies the selected filter and everything under it in as the next sibling. The copy gets
+    /// fresh ids: it is a new filter that happens to look like an existing one, and sharing ids would make
+    /// the two indistinguishable to the list, the presets and the match cache.</summary>
+    public void DuplicateSelected()
+    {
+        if (_doc is null || SelectedFilter is not { } f) return;
+        BeforeFiltersEdited?.Invoke("Duplicate Filter");
+        var copy = f.Clone();
+        var siblings = f.Parent?.Children ?? _doc.Filters.Roots;
+        _doc.Filters.Add(copy, f.Parent, siblings.IndexOf(f) + 1);
+        Rebuild();
+        if (NodeFor(copy) is { } node) { _tree.SelectedNode = node; node.EnsureVisible(); }
+        FiltersChanged?.Invoke();
     }
 
     public void SetAllEnabled(bool enabled)
@@ -1041,6 +1065,7 @@ public sealed class FilterTreeControl : UserControl
     public void RemoveAll()
     {
         if (_doc is null) return;
+        BeforeFiltersEdited?.Invoke("Remove All Filters");
         _doc.Filters.Roots.Clear();
         Rebuild();
         FiltersChanged?.Invoke();
