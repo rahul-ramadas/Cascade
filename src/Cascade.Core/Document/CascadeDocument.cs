@@ -115,6 +115,20 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Number of lines matching the filters (the status-bar "Fil" count).</summary>
     public long MatchedLineCount => MatchView.Count;
 
+    /// <summary>Bumped every time the filters are re-applied. Anything that summarises the whole file can
+    /// key its cache on this instead of recomputing per paint.</summary>
+    public int FilterGeneration { get; private set; }
+
+    /// <summary>How many matching lines fall in <c>[from, toExclusive)</c>. Two rank lookups, so summarising
+    /// the whole file a band at a time costs the same as summarising one line.</summary>
+    public long MatchedLinesInRange(long from, long toExclusive) => MatchView.CountInRange(from, toExclusive);
+
+    /// <summary>The cached set of lines deep-matching <paramref name="filter"/>, when there is one. Only a
+    /// summary of the whole file needs this; everything else asks about one line at a time.</summary>
+    public FilterMatchCache.MatchSet? MatchSetFor(Filter filter)
+        => _filterService is not null && _generation is not null &&
+           _filterService.TryGetMatchSet(_generation.Snapshot, filter, out var set) ? set : null;
+
     /// <summary>Lines the active filter generation has finished analyzing (0 when no filters run).</summary>
     public long FilterProcessedLineCount => _generation is not null ? _filterService.ProcessedLineCount : 0;
 
@@ -176,6 +190,7 @@ public sealed class CascadeDocument : IDisposable
     public void ApplyFilters()
     {
         CurrentSnapshot = FilterSnapshot.Build(Filters);
+        FilterGeneration++;
         if (_filterService is null)
         {
             // No file open yet (e.g. filters auto-loaded at startup). Keep the snapshot so the filters

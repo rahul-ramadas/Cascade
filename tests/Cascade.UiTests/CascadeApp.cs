@@ -679,9 +679,17 @@ internal sealed class CascadeApp : IDisposable
         Settle(1);
     }
 
-    /// <summary>Scrolls the log vertically by driving the grid's vertical scrollbar (UIA RangeValue),
-    /// so an off-screen line can be brought into view. <paramref name="firstRow"/> is the display row
-    /// to put at the top. Returns false if the view could not be moved there.</summary>
+    /// <summary>Name of whatever is standing in for the log view's vertical scrollbar - the match map, or a
+    /// real scrollbar when the map is switched off. Empty when there is neither.</summary>
+    public string VerticalScrollerName()
+        => Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+                 .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width)?.Name ?? "";
+
+    /// <summary>Scrolls the log vertically, so an off-screen line can be brought into view.
+    /// <paramref name="firstRow"/> is the display row to put at the top. Returns false if the view could not
+    /// be moved there.
+    /// <para>The match map stands in for the vertical scrollbar and exposes itself as one, but through MSAA
+    /// rather than the RangeValue pattern - so both are tried.</para></summary>
     public bool ScrollVerticalTo(int firstRow)
     {
         // Setting the value once and sleeping is not enough: on a small CI window the scrollbar element is
@@ -693,27 +701,34 @@ internal sealed class CascadeApp : IDisposable
             var vbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
                              .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width);
             var rv = vbar?.Patterns.RangeValue.PatternOrDefault;
-            if (rv is not null && !rv.IsReadOnly.ValueOrDefault)
+            var legacy = vbar?.Patterns.LegacyIAccessible.PatternOrDefault;
+            if (rv is not null && !rv.IsReadOnly.ValueOrDefault) rv.SetValue(firstRow);
+            else if (legacy is not null) legacy.SetValue(firstRow.ToString());
+            else { Settle(3); continue; }
+
+            // Confirm through the scrollbar itself: FirstVisibleLine reports file line numbers, which
+            // do not start at 1 in filtered mode, so it cannot answer "did we reach the top?".
+            if (firstRow == 0)
             {
-                rv.SetValue(firstRow);
-                // Confirm through the scrollbar itself: FirstVisibleLine reports file line numbers, which
-                // do not start at 1 in filtered mode, so it cannot answer "did we reach the top?".
-                if (firstRow == 0)
+                if (Retry.WhileFalse(() => TopRowReading(rv, legacy) <= 0.5, TimeSpan.FromSeconds(2), Poll).Result)
                 {
-                    if (Retry.WhileFalse(() => rv.Value.ValueOrDefault <= 0.5,
-                            TimeSpan.FromSeconds(2), Poll).Result)
-                    {
-                        Settle(1);
-                        return true;
-                    }
-                }
-                else if (Retry.WhileFalse(() => FirstVisibleLine() >= firstRow,
-                             TimeSpan.FromSeconds(2), Poll).Result)
+                    Settle(1);
                     return true;
+                }
             }
+            else if (Retry.WhileFalse(() => FirstVisibleLine() >= firstRow, TimeSpan.FromSeconds(2), Poll).Result)
+                return true;
+
             Settle(3);
         }
         return false;
+    }
+
+    private static double TopRowReading(FlaUI.Core.Patterns.IRangeValuePattern? rv,
+                                        FlaUI.Core.Patterns.ILegacyIAccessiblePattern? legacy)
+    {
+        if (rv is not null) return rv.Value.ValueOrDefault;
+        return double.TryParse(legacy?.Value.ValueOrDefault, out double v) ? v : double.MaxValue;
     }
 
     /// <summary>How far the log view is scrolled sideways, read from the horizontal scrollbar.</summary>

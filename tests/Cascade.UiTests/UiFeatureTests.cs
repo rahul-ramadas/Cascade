@@ -363,6 +363,43 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void The_match_map_stands_in_for_the_vertical_scrollbar()
+    {
+        // The map carries the viewport rectangle, so a scrollbar beside it would say the same thing twice.
+        // Exactly one of the two is present at a time, and whichever it is has to be able to scroll the view
+        // - for the tests, and for anything else driving the app through automation.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile();
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            Check("the map is there by default", app.VerticalScrollerName() == "Match map", app.VerticalScrollerName());
+
+            Check("the map scrolls the view", app.ScrollVerticalTo(400) && app.FirstVisibleLine() >= 400,
+                  $"first visible {app.FirstVisibleLine()}");
+
+            app.ClickMenuOrThrow("View", "Show Match Map");
+            Check("turning it off brings the scrollbar back",
+                  Retry.WhileFalse(() => app.VerticalScrollerName() != "Match map", TimeSpan.FromSeconds(4)).Result,
+                  app.VerticalScrollerName());
+            Check("the scrollbar still scrolls", app.ScrollVerticalTo(700) && app.FirstVisibleLine() >= 700,
+                  $"first visible {app.FirstVisibleLine()}");
+
+            app.ClickMenuOrThrow("View", "Show Match Map");
+            Check("turning it back on returns the map",
+                  Retry.WhileFalse(() => app.VerticalScrollerName() == "Match map", TimeSpan.FromSeconds(4)).Result,
+                  app.VerticalScrollerName());
+
+            Assert.True(fails.Count == 0, "Match map failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
     public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
     {
         string log = TestData.WriteLogFile();

@@ -47,7 +47,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
-    private ToolStripMenuItem _miPresets = null!;
+    private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     private FindDialog? _findDialog;
@@ -130,7 +130,7 @@ public sealed class MainForm : Form
 
         _refreshTimer.Tick += (_, _) =>
         {
-            if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _filterTree.RefreshCounts(); }
+            if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _grid.InvalidateMatchMap(); _filterTree.RefreshCounts(); }
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
             if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.ClearViewAnchor(); _anchorActive = false; }
             UpdateStatusIfChanged();
@@ -185,6 +185,7 @@ public sealed class MainForm : Form
         if (_offScreen) Size = new Size(1600, 1000);
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
         LayoutPresetPane();
+        _grid.SetMatchMapVisible(_settings.ShowMatchMap);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -284,6 +285,15 @@ public sealed class MainForm : Form
         { Checked = _settings.ShowLineNumbers };
         view.DropDownItems.Add(_miFilteredMode);
         view.DropDownItems.Add(_miLineNumbers);
+        _miMatchMap = new ToolStripMenuItem("Show Matc&h Map", null, (_, _) =>
+        {
+            _settings.ShowMatchMap = !_settings.ShowMatchMap;
+            _miMatchMap.Checked = _settings.ShowMatchMap;
+            _grid.SetMatchMapVisible(_settings.ShowMatchMap);
+            SaveSettingsSoon();
+        })
+        { Checked = _settings.ShowMatchMap, ShortcutKeys = Keys.Control | Keys.M };
+        view.DropDownItems.Add(_miMatchMap);
         view.DropDownItems.Add(BuildMarkersMenu());
         view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
@@ -1132,6 +1142,8 @@ public sealed class MainForm : Form
     {
         _miLineNumbers.Checked = _settings.ShowLineNumbers;
         _miPresets.Checked = _settings.ShowFilterPresets;
+        _miMatchMap.Checked = _settings.ShowMatchMap;
+        _grid.SetMatchMapVisible(_settings.ShowMatchMap);
         LayoutPresetPane();
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);

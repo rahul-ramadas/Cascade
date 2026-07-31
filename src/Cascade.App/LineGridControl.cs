@@ -29,6 +29,7 @@ public sealed class LineGridControl : Control
 
     private readonly VScrollBar _vbar = new() { Dock = DockStyle.Right };
     private readonly HScrollBar _hbar = new() { Dock = DockStyle.Bottom };
+    private MatchMapControl? _map;
     private readonly RowSelection _sel = new();
     private readonly List<ColumnValue> _cols = new();
 
@@ -66,7 +67,12 @@ public sealed class LineGridControl : Control
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         BackColor = Color.White;
+        _map = new MatchMapControl(this);
+        Controls.Add(_map);
         Controls.Add(_vbar);
+        // The map stands in for the scrollbar rather than sitting beside it - it carries the viewport
+        // rectangle, so a scrollbar next to it would be saying the same thing twice.
+        _vbar.Visible = false;
         Controls.Add(_hbar);
         _vbar.Scroll += (_, e) => { ClearViewAnchor(); _firstRow = e.NewValue; Invalidate(); };
         // Setting Value programmatically - which is what an accessibility tool or UI automation does, since
@@ -89,6 +95,47 @@ public sealed class LineGridControl : Control
     }
 
     public long CaretLine => _caretRow >= 0 && _doc is not null ? _doc.RowToLine(_caretRow) : -1;
+
+    // ---- what the match map reads ----
+
+    internal CascadeDocument? Document => _doc;
+    internal AppSettings Settings => _settings;
+    internal long FirstVisibleRow => _firstRow;
+    internal int VisibleRows => VisibleRowCount;
+    internal long CaretRow => _caretRow;
+
+    /// <summary>Scrolls so <paramref name="row"/> is the top visible row. Used by the map, which stands in
+    /// for the scrollbar, so it drops the view anchor exactly as dragging the thumb does.</summary>
+    internal void ScrollToRow(long row)
+    {
+        ClearViewAnchor();
+        SetFirstRow(row);
+        Invalidate();
+    }
+
+    /// <summary>A wheel turn over the map scrolls the text, as it does over the scrollbar.</summary>
+    internal void ScrollByWheel(int delta) => ScrollBy(-Math.Sign(delta) * SystemInformation.MouseWheelScrollLines);
+
+    /// <summary>Shows the match map in the vertical scrollbar's place, or puts the scrollbar back. Only one
+    /// of the two is ever visible: the map carries the viewport rectangle, so a scrollbar beside it would be
+    /// saying the same thing twice.</summary>
+    internal void SetMatchMapVisible(bool visible)
+    {
+        if (_map is null) return;
+        _map.Visible = visible;
+        _vbar.Visible = !visible;
+        RefreshView();
+    }
+
+    /// <summary>Tells the map its summary is stale (the filters, markers or file changed).</summary>
+    internal void InvalidateMatchMap() => _map?.InvalidateSummary();
+
+    internal MatchMapControl? MatchMapForTesting => _map;
+
+    internal bool VerticalScrollBarVisibleForTesting => _vbar.Visible;
+
+    /// <summary>Width taken by whichever of the map and the scrollbar is showing.</summary>
+    private int RightGutterWidth => (_map?.Visible == true ? _map.Width : 0) + (_vbar.Visible ? _vbar.Width : 0);
 
     /// <summary>Captures the viewport's current position so it can be restored after the visible-line set
     /// changes: the line to hold still (the caret line when it is on screen, else the top visible line), its
@@ -292,7 +339,7 @@ public sealed class LineGridControl : Control
         _hbar.Enabled = _maxContentWidth > viewport;
     }
 
-    private int ContentWidth => Math.Max(0, ClientSize.Width - _vbar.Width - GutterWidth());
+    private int ContentWidth => Math.Max(0, ClientSize.Width - RightGutterWidth - GutterWidth());
     private int HeaderHeight => (_doc?.Columns.Enabled ?? false) ? _rowHeight : 0;
     private int VisibleRowCount => Math.Max(1, (ClientSize.Height - _hbar.Height - HeaderHeight) / Math.Max(1, _rowHeight));
 
@@ -426,7 +473,7 @@ public sealed class LineGridControl : Control
             Color back = selected ? _settings.SelectionBack : ToColor(style.Background);
             Color fore = selected ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
 
-            var rowRect = new Rectangle(0, y, ClientSize.Width - _vbar.Width, _rowHeight);
+            var rowRect = new Rectangle(0, y, ClientSize.Width - RightGutterWidth, _rowHeight);
             using (var b = new SolidBrush(back)) g.FillRectangle(b, rowRect);
 
             DrawMarkers(g, line, y);
@@ -444,7 +491,7 @@ public sealed class LineGridControl : Control
 
             if (_doc.IsLineTruncated(line))
                 TextRenderer.DrawText(g, " […]", _fontItalic,
-                    new Point(ClientSize.Width - _vbar.Width - 40, y), Color.Gray);
+                    new Point(ClientSize.Width - RightGutterWidth - 40, y), Color.Gray);
 
             if (row == _caretRow && Focused)
                 using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack))) g.DrawRectangle(pen, 0, y, rowRect.Width - 1, _rowHeight - 1);
@@ -477,7 +524,7 @@ public sealed class LineGridControl : Control
 
     private void DrawColumnHeader(Graphics g, int gutter, int contentW)
     {
-        var rect = new Rectangle(0, 0, ClientSize.Width - _vbar.Width, _rowHeight);
+        var rect = new Rectangle(0, 0, ClientSize.Width - RightGutterWidth, _rowHeight);
         using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, rect);
         using (var pen = new Pen(Color.FromArgb(210, 210, 210))) g.DrawLine(pen, 0, _rowHeight - 1, rect.Width, _rowHeight - 1);
         int x = gutter - _hScroll;
@@ -923,7 +970,7 @@ public sealed class LineGridControl : Control
             get
             {
                 int y = _g.HeaderHeight + _visibleIndex * _g._rowHeight;
-                int w = Math.Max(0, _g.ClientSize.Width - _g._vbar.Width);
+                int w = Math.Max(0, _g.ClientSize.Width - _g.RightGutterWidth);
                 return _g.RectangleToScreen(new Rectangle(0, y, w, _g._rowHeight));
             }
         }

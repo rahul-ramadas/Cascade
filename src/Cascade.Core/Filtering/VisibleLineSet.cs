@@ -225,6 +225,24 @@ public sealed class VisibleLineSet
         return (GetWord(pages, line / WordBits) & (1L << (int)(line % WordBits))) != 0;
     }
 
+    /// <summary>How many visible lines fall in <c>[from, toExclusive)</c>. Two rank lookups, so it costs
+    /// the same whether the range is one line or ten million - which is what makes a per-pixel summary of
+    /// the whole file affordable.</summary>
+    public long CountInRange(long from, long toExclusive)
+    {
+        if (toExclusive <= from) return 0;
+        var idx = Volatile.Read(ref _index);
+        long[][] pages = Volatile.Read(ref _pages);
+        return RankAt(idx, pages, toExclusive) - RankAt(idx, pages, from);
+    }
+
+    private static long RankAt(Index idx, long[][] pages, long line)
+    {
+        if (line <= 0) return 0;
+        if (line >= idx.Lines) return idx.Total;
+        return RankBefore(idx, pages, line);
+    }
+
     /// <summary>Row of the nearest visible line at or after <paramref name="line"/>; <see cref="Count"/> if none.</summary>
     public long RowAtOrAfterLine(long line)
     {

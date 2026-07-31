@@ -57,6 +57,7 @@ internal static class SelfTest
             ok &= Timed("filter list", RunFilterListChecks);
             ok &= Timed("filter search", RunFilterSearchRevealChecks);
             ok &= Timed("filter presets", RunFilterPresetChecks);
+            ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -464,6 +465,139 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>The match map is a summary of the whole file in one pixel column, so what matters is that a
+    /// band says the right thing - how much of it matched and in what colours - not what the picture looks
+    /// like. Both are checked: the summary directly, and that the picture actually gets painted.</summary>
+    private static bool RunMatchMapChecks()
+    {
+        Line("-- match map --");
+        const int lines = 40_000;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_map_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        // Lines 0..999 are COMMON; line 2500 alone is RARE. One band is a many-line block, so the rare one
+        // is what proves a lone match is not rounded away.
+        for (int i = 0; i < lines; i++)
+            sb.Append(i < 10_000 ? "COMMON " : i == 25_000 ? "RARE " : "plain ").Append("line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(600, 400),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            Pump();
+
+            var common = new Filter { Enabled = true, Match = new FilterMatch { Text = "COMMON" }, Style = { Background = new RgbColor(0x22, 0x44, 0xEE) } };
+            var rare = new Filter { Enabled = true, Match = new FilterMatch { Text = "RARE" }, Style = { Background = new RgbColor(0xEE, 0x22, 0x22) } };
+            var collection = new FilterCollection();
+            collection.Roots.Add(common);
+            collection.Roots.Add(rare);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            Pump();
+
+            var map = grid.MatchMapForTesting;
+            bool ok = Check("the map replaces the vertical scrollbar", map is not null && map.Visible && !grid.VerticalScrollBarVisibleForTesting);
+            if (map is null) return false;
+
+            map.RebuildForTesting();
+            int height = map.BandCountForTesting;
+            ok &= Check("the map has one band per pixel row", height > 50, $"{height} bands");
+            if (height <= 50) return false;
+
+            int BandOf(long line) => (int)(line * height / lines);
+
+            ok &= Check("a band of matches is dense", map.DensityForTesting(BandOf(5000)) > 0.99,
+                        map.DensityForTesting(BandOf(5000)).ToString("0.000"));
+            ok &= Check("a band with nothing in it is empty", map.DensityForTesting(BandOf(18_000)) == 0,
+                        map.DensityForTesting(BandOf(18_000)).ToString("0.000"));
+
+            // The band holding the single RARE line: thin, but it must still be there and in its own colour.
+            double rareDensity = map.DensityForTesting(BandOf(25_000));
+            ok &= Check("a lone match still registers in its band", rareDensity > 0 && rareDensity < 0.2,
+                        rareDensity.ToString("0.0000"));
+            var rareColors = map.ColorsForTesting(BandOf(25_000));
+            ok &= Check("the lone match keeps its own colour", rareColors.Length == 1 && rareColors[0].R == 0xEE,
+                        string.Join(",", rareColors.Select(c => c.Name)));
+            var commonColors = map.ColorsForTesting(BandOf(5000));
+            ok &= Check("a dense band takes its filter's colour", commonColors.Length == 1 && commonColors[0].B == 0xEE,
+                        string.Join(",", commonColors.Select(c => c.Name)));
+
+            // ...and it is actually painted: the band with the lone match must differ from an empty one.
+            using var picture = Capture(host);
+            int mapLeft = picture.Width - map.Width;
+            bool rareRowPainted = RowHasColor(picture, mapLeft, map.Width, MapRowY(map, BandOf(25_000)), 0xEE, 0x22, 0x22);
+            ok &= Check("the lone match is painted, not rounded away", rareRowPainted);
+
+            // The viewport rectangle is the thumb: it has to follow the view.
+            long before = grid.FirstVisibleRow;
+            grid.ScrollToRow(30_000);
+            Pump();
+            ok &= Check("scrolling moves the view the map reports", grid.FirstVisibleRow > before,
+                        $"{before} -> {grid.FirstVisibleRow}");
+
+            // Filtered mode: the map covers the same rows the scrollbar does, and there every row is a
+            // match - so the whole strip fills, and the density channel gives way to the colours.
+            doc.Filters.ShowOnlyFilteredLines = true;
+            grid.RefreshView();
+            map.RebuildForTesting();
+            int solid = 0, sparse = 0;
+            for (int y = 0; y < map.BandCountForTesting; y++)
+            {
+                double d = map.DensityForTesting(y);
+                if (d > 0.99) solid++;
+                else if (d > 0) sparse++;
+            }
+            ok &= Check("every band is solid once only matching lines are shown", sparse == 0 && solid > 50,
+                        $"{solid} solid, {sparse} partial");
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Y of a band within the captured window (the map fills the grid's height).</summary>
+    private static int MapRowY(MatchMapControl map, int band) => map.Top + band;
+
+    private static bool RowHasColor(Bitmap bmp, int left, int width, int y, int r, int g, int b)
+    {
+        if (y < 0 || y >= bmp.Height) return false;
+        for (int x = Math.Max(0, left); x < Math.Min(bmp.Width, left + width); x++)
+        {
+            var c = bmp.GetPixel(x, y);
+            if (Math.Abs(c.R - r) < 24 && Math.Abs(c.G - g) < 24 && Math.Abs(c.B - b) < 24) return true;
+        }
+        return false;
+    }
+
+    /// <summary>Waits for a filter pass to finish, so the per-filter caches the map reads exist.</summary>
+    private static void WaitForFiltering(CascadeDocument doc)
+    {
+        var until = DateTime.UtcNow.AddSeconds(10);
+        while (doc.IsBusy && DateTime.UtcNow < until) { Pump(); Thread.Sleep(5); }
+        Pump();
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the

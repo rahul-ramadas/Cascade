@@ -39,6 +39,11 @@ public sealed class FilteredView
     public bool IsVisible(long line)
         => IsIdentity ? line >= 0 && line < Count : _set!.IsVisible(line);
 
+    /// <summary>How many visible lines fall in <c>[from, toExclusive)</c>.</summary>
+    public long CountInRange(long from, long toExclusive)
+        => IsIdentity ? Math.Max(0, Math.Min(toExclusive, Count) - Math.Max(0, from))
+                      : _set!.CountInRange(from, toExclusive);
+
     /// <summary>Row of the nearest visible line at or after <paramref name="line"/> (for preserving
     /// the current position when toggling filtered mode). Returns Count if none.</summary>
     public long RowAtOrAfterLine(long line)
