@@ -109,15 +109,12 @@ public sealed class LineGridControl : Control
 
     /// <summary>Arms view stabilization: as the filtered view streams in, the anchor's line is held at the
     /// same on-screen offset, so lines discovered before it move the scrollbar rather than the text.
-    /// Re-applied on each <see cref="RefreshView"/> until cleared. <paramref name="center"/> instead places
-    /// the line in the middle of the viewport (used when switching filtered/dim mode).</summary>
-    public void SetViewAnchor(ViewAnchor anchor, bool select, bool center = false)
+    /// Re-applied on each <see cref="RefreshView"/> until cleared.</summary>
+    public void SetViewAnchor(ViewAnchor anchor, bool select)
     {
         _anchorLine = anchor.Line;
         _anchorCaretLine = anchor.CaretLine;
-        _anchorOffset = center
-            ? Math.Max(0, VisibleRowCount / 2)
-            : Math.Clamp(anchor.Offset, 0, Math.Max(0, VisibleRowCount - 1));
+        _anchorOffset = Math.Clamp(anchor.Offset, 0, Math.Max(0, VisibleRowCount - 1));
         _anchorSelect = select;
     }
 
