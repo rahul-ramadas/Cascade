@@ -1462,5 +1462,3 @@ public sealed class MainForm : Form
         d.ShowDialog(this);
     }
 }
-
-

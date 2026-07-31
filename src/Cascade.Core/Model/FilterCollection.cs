@@ -198,4 +198,3 @@ public sealed class FilterCollection
 
     public int EnabledCount => EnumerateDepthFirst().Count(f => f.Enabled);
 }
-
