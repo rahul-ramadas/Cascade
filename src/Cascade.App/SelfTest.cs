@@ -51,6 +51,7 @@ internal static class SelfTest
             ok &= Timed("filter enable", RunFilterEnableChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
+            ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -821,6 +822,37 @@ internal static class SelfTest
         dlg.Close();
         dlg.Dispose();
         Pump();
+        return ok;
+    }
+
+    /// <summary>A filter started from a log line has to arrive holding that line. It used to keep only the
+    /// first 200 characters, and the lines worth filtering on are exactly the long ones.</summary>
+    private static bool RunNewFilterFromLineChecks()
+    {
+        Line("-- a filter made from a log line --");
+
+        string line = "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] " +
+                      new string('x', 900) + " tail";
+        string seeded = MainForm.SeedPatternFromLine("  " + line + "  \t");
+        bool ok = Check($"the whole line is carried over, not a prefix ({seeded.Length} of {line.Length} characters)",
+                        seeded == line);
+
+        // Whatever is seeded has to survive being put in the box, or it is lost just as quietly.
+        var dlg = new FilterEditDialog(new Filter { Match = { Text = seeded } }, isNew: true);
+        dlg.StartPosition = FormStartPosition.Manual;
+        dlg.Location = new Point(0, 0);
+        dlg.Opacity = 0;
+        dlg.Show();
+        Pump();
+        var box = AllControls(dlg).OfType<TextBox>().FirstOrDefault(t => t.Text.Length > 100);
+        ok &= Check($"the edit box keeps all of it (holds {box?.Text.Length ?? -1})", box?.Text == line);
+        dlg.Close();
+        dlg.Dispose();
+        Pump();
+
+        string huge = MainForm.SeedPatternFromLine(new string('y', FilterEditDialog.MaxPatternLength + 5_000));
+        ok &= Check($"an absurd line is cut to what the box can hold ({huge.Length})",
+                    huge.Length == FilterEditDialog.MaxPatternLength);
         return ok;
     }
 

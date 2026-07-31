@@ -654,11 +654,18 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>What a filter made from a log line starts out matching: the line itself, less the space
+    /// around it. Only the first 200 characters used to be kept, which threw away most of exactly the long
+    /// lines that are worth building a filter from.</summary>
+    internal static string SeedPatternFromLine(string line)
+    {
+        string text = line.Trim();
+        return text.Length <= FilterEditDialog.MaxPatternLength ? text : text[..FilterEditDialog.MaxPatternLength];
+    }
+
     private void CreateFilterFromLine(long line)
     {
-        string text = _doc.GetLineText(line).Trim();
-        if (text.Length > 200) text = text[..200];
-        var filter = new Filter { Enabled = true, Match = { Text = text } };
+        var filter = new Filter { Enabled = true, Match = { Text = SeedPatternFromLine(_doc.GetLineText(line)) } };
         using var dlg = new FilterEditDialog(filter, isNew: true);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
