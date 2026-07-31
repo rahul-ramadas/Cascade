@@ -50,6 +50,7 @@ internal static class SelfTest
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
+            ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
             ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
@@ -664,11 +665,7 @@ internal static class SelfTest
                 .GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(form, new object[] { ch })!;
 
-        static char? MnemonicOf(string text)
-        {
-            int i = text.IndexOf('&');
-            return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
-        }
+        static char? MnemonicOf(string text) => SelfTest.MnemonicOf(text);
 
         bool ok = true;
 
@@ -854,6 +851,49 @@ internal static class SelfTest
         ok &= Check($"an absurd line is cut to what the box can hold ({huge.Length})",
                     huge.Length == FilterEditDialog.MaxPatternLength);
         return ok;
+    }
+
+    /// <summary>The letter Alt activates for a caption, or null when it declares none.</summary>
+    private static char? MnemonicOf(string text)
+    {
+        int i = text.IndexOf('&');
+        return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
+    }
+
+    /// <summary>An Alt key has to be unique within its own menu. Where two items claim the same letter
+    /// Windows cycles between them rather than running either, so the key must be pressed twice and then
+    /// Enter - and nothing complains, which is how five of these had quietly accumulated.</summary>
+    private static bool RunMenuMnemonicChecks()
+    {
+        Line("-- menu keyboard access --");
+
+        // Built by the constructor; arguments are only acted on once the form is shown, so constructing one
+        // and never showing it opens no file and touches no settings.
+        using var form = new MainForm(new AppSettings(), new MachineState(), Array.Empty<string>());
+        if (form.MainMenuStrip is not { } bar) return Check("the menu bar was built", false);
+
+        bool Walk(string path, ToolStripItemCollection items)
+        {
+            var claimed = new Dictionary<char, string>();
+            var clashes = new List<string>();
+            foreach (ToolStripItem item in items)
+            {
+                if (MnemonicOf(item.Text ?? "") is not { } m) continue;
+                if (claimed.TryGetValue(m, out string? already)) clashes.Add($"'{m}' on \"{already}\" and \"{item.Text}\"");
+                else claimed[m] = item.Text ?? "";
+            }
+            bool good = Check($"{path}: no two items claim the same Alt key" +
+                              (clashes.Count > 0 ? " [" + string.Join("; ", clashes) + "]"
+                                                 : $" ({string.Join(",", claimed.Keys.OrderBy(c => c))})"),
+                              clashes.Count == 0);
+
+            foreach (ToolStripItem item in items)
+                if (item is ToolStripMenuItem sub && sub.DropDownItems.Count > 0)
+                    good &= Walk($"{path} > {(sub.Text ?? "").Replace("&", "")}", sub.DropDownItems);
+            return good;
+        }
+
+        return Walk("menu", bar.Items);
     }
 
     private static IEnumerable<Control> AllControls(Control root)
