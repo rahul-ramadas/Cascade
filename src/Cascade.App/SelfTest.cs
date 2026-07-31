@@ -894,7 +894,7 @@ internal static class SelfTest
     }
 
     /// <summary>Jumping to a particular line - Go To, find, per-filter find, marker navigation - lands it in
-    /// the middle third of the view, so it arrives with context above and below instead of hard against an
+    /// the middle half of the view, so it arrives with context above and below instead of hard against an
     /// edge with nothing to read around it. Stepping about with the arrow keys keeps the old behaviour of
     /// scrolling as little as possible, which is why the two paths are separate.</summary>
     private static bool RunNavigationChecks()
@@ -928,9 +928,9 @@ internal static class SelfTest
 
             // No filters, so a display row is its own file line and the offset arithmetic below is exact.
             int visible = grid.VisibleRowCountForTesting;
-            long top = visible / 3;
-            long bottom = Math.Max(top, visible * 2 / 3 - 1);
-            bool ok = Check($"the view is tall enough for a middle third to mean anything " +
+            long top = visible / 4;
+            long bottom = Math.Max(top, visible * 3 / 4 - 1);
+            bool ok = Check($"the view is tall enough for a middle half to mean anything " +
                             $"({visible} rows, band {top}..{bottom})", visible >= 9);
             if (!ok) return false;
 
@@ -939,11 +939,11 @@ internal static class SelfTest
             void Go(long line) { grid.GoToLine(line); Pump(); }
 
             Go(250);
-            ok &= Check($"a line below the view arrives at the bottom of the middle third " +
+            ok &= Check($"a line below the view arrives at the bottom of the middle half " +
                         $"(offset {Offset(250)} of {visible})", Offset(250) == bottom);
 
             Go(120);
-            ok &= Check($"a line above the view arrives at the top of the middle third " +
+            ok &= Check($"a line above the view arrives at the top of the middle half " +
                         $"(offset {Offset(120)} of {visible})", Offset(120) == top);
 
             // The point of the band being a range: walking through nearby matches must not drag the view
@@ -981,7 +981,7 @@ internal static class SelfTest
                         grid.FirstRowForTesting == before && grid.CaretRowForTesting == before + visible - 1);
             grid.PressKeyForTesting(Keys.Down);
             Pump();
-            ok &= Check($"walking off the bottom scrolls one line, not a third of a screen " +
+            ok &= Check($"walking off the bottom scrolls one line, not back into the band " +
                         $"({before} -> {grid.FirstRowForTesting})",
                         grid.FirstRowForTesting == before + 1);
             return ok;
@@ -1031,9 +1031,9 @@ internal static class SelfTest
             SetFilters(doc, tree, filters.ToArray());
 
             int visible = Math.Max(1, tree.TreeHeightForTesting / Math.Max(1, tree.RowHeightForTesting));
-            int top = visible / 3;
-            int bottom = Math.Max(top, visible * 2 / 3 - 1);
-            bool ok = Check($"the filter pane is tall enough for a middle third to mean anything " +
+            int top = visible / 4;
+            int bottom = Math.Max(top, visible * 3 / 4 - 1);
+            bool ok = Check($"the filter pane is tall enough for a middle half to mean anything " +
                             $"({visible} rows, band {top}..{bottom})", visible >= 9);
             if (!ok) return false;
 
@@ -1043,7 +1043,7 @@ internal static class SelfTest
             // Typing jumps to the first match, which is below the view.
             tree.SetSearchText("zulu");
             Pump();
-            ok &= Check($"a filter below the view arrives at the bottom of the middle third " +
+            ok &= Check($"a filter below the view arrives at the bottom of the middle half " +
                         $"(offset {OffsetOf("zulu early")} of {visible})", OffsetOf("zulu early") == bottom);
 
             // F3 walks to the next match, further down again.
@@ -1055,7 +1055,7 @@ internal static class SelfTest
             // Shift+F3 goes back up, so the match comes in at the top of the band instead.
             tree.PressKeyForTesting(Keys.F3 | Keys.Shift);
             Pump();
-            ok &= Check($"a match above the view arrives at the top of the middle third " +
+            ok &= Check($"a match above the view arrives at the top of the middle half " +
                         $"(offset {OffsetOf("zulu early")} of {visible})", OffsetOf("zulu early") == top);
             return ok;
         }
