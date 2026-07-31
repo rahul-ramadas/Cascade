@@ -1015,6 +1015,21 @@ public sealed class FilterTreeControl : UserControl
         FiltersChanged?.Invoke();
     }
 
+    /// <summary>Brings the checkboxes back in line with the model, for when something other than the list
+    /// itself decided which filters are enabled - applying a preset. In place rather than a rebuild: the
+    /// list must not blank, and the scroll position and selection have no reason to move.</summary>
+    public void RefreshCheckStates()
+    {
+        if (_doc is null) return;
+        _building = true;
+        _tree.BeginUpdate();
+        foreach (var n in _flat)
+            if (n.Tag is Filter f && n.Checked != f.Enabled) n.Checked = f.Enabled;
+        _tree.EndUpdate();
+        _building = false;
+        _tree.Invalidate();
+    }
+
     public void SetAllEnabled(bool enabled)
     {
         if (_doc is null) return;

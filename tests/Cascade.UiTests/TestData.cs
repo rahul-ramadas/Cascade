@@ -67,6 +67,30 @@ internal static class TestData
     }
 
     /// <summary>
+    /// A .cascade file with one <b>disabled</b> include filter per match text and the named presets over
+    /// them, so a test can start from "nothing on" and drive the presets pane. Each preset is given as a
+    /// name and the indices into <paramref name="texts"/> it switches on.
+    /// </summary>
+    public static string WritePresetFile(string[] texts, params (string Name, int[] Filters)[] presets)
+    {
+        string[] ids = texts.Select((_, i) => $"testfilter{i:00}").ToArray();
+        var sb = new StringBuilder();
+        sb.Append("{\n  \"schemaVersion\": 1,\n  \"showOnlyFilteredLines\": false,\n  \"filters\": [\n");
+        for (int i = 0; i < texts.Length; i++)
+            sb.Append($"    {{ \"id\": \"{ids[i]}\", \"description\": \"{texts[i]}\", \"enabled\": false, \"kind\": \"Include\", \"matchType\": \"Text\", \"text\": \"{texts[i]}\" }}")
+              .Append(i == texts.Length - 1 ? "\n" : ",\n");
+        sb.Append("  ],\n  \"presets\": [\n");
+        for (int i = 0; i < presets.Length; i++)
+            sb.Append($"    {{ \"name\": \"{presets[i].Name}\", \"filterIds\": [{string.Join(", ", presets[i].Filters.Select(f => $"\"{ids[f]}\""))}] }}")
+              .Append(i == presets.Length - 1 ? "\n" : ",\n");
+        sb.Append("  ]\n}\n");
+
+        string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".cascade");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        return path;
+    }
+
+    /// <summary>
     /// Path to the Cascade.exe under test. Defaults to the build output next to this test assembly.
     /// Set CASCADE_TEST_EXE to point the whole suite at a different one - CI aims it at the PUBLISHED
     /// single-file exe, because that is what ships and it resolves its assemblies and embedded resources

@@ -50,6 +50,9 @@ public sealed class AppSettings
     /// <summary>When true, <see cref="MachineState.LastFilterFile"/> is reloaded automatically at startup.</summary>
     public bool AutoLoadLastFilterFile { get; set; } = true;
 
+    /// <summary>Whether the filter presets pane shares the filter pane.</summary>
+    public bool ShowFilterPresets { get; set; } = true;
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 

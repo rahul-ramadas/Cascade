@@ -316,6 +316,53 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Presets_switch_filters_on_together()
+    {
+        // The pane's selection IS the set of presets in effect and the enabled filters are the union of it,
+        // so Fil: is what proves a click reached the filters rather than just the list.
+        string log = TestData.WriteLogFile();
+        string filters = TestData.WritePresetFile(
+            new[] { "MATCH", "line 999", "line 998" },
+            ("just match", new[] { 0 }),
+            ("the pair", new[] { 1, 2 }));
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, filters, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            Check("both presets are listed", app.PresetNames().Length == 2, string.Join(" | ", app.PresetNames()));
+            Check("nothing is in effect to start with", app.ActivePresets().Length == 0, string.Join(" | ", app.ActivePresets()));
+            Check("no filters enabled to start with", app.WaitStatus("Fil:", $"Fil: {TestData.LineCount:N0}"), app.StatusText("Fil:"));
+
+            app.SelectPreset("just match");
+            Check("selecting one preset enables its filter", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));
+
+            app.AddPreset("the pair");
+            Check("adding a preset enables the union", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
+            Check("both show as in effect", app.ActivePresets().Length == 2, string.Join(" | ", app.ActivePresets()));
+
+            app.SelectPreset("the pair");
+            Check("selecting one alone drops the other", app.WaitStatus("Fil:", "Fil: 2"), app.StatusText("Fil:"));
+
+            // The other direction: turning a filter off by hand must clear the preset that named it.
+            // Shift+Space rather than Space: the plain one is handled by the native tree, which ignores an
+            // injected keystroke, while Shift+Space is handled in managed code. On a filter with no
+            // children the two mean the same thing.
+            app.FocusFilter("line 999");
+            app.ShiftKey(app.Tree(), VirtualKeyShort.SPACE);
+            Check("unticking a filter by hand reaches the model", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
+            Check("a half-enabled preset stops showing as in effect",
+                  Retry.WhileFalse(() => app.ActivePresets().Length == 0, TimeSpan.FromSeconds(4)).Result,
+                  string.Join(" | ", app.ActivePresets()));
+
+            Assert.True(fails.Count == 0, "Preset failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(filters); }
+    }
+
+    [Fact]
     public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
     {
         string log = TestData.WriteLogFile();

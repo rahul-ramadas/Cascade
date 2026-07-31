@@ -238,6 +238,41 @@ internal sealed class CascadeApp : IDisposable
         return parent.FindAllChildren(cf => cf.ByControlType(ControlType.TreeItem)).Select(n => n.Name ?? "").ToArray();
     }
 
+    /// <summary>The filter presets pane's list.</summary>
+    public AutomationElement PresetList()
+        => Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByName("Filter presets")),
+               TimeSpan.FromSeconds(5)).Result ?? throw new InvalidOperationException("Filter presets list not found.");
+
+    public string[] PresetNames()
+        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem)).Select(i => i.Name ?? "").ToArray();
+
+    private AutomationElement PresetItem(string name)
+        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem))
+               .FirstOrDefault(i => (i.Name ?? "").StartsWith(name, StringComparison.OrdinalIgnoreCase))
+           ?? throw new InvalidOperationException($"Preset '{name}' is not listed: {string.Join(" | ", PresetNames())}");
+
+    /// <summary>Puts the preset list's selection exactly where asked. Set item by item rather than through
+    /// SelectionItem.Select(), which on a multi-select list adds rather than replacing.</summary>
+    public void SelectPreset(params string[] names)
+    {
+        foreach (var item in PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem)))
+        {
+            bool want = names.Any(n => (item.Name ?? "").StartsWith(n, StringComparison.OrdinalIgnoreCase));
+            var pattern = item.Patterns.SelectionItem.PatternOrDefault;
+            if (pattern is null) continue;
+            if (want && !pattern.IsSelected.ValueOrDefault) pattern.AddToSelection();
+            else if (!want && pattern.IsSelected.ValueOrDefault) pattern.RemoveFromSelection();
+        }
+    }
+
+    /// <summary>Ctrl+clicking a preset: it joins whatever is already in effect.</summary>
+    public void AddPreset(string name) => PresetItem(name).Patterns.SelectionItem.Pattern.AddToSelection();
+
+    public string[] ActivePresets()
+        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem))
+               .Where(i => i.Patterns.SelectionItem.PatternOrDefault?.IsSelected.ValueOrDefault == true)
+               .Select(i => i.Name ?? "").ToArray();
+
     /// <summary>Position of a filter within <paramref name="names"/>, or -1.</summary>
     public static int IndexOfFilter(string[] names, string containsText)
         => Array.FindIndex(names, n => n.Contains(containsText, StringComparison.OrdinalIgnoreCase));

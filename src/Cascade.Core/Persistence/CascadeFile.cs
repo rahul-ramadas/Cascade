@@ -27,6 +27,8 @@ public static class CascadeFile
             SchemaVersion = SchemaVersion,
             ShowOnlyFilteredLines = filters.ShowOnlyFilteredLines,
             Filters = filters.Roots.Select(ToDto).ToList(),
+            Presets = filters.Presets.Count == 0 ? null : filters.Presets
+                .Select(p => new PresetDto { Name = p.Name, FilterIds = p.FilterIds.ToList() }).ToList(),
             Columns = columns is null ? null : ToDto(columns)
         };
         AtomicFile.WriteAllText(path, JsonSerializer.Serialize(dto, Options));
@@ -40,6 +42,9 @@ public static class CascadeFile
         if (dto.Filters is not null)
             foreach (var f in dto.Filters)
                 filters.Add(FromDto(f));
+        if (dto.Presets is not null)
+            foreach (var p in dto.Presets)
+                filters.Presets.Add(new FilterPreset(p.Name ?? "", p.FilterIds ?? new List<string>()));
         ColumnSpec? columns = dto.Columns is null ? null : FromDto(dto.Columns);
         return (filters, columns);
     }
@@ -139,7 +144,14 @@ public static class CascadeFile
         public int SchemaVersion { get; set; } = CascadeFile.SchemaVersion;
         public bool ShowOnlyFilteredLines { get; set; }
         public List<FilterDto>? Filters { get; set; }
+        public List<PresetDto>? Presets { get; set; }
         public ColumnsDto? Columns { get; set; }
+    }
+
+    private sealed class PresetDto
+    {
+        public string? Name { get; set; }
+        public List<string>? FilterIds { get; set; }
     }
 
     private sealed class FilterDto

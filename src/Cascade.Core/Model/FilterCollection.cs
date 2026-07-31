@@ -140,6 +140,47 @@ public sealed class FilterCollection
                 yield return f;
     }
 
+    // ---- presets ----
+
+    /// <summary>Named sets of filters to switch on together. Saved with the filters, since that is what
+    /// they refer to.</summary>
+    public List<FilterPreset> Presets { get; } = new();
+
+    public Filter? FindById(string id) => EnumerateDepthFirst().FirstOrDefault(f => f.Id == id);
+
+    /// <summary>How many of a preset's filters no longer exist, so the list can say so.</summary>
+    public int MissingCount(FilterPreset preset) => preset.FilterIds.Count(id => FindById(id) is null);
+
+    /// <summary>Whether a preset is currently in effect: every filter it names that still exists is
+    /// enabled. Derived rather than stored, so ticking a filter by hand lights the preset up (or clears it)
+    /// exactly as applying it would. A preset naming nothing that exists is never active.</summary>
+    public bool IsPresetActive(FilterPreset preset)
+    {
+        bool any = false;
+        foreach (var id in preset.FilterIds)
+        {
+            if (FindById(id) is not { } f) continue;
+            if (!f.Enabled) return false;
+            any = true;
+        }
+        return any;
+    }
+
+    /// <summary>A preset capturing exactly what is enabled right now. Ancestors are not added: a parent's
+    /// pattern constrains its children whether or not the parent is enabled, so "parent off, children on"
+    /// is a real arrangement and must be reproduced faithfully.</summary>
+    public FilterPreset CaptureEnabled(string name)
+        => new(name, EnumerateDepthFirst().Where(f => f.Enabled).Select(f => f.Id));
+
+    /// <summary>Switches on exactly the union of the given presets, and everything else off. Selecting one
+    /// preset therefore means "just this", and adding a second means "both" - which is what makes the list's
+    /// selection and the enabled set the same thing.</summary>
+    public void ApplyPresets(IEnumerable<FilterPreset> presets)
+    {
+        var wanted = new HashSet<string>(presets.SelectMany(p => p.FilterIds), StringComparer.Ordinal);
+        foreach (var f in EnumerateDepthFirst()) f.Enabled = wanted.Contains(f.Id);
+    }
+
     private static IEnumerable<Filter> Walk(Filter f)
     {
         yield return f;

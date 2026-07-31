@@ -56,6 +56,7 @@ internal static class SelfTest
             ok &= Timed("navigation", RunNavigationChecks);
             ok &= Timed("filter list", RunFilterListChecks);
             ok &= Timed("filter search", RunFilterSearchRevealChecks);
+            ok &= Timed("filter presets", RunFilterPresetChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -351,6 +352,118 @@ internal static class SelfTest
         doc.SetFilters(collection);
         tree.Rebuild();
         Pump();
+    }
+
+    /// <summary>The presets pane's selection IS the set of presets in effect, and the enabled filters are
+    /// the union of what is selected. Both directions have to hold: selecting applies, and enabling by hand
+    /// selects.</summary>
+    private static bool RunFilterPresetChecks()
+    {
+        Line("-- filter presets --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_presets_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 50; i++) sb.Append($"alpha beta gamma line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var pane = new FilterPresetsControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(240, 220),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(pane);
+            pane.Attach(doc);
+            host.Show();
+            Pump();
+
+            var collection = new FilterCollection();
+            var a = new Filter { Match = new FilterMatch { Text = "alpha" } };
+            var b = new Filter { Match = new FilterMatch { Text = "beta" } };
+            var c = new Filter { Match = new FilterMatch { Text = "gamma" } };
+            foreach (var f in new[] { a, b, c }) collection.Roots.Add(f);
+            collection.Presets.Add(new FilterPreset("first", new[] { a.Id }));
+            collection.Presets.Add(new FilterPreset("second", new[] { b.Id, c.Id }));
+            doc.SetFilters(collection);
+            pane.Attach(doc);
+            Pump();
+
+            int applied = 0;
+            pane.PresetsApplied += () => applied++;
+
+            bool ok = Check("both presets are listed", pane.LabelsForTesting.SequenceEqual(new[] { "first", "second" }),
+                            string.Join(" | ", pane.LabelsForTesting));
+            ok &= Check("nothing is in effect while every filter is off", pane.ActiveForTesting.Length == 0);
+
+            // Selecting one preset means "just this".
+            pane.SelectForTesting("first");
+            Pump();
+            ok &= Check("selecting a preset enables exactly its filters", a.Enabled && !b.Enabled && !c.Enabled,
+                        $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
+
+            // Adding a second means "both", and does not drop the first.
+            pane.SelectForTesting("first", "second");
+            Pump();
+            ok &= Check("adding a preset enables the union", a.Enabled && b.Enabled && c.Enabled,
+                        $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
+
+            pane.SelectForTesting("second");
+            Pump();
+            ok &= Check("dropping a preset turns its filters back off", !a.Enabled && b.Enabled && c.Enabled,
+                        $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
+
+            pane.SelectForTesting();
+            Pump();
+            ok &= Check("selecting nothing leaves every filter off", !a.Enabled && !b.Enabled && !c.Enabled,
+                        $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
+
+            // A burst of selection changes must cost one re-filter, not one each: applying is what re-runs
+            // the filters over the whole file.
+            applied = 0;
+            pane.SelectForTesting("first");
+            pane.SelectForTesting("second");
+            pane.SelectForTesting("first", "second");
+            Pump();
+            ok &= Check("a burst of selection changes re-filters once", applied == 1, $"applied {applied} times");
+
+            // The other direction: enabling by hand is enough to put a preset in effect.
+            a.Enabled = false; b.Enabled = false; c.Enabled = false;
+            pane.RefreshActive();
+            ok &= Check("nothing is in effect after everything is switched off by hand", pane.ActiveForTesting.Length == 0,
+                        string.Join(",", pane.ActiveForTesting));
+            b.Enabled = true;
+            pane.RefreshActive();
+            ok &= Check("a half-enabled preset is not in effect", pane.ActiveForTesting.Length == 0,
+                        string.Join(",", pane.ActiveForTesting));
+            c.Enabled = true;
+            pane.RefreshActive();
+            ok &= Check("enabling every filter of a preset by hand puts it in effect",
+                        pane.ActiveForTesting.SequenceEqual(new[] { "second" }), string.Join(",", pane.ActiveForTesting));
+
+            // A deleted filter is remembered but reported.
+            collection.Remove(c);
+            pane.Rebuild();
+            ok &= Check("a preset says how many of its filters have gone",
+                        pane.LabelsForTesting[1].Contains("1 missing"), string.Join(" | ", pane.LabelsForTesting));
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the
@@ -1473,6 +1586,14 @@ internal static class SelfTest
     private static bool Check(string name, bool condition)
     {
         Line((condition ? "[PASS] " : "[FAIL] ") + name);
+        return condition;
+    }
+
+    /// <summary>Same, but reports what was actually seen when it fails - which is the difference between a
+    /// failure you can act on and one you have to reproduce first.</summary>
+    private static bool Check(string name, bool condition, string detail)
+    {
+        Line((condition ? "[PASS] " : "[FAIL] ") + name + (condition ? "" : $" [{detail}]"));
         return condition;
     }
 
