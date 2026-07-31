@@ -872,8 +872,9 @@ public sealed class MainForm : Form
         _filtersDirty = true;
         SyncFilteredModeMenu();
         // Filtered vs. dim is a display-only mode: the matched set is unchanged, so there is no need to
-        // re-run filtering (which would blank the view). Just re-map the view and center the line.
-        _grid.SetViewAnchor(anchor, select: true, center: true);
+        // re-run filtering (which would blank the view). Just re-map the view, holding the line where it
+        // already is - the same as every filter change does.
+        _grid.SetViewAnchor(anchor, select: true);
         _grid.RefreshView();
         _anchorActive = anchor.IsValid;
         UpdateStatus();

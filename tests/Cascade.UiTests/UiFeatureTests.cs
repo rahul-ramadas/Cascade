@@ -50,40 +50,63 @@ public class UiFeatureTests
     }
 
     [Fact]
-    public void Keeps_selected_line_selected_and_centered_when_toggling_filtered_mode()
+    public void Keeps_the_selected_line_where_it_is_when_toggling_filtered_mode()
     {
         using var app = CascadeApp.Launch();
         var fails = new List<string>();
         void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
-        // Scroll a middle region into view, then select a MATCH line (0-based 500 -> 1-based 501).
-        app.ScrollRowToMiddle(500);
-        app.SelectLine(501);
+        // How many rows down the viewport the selected one sits. Counted in rows, not pixels: the top row
+        // can be scrolled part-way out of view, which shifts every pixel figure without anything having
+        // actually moved.
+        int OffsetRows()
+        {
+            var sel = app.SelectedRow();
+            return sel is null ? -1 : app.Rows().Count(r => r.BoundingRectangle.Top < sel.Value.bounds.Top);
+        }
+
+        // Park the line a few rows below the top. Starting it mid-screen would make "it stayed put" and
+        // "it was moved to the middle" the same measurement, and the check would prove nothing.
+        app.ScrollVerticalTo(497);
+        app.SelectLine(501);                     // 0-based 500, a MATCH line, a few rows down
         Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
         Check("one line selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
 
-        // Hide non-matching lines: line 500 matches, so it must stay selected AND be centered.
+        int rows = app.Rows().Length;
+        int before = OffsetRows();
+        Check("the row is visible to start with", before >= 0);
+        Check("and is nowhere near the middle, or this proves nothing",
+              before >= 0 && before < rows / 3, $"offset {before} of {rows} rows");
+
+        // Hiding the non-matching lines must not move it: line 501 matches, so it stays exactly put.
         app.ToggleFilteredMode();
+        int after = OffsetRows();
         Check("filtered: line stays 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
         Check("filtered: still one selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
         Check("filtered: matched count", app.StatusText("Fil:") == $"Fil: {TestData.MatchCount:N0}", app.StatusText("Fil:"));
-        Check("filtered: selected row centered", app.SelectedRowIsCentered(out var d1), d1);
+        Check("filtered: the line did not move on screen", after == before, $"{before} -> {after}");
 
-        // Show all lines again: still selected + centered.
+        // And back again.
         app.ToggleFilteredMode();
+        int back = OffsetRows();
         Check("dim: line stays 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
-        Check("dim: selected row centered", app.SelectedRowIsCentered(out var d2), d2);
+        Check("dim: the line did not move on screen", back == before, $"{before} -> {back}");
 
-        // Select a NON-matching line (0-based 502 -> 1-based 503). Hiding non-matching lines should snap
-        // the selection to the nearest match at/after it: 0-based 505 -> 1-based 506.
+        // A NON-matching line (1-based 503) has nowhere to stay, so the nearest match at or after it takes
+        // its place - 1-based 506 - and that should appear about where 503 was, not in the middle.
         app.SelectLine(503);
+        int wasAt = OffsetRows();
         Check("select 503", app.StatusText("Ln:") == "Ln: 503 / 1,000", app.StatusText("Ln:"));
         app.ToggleFilteredMode();
+        int snapped = OffsetRows();
         Check("filtered-out line snaps to nearest match (506)", app.StatusText("Ln:") == "Ln: 506 / 1,000", app.StatusText("Ln:"));
         Check("nearest still selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
-        Check("nearest centered", app.SelectedRowIsCentered(out var d3), d3);
+        Check("the replacement appears within a row of where the old line was",
+              Math.Abs(snapped - wasAt) <= 1, $"{wasAt} -> {snapped}");
 
-        Assert.True(fails.Count == 0, "Keep-in-view failures:\n  " + string.Join("\n  ", fails));
+        Assert.True(fails.Count == 0,
+                    $"Keep-in-view failures (offsets in rows: start {before}, filtered {after}, back {back}, " +
+                    $"of {rows} visible):\n  " + string.Join("\n  ", fails));
     }
 
     [Fact]

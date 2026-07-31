@@ -216,21 +216,6 @@ internal sealed class CascadeApp : IDisposable
         return null;
     }
 
-    /// <summary>True if the selected row is vertically centered in the grid (within a few rows).</summary>
-    public bool SelectedRowIsCentered(out string detail)
-    {
-        detail = "";
-        var sel = SelectedRow();
-        if (sel is null) { detail = "no selected row visible"; return false; }
-        Rectangle grid = Grid().BoundingRectangle;
-        Rectangle row = sel.Value.bounds;
-        int gridCenter = grid.Top + grid.Height / 2;
-        int rowCenter = row.Top + row.Height / 2;
-        int tolerance = Math.Max(row.Height * 4, 12);
-        detail = $"line={sel.Value.line} rowCenterY={rowCenter} gridCenterY={gridCenter} tol={tolerance}";
-        return Math.Abs(rowCenter - gridCenter) <= tolerance;
-    }
-
     // ---- filter tree ----
 
     public AutomationElement Tree()
