@@ -29,6 +29,15 @@ public sealed class MarkerStore
 
     public bool AnyInUse => !_mask.IsEmpty;
 
+    /// <summary>Every marked line with its mask, in line order. Marked lines are hand-picked, so this stays
+    /// small however large the file - which is what lets a whole-file summary just walk it.</summary>
+    public (long Line, byte Mask)[] Snapshot()
+    {
+        var all = _mask.ToArray();
+        Array.Sort(all, static (a, b) => a.Key.CompareTo(b.Key));
+        return Array.ConvertAll(all, kv => (kv.Key, kv.Value));
+    }
+
     /// <summary>Bitmask of which of the 8 markers are currently used on at least one line.</summary>
     public int UsedMarkers
     {

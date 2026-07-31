@@ -66,6 +66,7 @@ internal static class UiShots
 
         ShotMainForm(outDir, file, tat);
         ShotGridStates(outDir);
+        ShotMatchMap(outDir);
         ShotFilterSearch(outDir);
 
         try { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); } catch { /* ignore */ }
@@ -182,6 +183,53 @@ internal static class UiShots
         Settle();
         CapControl(host, dir, "state-hscroll");
         grid.ScrollHorizontallyTo(0);
+
+        host.Close();
+        host.Dispose();
+        doc.Dispose();
+        try { File.Delete(path); } catch { /* ignore */ }
+    }
+
+    /// <summary>The match map over a file big enough for a band to cover many lines, which is the only scale
+    /// at which it says anything: a dense block, an empty stretch, and a single line on its own.</summary>
+    private static void ShotMatchMap(string dir)
+    {
+        const int lines = 60_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i < 12_000 || (i > 30_000 && i < 33_000) ? "WARN " : i % 9_999 == 0 ? "ERROR " : "INFO ")
+              .Append("service message ").Append(i).Append('\n');
+        string path = Path.Combine(Path.GetTempPath(), "cascade_map_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var settings = AppSettings.Load();
+        var doc = new CascadeDocument();
+        doc.Open(path);
+        doc.WaitForIndex();
+        doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xFF, 0xFF, 0xFF), Background = new RgbColor(0xC0, 0x20, 0x20) } });
+        doc.ApplyFilters();
+        WaitIdle(doc);
+        for (int i = 0; i < 6; i++) doc.Markers.Toggle(4_000 + i * 8_500, i % 3);
+
+        var grid = new LineGridControl { Dock = DockStyle.Fill };
+        var host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(900, 520), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+        host.Controls.Add(grid);
+        grid.Attach(doc, settings);
+        host.Show();
+        Settle();
+        grid.ScrollToRow(20_000);
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "match-map");
+
+        doc.Filters.ShowOnlyFilteredLines = true;
+        doc.ApplyFilters();
+        WaitIdle(doc);
+        grid.InvalidateMatchMap();
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "match-map-filtered");
 
         host.Close();
         host.Dispose();

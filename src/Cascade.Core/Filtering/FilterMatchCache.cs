@@ -122,6 +122,42 @@ public sealed class FilterMatchCache
             return found < 0 ? -1 : _sparse![found];
         }
 
+        /// <summary>How many of this filter's lines fall in <c>[from, toExclusive)</c>. Used to summarise a
+        /// whole band of the file in one pixel, so it must not walk the lines one at a time.</summary>
+        public long CountInRange(long from, long toExclusive)
+        {
+            if (from < 0) from = 0;
+            if (toExclusive > Covered) toExclusive = Covered;
+            if (toExclusive <= from) return 0;
+
+            if (_dense is ulong[] dense)
+            {
+                long first = from >> 6, last = (toExclusive - 1) >> 6;
+                ulong head = ulong.MaxValue << (int)(from & 63);
+                int lastBit = (int)((toExclusive - 1) & 63);
+                ulong tail = lastBit == 63 ? ulong.MaxValue : (1UL << (lastBit + 1)) - 1;
+                if (first == last) return BitOperations.PopCount(dense[first] & head & tail);
+
+                long n = BitOperations.PopCount(dense[first] & head);
+                for (long w = first + 1; w < last; w++) n += BitOperations.PopCount(dense[w]);
+                return n + BitOperations.PopCount(dense[last] & tail);
+            }
+
+            return LowerBound(toExclusive) - LowerBound(from);
+        }
+
+        /// <summary>Index of the first sparse entry at or after <paramref name="line"/>.</summary>
+        private int LowerBound(long line)
+        {
+            int lo = 0, hi = _sparseCount;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse![mid] < line) lo = mid + 1; else hi = mid;
+            }
+            return lo;
+        }
+
         /// <summary>Walks the set 64 lines at a time. Words must be requested in ascending order.</summary>
         internal struct Cursor
         {

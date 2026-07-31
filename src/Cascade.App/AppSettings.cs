@@ -53,6 +53,9 @@ public sealed class AppSettings
     /// <summary>Whether the filter presets pane shares the filter pane.</summary>
     public bool ShowFilterPresets { get; set; } = true;
 
+    /// <summary>Whether the match map replaces the log view's vertical scrollbar.</summary>
+    public bool ShowMatchMap { get; set; } = true;
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 
