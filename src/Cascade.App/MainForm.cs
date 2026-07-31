@@ -17,6 +17,10 @@ public sealed class MainForm : Form
     private readonly CascadeDocument _doc = new();
     private readonly LineGridControl _grid = new() { Dock = DockStyle.Fill };
     private readonly FilterTreeControl _filterTree = new() { Dock = DockStyle.Fill };
+    private readonly FilterPresetsControl _presets = new() { Dock = DockStyle.Fill };
+    // The filter list and its presets share one pane, split the short way round: the presets sit beside the
+    // list when it is docked along the bottom or top, and beneath it when it is down one side.
+    private readonly SplitContainer _filterPane = new() { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, FixedPanel = FixedPanel.Panel2 };
     private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
     private readonly StatusStrip _status = new();
     private readonly ToolStripStatusLabel _srcLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -43,6 +47,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
+    private ToolStripMenuItem _miPresets = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     private FindDialog? _findDialog;
@@ -97,13 +102,16 @@ public sealed class MainForm : Form
         BuildStatusBar();
 
         _split.Panel1.Controls.Add(_grid);
-        _split.Panel2.Controls.Add(_filterTree);
+        _filterPane.Panel1.Controls.Add(_filterTree);
+        _filterPane.Panel2.Controls.Add(_presets);
+        _split.Panel2.Controls.Add(_filterPane);
         Controls.Add(_split);
         Controls.Add(_status);
         _split.BringToFront();
 
         _grid.Attach(_doc, _settings);
         _filterTree.Attach(_doc);
+        _presets.Attach(_doc);
         _filterTree.SetSettings(_settings);
 
         _doc.Updated += () => _pendingRefresh = true;
@@ -112,6 +120,8 @@ public sealed class MainForm : Form
         _grid.LineDoubleClicked += CreateFilterFromLine;
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
+        _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };
+        _presets.PresetsEdited += () => { _filtersDirty = true; UpdateTitle(); };
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
@@ -174,6 +184,7 @@ public sealed class MainForm : Form
         // settles at MinimumSize, which squeezes the filter pane down to nothing.
         if (_offScreen) Size = new Size(1600, 1000);
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
+        LayoutPresetPane();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -283,6 +294,15 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(Mi("Focus &Text Area", (_, _) => FocusTextArea(), Keys.Control | Keys.Shift | Keys.T));
         view.DropDownItems.Add(Mi("Foc&us Filter List", (_, _) => FocusFilterList(), Keys.Control | Keys.Shift | Keys.F));
         view.DropDownItems.Add(Mi("Focus Filter &Search", (_, _) => FocusFilterSearch(), Keys.Control | Keys.E));
+        _miPresets = new ToolStripMenuItem("Show Filter &Presets", null, (_, _) =>
+        {
+            _settings.ShowFilterPresets = !_settings.ShowFilterPresets;
+            _miPresets.Checked = _settings.ShowFilterPresets;
+            LayoutPresetPane();
+            SaveSettingsSoon();
+        })
+        { Checked = _settings.ShowFilterPresets, ShortcutKeys = Keys.Control | Keys.Shift | Keys.P };
+        view.DropDownItems.Add(_miPresets);
         view.DropDownItems.Add(BuildFilterLocationMenu());
         view.DropDownItems.Add(BuildEncodingMenu());
 
@@ -311,6 +331,8 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("Disable All", (_, _) => _filterTree.SetAllEnabled(false)));
         filters.DropDownItems.Add(Mi("Remove All", (_, _) => _filterTree.RemoveAll()));
         filters.DropDownItems.Add(new ToolStripSeparator());
+        filters.DropDownItems.Add(BuildPresetsMenu());
+        filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("&Find Filter", (_, _) => _filterTree.FocusSearch()));
 
         var help = new ToolStripMenuItem("&Help");
@@ -320,6 +342,19 @@ public sealed class MainForm : Form
         MainMenuStrip = menu;
         Controls.Add(menu);
         RefreshRecentMenus();
+    }
+
+    /// <summary>The preset commands, so everything the pane's context menu offers is reachable from the
+    /// keyboard too.</summary>
+    private ToolStripMenuItem BuildPresetsMenu()
+    {
+        var m = new ToolStripMenuItem("&Presets");
+        m.DropDownItems.Add(Mi("&Save Enabled Filters as Preset…", (_, _) => { EnsurePresetsVisible(); _presets.SaveCurrent(); }));
+        m.DropDownItems.Add(Mi("&Update Preset from Enabled Filters", (_, _) => _presets.UpdateSelected()));
+        m.DropDownItems.Add(Mi("&Rename Preset…", (_, _) => _presets.RenameSelected()));
+        m.DropDownItems.Add(Mi("&Duplicate Preset", (_, _) => _presets.DuplicateSelected()));
+        m.DropDownItems.Add(Mi("De&lete Preset", (_, _) => _presets.DeleteSelected()));
+        return m;
     }
 
     private ToolStripMenuItem BuildMarkersMenu()
@@ -581,6 +616,7 @@ public sealed class MainForm : Form
             _doc.Open(path, enc);
             _grid.Attach(_doc, _settings);
             _filterTree.Attach(_doc);
+            _presets.Attach(_doc);
             _state.AddRecentFile(path);
             SaveStateSoon();
             RefreshRecentMenus();
@@ -631,6 +667,9 @@ public sealed class MainForm : Form
         // an undo entry - or is dropped, when the tree turns out not to have changed.
         _history.Commit(_doc.Filters);
         SyncUndoMenu();
+        // Which presets are in effect follows from which filters are enabled, so it is re-derived here
+        // rather than tracked - ticking a filter by hand lights the matching preset up.
+        _presets.RefreshActive();
         _filtersDirty = true;
         // Capture where the viewport is BEFORE the visible-line set changes, so the same line can be held at
         // the same place on screen while the new matches stream in.
@@ -837,6 +876,7 @@ public sealed class MainForm : Form
             _state.LastFilterFile = path; // remember for auto-load next launch
             _state.Save();
             _filterTree.Attach(_doc);
+            _presets.Attach(_doc);
             SyncFilteredModeMenu();
             _grid.RefreshView();
             RefreshRecentMenus();
@@ -868,6 +908,7 @@ public sealed class MainForm : Form
             foreach (var root in loaded.Roots.ToList()) _doc.Filters.Add(root.Clone());
             _filtersDirty = true;
             _filterTree.Attach(_doc);
+            _presets.Attach(_doc);
             OnFiltersChanged();
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Error); }
@@ -891,6 +932,7 @@ public sealed class MainForm : Form
         _state.LastFilterFile = null;
         _state.Save();
         _filterTree.Attach(_doc);
+        _presets.Attach(_doc);
         SyncFilteredModeMenu();
         _grid.RefreshView();
         RefreshRecentMenus();
@@ -942,6 +984,27 @@ public sealed class MainForm : Form
 
     private void SyncFilteredModeMenu() => _miFilteredMode.Checked = _doc.Filters.ShowOnlyFilteredLines;
 
+    /// <summary>Shows or hides the presets pane and gives it a sensible share of the filter pane. It takes
+    /// the short side, so the split is measured across whichever way the pane is currently turned.</summary>
+    private void LayoutPresetPane()
+    {
+        _filterPane.Panel2Collapsed = !_settings.ShowFilterPresets;
+        if (!_settings.ShowFilterPresets) return;
+        int total = _filterPane.Orientation == Orientation.Vertical ? _filterPane.Width : _filterPane.Height;
+        int wanted = _filterPane.Orientation == Orientation.Vertical ? LogicalToDeviceUnits(200) : LogicalToDeviceUnits(120);
+        int distance = Math.Max(1, total - wanted - _filterPane.SplitterWidth);
+        try { if (distance > 0) _filterPane.SplitterDistance = distance; }
+        catch { /* sizes not ready */ }
+    }
+
+    private void EnsurePresetsVisible()
+    {
+        if (_settings.ShowFilterPresets) return;
+        _settings.ShowFilterPresets = true;
+        _miPresets.Checked = true;
+        LayoutPresetPane();
+    }
+
     private void SetFilterDock(FilterDock dock)
     {
         bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
@@ -961,12 +1024,16 @@ public sealed class MainForm : Form
             {
                 _split.Panel1.Controls.Clear();
                 _split.Panel2.Controls.Clear();
-                if (treeFirst) { _split.Panel1.Controls.Add(_filterTree); _split.Panel2.Controls.Add(_grid); }
-                else { _split.Panel1.Controls.Add(_grid); _split.Panel2.Controls.Add(_filterTree); }
+                if (treeFirst) { _split.Panel1.Controls.Add(_filterPane); _split.Panel2.Controls.Add(_grid); }
+                else { _split.Panel1.Controls.Add(_grid); _split.Panel2.Controls.Add(_filterPane); }
                 _treePanel = wantedPanel;
             }
 
             _split.Orientation = orientation;
+            // Keep the presets on the pane's short side: beside the list when it spans the window, below it
+            // when it is down one edge.
+            _filterPane.Orientation = orientation == Orientation.Vertical ? Orientation.Horizontal : Orientation.Vertical;
+            LayoutPresetPane();
 
             int total = orientation == Orientation.Vertical ? _split.Width : _split.Height;
             int treeSize = Math.Max(60, (int)(total * 0.3));
@@ -1064,6 +1131,8 @@ public sealed class MainForm : Form
     private void ApplySettingsEverywhere()
     {
         _miLineNumbers.Checked = _settings.ShowLineNumbers;
+        _miPresets.Checked = _settings.ShowFilterPresets;
+        LayoutPresetPane();
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);
         _filterTree.SetSettings(_settings);
@@ -1381,4 +1450,5 @@ public sealed class MainForm : Form
         d.ShowDialog(this);
     }
 }
+
 
