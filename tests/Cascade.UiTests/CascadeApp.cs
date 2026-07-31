@@ -67,11 +67,26 @@ internal sealed class CascadeApp : IDisposable
                      ?? throw new InvalidOperationException("Main window did not appear.");
         var harness = new CascadeApp(app, automation, window,
             ownsFiles ? log : "", ownsFiles ? (tat ?? "") : "", ownsSettingsDir ? settingsDir : "");
-        // Deliberately NOT brought to the foreground: everything here drives the app through automation
-        // patterns or messages sent straight to its windows, so a run never takes focus from the user.
+        // Launching a windowed app normally makes it the foreground one, and that matters: a WinForms
+        // dropdown will not open or close properly unless its owner is active, so every UI Automation menu
+        // call waits out its 2-second transaction timeout instead - MEASURED at 4,140ms per menu click
+        // (two timeouts) against 120ms, which is the whole of the suite's occasional 4x slowdown. It only
+        // fails to happen when something else is sitting on the foreground; ask once when that is the case.
+        harness.EnsureForegroundIfLost();
         // Wait for indexing to finish (Total shows the full line count).
         harness.WaitStatus("Total:", $"Total: {TestData.LineCount:N0}", 20000);
         return harness;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    /// <summary>Claims the foreground only if the app did not already get it at launch. No focus is taken
+    /// that the launch was not going to take anyway.</summary>
+    private void EnsureForegroundIfLost()
+    {
+        GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
+        if (foregroundPid != (uint)_app.ProcessId) Activate();
     }
 
     /// <summary>Brings the window to the front. Only for debugging a run by eye - the tests do not need it.</summary>
