@@ -130,9 +130,9 @@ public class UiFeatureTests
         Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
 
         int rows = app.Rows().Length;
-        int top = rows / 3;
-        int bottom = Math.Max(top, rows * 2 / 3 - 1);
-        Check("the view is tall enough for a middle third to mean anything", rows >= 9, $"{rows} rows");
+        int top = rows / 4;
+        int bottom = Math.Max(top, rows * 3 / 4 - 1);
+        Check("the view is tall enough for a middle half to mean anything", rows >= 9, $"{rows} rows");
 
         var dlg = app.OpenFindDialog();
 
@@ -141,7 +141,7 @@ public class UiFeatureTests
         bool wentDown = app.WaitStatus("Ln:", "Ln: 521 / 1,000");
         int down = OffsetRows();
         Check("found line 521", wentDown, app.StatusText("Ln:"));
-        Check("a line found below arrives at the bottom of the middle third",
+        Check("a line found below arrives at the bottom of the middle half",
               down == bottom, $"offset {down}, band {top}..{bottom} of {rows}");
 
         // Backwards to a line above it: the top of the band this time.
@@ -149,7 +149,7 @@ public class UiFeatureTests
         bool wentUp = app.WaitStatus("Ln:", "Ln: 501 / 1,000");
         int up = OffsetRows();
         Check("found line 501 going back", wentUp, app.StatusText("Ln:"));
-        Check("a line found above arrives at the top of the middle third",
+        Check("a line found above arrives at the top of the middle half",
               up == top, $"offset {up}, band {top}..{bottom} of {rows}");
 
         try { dlg.Close(); } catch { /* modeless: hides */ }

@@ -736,15 +736,15 @@ public sealed class LineGridControl : Control
         else if (row >= _firstRow + visible) SetFirstRow(row - visible + 1);
     }
 
-    /// <summary>Scrolls a jumped-to row into the middle third of the view, so it arrives with context on
+    /// <summary>Scrolls a jumped-to row into the middle half of the view, so it arrives with context on
     /// both sides instead of hard against an edge. Coming from below it settles at the bottom of that band
     /// and from above at the top, and a row already inside it does not move at all - so walking through
     /// nearby matches does not drag the view about.</summary>
     private void RevealRow(long row)
     {
         int visible = VisibleRowCount;
-        long top = visible / 3;
-        long bottom = Math.Max(top, visible * 2 / 3 - 1);   // Max guards a viewport only a row or two tall
+        long top = visible / 4;
+        long bottom = Math.Max(top, visible * 3 / 4 - 1);   // Max guards a viewport only a row or two tall
         if (row < _firstRow + top) SetFirstRow(row - top);
         else if (row > _firstRow + bottom) SetFirstRow(row - bottom);
     }
