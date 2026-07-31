@@ -65,6 +65,7 @@ public sealed class MainForm : Form
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
     internal bool NoSavePrompt;
+    private bool _offScreen;
 
     // Harness only: shows the update notice without an update actually being pending.
     internal string? UpdateNoticeOverride;
@@ -88,6 +89,7 @@ public sealed class MainForm : Form
         WindowState = FormWindowState.Maximized;
         MinimumSize = new Size(700, 400);
         Icon = LoadAppIcon();
+        PlaceOffScreenIfAsked();
 
         BuildMenu();
         BuildStatusBar();
@@ -128,6 +130,22 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
+    /// <summary>An automated UI run drives the app through UI Automation and needs no one to see it, but a
+    /// maximised window landing on top of whatever the user is doing - and catching a stray click, which
+    /// fails the run - is intolerable. CASCADE_TEST_OFFSCREEN parks it beyond the last monitor instead:
+    /// invisible and unreachable by the mouse, while staying on the real desktop, where UI Automation is
+    /// quick and dependable. (Running the whole suite on a Windows desktop of its own hides it just as well
+    /// but was measured 5x slower and badly flaky - automation there waits out its transaction timeouts.)</summary>
+    private void PlaceOffScreenIfAsked()
+    {
+        if (Environment.GetEnvironmentVariable("CASCADE_TEST_OFFSCREEN") != "1") return;
+        _offScreen = true;
+        var virtualScreen = SystemInformation.VirtualScreen;
+        StartPosition = FormStartPosition.Manual;
+        WindowState = FormWindowState.Normal;   // a maximised window is snapped back onto a monitor
+        Location = new Point(virtualScreen.Right + 200, virtualScreen.Top);
+    }
+
     /// <summary>Loads the embedded multi-resolution application icon; falls back to the system icon.</summary>
     private static Icon LoadAppIcon()
     {
@@ -148,6 +166,9 @@ public sealed class MainForm : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+        // Sized here, not in the constructor: asked any earlier the form has not scaled itself yet and
+        // settles at MinimumSize, which squeezes the filter pane down to nothing.
+        if (_offScreen) Size = new Size(1600, 1000);
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
     }
 
