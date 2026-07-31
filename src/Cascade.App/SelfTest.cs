@@ -53,7 +53,9 @@ internal static class SelfTest
             ok &= Timed("settings", RunSettingsChecks);
             ok &= Timed("machine state", RunMachineStateChecks);
             ok &= Timed("render", RunRenderChecks);
+            ok &= Timed("navigation", RunNavigationChecks);
             ok &= Timed("filter list", RunFilterListChecks);
+            ok &= Timed("filter search", RunFilterSearchRevealChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -891,9 +893,182 @@ internal static class SelfTest
         return ok;
     }
 
-    /// <summary>The letter Alt activates for a caption, or null when it declares none.</summary>
-    private static char? MnemonicOf(string text)
+    /// <summary>Jumping to a particular line - Go To, find, per-filter find, marker navigation - lands it in
+    /// the middle third of the view, so it arrives with context above and below instead of hard against an
+    /// edge with nothing to read around it. Stepping about with the arrow keys keeps the old behaviour of
+    /// scrolling as little as possible, which is why the two paths are separate.</summary>
+    private static bool RunNavigationChecks()
     {
+        Line("-- jumping to a line --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_nav_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 400; i++) sb.Append($"line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(500, 420),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            Pump();
+
+            // No filters, so a display row is its own file line and the offset arithmetic below is exact.
+            int visible = grid.VisibleRowCountForTesting;
+            long top = visible / 3;
+            long bottom = Math.Max(top, visible * 2 / 3 - 1);
+            bool ok = Check($"the view is tall enough for a middle third to mean anything " +
+                            $"({visible} rows, band {top}..{bottom})", visible >= 9);
+            if (!ok) return false;
+
+            // GoToLine takes a 0-based line; the offset is how far down the view the line ended up.
+            long Offset(long line) => line - grid.FirstRowForTesting;
+            void Go(long line) { grid.GoToLine(line); Pump(); }
+
+            Go(250);
+            ok &= Check($"a line below the view arrives at the bottom of the middle third " +
+                        $"(offset {Offset(250)} of {visible})", Offset(250) == bottom);
+
+            Go(120);
+            ok &= Check($"a line above the view arrives at the top of the middle third " +
+                        $"(offset {Offset(120)} of {visible})", Offset(120) == top);
+
+            // The point of the band being a range: walking through nearby matches must not drag the view
+            // about, or repeated F3 turns into a flicker.
+            long settled = grid.FirstRowForTesting;
+            Go(120 + (bottom - top) / 2);
+            ok &= Check("a line already inside the band does not move the view at all",
+                        grid.FirstRowForTesting == settled);
+
+            // Both ends of the file cannot honour the band, and must simply stop rather than scroll into
+            // blank space.
+            Go(1);
+            ok &= Check($"near the start the view stops at the top (row {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == 0);
+            Go(399);
+            ok &= Check($"near the end the view stops at the last screenful (row {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == 400 - visible);
+
+            // Marker navigation is the other jump, and reaches the view by a different route.
+            doc.Markers.Toggle(300, 0);
+            Go(120);
+            grid.PressKeyForTesting(Keys.D1);
+            Pump();
+            ok &= Check($"jumping to the next marker also lands in the band (offset {Offset(300)} of {visible})",
+                        grid.CaretRowForTesting == 300 && Offset(300) == bottom);
+
+            // Arrow keys are a different thing entirely: they move the caret one line, and the view should
+            // follow only when it has to. Walk to the bottom edge, which must not scroll, then one further.
+            Go(250);
+            long before = grid.FirstRowForTesting;
+            for (long o = grid.CaretRowForTesting - before; o < visible - 1; o++) grid.PressKeyForTesting(Keys.Down);
+            Pump();
+            ok &= Check($"walking down inside the view does not scroll it (row {grid.FirstRowForTesting}, " +
+                        $"caret {grid.CaretRowForTesting})",
+                        grid.FirstRowForTesting == before && grid.CaretRowForTesting == before + visible - 1);
+            grid.PressKeyForTesting(Keys.Down);
+            Pump();
+            ok &= Check($"walking off the bottom scrolls one line, not a third of a screen " +
+                        $"({before} -> {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == before + 1);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Searching the filter list has the same problem as jumping to a log line: a match pinned to
+    /// the bottom edge hides the siblings that give it its meaning.</summary>
+    private static bool RunFilterSearchRevealChecks()
+    {
+        Line("-- finding a filter in the list --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_fsearch_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one\ntwo\nthree\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(300, 520),   // the search box and header eat into this, so allow plenty
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            // Far more filters than fit, with the two targets deliberately deep in the list and apart, so a
+            // jump to either really does have to scroll.
+            var filters = new List<Filter>();
+            for (int i = 0; i < 60; i++)
+                filters.Add(new Filter { Match = new FilterMatch { Text = i == 20 ? "zulu early" : i == 45 ? "zulu late" : $"alpha {i}" } });
+            SetFilters(doc, tree, filters.ToArray());
+
+            int visible = Math.Max(1, tree.TreeHeightForTesting / Math.Max(1, tree.RowHeightForTesting));
+            int top = visible / 3;
+            int bottom = Math.Max(top, visible * 2 / 3 - 1);
+            bool ok = Check($"the filter pane is tall enough for a middle third to mean anything " +
+                            $"({visible} rows, band {top}..{bottom})", visible >= 9);
+            if (!ok) return false;
+
+            int OffsetOf(string text) =>
+                tree.VisibleFiltersForTesting.FindIndex(f => f.Match.Text == text);
+
+            // Typing jumps to the first match, which is below the view.
+            tree.SetSearchText("zulu");
+            Pump();
+            ok &= Check($"a filter below the view arrives at the bottom of the middle third " +
+                        $"(offset {OffsetOf("zulu early")} of {visible})", OffsetOf("zulu early") == bottom);
+
+            // F3 walks to the next match, further down again.
+            tree.PressKeyForTesting(Keys.F3);
+            Pump();
+            ok &= Check($"the next match down also arrives at the bottom of the band " +
+                        $"(offset {OffsetOf("zulu late")} of {visible})", OffsetOf("zulu late") == bottom);
+
+            // Shift+F3 goes back up, so the match comes in at the top of the band instead.
+            tree.PressKeyForTesting(Keys.F3 | Keys.Shift);
+            Pump();
+            ok &= Check($"a match above the view arrives at the top of the middle third " +
+                        $"(offset {OffsetOf("zulu early")} of {visible})", OffsetOf("zulu early") == top);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>The letter Alt activates for a caption, or null when it declares none.</summary>
+    private static char? MnemonicOf(string text)    {
         int i = text.IndexOf('&');
         return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
     }

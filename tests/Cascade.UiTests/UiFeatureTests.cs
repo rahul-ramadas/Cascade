@@ -110,6 +110,54 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Jumping_to_a_line_leaves_room_to_read_around_it()
+    {
+        // A find used to scroll the bare minimum, so the line you were looking for arrived jammed against
+        // the top or bottom edge with none of the surrounding log visible.
+        using var app = CascadeApp.Launch();
+        var fails = new List<string>();
+        void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+        int OffsetRows()
+        {
+            var sel = app.SelectedRow();
+            return sel is null ? -1 : app.Rows().Count(r => r.BoundingRectangle.Top < sel.Value.bounds.Top);
+        }
+
+        // Deep enough into the file that neither end can clamp the result and hide a regression.
+        app.ScrollVerticalTo(497);
+        app.SelectLine(501);
+        Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+
+        int rows = app.Rows().Length;
+        int top = rows / 3;
+        int bottom = Math.Max(top, rows * 2 / 3 - 1);
+        Check("the view is tall enough for a middle third to mean anything", rows >= 9, $"{rows} rows");
+
+        var dlg = app.OpenFindDialog();
+
+        // Forwards to a line below the view: it should settle at the bottom of the band, not the last row.
+        app.FindInDialog(dlg, "line 520", forward: true);
+        bool wentDown = app.WaitStatus("Ln:", "Ln: 521 / 1,000");
+        int down = OffsetRows();
+        Check("found line 521", wentDown, app.StatusText("Ln:"));
+        Check("a line found below arrives at the bottom of the middle third",
+              down == bottom, $"offset {down}, band {top}..{bottom} of {rows}");
+
+        // Backwards to a line above it: the top of the band this time.
+        app.FindInDialog(dlg, "line 500", forward: false);
+        bool wentUp = app.WaitStatus("Ln:", "Ln: 501 / 1,000");
+        int up = OffsetRows();
+        Check("found line 501 going back", wentUp, app.StatusText("Ln:"));
+        Check("a line found above arrives at the top of the middle third",
+              up == top, $"offset {up}, band {top}..{bottom} of {rows}");
+
+        try { dlg.Close(); } catch { /* modeless: hides */ }
+        Assert.True(fails.Count == 0,
+                    $"Reveal failures (band {top}..{bottom} of {rows} rows):\n  " + string.Join("\n  ", fails));
+    }
+
+    [Fact]
     public void Full_feature_sweep()
     {
         using var app = CascadeApp.Launch();

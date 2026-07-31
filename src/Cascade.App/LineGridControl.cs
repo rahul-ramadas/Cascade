@@ -336,6 +336,12 @@ public sealed class LineGridControl : Control
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
 
+    internal int VisibleRowCountForTesting => VisibleRowCount;
+
+    internal long CaretRowForTesting => _caretRow;
+
+    internal void PressKeyForTesting(Keys key) => OnKeyDown(new KeyEventArgs(key));
+
     /// <summary>Drives the vertical scrollbar the way UI Automation does: by setting Value, which raises
     /// ValueChanged but never Scroll.</summary>
     internal void SetVerticalScrollValue(int firstRow) => _vbar.Value = firstRow;
@@ -680,7 +686,7 @@ public sealed class LineGridControl : Control
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         _caretRow = row;
         _sel.SetSingle(row);
-        EnsureVisible(row);
+        RevealRow(row);
         Invalidate();
         SelectionChanged?.Invoke();
     }
@@ -730,6 +736,19 @@ public sealed class LineGridControl : Control
         else if (row >= _firstRow + visible) SetFirstRow(row - visible + 1);
     }
 
+    /// <summary>Scrolls a jumped-to row into the middle third of the view, so it arrives with context on
+    /// both sides instead of hard against an edge. Coming from below it settles at the bottom of that band
+    /// and from above at the top, and a row already inside it does not move at all - so walking through
+    /// nearby matches does not drag the view about.</summary>
+    private void RevealRow(long row)
+    {
+        int visible = VisibleRowCount;
+        long top = visible / 3;
+        long bottom = Math.Max(top, visible * 2 / 3 - 1);   // Max guards a viewport only a row or two tall
+        if (row < _firstRow + top) SetFirstRow(row - top);
+        else if (row > _firstRow + bottom) SetFirstRow(row - bottom);
+    }
+
     public void SelectAll() { if (_doc is not null) { _sel.SelectAll(_doc.RowCount); Invalidate(); SelectionChanged?.Invoke(); } }
 
     /// <summary>Clears the current selection (used when the visible row set changes).</summary>
@@ -757,7 +776,7 @@ public sealed class LineGridControl : Control
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _caretRow = row;
         _sel.SetSingle(row);
-        EnsureVisible(row);
+        RevealRow(row);
         Invalidate();
         SelectionChanged?.Invoke();
     }

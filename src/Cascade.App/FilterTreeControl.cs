@@ -284,7 +284,7 @@ public sealed class FilterTreeControl : UserControl
         {
             if (!Matches(_flat[idx], q)) continue;
             _tree.SelectedNode = _flat[idx];
-            _flat[idx].EnsureVisible();
+            RevealNode(_flat[idx]);
             _tree.Invalidate();
             return;
         }
@@ -869,6 +869,26 @@ public sealed class FilterTreeControl : UserControl
             top = next;
         }
         if (!ReferenceEquals(top, _tree.TopNode)) _tree.TopNode = top;
+    }
+
+    /// <summary>Brings a searched-for filter into the middle third of the list, the same way the log view
+    /// reveals a line it jumps to - a match pinned against the top or bottom edge hides the siblings that
+    /// give it its meaning. A match already inside that band does not move.</summary>
+    private void RevealNode(TreeNode node)
+    {
+        node.EnsureVisible();   // opens any collapsed ancestors, so the node is on a visible row from here on
+        int visible = Math.Max(1, _tree.ClientSize.Height / Math.Max(1, _tree.ItemHeight));
+        int top = visible / 3;
+        int bottom = Math.Max(top, visible * 2 / 3 - 1);
+
+        int offset = -1;
+        int i = 0;
+        for (var n = _tree.TopNode; n is not null && i <= visible; n = n.NextVisibleNode, i++)
+            if (ReferenceEquals(n, node)) { offset = i; break; }
+        if (offset < 0) return;
+
+        if (offset < top) ScrollBy(offset - top);
+        else if (offset > bottom) ScrollBy(offset - bottom);
     }
 
     // ---- context menu / edits ----
