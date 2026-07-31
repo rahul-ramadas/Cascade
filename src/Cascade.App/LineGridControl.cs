@@ -54,8 +54,17 @@ public sealed class LineGridControl : Control
     private bool _syncingScroll;     // true while pushing _firstRow into the scrollbar (ignore its echo)
     private long[] _window = new long[64];   // file lines resolved for the current frame
 
+    // Character selection within one row. There is no caret and none is drawn - nothing here is editable -
+    // so this is purely a highlighted range that any navigation drops. Indices are into the row's DISPLAYED
+    // text (tabs already expanded), which is what the hit test and the painting both work in.
+    private long _charRow = -1;
+    private int _charAnchor, _charFocus;
+    private bool _charDragging;
+    private DateTime _lastClickAt;
+    private Point _lastClickAtPoint;
+    private int _clickCount;
+
     public event Action? SelectionChanged;
-    public event Action<long>? LineDoubleClicked;
     public event Action? ZoomChanged;
 
     /// <summary>Raised with the 0-based marker index when marker navigation runs off the end. The host
@@ -95,6 +104,117 @@ public sealed class LineGridControl : Control
     }
 
     public long CaretLine => _caretRow >= 0 && _doc is not null ? _doc.RowToLine(_caretRow) : -1;
+
+    // ---- character selection ----
+
+    /// <summary>Whether part of one line is selected, as opposed to whole lines.</summary>
+    public bool HasCharSelection => _charRow >= 0 && _charFocus != _charAnchor;
+
+    /// <summary>The selected part of a line, or null when the selection is whole lines. This is the
+    /// displayed text, so a tab reads as the spaces it was shown as.</summary>
+    public string? SelectedText
+    {
+        get
+        {
+            if (!HasCharSelection || _doc is null) return null;
+            string text = DisplayText(_charRow);
+            int from = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
+            int to = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
+            return to > from ? text[from..to] : null;
+        }
+    }
+
+    /// <summary>Drops any part-of-a-line selection. Every way of moving around calls this: the range means
+    /// nothing once the thing it was pointing at is no longer where the user is looking.</summary>
+    private void ClearCharSelection()
+    {
+        if (_charRow < 0) return;
+        _charRow = -1;
+        _charAnchor = _charFocus = 0;
+        Invalidate();
+    }
+
+    /// <summary>A row's text as it is drawn: tabs expanded, so a character index means the same thing to the
+    /// hit test, the painting and the clipboard.</summary>
+    private string DisplayText(long row)
+    {
+        if (_doc is null) return "";
+        return Expand(_doc.GetLineText(_doc.RowToLine(row)));
+    }
+
+    /// <summary>Tabs as the spaces they are drawn as, so a character index means the same thing to the hit
+    /// test, the painting and the clipboard.</summary>
+    private string Expand(string text)
+        => _settings.TabSize > 0 && text.IndexOf('\t') >= 0
+            ? text.Replace("\t", new string(' ', _settings.TabSize))
+            : text;
+
+    /// <summary>Character index in a row's displayed text nearest to <paramref name="x"/>, by binary search
+    /// on the measured width of the prefix - the same measurement the drawing uses, so the highlight lands
+    /// exactly where the pointer did.</summary>
+    private int CharIndexAt(long row, int x)
+    {
+        string text = DisplayText(row);
+        if (text.Length == 0) return 0;
+        var font = FontForRow(row, text);
+        int left = GutterWidth() - _hScroll;
+        int target = Math.Max(0, x - left);
+
+        int lo = 0, hi = text.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (PrefixWidth(text, mid, font) <= target) lo = mid; else hi = mid - 1;
+        }
+        // Round to the nearer edge of the character the pointer is inside, as a text box does.
+        if (lo < text.Length)
+        {
+            int a = PrefixWidth(text, lo, font), b = PrefixWidth(text, lo + 1, font);
+            if (target - a > b - target) lo++;
+        }
+        return lo;
+    }
+
+    /// <summary>The font a row is drawn in. Measuring with anything else would put the highlight in a
+    /// slightly different place from the glyphs on a bold or italic filter row.</summary>
+    private Font FontForRow(long row, string text)
+    {
+        if (_doc is null) return _fontRegular;
+        var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
+        var eval = _doc.EvaluateText(text, _doc.RowToLine(row));
+        return SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
+    }
+
+    private int PrefixWidth(string text, int count, Font font)
+        => count <= 0 ? 0 : TextRenderer.MeasureText(text[..count], font, new Size(int.MaxValue, _rowHeight),
+               TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+
+    /// <summary>Word boundaries around <paramref name="index"/>, for double-click. "Word" is a run of
+    /// letters, digits and the punctuation that holds identifiers together, which is what makes
+    /// double-clicking a request id or a path pick up the whole thing.</summary>
+    private static (int From, int To) WordAt(string text, int index)
+    {
+        if (text.Length == 0) return (0, 0);
+        int at = Math.Clamp(index, 0, text.Length - 1);
+        if (!IsWordChar(text[at]))
+        {
+            // Between words: take the run of whatever is there, so a double-click never selects nothing.
+            int s = at, e = at + 1;
+            while (s > 0 && !IsWordChar(text[s - 1])) s--;
+            while (e < text.Length && !IsWordChar(text[e])) e++;
+            return (s, e);
+        }
+        int from = at, to = at + 1;
+        while (from > 0 && IsWordChar(text[from - 1])) from--;
+        while (to < text.Length && IsWordChar(text[to])) to++;
+        return (from, to);
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '-' or '.' or ':' or '/' or '\\';
+
+    /// <summary>Character selection is a plain-text idea, so it is not offered while the line is split into
+    /// columns - a click there keeps meaning "select this row".</summary>
+    private bool CharSelectionAvailable => _doc is not null && !_doc.Columns.Enabled;
 
     // ---- what the match map reads ----
 
@@ -267,6 +387,7 @@ public sealed class LineGridControl : Control
         _hScroll = 0;
         _caretRow = -1;
         _sel.Clear();
+        ClearCharSelection();
         ClearViewAnchor();
         RebuildFonts();
         RefreshView();
@@ -389,6 +510,53 @@ public sealed class LineGridControl : Control
 
     internal void PressKeyForTesting(Keys key) => OnKeyDown(new KeyEventArgs(key));
 
+    // ---- test seams for selecting with the mouse ----
+
+    /// <summary>Screen x of a character in a row, so a check can aim at one rather than guess pixels.</summary>
+    internal int XForCharForTesting(long row, int index)
+        => GutterWidth() - _hScroll + PrefixWidth(DisplayText(row), index, FontForRow(row, DisplayText(row)));
+
+    private int YForRowForTesting(long row) => HeaderHeight + (int)(row - _firstRow) * _rowHeight + _rowHeight / 2;
+
+    /// <summary>Y of the middle of a row, for a check that looks at what was painted there.</summary>
+    internal int RowMiddleForTesting(long row) => YForRowForTesting(row);
+
+    /// <summary>Forgets the last click, so one check's clicks cannot look like a double-click to the next.
+    /// A real user gets that behaviour on purpose; a test asking about something else does not.</summary>
+    private void ForgetLastClick() { _clickCount = 0; _lastClickAt = DateTime.MinValue; }
+
+    internal void ClickForTesting(long row, int x)
+    {
+        ForgetLastClick();
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, YForRowForTesting(row), 0));
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, YForRowForTesting(row), 0));
+    }
+
+    internal void DoubleClickForTesting(long row, int x)
+    {
+        ClickForTesting(row, x);
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 2, x, YForRowForTesting(row), 0));
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 2, x, YForRowForTesting(row), 0));
+    }
+
+    internal void DragForTesting(long row, int fromX, int toX)
+    {
+        ForgetLastClick();
+        int y = YForRowForTesting(row);
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, fromX, y, 0));
+        OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, toX, y, 0));
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, toX, y, 0));
+    }
+
+    /// <summary>Continues the drag started by the last press onto another row.</summary>
+    internal void DragToRowForTesting(long row, int x)
+    {
+        int y = YForRowForTesting(row);
+        _dragging = true;
+        OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x, y, 0));
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
+    }
+
     /// <summary>Drives the vertical scrollbar the way UI Automation does: by setting Value, which raises
     /// ValueChanged but never Scroll.</summary>
     internal void SetVerticalScrollValue(int firstRow) => _vbar.Value = firstRow;
@@ -467,7 +635,8 @@ public sealed class LineGridControl : Control
                 ? StyleResolver.Resolve(eval.ColorFilter, defaults)
                 : defaults;
 
-            bool selected = _sel.Contains(row);
+            bool charSel = HasCharSelection && row == _charRow;
+            bool selected = !charSel && _sel.Contains(row);
             bool dim = !_doc.FilteredMode && !eval.Shown;
 
             Color back = selected ? _settings.SelectionBack : ToColor(style.Background);
@@ -486,7 +655,10 @@ public sealed class LineGridControl : Control
             if (columns && splitter is not null)
                 runningMaxWidth = Math.Max(runningMaxWidth, DrawColumns(g, splitter, text, gutter, y, fore, font));
             else
+            {
                 runningMaxWidth = Math.Max(runningMaxWidth, DrawFullLine(g, text, gutter, y, fore, font));
+                if (charSel) DrawCharSelection(g, Expand(text), gutter, y, font);
+            }
             g.Clip = clip;
 
             if (_doc.IsLineTruncated(line))
@@ -570,12 +742,24 @@ public sealed class LineGridControl : Control
 
     private int DrawFullLine(Graphics g, string text, int gutter, int y, Color fore, Font font)
     {
-        if (_settings.TabSize > 0 && text.IndexOf('\t') >= 0)
-            text = text.Replace("\t", new string(' ', _settings.TabSize));
+        text = Expand(text);
         var pt = new Point(gutter - _hScroll, y);
         TextRenderer.DrawText(g, text, font, pt, fore, TextFlags);
         int w = TextRenderer.MeasureText(g, text, font, new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
         return w + 8;
+    }
+
+    /// <summary>Paints the selected part of a line over the text already drawn. The row keeps its own
+    /// colours - only the range is in the selection colours - which is how a text box reads.</summary>
+    private void DrawCharSelection(Graphics g, string text, int gutter, int y, Font font)
+    {
+        int from = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
+        int to = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
+        if (to <= from) return;
+        int x0 = gutter - _hScroll + PrefixWidth(text, from, font);
+        int x1 = gutter - _hScroll + PrefixWidth(text, to, font);
+        using (var b = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(b, x0, y, Math.Max(1, x1 - x0), _rowHeight);
+        TextRenderer.DrawText(g, text[from..to], font, new Point(x0, y), _settings.SelectionFore, TextFlags);
     }
 
     private void DrawMarkers(Graphics g, long line, int y)
@@ -619,12 +803,44 @@ public sealed class LineGridControl : Control
         ClearViewAnchor();
         if (row < 0 || row >= _doc.RowCount) return;
 
+        // Windows only ever reports one or two clicks, so a triple has to be counted here.
+        bool repeat = (DateTime.UtcNow - _lastClickAt).TotalMilliseconds <= SystemInformation.DoubleClickTime
+                      && Math.Abs(e.X - _lastClickAtPoint.X) <= SystemInformation.DragSize.Width
+                      && Math.Abs(e.Y - _lastClickAtPoint.Y) <= SystemInformation.DragSize.Height;
+        _clickCount = repeat ? Math.Min(3, _clickCount + 1) : 1;
+        _lastClickAt = DateTime.UtcNow;
+        _lastClickAtPoint = e.Location;
+
+        if (_clickCount == 2 && CharSelectionAvailable)
+        {
+            // Double-click selects the word under the pointer, as a text box does.
+            string text = DisplayText(row);
+            (_charAnchor, _charFocus) = WordAt(text, CharIndexAt(row, e.X));
+            _charRow = row;
+            _caretRow = row;
+            _sel.SetSingle(row);
+            _charDragging = false;
+            Invalidate();
+            SelectionChanged?.Invoke();
+            return;
+        }
+
+        // A plain click - and a triple click - means the whole line, which is also where a drag starts from.
+        ClearCharSelection();
         if ((ModifierKeys & Keys.Shift) != 0 && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, row);
         else if ((ModifierKeys & Keys.Control) != 0) _sel.ToggleSingle(row);
         else _sel.SetSingle(row);
 
         _caretRow = row;
         _dragging = true;
+        _charDragging = false;
+        if (CharSelectionAvailable && (ModifierKeys & (Keys.Shift | Keys.Control)) == 0)
+        {
+            // Armed, not shown: a drag that stays on this row turns into a character selection, and one that
+            // leaves it goes back to selecting whole rows.
+            _charRow = row;
+            _charAnchor = _charFocus = CharIndexAt(row, e.X);
+        }
         Invalidate();
         SelectionChanged?.Invoke();
     }
@@ -634,8 +850,21 @@ public sealed class LineGridControl : Control
         if (_dragging && _doc is not null)
         {
             long row = Math.Clamp(RowAtY(e.Y), 0, Math.Max(0, _doc.RowCount - 1));
-            if (row != _caretRow)
+            if (_charRow >= 0 && row == _charRow)
             {
+                int at = CharIndexAt(_charRow, e.X);
+                if (at != _charFocus)
+                {
+                    _charFocus = at;
+                    _charDragging = true;
+                    Invalidate();
+                    SelectionChanged?.Invoke();
+                }
+            }
+            else if (row != _caretRow)
+            {
+                // Left the row: this is a selection of whole lines after all.
+                ClearCharSelection();
                 _sel.SetRange(_sel.Anchor, row);
                 _caretRow = row;
                 EnsureVisible(row);
@@ -646,16 +875,13 @@ public sealed class LineGridControl : Control
         base.OnMouseMove(e);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e) { _dragging = false; base.OnMouseUp(e); }
-
-    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    protected override void OnMouseUp(MouseEventArgs e)
     {
-        if (_doc is not null)
-        {
-            long row = RowAtY(e.Y);
-            if (row >= 0 && row < _doc.RowCount) LineDoubleClicked?.Invoke(_doc.RowToLine(row));
-        }
-        base.OnMouseDoubleClick(e);
+        _dragging = false;
+        // A press that never moved sideways selected the whole line, so drop the empty range it armed.
+        if (!_charDragging && !HasCharSelection) ClearCharSelection();
+        _charDragging = false;
+        base.OnMouseUp(e);
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -747,6 +973,7 @@ public sealed class LineGridControl : Control
     private void MoveCaretTo(long row, bool extend)
     {
         if (_doc is null) return;
+        ClearCharSelection();
         _anchorLine = -1;
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _caretRow = row;
@@ -796,7 +1023,7 @@ public sealed class LineGridControl : Control
         else if (row > _firstRow + bottom) SetFirstRow(row - bottom);
     }
 
-    public void SelectAll() { if (_doc is not null) { _sel.SelectAll(_doc.RowCount); Invalidate(); SelectionChanged?.Invoke(); } }
+    public void SelectAll() { if (_doc is not null) { ClearCharSelection(); _sel.SelectAll(_doc.RowCount); Invalidate(); SelectionChanged?.Invoke(); } }
 
     /// <summary>Clears the current selection (used when the visible row set changes).</summary>
     public void ClearSelection() { _sel.Clear(); Invalidate(); SelectionChanged?.Invoke(); }
@@ -817,6 +1044,7 @@ public sealed class LineGridControl : Control
     public void GoToLine(long line)
     {
         if (_doc is null) return;
+        ClearCharSelection();
         _anchorLine = -1;
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
@@ -830,7 +1058,14 @@ public sealed class LineGridControl : Control
 
     public void CopySelection(bool withLineNumbers)
     {
-        if (_doc is null || _sel.Count == 0) return;
+        if (_doc is null) return;
+        if (SelectedText is { } part)
+        {
+            string one = withLineNumbers ? $"{_doc.RowToLine(_charRow) + 1}\t{part}" : part;
+            try { Clipboard.SetText(one); } catch { /* clipboard busy */ }
+            return;
+        }
+        if (_sel.Count == 0) return;
         var sb = new StringBuilder();
         long n = 0;
         foreach (long row in _sel.Rows(CopyLineCap))

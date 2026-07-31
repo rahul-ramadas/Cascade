@@ -58,6 +58,7 @@ internal static class SelfTest
             ok &= Timed("filter search", RunFilterSearchRevealChecks);
             ok &= Timed("filter presets", RunFilterPresetChecks);
             ok &= Timed("match map", RunMatchMapChecks);
+            ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -598,6 +599,117 @@ internal static class SelfTest
         var until = DateTime.UtcNow.AddSeconds(10);
         while (doc.IsBusy && DateTime.UtcNow < until) { Pump(); Thread.Sleep(5); }
         Pump();
+    }
+
+    /// <summary>Selecting part of a line. There is no caret and none is drawn, so every rule here is about
+    /// what the mouse does: a click takes the whole line, a drag within one line takes a range, a drag off
+    /// it goes back to whole lines, and moving away drops the range.</summary>
+    private static bool RunTextSelectionChecks()
+    {
+        Line("-- text selection --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_sel_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 40; i++) sb.Append($"line {i:00} req-abc123 GET /v1/orders/99 -> 200 in 41ms\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(700, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            Pump();
+
+            string text = doc.GetLineText(2);
+            int reqAt = text.IndexOf("req-abc123", StringComparison.Ordinal);
+            int xOfChar(int index) => grid.XForCharForTesting(2, index);
+
+            // A click takes the whole line and leaves no range behind.
+            grid.ClickForTesting(2, xOfChar(reqAt) + 2);
+            bool ok = Check("a click selects the whole line", !grid.HasCharSelection && grid.SelectedText is null);
+
+            // A drag within the line takes exactly what it covered.
+            grid.DragForTesting(2, xOfChar(reqAt), xOfChar(reqAt + 10));
+            ok &= Check("dragging inside a line selects that part", grid.SelectedText == "req-abc123",
+                        grid.SelectedText ?? "(none)");
+
+            // Dragging off the line means whole lines after all.
+            grid.ClickForTesting(2, xOfChar(reqAt));
+            grid.DragToRowForTesting(4, xOfChar(reqAt + 10));
+            ok &= Check("dragging onto another line goes back to whole lines", !grid.HasCharSelection,
+                        grid.SelectedText ?? "(none)");
+
+            // Double-click takes the word under the pointer; the separators around it are not part of it.
+            grid.DoubleClickForTesting(2, xOfChar(reqAt + 3));
+            ok &= Check("double-click selects the word", grid.SelectedText == "req-abc123", grid.SelectedText ?? "(none)");
+
+            // ...and it stops at whitespace rather than running to the end of the line.
+            int getAt = text.IndexOf("GET", StringComparison.Ordinal);
+            grid.DoubleClickForTesting(2, xOfChar(getAt + 1));
+            ok &= Check("a word stops at the space around it", grid.SelectedText == "GET", grid.SelectedText ?? "(none)");
+
+            // Moving away drops it: the range meant a place the user is no longer looking at.
+            grid.PressKeyForTesting(Keys.Down);
+            ok &= Check("moving the caret drops the range", !grid.HasCharSelection, grid.SelectedText ?? "(none)");
+
+            // Starting past the right-hand end clamps to the end of the line rather than running off it.
+            grid.DragForTesting(2, 5000, xOfChar(text.Length - 5));
+            ok &= Check("a drag starting past the end selects up to the end",
+                        grid.SelectedText == text[^5..], grid.SelectedText ?? "(none)");
+
+            // The visual contract: only the range is in the selection colours, and the rest of the row keeps
+            // its own - which is what makes it read like a text box rather than a selected row.
+            grid.DragForTesting(2, xOfChar(reqAt), xOfChar(reqAt + 10));
+            grid.RefreshView();
+            Pump();
+            using var picture = Capture(host);
+            var settings = new AppSettings();
+            int rowY = grid.RowMiddleForTesting(2);
+            int inside = xOfChar(reqAt + 5), before = xOfChar(reqAt) - 6, after = xOfChar(reqAt + 10) + 6;
+            ok &= Check("the selected part is drawn selected", IsBackground(picture, inside, rowY, settings.SelectionBack),
+                        picture.GetPixel(Math.Clamp(inside, 0, picture.Width - 1), rowY).Name);
+            ok &= Check("the rest of the row is not", !IsBackground(picture, before, rowY, settings.SelectionBack) &&
+                                                     !IsBackground(picture, after, rowY, settings.SelectionBack),
+                        $"{picture.GetPixel(Math.Clamp(before, 0, picture.Width - 1), rowY).Name} / " +
+                        $"{picture.GetPixel(Math.Clamp(after, 0, picture.Width - 1), rowY).Name}");
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Whether a pixel is (close to) a given colour. A scanline through a row crosses glyphs, so a
+    /// check about the BACKGROUND has to look at more than one pixel and take the commonest answer.</summary>
+    private static bool IsBackground(Bitmap bmp, int x, int y, Color colour)
+    {
+        if (x < 0 || x >= bmp.Width || y < 0 || y >= bmp.Height) return false;
+        int hits = 0;
+        for (int dy = -2; dy <= 2; dy++)
+        {
+            int yy = Math.Clamp(y + dy, 0, bmp.Height - 1);
+            var c = bmp.GetPixel(x, yy);
+            if (Math.Abs(c.R - colour.R) < 30 && Math.Abs(c.G - colour.G) < 30 && Math.Abs(c.B - colour.B) < 30) hits++;
+        }
+        return hits >= 3;
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the

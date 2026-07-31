@@ -186,7 +186,7 @@ public class UiFeatureTests
         Check("View has Focus Filter Search", view.Any(n => n.Contains("Focus Filter S", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
         var filtersItems = app.MenuItemNames("Filters");
         Check("Filters has Find Next Match", filtersItems.Any(n => n.Contains("Find Next Match", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
-        Check("Filters has New Filter from Current Line", filtersItems.Any(n => n.Contains("Current Line", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
+        Check("Filters has New Filter from Selection", filtersItems.Any(n => n.Contains("New Filter from Selection", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
 
         // ---- text find (dialog) ----
         app.FindText("other line 7");
