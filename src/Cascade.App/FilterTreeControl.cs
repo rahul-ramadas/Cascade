@@ -841,20 +841,20 @@ public sealed class FilterTreeControl : UserControl
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Add filter…", null, (_, _) => AddRequested?.Invoke(null));
-        menu.Items.Add("Add child filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
-        menu.Items.Add("Edit…", null, (_, _) => { if (SelectedFilter is { } f) EditRequested?.Invoke(f); });
-        menu.Items.Add("Remove", null, (_, _) => RemoveSelected());
+        menu.Items.Add("Add Filter…", null, (_, _) => AddRequested?.Invoke(null));
+        menu.Items.Add("Add Child Filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
+        menu.Items.Add("Edit Filter…", null, (_, _) => { if (SelectedFilter is { } f) EditRequested?.Invoke(f); });
+        menu.Items.Add("Remove Filter", null, (_, _) => RemoveSelected());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Find next matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
-        menu.Items.Add(new ToolStripMenuItem("Find previous matching", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); }) { ShortcutKeyDisplayString = "Shift+F4" });
+        menu.Items.Add(new ToolStripMenuItem("Find Next Match", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
+        menu.Items.Add(new ToolStripMenuItem("Find Previous Match", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); }) { ShortcutKeyDisplayString = "Shift+F4" });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Enable this and everything under it", null, (_, _) => SetSelectedSubtreeEnabled(true)) { ShortcutKeyDisplayString = "Shift+Space" });
-        menu.Items.Add(new ToolStripMenuItem("Disable this and everything under it", null, (_, _) => SetSelectedSubtreeEnabled(false)) { ShortcutKeyDisplayString = "Shift+Space" });
+        menu.Items.Add(new ToolStripMenuItem("Enable Subtree", null, (_, _) => SetSelectedSubtreeEnabled(true)) { ShortcutKeyDisplayString = "Shift+Space" });
+        menu.Items.Add(new ToolStripMenuItem("Disable Subtree", null, (_, _) => SetSelectedSubtreeEnabled(false)) { ShortcutKeyDisplayString = "Shift+Space" });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Enable all", null, (_, _) => SetAllEnabled(true));
-        menu.Items.Add("Disable all", null, (_, _) => SetAllEnabled(false));
-        menu.Items.Add("Remove all", null, (_, _) => RemoveAll());
+        menu.Items.Add("Enable All", null, (_, _) => SetAllEnabled(true));
+        menu.Items.Add("Disable All", null, (_, _) => SetAllEnabled(false));
+        menu.Items.Add("Remove All", null, (_, _) => RemoveAll());
         return menu;
     }
 

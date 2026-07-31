@@ -217,12 +217,12 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(Mi("Open from &Clipboard", (_, _) => OpenFromClipboard()));
         file.DropDownItems.Add(Mi("Save Current &Lines…", (_, _) => SaveCurrentLines()));
         file.DropDownItems.Add(new ToolStripSeparator());
-        file.DropDownItems.Add(Mi("&Load Filters…", (_, _) => LoadFilters()));
+        file.DropDownItems.Add(Mi("Loa&d Filters…", (_, _) => LoadFilters()));
         file.DropDownItems.Add(Mi("&Save Filters", (_, _) => SaveFilters(false), Keys.Control | Keys.S));
         file.DropDownItems.Add(Mi("Save Filters &As…", (_, _) => SaveFilters(true)));
-        file.DropDownItems.Add(Mi("&Append Filters…", (_, _) => AppendFilters()));
+        file.DropDownItems.Add(Mi("A&ppend Filters…", (_, _) => AppendFilters()));
         file.DropDownItems.Add(Mi("&Import .tat filters…", (_, _) => ImportTat()));
-        file.DropDownItems.Add(Mi("&Close Filters", (_, _) => CloseFilters()));
+        file.DropDownItems.Add(Mi("Clos&e Filters", (_, _) => CloseFilters()));
         file.DropDownItems.Add(new ToolStripSeparator());
         _recentFilesMenu = new ToolStripMenuItem("Recent &Files");
         _recentFilterFilesMenu = new ToolStripMenuItem("Recent Filter Files");
@@ -238,7 +238,7 @@ public sealed class MainForm : Form
 
         var edit = new ToolStripMenuItem("&Edit");
         edit.DropDownItems.Add(Mi("&Copy", (_, _) => _grid.CopySelection(false), Keys.Control | Keys.C));
-        edit.DropDownItems.Add(Mi("Copy with Line &Numbers", (_, _) => _grid.CopySelection(true)));
+        edit.DropDownItems.Add(Mi("Copy with Line N&umbers", (_, _) => _grid.CopySelection(true)));
         edit.DropDownItems.Add(Mi("Select &All", (_, _) => _grid.SelectAll(), Keys.Control | Keys.A));
         edit.DropDownItems.Add(new ToolStripSeparator());
         edit.DropDownItems.Add(Mi("&Find…", (_, _) => ShowFind(), Keys.Control | Keys.F));
@@ -246,7 +246,7 @@ public sealed class MainForm : Form
         edit.DropDownItems.Add(Mi("Find &Previous", (_, _) => RepeatFind(false), Keys.Shift | Keys.F3));
         edit.DropDownItems.Add(Mi("&Go To Line…", (_, _) => GoTo(), Keys.Control | Keys.G));
         edit.DropDownItems.Add(new ToolStripSeparator());
-        edit.DropDownItems.Add(Mi("&Preferences…", (_, _) => ShowPreferences()));
+        edit.DropDownItems.Add(Mi("P&references…", (_, _) => ShowPreferences()));
 
         var view = new ToolStripMenuItem("&View");
         _miFilteredMode = Mi("Show Only &Filtered Lines", (_, _) => ToggleFilteredMode(), Keys.Control | Keys.H);
@@ -268,7 +268,7 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(Mi("&Reset Zoom", (_, _) => _grid.ResetZoom(), Keys.Control | Keys.D0));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Focus &Text Area", (_, _) => FocusTextArea(), Keys.Control | Keys.Shift | Keys.T));
-        view.DropDownItems.Add(Mi("Focus Filter &List", (_, _) => FocusFilterList(), Keys.Control | Keys.Shift | Keys.F));
+        view.DropDownItems.Add(Mi("Foc&us Filter List", (_, _) => FocusFilterList(), Keys.Control | Keys.Shift | Keys.F));
         view.DropDownItems.Add(Mi("Focus Filter &Search", (_, _) => FocusFilterSearch(), Keys.Control | Keys.E));
         view.DropDownItems.Add(BuildFilterLocationMenu());
         view.DropDownItems.Add(BuildEncodingMenu());
@@ -290,8 +290,8 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
         filters.DropDownItems.Add(Mi("Find Pre&vious Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
         filters.DropDownItems.Add(new ToolStripSeparator());
-        filters.DropDownItems.Add(Hint("Ena&ble Filter and Everything Under It", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(true)));
-        filters.DropDownItems.Add(Hint("Disa&ble Filter and Everything Under It", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(false)));
+        filters.DropDownItems.Add(Hint("Enable &Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(true)));
+        filters.DropDownItems.Add(Hint("Disa&ble Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(false)));
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Enable All", (_, _) => _filterTree.SetAllEnabled(true)));
         filters.DropDownItems.Add(Mi("Disable All", (_, _) => _filterTree.SetAllEnabled(false)));
@@ -337,7 +337,7 @@ public sealed class MainForm : Form
 
     private ToolStripMenuItem BuildFilterLocationMenu()
     {
-        var m = new ToolStripMenuItem("Filter List &Location");
+        var m = new ToolStripMenuItem("Filter List Loc&ation");
         // Show the key as a right-aligned hint (ShortcutKeyDisplayString); the keys themselves are
         // handled in ProcessCmdKey, so we don't register them via ShortcutKeys here.
         static ToolStripMenuItem Item(string text, string keys, EventHandler onClick)
