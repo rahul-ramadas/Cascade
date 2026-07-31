@@ -175,6 +175,9 @@ public sealed class FilterTreeControl : UserControl
         _tree.EndUpdate();
         _building = false;
 
+        // A deleted filter must not leave its id behind in the collapsed set.
+        if (_collapsed.Count > 0) _collapsed.IntersectWith(_flat.Select(n => (n.Tag as Filter)?.Id ?? ""));
+
         if (selectedId is not null)
             _tree.SelectedNode = _flat.FirstOrDefault(n => (n.Tag as Filter)?.Id == selectedId);
 

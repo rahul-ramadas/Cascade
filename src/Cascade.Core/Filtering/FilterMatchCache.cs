@@ -16,16 +16,9 @@ namespace Cascade.Core.Filtering;
 /// </summary>
 public sealed class FilterMatchCache
 {
-    /// <summary>Cap on total cached bytes. Beyond this the cache stops taking new entries rather than growing
-    /// without bound; filtering still works, it just re-scans.</summary>
-    public const long DefaultBudgetBytes = 256L * 1024 * 1024;
-
     private readonly Dictionary<string, MatchSet> _sets = new(StringComparer.Ordinal);
-    private readonly long _budgetBytes;
     // Written by the filter worker, read by per-filter find on its own background thread.
     private readonly object _sync = new();
-
-    public FilterMatchCache(long budgetBytes = DefaultBudgetBytes) => _budgetBytes = budgetBytes;
 
     public long UsedBytes { get { lock (_sync) return _usedBytes; } }
     public int Count { get { lock (_sync) return _sets.Count; } }
@@ -169,12 +162,28 @@ public sealed class FilterMatchCache
         }
     }
 
+    /// <summary>Forgets every result that does not belong to one of <paramref name="live"/>. A key describes
+    /// a filter's whole predicate chain, so deleting or editing a filter strands its results permanently -
+    /// nothing can ever ask for them again. Without this the cache only grows.</summary>
+    public void RetainOnly(IReadOnlyCollection<string> live)
+    {
+        lock (_sync)
+        {
+            if (_sets.Count == 0) return;
+            var dead = _sets.Keys.Where(k => !live.Contains(k)).ToList();
+            foreach (string key in dead)
+            {
+                _usedBytes -= _sets[key].Bytes;
+                _sets.Remove(key);
+            }
+        }
+    }
+
     internal void Store(string key, MatchSet set)
     {
         lock (_sync)
         {
             if (_sets.TryGetValue(key, out var old)) _usedBytes -= old.Bytes;
-            else if (_usedBytes + set.Bytes > _budgetBytes) return;   // over budget: simply do not cache
             _sets[key] = set;
             _usedBytes += set.Bytes;
         }

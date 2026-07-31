@@ -124,6 +124,9 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Bytes held by the per-filter match cache.</summary>
     public long FilterCacheBytes => _filterService?.CacheBytes ?? 0;
 
+    /// <summary>How many filters currently have results cached.</summary>
+    public int FilterCacheCount => _filterService?.CacheCount ?? 0;
+
     /// <summary>File lines below this value are fully resolved in the current view: every visible line before
     /// it has been discovered, so <see cref="RowForLine"/> is authoritative for them. Because a filter pass
     /// updates the visible set in place, this is the whole file as soon as one pass has covered it — only the

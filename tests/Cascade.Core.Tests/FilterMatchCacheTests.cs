@@ -608,17 +608,71 @@ public class FilterMatchCacheTests
         if (tail != 0) Assert.Equal(0UL, shown[^1] >> tail);
     }
 
+    /// <summary>Deleting a filter has to take its cached results with it. The key is the whole predicate
+    /// chain, so a deleted filter's results can never be asked for again - kept, they would simply
+    /// accumulate for as long as the file stayed open.</summary>
     [Fact]
-    public void Cache_respects_its_memory_budget()
+    public void Deleting_a_filter_frees_what_was_cached_for_it()
     {
-        var cache = new FilterMatchCache(budgetBytes: 4096);
-        const long lines = 100_000;
-        for (int i = 0; i < 50; i++)
+        string path = WriteLog();
+        try
         {
-            var b = new FilterMatchCache.SetBuilder(lines);
-            for (long w = 0; w < 64; w++) b.AddWord(w, ulong.MaxValue);
-            cache.Store($"key{i}", b.Build(lines));
+            using var doc = Warmed(path, out var filters, out var flat);
+            long bytesBefore = doc.FilterCacheBytes;
+            int entriesBefore = doc.FilterCacheCount;
+
+            filters.Remove(flat[3]);        // "net" at the root: every 7th line
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            Assert.True(doc.FilterCacheCount < entriesBefore,
+                        $"the removed filter's entry survived ({entriesBefore} -> {doc.FilterCacheCount})");
+            Assert.True(doc.FilterCacheBytes < bytesBefore,
+                        $"its bytes were never given back ({bytesBefore} -> {doc.FilterCacheBytes})");
         }
-        Assert.True(cache.UsedBytes <= 4096, $"cache grew past its budget: {cache.UsedBytes} bytes");
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Editing one filter repeatedly is the case that used to grow without bound: every edit makes
+    /// a new key, and the key it replaces can never be reached again.</summary>
+    [Fact]
+    public void Editing_a_filter_repeatedly_does_not_pile_up_dead_entries()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out var filters, out var flat);
+            int settled = doc.FilterCacheCount;
+
+            for (int i = 0; i < 20; i++)
+            {
+                flat[3].Match.Text = "net" + i;
+                doc.SetFilters(filters);
+                WaitIdle(doc);
+            }
+
+            Assert.Equal(settled, doc.FilterCacheCount);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Turning a filter off must NOT discard its results - keeping them is exactly what makes
+    /// turning it back on instant.</summary>
+    [Fact]
+    public void Disabling_a_filter_keeps_its_results()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out var filters, out var flat);
+            int settled = doc.FilterCacheCount;
+
+            flat[3].Enabled = false;
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            Assert.Equal(settled, doc.FilterCacheCount);
+        }
+        finally { File.Delete(path); }
     }
 }
