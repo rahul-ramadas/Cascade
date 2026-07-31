@@ -117,7 +117,6 @@ public sealed class MainForm : Form
         _doc.Updated += () => _pendingRefresh = true;
         _grid.SelectionChanged += UpdateStatus;
         _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); };
-        _grid.LineDoubleClicked += CreateFilterFromLine;
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };
@@ -319,7 +318,7 @@ public sealed class MainForm : Form
         var filters = new ToolStripMenuItem("Fi&lters");
         filters.DropDownItems.Add(Mi("&Add Filter…", (_, _) => AddFilter(null)));
         filters.DropDownItems.Add(Mi("Add &Child Filter…", (_, _) => AddFilter(_filterTree.SelectedFilter)));
-        filters.DropDownItems.Add(Mi("New Filter from Current &Line…", (_, _) => NewFilterFromCurrentLine(), Keys.Control | Keys.N));
+        filters.DropDownItems.Add(Mi("New Filter from Se&lection…", (_, _) => NewFilterFromSelection(), Keys.Control | Keys.N));
         filters.DropDownItems.Add(Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); }));
         filters.DropDownItems.Add(Mi("Duplica&te Filter", (_, _) => _filterTree.DuplicateSelected(), Keys.Control | Keys.D));
         filters.DropDownItems.Add(Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected()));
@@ -765,9 +764,25 @@ public sealed class MainForm : Form
         return text.Length <= FilterEditDialog.MaxPatternLength ? text : text[..FilterEditDialog.MaxPatternLength];
     }
 
-    private void CreateFilterFromLine(long line)
+    private void CreateFilterFromLine(long line) => CreateFilterFrom(SeedPatternFromLine(_doc.GetLineText(line)));
+
+    /// <summary>Ctrl+N: a filter from whatever is selected. Part of a line if part of one is selected -
+    /// which is the point of being able to select part of one - and otherwise the whole caret line.</summary>
+    private void NewFilterFromSelection()
     {
-        var filter = new Filter { Enabled = true, Match = { Text = SeedPatternFromLine(_doc.GetLineText(line)) } };
+        if (_grid.SelectedText is { Length: > 0 } part)
+        {
+            CreateFilterFrom(SeedPatternFromLine(part));
+            return;
+        }
+        long line = _grid.CaretLine;
+        if (line < 0) { MessageBox.Show(this, "Select a line in the text view first.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
+        CreateFilterFromLine(line);
+    }
+
+    private void CreateFilterFrom(string pattern)
+    {
+        var filter = new Filter { Enabled = true, Match = { Text = pattern } };
         using var dlg = new FilterEditDialog(filter, isNew: true);
         _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
@@ -777,13 +792,6 @@ public sealed class MainForm : Form
             OnFiltersChanged();
         }
         else _history.Abandon();
-    }
-
-    private void NewFilterFromCurrentLine()
-    {
-        long line = _grid.CaretLine;
-        if (line < 0) { MessageBox.Show(this, "Select a line in the text view first.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        CreateFilterFromLine(line);
     }
 
     private void FindSelectedFilterMatch(bool forward)
