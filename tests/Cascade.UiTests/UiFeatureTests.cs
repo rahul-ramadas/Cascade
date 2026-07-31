@@ -260,6 +260,62 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Undo_and_redo_take_back_filter_edits()
+    {
+        // The undo stack is snapshot-based, so what matters through the real UI is that the list, the
+        // selection-independent model behind it and the menu labels all agree afterwards. "line 999" and
+        // "line 998" each match exactly one non-MATCH line, so Fil: proves the model changed, not just
+        // the tree.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "line 999", "line 998");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            Check("starts with three filters", app.RootFilterNames().Length == 3, string.Join(" | ", app.RootFilterNames()));
+            Check("count with all three", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
+
+            // Nothing has been edited yet, so there is nothing to take back.
+            Check("undo starts unavailable", app.MenuItemNames("Edit").Any(n => n.Equals("Undo", StringComparison.OrdinalIgnoreCase)),
+                  string.Join(",", app.MenuItemNames("Edit")));
+
+            app.FilterNode("line 999")!.AsTreeItem().Select();
+            app.ClickMenuOrThrow("Filters", "Remove Filter");
+            Check("removed", app.FilterNode("line 999") is null);
+            Check("count after remove", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 1:N0}"), app.StatusText("Fil:"));
+            Check("menu names what it would undo",
+                  app.MenuItemNames("Edit").Any(n => n.Contains("Undo Remove Filter", StringComparison.OrdinalIgnoreCase)),
+                  string.Join(",", app.MenuItemNames("Edit")));
+
+            // Ctrl+Z is handled at form level, so it has to go through the message loop.
+            app.SendKeyAsDialogKey(app.Tree(), VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Check("undo brings the filter back", app.WaitForFilter("line 999"), string.Join(" | ", app.RootFilterNames()));
+            Check("undo restores its position", app.RootFilterNames().Length == 3 &&
+                  CascadeApp.IndexOfFilter(app.RootFilterNames(), "line 999") == 1, string.Join(" | ", app.RootFilterNames()));
+            Check("undo restores the model", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
+
+            app.SendKeyAsDialogKey(app.Tree(), VirtualKeyShort.KEY_Y, VirtualKeyShort.CONTROL);
+            Check("redo removes it again", app.WaitForNoFilter("line 999"), string.Join(" | ", app.RootFilterNames()));
+            Check("redo restores the model", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 1:N0}"), app.StatusText("Fil:"));
+
+            // Duplicating is an edit like any other, so it stacks and unwinds the same way.
+            app.FilterNode("line 998")!.AsTreeItem().Select();
+            app.ClickMenuOrThrow("Filters", "Duplicate Filter");
+            Check("duplicate adds a filter", app.RootFilterNames().Count(n => n.Contains("line 998", StringComparison.OrdinalIgnoreCase)) == 2,
+                  string.Join(" | ", app.RootFilterNames()));
+
+            app.SendKeyAsDialogKey(app.Tree(), VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Check("undo removes the copy", app.WaitForFilterCount(2), string.Join(" | ", app.RootFilterNames()));
+
+            Assert.True(fails.Count == 0, "Undo/redo failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
     public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
     {
         string log = TestData.WriteLogFile();

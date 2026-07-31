@@ -47,6 +47,8 @@ public sealed class MainForm : Form
 
     private FindDialog? _findDialog;
     private FindQuery? _lastQuery;
+    private readonly FilterHistory _history = new();
+    private ToolStripMenuItem _miUndo = null!, _miRedo = null!;
     private string? _filterFilePath;
     private bool _filtersDirty;
     private volatile bool _pendingRefresh;
@@ -109,6 +111,7 @@ public sealed class MainForm : Form
         _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); };
         _grid.LineDoubleClicked += CreateFilterFromLine;
         _filterTree.FiltersChanged += OnFiltersChanged;
+        _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
@@ -127,6 +130,7 @@ public sealed class MainForm : Form
 
         Shown += (_, _) => ProcessArgs(args);
         FormClosing += OnClosing;
+        SyncUndoMenu();
         UpdateStatus();
     }
 
@@ -182,6 +186,10 @@ public sealed class MainForm : Form
         {
             switch (keyData)
             {
+                // Undo/redo belong to the filter list wherever focus is, except inside a text box, where
+                // Ctrl+Z has to keep meaning "undo my typing".
+                case Keys.Control | Keys.Z: UndoFilterEdit(); return true;
+                case Keys.Control | Keys.Y: RedoFilterEdit(); return true;
                 case Keys.Control | Keys.Shift | Keys.Up: SetFilterDock(FilterDock.Top); return true;
                 case Keys.Control | Keys.Shift | Keys.Down: SetFilterDock(FilterDock.Bottom); return true;
                 case Keys.Control | Keys.Shift | Keys.Left: SetFilterDock(FilterDock.Left); return true;
@@ -237,6 +245,11 @@ public sealed class MainForm : Form
         file.DropDownItems.Add(Mi("E&xit", (_, _) => Close()));
 
         var edit = new ToolStripMenuItem("&Edit");
+        _miUndo = Mi("Un&do", (_, _) => UndoFilterEdit(), Keys.Control | Keys.Z);
+        _miRedo = Mi("R&edo", (_, _) => RedoFilterEdit(), Keys.Control | Keys.Y);
+        edit.DropDownItems.Add(_miUndo);
+        edit.DropDownItems.Add(_miRedo);
+        edit.DropDownItems.Add(new ToolStripSeparator());
         edit.DropDownItems.Add(Mi("&Copy", (_, _) => _grid.CopySelection(false), Keys.Control | Keys.C));
         edit.DropDownItems.Add(Mi("Copy with Line N&umbers", (_, _) => _grid.CopySelection(true)));
         edit.DropDownItems.Add(Mi("Select &All", (_, _) => _grid.SelectAll(), Keys.Control | Keys.A));
@@ -278,6 +291,7 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("Add &Child Filter…", (_, _) => AddFilter(_filterTree.SelectedFilter)));
         filters.DropDownItems.Add(Mi("New Filter from Current &Line…", (_, _) => NewFilterFromCurrentLine(), Keys.Control | Keys.N));
         filters.DropDownItems.Add(Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); }));
+        filters.DropDownItems.Add(Mi("Duplica&te Filter", (_, _) => _filterTree.DuplicateSelected(), Keys.Control | Keys.D));
         filters.DropDownItems.Add(Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected()));
         filters.DropDownItems.Add(new ToolStripSeparator());
         // The keys themselves are handled by the filter tree (they only apply while it has focus), so these
@@ -613,6 +627,10 @@ public sealed class MainForm : Form
 
     private void OnFiltersChanged()
     {
+        // Every structural edit funnels through here, so this is where a snapshot taken before one becomes
+        // an undo entry - or is dropped, when the tree turns out not to have changed.
+        _history.Commit(_doc.Filters);
+        SyncUndoMenu();
         _filtersDirty = true;
         // Capture where the viewport is BEFORE the visible-line set changes, so the same line can be held at
         // the same place on screen while the new matches stream in.
@@ -627,6 +645,37 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
+    private void UndoFilterEdit() => ApplyHistory(_history.Undo(_doc.Filters), "Nothing to undo");
+
+    private void RedoFilterEdit() => ApplyHistory(_history.Redo(_doc.Filters), "Nothing to redo");
+
+    /// <summary>Puts a restored tree on screen. Deliberately not routed through <see cref="OnFiltersChanged"/>
+    /// for the history's sake - the snapshot has already been swapped onto the other stack, and committing
+    /// again here would record undoing as an edit of its own.</summary>
+    private void ApplyHistory(string? label, string emptyMessage)
+    {
+        if (label is null) { ShowFindMessage(emptyMessage); return; }
+        _history.Abandon();
+        _filterTree.Rebuild();
+        _filtersDirty = true;
+        var anchor = _grid.CaptureViewAnchor();
+        _doc.ApplyFilters();
+        _grid.SetViewAnchor(anchor, select: _doc.FilteredMode);
+        _grid.RefreshView();
+        _anchorActive = anchor.IsValid;
+        SyncUndoMenu();
+        UpdateTitle();
+        UpdateStatus();
+    }
+
+    private void SyncUndoMenu()
+    {
+        _miUndo.Enabled = _history.CanUndo;
+        _miRedo.Enabled = _history.CanRedo;
+        _miUndo.Text = _history.UndoLabel is { } u ? $"Un&do {u}" : "Un&do";
+        _miRedo.Text = _history.RedoLabel is { } r ? $"R&edo {r}" : "R&edo";
+    }
+
     private void AddFilter(Filter? parent)
     {
         if (parent is not null && parent.Depth + 1 >= FilterCollection.MaxDepth)
@@ -636,22 +685,26 @@ public sealed class MainForm : Form
         }
         var filter = new Filter { Enabled = true };
         using var dlg = new FilterEditDialog(filter, isNew: true);
+        _history.Begin("Add Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _doc.Filters.Add(filter, parent);
             _filterTree.Rebuild();
             OnFiltersChanged();
         }
+        else _history.Abandon();
     }
 
     private void EditFilter(Filter filter)
     {
         using var dlg = new FilterEditDialog(filter, isNew: false);
+        _history.Begin("Edit Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _filterTree.Rebuild();
             OnFiltersChanged();
         }
+        else _history.Abandon();
     }
 
     /// <summary>What a filter made from a log line starts out matching: the line itself, less the space
@@ -667,12 +720,14 @@ public sealed class MainForm : Form
     {
         var filter = new Filter { Enabled = true, Match = { Text = SeedPatternFromLine(_doc.GetLineText(line)) } };
         using var dlg = new FilterEditDialog(filter, isNew: true);
+        _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _doc.Filters.Add(filter);
             _filterTree.Rebuild();
             OnFiltersChanged();
         }
+        else _history.Abandon();
     }
 
     private void NewFilterFromCurrentLine()
@@ -777,6 +832,8 @@ public sealed class MainForm : Form
                 _state.AddRecentFilterFile(path);
             }
             _filtersDirty = false;
+            _history.Clear();
+            SyncUndoMenu();
             _state.LastFilterFile = path; // remember for auto-load next launch
             _state.Save();
             _filterTree.Attach(_doc);
@@ -807,6 +864,7 @@ public sealed class MainForm : Form
             var loaded = dlg.FileName.EndsWith(".tat", StringComparison.OrdinalIgnoreCase)
                 ? TatImporter.Import(dlg.FileName)
                 : CascadeFile.Load(dlg.FileName).Filters;
+            _history.Begin("Append Filters", _doc.Filters);
             foreach (var root in loaded.Roots.ToList()) _doc.Filters.Add(root.Clone());
             _filtersDirty = true;
             _filterTree.Attach(_doc);
@@ -826,6 +884,8 @@ public sealed class MainForm : Form
     private void CloseFilters()
     {
         _doc.SetFilters(new FilterCollection());
+        _history.Clear();
+        SyncUndoMenu();
         _filterFilePath = null;
         _filtersDirty = false;
         _state.LastFilterFile = null;
@@ -1321,3 +1381,4 @@ public sealed class MainForm : Form
         d.ShowDialog(this);
     }
 }
+
