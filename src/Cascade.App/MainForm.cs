@@ -192,6 +192,8 @@ public sealed class MainForm : Form
         if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
         if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
         if (keyData == Keys.Escape && _findBusy) { _doc.CancelFind(); return true; }
+        // ...and once nothing is running, Esc puts the term away: highlights off and the counts with them.
+        if (keyData == Keys.Escape && _lastQuery is not null && !IsTextInputFocused()) { ClearFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (!IsTextInputFocused())
         {
@@ -1209,6 +1211,9 @@ public sealed class MainForm : Form
     private async void DoFind(FindQuery query, bool forward)
     {
         _lastQuery = query;
+        // The highlight outlives the dialog: F3 keeps working with it closed, so the hits have to stay
+        // marked until the term is deliberately put away.
+        _grid.SetFindHighlight(FindEngine.CompileQuery(query));
         long start = _grid.CaretLine;
         start = start < 0 ? 0 : start + (forward ? 1 : -1);
 
@@ -1247,6 +1252,17 @@ public sealed class MainForm : Form
     }
 
     private void RepeatFind(bool forward) { if (_lastQuery is { } q) DoFind(q, forward); else ShowFind(); }
+
+    /// <summary>Drops the find term: highlights off, counts gone, and the sweep behind it released.</summary>
+    private void ClearFind()
+    {
+        _lastQuery = null;
+        _grid.SetFindHighlight(null);
+        _doc.DropSearch();
+        _findMsg = "";
+        _findDialog?.SetStatus("");
+        UpdateStatus();
+    }
 
     /// <summary>Writes the activity slot's text, trimming it to the space reserved for it. The untrimmed
     /// wording stays available on hover.</summary>

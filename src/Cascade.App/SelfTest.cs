@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Text;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
+using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
 
@@ -59,6 +60,7 @@ internal static class SelfTest
             ok &= Timed("filter presets", RunFilterPresetChecks);
             ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("text selection", RunTextSelectionChecks);
+            ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -697,6 +699,24 @@ internal static class SelfTest
         }
     }
 
+    /// <summary>What fraction of the columns across a span of a row show a colour. Not "is any pixel that
+    /// colour": ClearType puts a warm fringe on every dark glyph, and one of those is a close enough match
+    /// to a soft highlight to answer yes anywhere in the line. A real highlight fills its whole span.</summary>
+    private static double PixelFraction(Bitmap bmp, int x0, int x1, int y, Color colour)
+    {
+        int from = Math.Max(0, x0), to = Math.Min(bmp.Width, x1);
+        if (to <= from) return 0;
+        int hits = 0;
+        for (int x = from; x < to; x++)
+            for (int dy = -3; dy <= 3; dy++)
+            {
+                int yy = Math.Clamp(y + dy, 0, bmp.Height - 1);
+                var c = bmp.GetPixel(x, yy);
+                if (Math.Abs(c.R - colour.R) < 24 && Math.Abs(c.G - colour.G) < 24 && Math.Abs(c.B - colour.B) < 24) { hits++; break; }
+            }
+        return (double)hits / (to - from);
+    }
+
     /// <summary>Whether a pixel is (close to) a given colour. A scanline through a row crosses glyphs, so a
     /// check about the BACKGROUND has to look at more than one pixel and take the commonest answer.</summary>
     private static bool IsBackground(Bitmap bmp, int x, int y, Color colour)
@@ -710,6 +730,91 @@ internal static class SelfTest
             if (Math.Abs(c.R - colour.R) < 30 && Math.Abs(c.G - colour.G) < 30 && Math.Abs(c.B - colour.B) < 30) hits++;
         }
         return hits >= 3;
+    }
+
+    /// <summary>Every occurrence of the find term is marked on every visible line, and the line the search
+    /// landed on is marked more strongly - which is how navigation can stay line-by-line without leaving you
+    /// wondering which line it meant.</summary>
+    private static bool RunFindHighlightChecks()
+    {
+        Line("-- find highlighting --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_hl_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 20; i++) sb.Append($"line {i:00} alpha middle alpha tail\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(700, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            string text = doc.GetLineText(1);
+            int first = text.IndexOf("alpha", StringComparison.Ordinal);
+            int second = text.IndexOf("alpha", first + 1, StringComparison.Ordinal);
+            int gap = text.IndexOf("middle", StringComparison.Ordinal);
+            int X(int index) => grid.XForCharForTesting(1, index);
+
+            grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("alpha", false, false)));
+            grid.RefreshView();
+            Pump();
+
+            using (var picture = Capture(host))
+            {
+                int y = grid.RowMiddleForTesting(1);
+                bool ok0 = Check("the first occurrence is marked", PixelFraction(picture, X(first), X(first + 5), y, settings.FindHighlight) > 0.5);
+                ok0 &= Check("so is the second one on the same line", PixelFraction(picture, X(second), X(second + 5), y, settings.FindHighlight) > 0.5);
+                ok0 &= Check("the text between them is not", PixelFraction(picture, X(gap), X(gap + 6), y, settings.FindHighlight) < 0.2);
+                if (!ok0) return false;
+            }
+
+            // The line the search landed on is marked more strongly than the rest.
+            grid.SelectRowForAccessibility(1);
+            grid.RefreshView();
+            Pump();
+            using (var picture = Capture(host))
+            {
+                bool ok1 = Check("the line the search landed on is marked differently",
+                                 PixelFraction(picture, X(first), X(first + 5), grid.RowMiddleForTesting(1), settings.FindCurrent) > 0.5);
+                ok1 &= Check("other lines keep the ordinary mark",
+                             PixelFraction(picture, X(first), X(first + 5), grid.RowMiddleForTesting(2), settings.FindHighlight) > 0.5);
+                if (!ok1) return false;
+            }
+
+            // Putting the term away takes the marks with it.
+            grid.SetFindHighlight(null);
+            grid.RefreshView();
+            Pump();
+            using (var picture = Capture(host))
+            {
+                bool ok2 = Check("clearing the term clears the marks",
+                                 PixelFraction(picture, X(first), X(first + 5), grid.RowMiddleForTesting(2), settings.FindHighlight) < 0.2);
+                return ok2;
+            }
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the

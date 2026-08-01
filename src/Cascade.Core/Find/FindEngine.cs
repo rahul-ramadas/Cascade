@@ -76,6 +76,44 @@ public static class FindEngine
 
         public bool Matches(ReadOnlySpan<char> line)
             => _rx is not null ? _rx.IsMatch(line) : line.Contains(_text, _cmp);
+
+        /// <summary>The next occurrence at or after <paramref name="start"/>, for highlighting every hit on
+        /// a line rather than just knowing there is one. A zero-length regex match would otherwise stand
+        /// still for ever, so it reports one character and the caller moves past it.</summary>
+        public bool NextMatch(ReadOnlySpan<char> line, int start, out int at, out int length)
+        {
+            at = -1;
+            length = 0;
+            if (start < 0) start = 0;
+            if (start > line.Length) return false;
+
+            if (_rx is not null)
+            {
+                foreach (var m in _rx.EnumerateMatches(line[start..]))
+                {
+                    at = start + m.Index;
+                    length = Math.Max(1, m.Length);
+                    return true;
+                }
+                return false;
+            }
+
+            if (_text.Length == 0) return false;
+            int found = line[start..].IndexOf(_text, _cmp);
+            if (found < 0) return false;
+            at = start + found;
+            length = _text.Length;
+            return true;
+        }
+
+        /// <summary>How many times this matches in a line. Occurrences, not lines: a line with three hits
+        /// counts three.</summary>
+        public int CountIn(ReadOnlySpan<char> line)
+        {
+            int n = 0, from = 0;
+            while (NextMatch(line, from, out int at, out int len)) { n++; from = at + Math.Max(1, len); }
+            return n;
+        }
     }
 
     /// <summary>Compiles a query, or returns null when it can never match anything: an empty term, or a
