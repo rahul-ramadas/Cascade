@@ -583,7 +583,8 @@ public class UiFeatureTests
     public void Reaching_the_end_of_a_search_shows_feedback()
     {
         // Every find command has to say so when there is nothing further that way. Two of them used to be
-        // completely silent, and Find only reported it inside a dialog that is usually closed.
+        // completely silent. The text find is the exception: its counts are already in the status bar, so a
+        // message there would cover up the very numbers that answer the question - it flashes and beeps only.
         string log = TestData.WriteLogFile();
         string tat = TestData.WriteFilterFile("MATCH");
         try
@@ -604,10 +605,15 @@ public class UiFeatureTests
             app.FindPrevForSelectedFilter();
             Check("per-filter find reports the end", app.WaitForFindMessage("No more matches"));
 
-            // 3. Text find for something that does not exist.
+            // 3. Text find: the dialog says so, and the status bar keeps its counts.
             var dlg = app.OpenFindDialog();
-            app.FindInDialog(dlg, "zzz-not-in-this-file", forward: true);
-            Check("text find reports the end", app.WaitForFindMessage("No more matches"));
+            app.FindInDialog(dlg, "line 137", forward: true);
+            Check("the search found something", app.WaitForStatusContaining("Match "));
+            app.FindInDialog(dlg, "line 137", forward: true);   // ...and there is only the one
+            Check("the dialog says it ran out",
+                  Retry.WhileFalse(() => app.DialogText(dlg).Contains("Not found"), TimeSpan.FromSeconds(4)).Result);
+            Check("the counts are still on show, not replaced by a message",
+                  app.AllStatusText().Contains("Match ") && !app.AllStatusText().Contains("No more matches"));
             try { dlg.Close(); } catch { /* modeless: hides */ }
 
             // 4. Filter search for a filter that is not in the list. Deliberately after the Find bar, which
