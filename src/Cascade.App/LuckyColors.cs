@@ -56,7 +56,10 @@ internal static class LuckyColors
             else if (f.Style.Foreground is { } g) used.Add(g);
         }
 
-        for (int step = 1; step <= Count; step++)
+        // Stops one short of a full turn: a step of Count lands back on the pair just offered, and since the
+        // filter being edited is not counted as using anything, that pair always looks free - so once the
+        // others had the rest of the ring the button kept handing back the same colour.
+        for (int step = 1; step < Count; step++)
         {
             var candidate = At(from + step).Back;
             if (used.All(u => Distance(u, candidate) > 90)) return from + step;
