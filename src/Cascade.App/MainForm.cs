@@ -196,6 +196,7 @@ public sealed class MainForm : Form
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
         LayoutPresetPane();
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
+        _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -302,6 +303,7 @@ public sealed class MainForm : Form
             _settings.ShowMatchMap = !_settings.ShowMatchMap;
             _miMatchMap.Checked = _settings.ShowMatchMap;
             _grid.SetMatchMapVisible(_settings.ShowMatchMap);
+            _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
             SaveSettingsSoon();
         })
         { Checked = _settings.ShowMatchMap, ShortcutKeys = Keys.Control | Keys.M };
@@ -1227,6 +1229,7 @@ public sealed class MainForm : Form
         _miWordWrap.Checked = _settings.WordWrap;
         _miFilterTips.Checked = _settings.ShowFilterTooltips;
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
+        _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
         LayoutPresetPane();
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);

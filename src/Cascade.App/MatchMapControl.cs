@@ -35,7 +35,6 @@ internal sealed class MatchMapControl : Control
 
     private const int EdgeLane = 2;           // logical; the marker and find lanes down the two edges
     private const int MinLanePixels = 2;      // below this a lane is a hairline, not a lane
-    private const int MaxLanes = 24;          // beyond this there is nothing to see; fall back to density
     private const int TickHeight = 3;         // a single marked line has to be findable at map scale
     private const int MinViewportHeight = 8;  // and the viewport rectangle has to be grabbable
     private const int HoverDelayMs = 400;
@@ -46,7 +45,7 @@ internal sealed class MatchMapControl : Control
     private readonly System.Windows.Forms.Timer _tipTimer = new() { Interval = HoverDelayMs };
 
     private Band[] _bands = Array.Empty<Band>();
-    private Lane[] _lanes = Array.Empty<Lane>();
+    private MapLanes.Lane[] _lanes = Array.Empty<MapLanes.Lane>();
     private float[] _lanePeak = Array.Empty<float>();
     private (long Line, byte Mask)[] _markers = Array.Empty<(long, byte)>();
     private Bitmap? _picture;
@@ -62,9 +61,6 @@ internal sealed class MatchMapControl : Control
     private int _tipBand = -1;
     private Point _tipPoint;
     private int _paints;
-
-    /// <summary>One filter's column on the map.</summary>
-    private readonly record struct Lane(string Name, Color Color, FilterMatchCache.MatchSet Set);
 
     /// <summary>What one pixel row of the map shows: how much of it matched at all, how much of it each lane
     /// accounts for, and whether the current find term is anywhere in it.</summary>
@@ -105,7 +101,7 @@ internal sealed class MatchMapControl : Control
     internal int BandCountForTesting => _bands.Length;
     internal double DensityForTesting(int y) => y >= 0 && y < _bands.Length ? _bands[y].Density : -1;
     internal int LaneCountForTesting => _lanes.Length;
-    internal string[] LaneNamesForTesting => _lanes.Select(l => l.Name).ToArray();
+    internal string[] LaneNamesForTesting => _lanes.Select(l => l.Filter.DisplayName).ToArray();
     internal Color[] LaneColorsForTesting => _lanes.Select(l => l.Color).ToArray();
     internal bool LanesFitForTesting => _lanes.Length > 0 && BarWidth / _lanes.Length >= MinLanePixels;
     internal double ShareForTesting(int y, int lane)
@@ -113,6 +109,13 @@ internal sealed class MatchMapControl : Control
     internal bool FindInBandForTesting(int y) => y >= 0 && y < _bands.Length && _bands[y].Find;
     internal double LanePeakForTesting(int lane) => lane >= 0 && lane < _lanePeak.Length ? _lanePeak[lane] : -1;
     internal string TipTextForTesting(int band) => BandTipText(band);
+    internal string TipOverLaneForTesting(int band, int lane) => BandTipText(band, lane);
+
+    /// <summary>Which lane the pointer would be over at this x, so a test can check the same arithmetic the
+    /// tip uses rather than a copy of it.</summary>
+    internal int LaneAtForTesting(int x) => LaneAt(x);
+
+    internal (int Left, int Width) BarBoundsForTesting => (BarLeft, BarWidth);
 
     /// <summary>How many times the map has actually painted. A picture of it cannot answer that: capturing
     /// a control draws it whether or not it was invalidated, so a screenshot always looks up to date even
@@ -134,7 +137,7 @@ internal sealed class MatchMapControl : Control
     private void EnsureBands()
     {
         var doc = _grid.Document;
-        if (doc is null) { _bands = Array.Empty<Band>(); _lanes = Array.Empty<Lane>(); return; }
+        if (doc is null) { _bands = Array.Empty<Band>(); _lanes = Array.Empty<MapLanes.Lane>(); return; }
 
         long rows = doc.RowCount;
         int height = Math.Max(1, ClientSize.Height);
@@ -153,7 +156,7 @@ internal sealed class MatchMapControl : Control
         _builtMarkers = doc.Markers.Version;
         _builtFindHits = findHits;
         _markers = doc.Markers.Snapshot();
-        _lanes = BuildLanes(doc);
+        _lanes = MapLanes.For(doc, _grid.Settings).ToArray();
         _lanePeak = new float[_lanes.Length];
 
         var bands = new Band[height];
@@ -202,128 +205,6 @@ internal sealed class MatchMapControl : Control
         long from = doc.RowToLine(rowFrom);
         long to = rowTo >= rows ? doc.CompletedLineCount : doc.RowToLine(rowTo);
         return (from, Math.Max(from + 1, to));
-    }
-
-    /// <summary>One lane per enabled include filter that no enabled include filter above it already covers.
-    ///
-    /// Nesting narrows, so a filter's lines are a subset of its enabled parent's - the parent's lane already
-    /// accounts for every one of them, and giving the children lanes of their own would say the same thing
-    /// several times over in ever-thinner columns. Turning on one filter with twenty children under it is one
-    /// lane; turning on six unrelated filters is six.</summary>
-    private Lane[] BuildLanes(CascadeDocument doc)
-    {
-        var result = new List<Lane>();
-        foreach (var f in doc.Filters.EnumerateDepthFirst())
-        {
-            if (!f.Enabled || f.Kind != FilterKind.Include) continue;
-            if (HasEnabledIncludeAncestor(f)) continue;
-            // A filter that matches nothing gets no lane. It would be a blank column taking width off the
-            // ones that have something to show, and there are usually several of them: a saved filter set
-            // carries filters for every log this person reads, not just this one.
-            if (doc.MatchCountFor(f) == 0) continue;
-            if (doc.MatchSetFor(f) is not { } set) continue;
-            result.Add(new Lane(f.DisplayName, MapColor(f, result.Count), set));
-            if (result.Count >= MaxLanes) break;
-        }
-        return result.ToArray();
-    }
-
-    private static bool HasEnabledIncludeAncestor(Filter f)
-    {
-        for (var p = f.Parent; p is not null; p = p.Parent)
-            if (p.Enabled && p.Kind == FilterKind.Include) return true;
-        return false;
-    }
-
-    // ---- colour ----
-
-    /// <summary>Colours for filters that have none of their own, spaced round the wheel so that neighbouring
-    /// lanes never read as the same colour.</summary>
-    private static readonly Color[] Fallback =
-    {
-        Color.FromArgb(0xE6, 0x39, 0x46), Color.FromArgb(0x1D, 0x7D, 0xD8), Color.FromArgb(0x2A, 0x9D, 0x54),
-        Color.FromArgb(0xE8, 0x8B, 0x0A), Color.FromArgb(0x8E, 0x44, 0xCC), Color.FromArgb(0x00, 0x9A, 0xA6),
-        Color.FromArgb(0xC2, 0x2E, 0x8A), Color.FromArgb(0x7A, 0x6A, 0x00),
-    };
-
-    internal static Color FallbackForTesting(int index) => Fallback[index % Fallback.Length];
-
-    /// <summary>The colour that stands for this filter on the map.
-    ///
-    /// Its own, when it has one - a lane you can match to the rows it colours is worth a great deal - but
-    /// pushed until it actually reads a few pixels wide against the gutter. Row colours are picked to be
-    /// quiet enough to put text on, which is exactly what makes them vanish here: a pale grey highlight and
-    /// a pale blue one are the same pixel. A filter with no colour of its own takes one from the palette
-    /// rather than the text colour, which every unstyled filter would share.</summary>
-    private Color MapColor(Filter f, int index)
-    {
-        var settings = _grid.Settings;
-        var defaults = new ResolvedStyle(
-            new RgbColor(settings.Foreground.R, settings.Foreground.G, settings.Foreground.B),
-            new RgbColor(settings.Background.R, settings.Background.G, settings.Background.B), false, false);
-        var style = StyleResolver.Resolve(f, defaults);
-        var bg = Color.FromArgb(style.Background.R, style.Background.G, style.Background.B);
-        var fg = Color.FromArgb(style.Foreground.R, style.Foreground.G, style.Foreground.B);
-
-        Color own = bg.ToArgb() != settings.Background.ToArgb() ? bg
-                  : fg.ToArgb() != settings.Foreground.ToArgb() ? fg
-                  : Color.Empty;
-        // A grey, black or white highlight has no hue to keep, and forcing saturation onto one invents a
-        // colour outright - a filter styled black on yellow came out as a red lane. Those take a palette
-        // colour too: a grey lane against a grey gutter would be nothing to look at either way.
-        if (own.IsEmpty || ToHsl(own).S < 0.15) return Fallback[index % Fallback.Length];
-        return Vivid(own, settings.GutterBack);
-    }
-
-    /// <summary>Raises a colour's saturation and pulls its lightness away from <paramref name="against"/>,
-    /// keeping its hue. Enough to tell two pastels apart in a three-pixel column.</summary>
-    internal static Color Vivid(Color c, Color against)
-    {
-        (double h, double s, double l) = ToHsl(c);
-        s = Math.Max(s, 0.65);
-        double target = Luminance(against);
-        // Away from the background in whichever direction there is room, so this works the same on a dark
-        // theme as on a light one.
-        if (Math.Abs(l - target) < 0.30) l = target > 0.5 ? target - 0.30 : target + 0.30;
-        return FromHsl(h, s, Math.Clamp(l, 0.18, 0.82));
-    }
-
-    private static double Luminance(Color c) => (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
-
-    private static (double H, double S, double L) ToHsl(Color c)
-    {
-        double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
-        double max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b));
-        double l = (max + min) / 2, h = 0, s = 0;
-        if (max > min)
-        {
-            double d = max - min;
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            if (max == r) h = (g - b) / d + (g < b ? 6 : 0);
-            else if (max == g) h = (b - r) / d + 2;
-            else h = (r - g) / d + 4;
-            h /= 6;
-        }
-        return (h, s, l);
-    }
-
-    private static Color FromHsl(double h, double s, double l)
-    {
-        if (s <= 0) { int v = (int)Math.Round(l * 255); return Color.FromArgb(v, v, v); }
-        double q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-        double p = 2 * l - q;
-        return Color.FromArgb(Channel(p, q, h + 1.0 / 3), Channel(p, q, h), Channel(p, q, h - 1.0 / 3));
-    }
-
-    private static int Channel(double p, double q, double t)
-    {
-        if (t < 0) t += 1;
-        if (t > 1) t -= 1;
-        double v = t < 1.0 / 6 ? p + (q - p) * 6 * t
-                 : t < 1.0 / 2 ? q
-                 : t < 2.0 / 3 ? p + (q - p) * (2.0 / 3 - t) * 6
-                 : p;
-        return (int)Math.Round(Math.Clamp(v, 0, 1) * 255);
     }
 
     /// <summary>Blends a lane's colour over the gutter, against the busiest band that lane has anywhere in
@@ -557,14 +438,25 @@ internal sealed class MatchMapControl : Control
     private void ShowTipNow()
     {
         _tipTimer.Stop();
-        string text = BandTipText(_tipBand);
+        string text = BandTipText(_tipBand, LaneAt(_tipPoint.X));
         if (text.Length == 0) return;
         _tips.Show(text, this, _tipPoint.X - 8, _tipPoint.Y + 20, TipDurationMs);
     }
 
-    /// <summary>What a band holds, in words. Without this the lanes are colours with nothing to read them
-    /// against: the filter list is right there, but which lane is which would otherwise be a guess.</summary>
-    private string BandTipText(int band)
+    /// <summary>Which lane a given x is over, or -1 for the edges and the gutter.</summary>
+    private int LaneAt(int x)
+    {
+        int n = _lanes.Length, barLeft = BarLeft, barWidth = BarWidth;
+        if (n == 0 || barWidth / n < MinLanePixels || x < barLeft || x >= barLeft + barWidth) return -1;
+        return Math.Clamp((x - barLeft) * n / barWidth, 0, n - 1);
+    }
+
+    /// <summary>What a band holds, in words, naming the lane under the pointer first.
+    ///
+    /// Without this the lanes are colours with nothing to read them against. The key beside each filter in
+    /// the list answers "which lane is that filter"; this answers the other direction - "whose lane am I
+    /// pointing at" - which is the one you ask when something unexpected shows up on the map.</summary>
+    private string BandTipText(int band, int lane = -1)
     {
         if (band < 0 || band >= _bands.Length || _grid.Document is not { } doc) return "";
         long rows = doc.RowCount;
@@ -574,16 +466,18 @@ internal sealed class MatchMapControl : Control
         (long lineFrom, long lineTo) = LineRange(doc, rowFrom, rowTo, rows);
 
         var sb = new StringBuilder();
+        if (lane >= 0 && lane < _lanes.Length)
+            sb.Append("This lane: ").Append(Trim(_lanes[lane].Filter.DisplayName)).Append('\n');
         sb.Append(doc.FilteredMode ? "Rows " : "Lines ")
           .Append((rowFrom + 1).ToString("N0")).Append('\u2013').Append(rowTo.ToString("N0"));
         if (doc.FilteredMode)
             sb.Append(" (lines ").Append((lineFrom + 1).ToString("N0")).Append('\u2013').Append(lineTo.ToString("N0")).Append(')');
 
         var named = new List<(string Name, long Count)>();
-        foreach (var lane in _lanes)
+        foreach (var l in _lanes)
         {
-            long c = lane.Set.CountInRange(lineFrom, lineTo);
-            if (c > 0) named.Add((lane.Name, c));
+            long c = l.Set.CountInRange(lineFrom, lineTo);
+            if (c > 0) named.Add((l.Filter.DisplayName, c));
         }
         if (named.Count == 0) return sb.Append("\nnothing here matches").ToString();
         foreach (var (name, count) in named.OrderByDescending(x => x.Count).Take(8))
