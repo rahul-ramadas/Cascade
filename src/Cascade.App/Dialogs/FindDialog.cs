@@ -8,7 +8,7 @@ namespace Cascade.App;
 /// and reports status (e.g. still-loading) back via <see cref="SetStatus"/>.</summary>
 public sealed class FindDialog : Form
 {
-    private readonly TextBox _text = new() { Dock = DockStyle.Fill };
+    private readonly ComboBox _text = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDown, AutoCompleteMode = AutoCompleteMode.None };
     private readonly CheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly Label _status = new() { AutoSize = true, ForeColor = Color.Gray };
@@ -17,10 +17,15 @@ public sealed class FindDialog : Form
     private readonly Button _prev = new() { Text = "Find &Previous" };
     private readonly Button _cancel = new() { Text = "Cancel", Visible = false };
     private readonly Action<FindQuery, bool> _search;
+    private readonly System.Windows.Forms.Timer _preview = new() { Interval = 200 };
     private bool _searching;
 
     /// <summary>Raised when the user clicks Cancel while a search is running.</summary>
     public event Action? CancelRequested;
+
+    /// <summary>Raised shortly after the term changes, with null for an empty one. Only marks what is
+    /// already on screen - it deliberately does not search, so typing never moves the view.</summary>
+    public event Action<FindQuery?>? PreviewChanged;
 
     public FindDialog(Action<FindQuery, bool> search)
     {
@@ -163,6 +168,25 @@ public sealed class FindDialog : Form
         Controls.Add(root);
         AcceptButton = _next;
         MinimumSize = new Size(Dpi(460), 0);
+
+        // Typing marks the hits already on screen, after a pause so a burst of keystrokes costs one pass.
+        _text.TextChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _regex.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _case.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _preview.Tick += (_, _) =>
+        {
+            _preview.Stop();
+            PreviewChanged?.Invoke(_text.Text.Length == 0 ? null : new FindQuery(_text.Text, _regex.Checked, _case.Checked));
+        };
+    }
+
+    /// <summary>Fills the drop-down with the terms searched for before, most recent first.</summary>
+    public void SetHistory(IEnumerable<string> terms)
+    {
+        string current = _text.Text;
+        _text.Items.Clear();
+        foreach (var t in terms) _text.Items.Add(t);
+        _text.Text = current;
     }
 
     /// <summary>Find keys work anywhere in the dialog, not just in the text box. ProcessCmdKey runs before
@@ -240,5 +264,5 @@ public sealed class FindDialog : Form
         else _progress.Value = v;
     }
 
-    public void FocusInput() { _text.Focus(); _text.SelectAll(); }
+    public void FocusInput() { _text.Focus(); _text.SelectionStart = 0; _text.SelectionLength = _text.Text.Length; }
 }

@@ -11,6 +11,10 @@ public sealed class MachineState
     public List<string> RecentFiles { get; set; } = new();
     public List<string> RecentFilterFiles { get; set; } = new();
 
+    /// <summary>Terms searched for, most recent first. Machine-local like the recent files: what someone
+    /// looked for in their logs is not a preference to carry to another machine.</summary>
+    public List<string> RecentFindTerms { get; set; } = new();
+
     /// <summary>The filter file (.cascade or .tat) last loaded/saved; auto-loaded on the next launch when
     /// <see cref="AppSettings.AutoLoadLastFilterFile"/> is set.</summary>
     public string? LastFilterFile { get; set; }
@@ -20,6 +24,14 @@ public sealed class MachineState
 
     public void AddRecentFile(string path) => AddRecent(RecentFiles, path);
     public void AddRecentFilterFile(string path) => AddRecent(RecentFilterFiles, path);
+
+    public void AddRecentFindTerm(string term)
+    {
+        if (string.IsNullOrEmpty(term)) return;
+        RecentFindTerms.RemoveAll(t => string.Equals(t, term, StringComparison.Ordinal));
+        RecentFindTerms.Insert(0, term);
+        while (RecentFindTerms.Count > 20) RecentFindTerms.RemoveAt(RecentFindTerms.Count - 1);
+    }
 
     private static void AddRecent(List<string> list, string path)
     {

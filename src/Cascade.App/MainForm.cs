@@ -1210,7 +1210,15 @@ public sealed class MainForm : Form
         {
             _findDialog = new FindDialog(DoFind);
             _findDialog.CancelRequested += () => _doc.CancelFind();
+            // Typing marks the hits already on screen and nothing else: no sweep, and the view does not
+            // move until a search is actually asked for.
+            _findDialog.PreviewChanged += q =>
+            {
+                _grid.SetFindHighlight(q is null ? null : FindEngine.CompileQuery(q));
+                if (q is null && _lastQuery is not null) ClearFind();
+            };
         }
+        _findDialog.SetHistory(_state.RecentFindTerms);
         if (!_findDialog.Visible) _findDialog.Show(this);
         _findDialog.FocusInput();
     }
@@ -1218,6 +1226,9 @@ public sealed class MainForm : Form
     private async void DoFind(FindQuery query, bool forward)
     {
         _lastQuery = query;
+        _state.AddRecentFindTerm(query.Text);
+        _stateDirty = true;
+        _findDialog?.SetHistory(_state.RecentFindTerms);
         // The highlight outlives the dialog: F3 keeps working with it closed, so the hits have to stay
         // marked until the term is deliberately put away.
         _grid.SetFindHighlight(FindEngine.CompileQuery(query));
