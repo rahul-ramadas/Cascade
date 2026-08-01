@@ -7,4 +7,5 @@
     <Project Path="tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj" />
     <Project Path="tests/Cascade.UiTests/Cascade.UiTests.csproj" />
   </Folder>
+  <Project Path="../../Temp/vivid/vivid.csproj" />
 </Solution>

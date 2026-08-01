@@ -148,4 +148,3 @@ public class MapLook : IDisposable
     [DllImport("user32.dll")]
     private static extern bool SetProcessDpiAwarenessContext(int value);
 }
-

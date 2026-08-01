@@ -726,6 +726,17 @@ public class ManualSweep : IDisposable
             WaitFiltered();
             Thread.Sleep(1500);
 
+            // The key beside a filter in the list is the only thing that makes a lane's colour mean
+            // anything, so the two have to be the same colour on the real thing and not just in a fixture.
+            foreach (string name in new[] { "[ERROR]", "[order-service]" })
+            {
+                var key = KeyColour(name);
+                if (key is null) { Say($"  (no key beside {name})"); continue; }
+                Check($"the key beside {name} is a colour the map is painting",
+                      MapPaints(map, key.Value), $"key #{key.Value.R:x2}{key.Value.G:x2}{key.Value.B:x2}");
+            }
+            Shot("map-key");
+
             // Put the filters back as this stage found them: the stages after it share this window.
             if (ClickFilterRow("[ERROR]"))
             {
@@ -746,6 +757,53 @@ public class ManualSweep : IDisposable
     private AutomationElement? MapElement()
         => _app.Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
                .FirstOrDefault(s => (s.Name ?? "") == "Match map");
+
+    /// <summary>The colour of the map key drawn at the left of a filter's row, or null when it has none.</summary>
+    private Color? KeyColour(string contains)
+    {
+        var node = _app.FilterNode(contains);
+        if (node is null) return null;
+        try { node.AsTreeItem().Select(); } catch { /* only to bring it into view */ }
+        Thread.Sleep(400);
+        var r = (_app.FilterNode(contains) ?? node).BoundingRectangle;
+        if (r.Width <= 0 || r.Height <= 0) return null;
+
+        int y = r.Top + r.Height / 2;
+        const int span = 16;
+        using var strip = new Bitmap(span, 1, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(strip)) g.CopyFromScreen(r.Left, y, 0, 0, new Size(span, 1));
+        // The row's rectangle starts where its text does, and the key is drawn in the first few pixels of
+        // it. Further along is the row's own colour, which is what says whether there is a key at all.
+        var key = strip.GetPixel(3, 0);
+        var row = strip.GetPixel(11, 0);
+        Say($"  beside {contains}: key #{key.R:x2}{key.G:x2}{key.B:x2} on row #{row.R:x2}{row.G:x2}{row.B:x2}");
+        return Diff(key, row) > 40 ? key : null;
+    }
+
+    private static int Diff(Color a, Color b) => Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
+
+    /// <summary>Whether the map paints this colour anywhere, at any strength. A lane fades toward the gutter
+    /// where the filter is quiet, so what is looked for is the colour blended along that line rather than
+    /// the colour itself.</summary>
+    private bool MapPaints(AutomationElement map, Color want)
+    {
+        using var bmp = Grab(map);
+        var gutter = bmp.GetPixel(1, 1);
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 2; x < bmp.Width - 2; x++)
+            {
+                var p = bmp.GetPixel(x, y);
+                double span = want.R - gutter.R;
+                double t = Math.Abs(span) < 12 ? (want.G - gutter.G == 0 ? 1 : (p.G - gutter.G) / (double)(want.G - gutter.G))
+                                               : (p.R - gutter.R) / span;
+                if (t < 0.4 || t > 1.2) continue;
+                if (Math.Abs(gutter.R + (want.R - gutter.R) * t - p.R) > 14) continue;
+                if (Math.Abs(gutter.G + (want.G - gutter.G) * t - p.G) > 14) continue;
+                if (Math.Abs(gutter.B + (want.B - gutter.B) * t - p.B) > 14) continue;
+                return true;
+            }
+        return false;
+    }
 
     private static Bitmap Grab(AutomationElement e)
     {

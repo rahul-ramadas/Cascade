@@ -649,8 +649,23 @@ internal static class SelfTest
             map.RebuildForTesting();
             ok &= Check("but it takes one as soon as nothing above it is on",
                         map.LaneNamesForTesting.Any(n => n.Contains("line 1")), string.Join(",", map.LaneNamesForTesting));
+            // The parent is still in play - its pattern goes on scoping the child - but it is switched off,
+            // so it is not one of the filters being looked at and gets no lane of its own.
+            ok &= Check("and the switched-off filter above it does not",
+                        !map.LaneNamesForTesting.Contains("COMMON"), string.Join(",", map.LaneNamesForTesting));
             common.Enabled = true;
             collection.Remove(child);
+
+            // An exclude filter takes lines away rather than picking them out, so there is no such thing as
+            // where its lines are.
+            var without = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "line 7" } };
+            collection.Roots.Add(without);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+            ok &= Check("an exclude filter gets no lane", map.LaneCountForTesting == 2,
+                        string.Join(",", map.LaneNamesForTesting));
+            collection.Remove(without);
             doc.SetFilters(collection);
             WaitForFiltering(doc);
             map.RebuildForTesting();
@@ -677,11 +692,11 @@ internal static class SelfTest
             var colours = map.LaneColorsForTesting;
             var theme = new AppSettings();
             ok &= Check("a filter with no colour of its own takes one from the palette, not the text colour",
-                        colours.Length == 5 && colours[2].ToArgb() == MatchMapControl.FallbackForTesting(2).ToArgb()
-                                            && colours[3].ToArgb() == MatchMapControl.FallbackForTesting(3).ToArgb(),
+                        colours.Length == 5 && colours[2].ToArgb() == MapLanes.FallbackForTesting(2).ToArgb()
+                                            && colours[3].ToArgb() == MapLanes.FallbackForTesting(3).ToArgb(),
                         string.Join(" ", colours.Select(c => $"{c.R},{c.G},{c.B}")));
             ok &= Check("and so does one whose colour has no hue to keep",
-                        colours.Length == 5 && colours[4].ToArgb() == MatchMapControl.FallbackForTesting(4).ToArgb(),
+                        colours.Length == 5 && colours[4].ToArgb() == MapLanes.FallbackForTesting(4).ToArgb(),
                         colours.Length == 5 ? $"{colours[4].R},{colours[4].G},{colours[4].B}" : "?");
             ok &= Check("and two of them do not look the same",
                         colours.Length == 5 && Distance(colours[2], colours[3]) > 80,
@@ -709,7 +724,7 @@ internal static class SelfTest
 
             // A pale highlight, chosen to be quiet enough to read text on, has to survive being reduced to a
             // three-pixel column - which means it cannot stay pale.
-            var pale = MatchMapControl.Vivid(Color.FromArgb(0xDC, 0xDC, 0xDC), theme.GutterBack);
+            var pale = MapLanes.Vivid(Color.FromArgb(0xDC, 0xDC, 0xDC), theme.GutterBack);
             ok &= Check("a pale filter colour is pushed until it reads against the gutter",
                         Distance(pale, theme.GutterBack) > 90, $"{pale.R},{pale.G},{pale.B}");
 
@@ -750,6 +765,26 @@ internal static class SelfTest
             ok &= Check("and an empty band says so", map.TipTextForTesting(BandOf(18_000)).Contains("nothing"),
                         map.TipTextForTesting(BandOf(18_000)).Replace("\n", " | "));
 
+            // Which lane you are actually on, which is the question a colour cannot answer by itself.
+            string overRare = map.TipOverLaneForTesting(BandOf(5000), lane: 1);
+            ok &= Check("pointing at a lane names that lane first", overRare.StartsWith("This lane: RARE"),
+                        overRare.Replace("\n", " | "));
+            string overCommon = map.TipOverLaneForTesting(BandOf(5000), lane: 0);
+            ok &= Check("and the other lane names the other filter", overCommon.StartsWith("This lane: COMMON"),
+                        overCommon.Replace("\n", " | "));
+            ok &= Check("off the lanes it names none of them", !map.TipTextForTesting(BandOf(5000)).StartsWith("This lane"),
+                        map.TipTextForTesting(BandOf(5000)).Replace("\n", " | "));
+
+            // And the pointer really lands on the lane it looks like it is over.
+            var (barLeft, barWidth) = map.BarBoundsForTesting;
+            ok &= Check("the left of the bar is the first lane", map.LaneAtForTesting(barLeft + 1) == 0,
+                        map.LaneAtForTesting(barLeft + 1).ToString());
+            ok &= Check("and the right of it is the last", map.LaneAtForTesting(barLeft + barWidth - 1) == map.LaneCountForTesting - 1,
+                        map.LaneAtForTesting(barLeft + barWidth - 1).ToString());
+            ok &= Check("the edges belong to no lane",
+                        map.LaneAtForTesting(0) == -1 && map.LaneAtForTesting(barLeft + barWidth + 1) == -1,
+                        $"{map.LaneAtForTesting(0)} / {map.LaneAtForTesting(barLeft + barWidth + 1)}");
+
             // ---- find hits get their own edge ----
             ok &= Check("no find, no marks down the find edge", !map.FindInBandForTesting(BandOf(25_000)));
             doc.FindNextAsync(new FindQuery("RARE", false, false), 0, true).GetAwaiter().GetResult();
@@ -789,6 +824,7 @@ internal static class SelfTest
             ok &= Check("and goes again when the mark is cleared", !MapRowHasMarker(host, map, markerBand),
                         MapLaneColours(host, map, markerBand));
 
+            ok &= RunMapKeyChecks(doc, map);
             return ok;
         }
         finally
@@ -797,6 +833,104 @@ internal static class SelfTest
             host?.Dispose();
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>The key beside each filter in the list, which is the only thing that makes a lane's colour
+    /// mean anything: about half the filters in a real set have no colour of their own and take one from a
+    /// palette, and there is no guessing those. Both sides work it out from the same rule, so what is
+    /// checked here is that they agree - and that the key is actually painted.</summary>
+    private static bool RunMapKeyChecks(CascadeDocument doc, MatchMapControl map)
+    {
+        var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+        var host = new Form
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            ClientSize = new Size(400, 300),
+            Opacity = 0,
+            FormBorderStyle = FormBorderStyle.None
+        };
+        try
+        {
+            // An unstyled filter is the one that matters: its row is plain, so the palette colour of its key
+            // appears nowhere else on that row and cannot be found by accident.
+            var plain = new Filter { Enabled = true, Match = new FilterMatch { Text = "plain" } };
+            doc.Filters.Roots.Add(plain);
+            doc.SetFilters(doc.Filters);
+            WaitForFiltering(doc);
+
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            tree.RefreshCounts();
+            Pump();
+            map.RebuildForTesting();
+
+            var lanes = map.LaneNamesForTesting;
+            var colours = map.LaneColorsForTesting;
+            var filters = doc.Filters.EnumerateDepthFirst().ToList();
+            bool ok = Check("there are lanes to key", lanes.Length >= 3, $"{lanes.Length} lanes");
+
+            for (int i = 0; i < lanes.Length; i++)
+            {
+                var f = filters.FirstOrDefault(x => x.DisplayName == lanes[i]);
+                if (f is null) { ok &= Check($"the filter behind lane {lanes[i]} is findable", false); continue; }
+                ok &= Check($"the key beside {lanes[i]} is the colour its lane is painted",
+                            tree.LaneKeyForTesting(f) is { } c && c.ToArgb() == colours[i].ToArgb(),
+                            $"{tree.LaneKeyForTesting(f)} vs {colours[i]}");
+            }
+
+            // A filter that has lines but is switched off has no lane, so it must have no key either - the
+            // list would otherwise promise a colour the map is not painting anywhere.
+            var live = filters.First(x => x.DisplayName == lanes[0]);
+            var keyBefore = tree.LaneKeyForTesting(live);
+            live.Enabled = false;
+            doc.SetFilters(doc.Filters);
+            WaitForFiltering(doc);
+            tree.RefreshCounts();
+            Pump();
+            ok &= Check("switching a filter off takes its key away",
+                        keyBefore is not null && tree.LaneKeyForTesting(live) is null,
+                        $"{keyBefore} -> {tree.LaneKeyForTesting(live)?.ToString() ?? "none"}");
+            live.Enabled = true;
+            doc.SetFilters(doc.Filters);
+            WaitForFiltering(doc);
+            tree.RefreshCounts();
+            Pump();
+            map.RebuildForTesting();
+
+            // ...and it is really on screen, not merely worked out. Checked on the unstyled filter, whose
+            // row is not painted in anything like its key.
+            var r = tree.LaneKeyBoundsForTesting(plain);
+            var want = tree.LaneKeyForTesting(plain);
+            ok &= Check("the unstyled filter has a key with somewhere to be drawn",
+                        r.Width > 0 && r.Height > 0 && want is not null, $"{r}, {want?.ToString() ?? "no colour"}");
+            if (r.Width > 0 && want is { } colour)
+            {
+                using var picture = Capture(host);
+                bool painted = false;
+                for (int y = r.Top; y < r.Bottom && y < picture.Height && !painted; y++)
+                    for (int x = r.Left; x < r.Right && x < picture.Width; x++)
+                        if (picture.GetPixel(x, y).ToArgb() == colour.ToArgb()) { painted = true; break; }
+                ok &= Check("and it is painted there", painted,
+                            $"looked for {colour.R},{colour.G},{colour.B} in {r}");
+            }
+
+            // Turning the map off takes the key with it: it would be pointing at nothing.
+            tree.ShowLaneKeys = false;
+            Pump();
+            ok &= Check("no map, no key", tree.LaneKeyBoundsForTesting(plain) == Rectangle.Empty);
+
+            doc.Filters.Remove(plain);
+            doc.SetFilters(doc.Filters);
+            WaitForFiltering(doc);
+            return ok;
+        }
+        finally
+        {
+            host.Close();
+            host.Dispose();
         }
     }
 
