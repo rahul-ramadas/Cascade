@@ -1612,24 +1612,26 @@ internal static class SelfTest
                 return searched.Count - was;
             }
 
-            // When the counts get re-read. A sweep of a large file takes a second or so, and the numbers
-            // climb the whole time - stopping short of the end is what makes them look wrong.
+            // When the counts get re-read. Two things move underneath them - the sweep gathering matches and
+            // the filters deciding which of them can be reached - and both have to be watched the same way.
             var fresh = TimeSpan.Zero;
             var old = TimeSpan.FromSeconds(1);
-            ok &= Check("a running sweep is re-read as it goes",
-                        MainForm.TallyIsStale(complete: false, wasComplete: false, sameLine: true,
-                                              sameFilters: true, haveText: true, age: old));
-            ok &= Check("but not faster than the eye",
-                        !MainForm.TallyIsStale(false, false, true, true, true, fresh));
-            ok &= Check("the sweep finishing is a reason on its own",
-                        MainForm.TallyIsStale(complete: true, wasComplete: false, sameLine: true,
-                                              sameFilters: true, haveText: true, age: fresh));
-            ok &= Check("a finished search that nothing has touched is left alone",
-                        !MainForm.TallyIsStale(true, true, true, true, true, old));
-            ok &= Check("moving the caret changes which match you are on",
-                        MainForm.TallyIsStale(true, true, sameLine: false, sameFilters: true, haveText: true, age: fresh));
-            ok &= Check("and changing the filters changes what is hidden",
-                        MainForm.TallyIsStale(true, true, true, sameFilters: false, haveText: true, age: fresh));
+            bool Stale(bool swept = true, bool wasSwept = true, bool settled = true, bool wasSettled = true,
+                       bool sameLine = true, bool sameFilters = true, bool sameHiding = true,
+                       bool haveText = true, TimeSpan? age = null)
+                => MainForm.TallyIsStale(swept, wasSwept, settled, wasSettled, sameLine, sameFilters,
+                                         sameHiding, haveText, age ?? fresh);
+
+            ok &= Check("a running sweep is re-read as it goes", Stale(swept: false, wasSwept: false, age: old));
+            ok &= Check("but not faster than the eye", !Stale(swept: false, wasSwept: false, age: fresh));
+            ok &= Check("the sweep finishing is a reason on its own", Stale(swept: true, wasSwept: false));
+            ok &= Check("a settled search that nothing has touched is left alone", !Stale(age: old));
+            ok &= Check("moving the caret changes which match you are on", Stale(sameLine: false));
+            ok &= Check("and a filter edit changes what is hidden", Stale(sameFilters: false));
+            ok &= Check("so does hiding or showing the lines that did not match", Stale(sameHiding: false));
+            ok &= Check("a filter pass under way is re-read as it goes",
+                        Stale(settled: false, wasSettled: false, age: old));
+            ok &= Check("and once more when it settles", Stale(settled: true, wasSettled: false));
 
             return ok;
         }
