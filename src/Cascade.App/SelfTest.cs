@@ -149,6 +149,40 @@ internal static class SelfTest
                              new Rectangle(gutter, margin.Top, unscrolled.Width - gutter - 20, margin.Height));
             bool ok = Check("scrolling right actually moved the text", moved);
 
+            // ...and the sideways scrollbar has to say so. It is drawn rather than borrowed now, so it only
+            // reports a position because it was given one to report - and that is what the UI tests read.
+            var hbar = grid.HScrollBarForTesting;
+            ok &= Check("and the sideways scrollbar has somewhere to scroll to", hbar.MaxValue > 0,
+                        $"max {hbar.MaxValue}");
+            ok &= Check("and reports where it is to anyone asking",
+                        hbar.AccessibilityObject.Value == hbar.Value.ToString() && hbar.Value > 0,
+                        $"value {hbar.Value}, reported {hbar.AccessibilityObject.Value ?? "(null)"}");
+
+            // ...and it knows its range before anything is painted. A window placed off the screen never
+            // gets a paint, so a range measured only while drawing stays empty and Home and End have
+            // nowhere to go - which is exactly the state the UI tests run in.
+            using (var quiet = new Form { ClientSize = new Size(420, 300) })
+            using (var unpainted = new LineGridControl())
+            {
+                quiet.Controls.Add(unpainted);
+                unpainted.Dock = DockStyle.Fill;
+                quiet.CreateControl();
+                unpainted.Attach(doc, settings);
+                unpainted.RefreshView();
+                ok &= Check("and knows its range before it has painted anything",
+                            unpainted.HScrollBarForTesting.MaxValue > 0 && unpainted.RowsPaintedForTesting == 0,
+                            $"max {unpainted.HScrollBarForTesting.MaxValue}, " +
+                            $"{unpainted.RowsPaintedForTesting} rows painted");
+            }
+
+            // ...and the End key drives it, which is the path the UI tests take.
+            grid.ScrollHorizontallyTo(0);
+            grid.PressKeyForTesting(Keys.End);
+            ok &= Check("End takes the view to the far right", hbar.Value > 0 && hbar.Value == hbar.MaxValue,
+                        $"value {hbar.Value} of {hbar.MaxValue}");
+            grid.PressKeyForTesting(Keys.Home);
+            ok &= Check("and Home brings it back", hbar.Value == 0, hbar.Value.ToString());
+
             var diff = FirstDifference(unscrolled, scrolled, margin);
             ok &= Check($"scrolling right leaves the line-number margin (0..{gutter}) untouched" +
                         (diff is null ? "" : $" [first differs at x={diff.Value.X},y={diff.Value.Y}: " +
@@ -445,6 +479,24 @@ internal static class SelfTest
             Pump();
             ok &= Check("a burst of selection changes re-filters once", applied == 1, $"applied {applied} times");
 
+            // Landing on the same set of filters must cost nothing at all. Every click in the pane used to
+            // re-run a pass over the whole file to arrive back where it started, which on a big file is a
+            // visible flicker of the progress bar and a great deal of work for no answer.
+            applied = 0;
+            pane.SelectForTesting("first", "second");
+            Pump();
+            pane.SelectForTesting("first", "second");
+            Pump();
+            ok &= Check("but re-picking the same presets does not re-filter at all", applied == 0,
+                        $"applied {applied} times");
+            applied = 0;
+            pane.SelectForTesting();
+            Pump();
+            pane.SelectForTesting();
+            Pump();
+            ok &= Check("nor does clearing a selection that is already clear", applied == 1,
+                        $"applied {applied} times");
+
             // The other direction: enabling by hand is enough to put a preset in effect.
             a.Enabled = false; b.Enabled = false; c.Enabled = false;
             pane.RefreshActive();
@@ -558,6 +610,59 @@ internal static class SelfTest
                             $"map background {settings.GutterBack}, row here {mapSide}, trough {trough}");
             }
 
+            // The scrollbar is framed on every side, not just the one facing the map, and its thumb has
+            // square corners - a rounded one against the map's square window read as a different kind of
+            // thing altogether. Read off the painted pixels: the frame is drawn, not laid out, so geometry
+            // would answer for a bar that paints only one edge.
+            var bar = grid.ScrollBarForTesting;
+            if (bar is not null)
+            {
+                var trough = bar.TroughForTesting;
+                using var shot = new Bitmap(bar.Width, bar.Height);
+                bar.DrawToBitmap(shot, new Rectangle(0, 0, bar.Width, bar.Height));
+                // Down the first column of the trough, which the thumb is inset away from.
+                var inside = shot.GetPixel(trough.Left, trough.Top + trough.Height / 2);
+                var above = shot.GetPixel(trough.Left, 0);
+                var below = shot.GetPixel(trough.Left, bar.Height - 1);
+                var beside = shot.GetPixel(0, trough.Top + trough.Height / 2);
+                ok &= Check("the scrollbar is framed on all four sides",
+                            above.ToArgb() == beside.ToArgb() && below.ToArgb() == beside.ToArgb() &&
+                            beside.ToArgb() != inside.ToArgb(),
+                            $"trough {inside}, above {above}, below {below}, beside {beside}");
+                var thumb = bar.ThumbForTesting;
+                var corner = shot.GetPixel(thumb.Left, thumb.Top);
+                var middle = shot.GetPixel(thumb.Left + thumb.Width / 2, thumb.Top + thumb.Height / 2);
+                ok &= Check("and its thumb has square corners", corner.ToArgb() == middle.ToArgb(),
+                            $"corner {corner}, middle {middle}");
+            }
+
+            // The sideways scrollbar is the same control, so the two edges of the window match.
+            var hbar = grid.HScrollBarForTesting;
+            if (hbar.Visible && hbar.Width > 8)
+            {
+                var htrough = hbar.TroughForTesting;
+                using var hshot = new Bitmap(hbar.Width, hbar.Height);
+                hbar.DrawToBitmap(hshot, new Rectangle(0, 0, hbar.Width, hbar.Height));
+                var inside = hshot.GetPixel(htrough.Left + htrough.Width / 2, htrough.Top);
+                var above = hshot.GetPixel(htrough.Left + htrough.Width / 2, 0);
+                var below = hshot.GetPixel(htrough.Left + htrough.Width / 2, hbar.Height - 1);
+                var beside = hshot.GetPixel(0, htrough.Top);
+                ok &= Check("the sideways scrollbar is framed on all four sides too",
+                            above.ToArgb() == beside.ToArgb() && below.ToArgb() == beside.ToArgb() &&
+                            beside.ToArgb() != inside.ToArgb(),
+                            $"trough {inside}, above {above}, below {below}, beside {beside}");
+                ok &= Check("and is as thick as the vertical one",
+                            bar is null || hbar.Height == bar.Width, $"{hbar.Height}px vs {bar?.Width}px");
+            }
+
+            // Both bars have to answer for where they are: assistive technology reads a scrollbar's value,
+            // and so do the UI tests. A drawn control gets that only by saying so.
+            grid.ScrollBarForTesting.Value = 7;
+            ok &= Check("the scrollbar tells anyone asking where it is",
+                        grid.ScrollBarForTesting.AccessibilityObject.Value == "7",
+                        grid.ScrollBarForTesting.AccessibilityObject.Value ?? "(null)");
+            grid.ScrollBarForTesting.Value = 0;
+
             grid.ScrollToRow(0);
             map.RebuildForTesting();
             int slots = map.SlotCountForTesting;
@@ -652,34 +757,102 @@ internal static class SelfTest
             ok &= Check("so the rectangle is at the bottom", end.Top + end.Height >= map.Height - map.RowPixelsForTesting * 2,
                         $"{end.Top}+{end.Height} of {map.Height}");
 
-            // ---- the caret is never compressed away ----
+            // ---- the caret is never compressed away, and never disturbs the map either ----
+            // It is drawn from the rows a pixel stands for rather than being given a pixel of its own:
+            // splitting a compressed stretch at the caret re-lays out everything below it on every arrow
+            // key, which reads as the whole map shivering.
             grid.ScrollToRow(20_000);
             grid.SelectRowForAccessibility(20_000);
             grid.RefreshView();
             Pump();
             map.RebuildForTesting();
             int caretSlot = map.SlotOfForTesting(20_000);
-            ok &= Check("a caret on a line nothing matched still gets a pixel of its own",
-                        map.RowAtForTesting(caretSlot) == 20_000,
-                        $"slot {caretSlot} holds row {map.RowAtForTesting(caretSlot)}");
-            ok &= Check("and the stretch around it is still compressed",
-                        map.RowAtForTesting(caretSlot + 1) > 20_001,
-                        map.RowAtForTesting(caretSlot + 1).ToString());
+            var (caretFrom, caretTo) = map.RowsAtForTesting(caretSlot);
+            ok &= Check("a caret on a line nothing matched is still somewhere on the map",
+                        caretFrom <= 20_000 && caretTo > 20_000,
+                        $"slot {caretSlot} stands for rows {caretFrom}..{caretTo}");
+            ok &= Check("and the stretch it is in is still compressed", caretTo - caretFrom > 1,
+                        $"{caretTo - caretFrom} rows on one pixel");
 
-            // The same at the end of the file, where the map is filled the other way round.
-            long lastPlain = lines - 3_000;
-            grid.ScrollToRow(lines);
-            grid.SelectRowForAccessibility(lastPlain);
-            grid.RefreshView();
-            Pump();
-            map.RebuildForTesting();
-            int endSlot = map.SlotOfForTesting(lastPlain);
-            ok &= Check("and it keeps one when the map is filled from the bottom up",
-                        map.RowAtForTesting(endSlot) == lastPlain,
-                        $"slot {endSlot} holds row {map.RowAtForTesting(endSlot)}, wanted {lastPlain}");
+            // Walking the caret down the view must not move a single pixel of the map.
+            long[] before20 = map.RowsForTesting();
+            long stillAt = grid.FirstVisibleRow;
+            int walk = Math.Max(2, grid.VisibleRows - 1);
+            for (int i = 1; i <= walk; i++)
+            {
+                grid.SelectRowForAccessibility(20_000 + i);
+                grid.RefreshView();
+                map.RebuildForTesting();
+            }
+            long[] after20 = map.RowsForTesting();
+            int moved = before20.Length == after20.Length
+                ? Enumerable.Range(0, before20.Length).Count(i => before20[i] != after20[i])
+                : Math.Max(before20.Length, after20.Length);
+            ok &= Check("the caret walked without scrolling the view, so the map had no reason to move",
+                        grid.FirstVisibleRow == stillAt, $"{stillAt} -> {grid.FirstVisibleRow}");
+            ok &= Check("walking the caret through it leaves the map exactly where it was", moved == 0,
+                        $"{moved} of {before20.Length} pixels moved over {walk} steps");
+            int endSlot = map.SlotOfForTesting(20_000 + walk);
+            var endRows = map.RowsAtForTesting(endSlot);
+            ok &= Check("and the caret is still on the map at the end of the walk",
+                        endRows.From <= 20_000 + walk && endRows.To > 20_000 + walk,
+                        $"slot {endSlot} stands for rows {endRows.From}..{endRows.To}, caret at {20_000 + walk}");
+
             grid.SelectRowForAccessibility(0);
             grid.RefreshView();
             Pump();
+
+            // ---- the window is dragged, not flung ----
+            grid.ScrollToRow(15_000);
+            map.RebuildForTesting();
+            var held = map.ViewportForTesting;
+            int grabAt = held.Top + held.Height - 1;      // by its bottom edge, the worst case for a snap
+            map.GrabForTesting(grabAt);
+            ok &= Check("taking hold of the window does not move it",
+                        map.ViewportForTesting.Top == held.Top, $"{held.Top} -> {map.ViewportForTesting.Top}");
+            map.DragToForTesting(grabAt + map.RowPixelsForTesting * 20);
+            var dragged = map.ViewportForTesting;
+            ok &= Check("and it follows the pointer from where it was taken hold of",
+                        dragged.Top > held.Top && Math.Abs(dragged.Top - held.Top - map.RowPixelsForTesting * 20) <= 4,
+                        $"{held.Top} -> {dragged.Top}, asked for +{map.RowPixelsForTesting * 20}");
+
+            // Dropping it and moving away must leave it where it was dropped. Re-centring there would be a
+            // rubber band: the map would snap back the moment the pointer left it.
+            long droppedAt = map.TopRowForTesting;
+            map.DropForTesting();
+            map.LeaveForTesting();
+            map.RebuildForTesting();
+            ok &= Check("letting go and moving off leaves the window where it was dropped",
+                        map.TopRowForTesting == droppedAt, $"{droppedAt} -> {map.TopRowForTesting}");
+            ok &= Check("and the rectangle stays where it was dropped too",
+                        Math.Abs(map.ViewportForTesting.Top - dragged.Top) <= 2,
+                        $"{dragged.Top} -> {map.ViewportForTesting.Top}");
+
+            // ...but a scroll from anywhere else still re-centres it.
+            grid.ScrollToRow(15_500);
+            map.RebuildForTesting();
+            int reAt = map.SlotOfForTesting(15_500), reOf = map.SlotCountForTesting;
+            ok &= Check("while scrolling from outside re-centres it again",
+                        reAt > reOf / 5 && reAt < reOf * 4 / 5, $"view at slot {reAt} of {reOf}");
+
+            // ---- the window cannot be dragged off the map ----
+            map.GrabForTesting(map.ViewportForTesting.Top);
+            map.DragToForTesting(-500);
+            ok &= Check("dragging above the map stops at its top edge", map.ViewportForTesting.Top == 0,
+                        map.ViewportForTesting.Top.ToString());
+            ok &= Check("and the view stops at the first row the map shows",
+                        grid.FirstVisibleRow == map.RowAtForTesting(0),
+                        $"view {grid.FirstVisibleRow}, map starts {map.RowAtForTesting(0)}");
+            map.DragToForTesting(map.Height + 500);
+            var low = map.ViewportForTesting;
+            ok &= Check("dragging below it stops at the bottom edge", low.Top + low.Height <= map.Height,
+                        $"{low.Top}+{low.Height} of {map.Height}");
+            ok &= Check("and the view stops at the last row the map shows",
+                        grid.FirstVisibleRow + grid.VisibleRows - 1 <= map.RowAtForTesting(map.SlotCountForTesting - 1),
+                        $"view ends {grid.FirstVisibleRow + grid.VisibleRows - 1}, " +
+                        $"map ends {map.RowAtForTesting(map.SlotCountForTesting - 1)}");
+            map.DropForTesting();
+            map.LeaveForTesting();
 
             // ---- painted, and repainted when it must be ----
             grid.ScrollToRow(0);
@@ -905,6 +1078,23 @@ internal static class SelfTest
             grid.DragToRowForTesting(4, xOfChar(reqAt + 10));
             ok &= Check("dragging onto another line goes back to whole lines", !grid.HasCharSelection,
                         grid.SelectedText ?? "(none)");
+
+            // ...and coming back to the row it started on picks the characters up again. Leaving used to
+            // throw the starting point away, so a drag that wandered off by a pixel could never get back.
+            grid.PressForTesting(2, xOfChar(reqAt));
+            grid.DragOverRowForTesting(4, xOfChar(reqAt + 10));
+            ok &= Check("a drag that has wandered off is selecting whole lines",
+                        !grid.HasCharSelection && grid.CaretRowForTesting == 4,
+                        $"{grid.SelectedText ?? "(none)"}, caret {grid.CaretRowForTesting}");
+            grid.DragOverRowForTesting(2, xOfChar(reqAt + 10));
+            ok &= Check("and coming back to where it started selects characters again",
+                        grid.SelectedText == "req-abc123",
+                        $"{grid.SelectedText ?? "(none)"} [origin {grid.CharOriginForTesting}, caret {grid.CaretRowForTesting}]");
+            grid.DragOverRowForTesting(2, xOfChar(reqAt + 3));
+            ok &= Check("from the same starting point it set out from", grid.SelectedText == "req",
+                        grid.SelectedText ?? "(none)");
+            grid.ReleaseForTesting(2, xOfChar(reqAt + 3));
+            ok &= Check("and letting go there keeps it", grid.SelectedText == "req", grid.SelectedText ?? "(none)");
 
             // Double-click takes the word under the pointer; the separators around it are not part of it.
             grid.DoubleClickForTesting(2, xOfChar(reqAt + 3));
@@ -1287,6 +1477,28 @@ internal static class SelfTest
             ok &= Check("page down moves by the rows that fit, not by the rows that would have",
                         grid.CaretRowForTesting > caretBefore && grid.CaretRowForTesting <= caretBefore + fits,
                         $"caret {caretBefore} -> {grid.CaretRowForTesting} with {fits} rows on screen");
+
+            // ...and it has to bring the caret with it. Scrolling was counted in unwrapped rows, of which
+            // many more fit, so the caret was reckoned to be on screen while it was pages below.
+            Pump();
+            ok &= Check("and the caret it moved is on screen afterwards",
+                        grid.CaretRowForTesting >= grid.FirstRowForTesting &&
+                        grid.CaretRowForTesting < grid.FirstRowForTesting + grid.RowsPaintedForTesting,
+                        $"caret {grid.CaretRowForTesting}, showing {grid.FirstRowForTesting}.." +
+                        $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
+            for (int i = 0; i < 3; i++) { grid.PressKeyForTesting(Keys.PageDown); Pump(); }
+            ok &= Check("and stays on screen page after page",
+                        grid.CaretRowForTesting >= grid.FirstRowForTesting &&
+                        grid.CaretRowForTesting < grid.FirstRowForTesting + grid.RowsPaintedForTesting,
+                        $"caret {grid.CaretRowForTesting}, showing {grid.FirstRowForTesting}.." +
+                        $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
+            grid.PressKeyForTesting(Keys.PageUp);
+            Pump();
+            ok &= Check("and page up keeps it too",
+                        grid.CaretRowForTesting >= grid.FirstRowForTesting &&
+                        grid.CaretRowForTesting < grid.FirstRowForTesting + grid.RowsPaintedForTesting,
+                        $"caret {grid.CaretRowForTesting}, showing {grid.FirstRowForTesting}.." +
+                        $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
 
             // A pathological line must not be allowed to fill the window on its own.
             grid.ScrollToRow(60);
@@ -1756,6 +1968,19 @@ internal static class SelfTest
         for (int i = 0; i < LuckyColors.Count; i++) all.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
         int fallback = LuckyColors.Next(3, all, mine);
         ok &= Check("with nothing left it still moves on rather than stopping", fallback == 4, fallback.ToString());
+
+        // Every colour but the one on offer taken - the case a long filter list actually produces. That one
+        // always looks free, because the filter being edited is not counted as using anything, so a full
+        // turn round the ring lands straight back on it and the same colour comes up for ever.
+        var allButOne = new List<Filter>();
+        for (int i = 1; i < LuckyColors.Count; i++)
+            allButOne.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
+        int p1 = LuckyColors.Next(0, allButOne, mine);
+        int p2 = LuckyColors.Next(p1, allButOne, mine);
+        ok &= Check("and never offers back the colour it is already on",
+                    LuckyColors.At(p1).Back != LuckyColors.At(0).Back &&
+                    LuckyColors.At(p2).Back != LuckyColors.At(p1).Back,
+                    $"on {LuckyColors.At(0).Back}: offered {LuckyColors.At(p1).Back} then {LuckyColors.At(p2).Back}");
 
         // The dialog wires it to both colours at once - a background with no matching text colour is how a
         // filter ends up unreadable.
