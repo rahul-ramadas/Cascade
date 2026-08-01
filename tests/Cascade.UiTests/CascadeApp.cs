@@ -702,11 +702,14 @@ internal sealed class CascadeApp : IDisposable
         Settle(1);
     }
 
-    /// <summary>Name of whatever is standing in for the log view's vertical scrollbar - the match map, or a
-    /// real scrollbar when the map is switched off. Empty when there is neither.</summary>
+    /// <summary>Name of the log view's vertical scrollbar. Empty when there is none.</summary>
     public string VerticalScrollerName()
         => Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
                  .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width)?.Name ?? "";
+
+    /// <summary>The minimap beside the scrollbar, when it is showing.</summary>
+    public AutomationElement? Minimap()
+        => Grid().FindAllChildren().FirstOrDefault(c => (c.Name ?? "") == "Minimap");
 
     /// <summary>Scrolls the log vertically, so an off-screen line can be brought into view.
     /// <paramref name="firstRow"/> is the display row to put at the top. Returns false if the view could not

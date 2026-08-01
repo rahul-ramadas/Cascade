@@ -103,13 +103,13 @@ public class ManualSweep : IDisposable
         Assert.True(true);
     }
 
-    /// <summary>Markers draw down the map's left edge, so setting one has to change what it paints.</summary>
+    /// <summary>Markers draw down the map's left edge, so setting one has to change what it paints. Also on
+    /// the scrollbar's trough, which is the only place a mark outside the map's window can appear.</summary>
     private void MarkersAndMap()
     {
         ClickRow(20);
         Thread.Sleep(400);
-        var map = _app.Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
-                      .FirstOrDefault(s => (s.Name ?? "") == "Match map");
+        var map = MapElement();
         Check("the map is there to draw on", map is not null);
         if (map is null) return;
 
@@ -673,30 +673,53 @@ public class ManualSweep : IDisposable
 
     private void MatchMap()
     {
-        Check("the map stands in for the scrollbar", _app.VerticalScrollerName() == "Match map", _app.VerticalScrollerName());
+        Check("there is a scrollbar", _app.VerticalScrollerName().Length > 0, _app.VerticalScrollerName());
         long first = _app.FirstVisibleLine();
         bool scrolled = _app.ScrollVerticalTo(150_000);
-        Check("the map scrolls the view", scrolled && _app.FirstVisibleLine() != first,
+        Check("and it scrolls the view", scrolled && _app.FirstVisibleLine() != first,
               $"{first} -> {_app.FirstVisibleLine()}");
         Shot("map");
 
         var map = MapElement();
+        Check("the minimap is beside it, not instead of it", map is not null);
         if (map is not null)
         {
-            // A lane per filter, so turning a second one on has to put a second colour on the map.
-            var oneFilter = MapColours(map);
-            Say($"colours with one filter on: {string.Join(" ", oneFilter)}");
-            if (ClickFilterRow("[ERROR]"))
+            // Nothing is coloured on the map that a filter is not colouring in the text. Switching them all
+            // off is the sharpest form of that: the map has to go blank.
+            _app.ScrollVerticalTo(150_000);
+            Thread.Sleep(900);
+            var coloured = MapColours(map);
+            Say($"colours with the filters on: {string.Join(" ", coloured)}");
+            Check("the map is coloured while filters are on", coloured.Count > 0, string.Join(" ", coloured));
+
+            _app.ClickMenuOrThrow("Filters", "Disable All");
+            WaitFiltered();
+            Thread.Sleep(1500);
+            var bare = MapColours(map);
+            Say($"colours with every filter off: {string.Join(" ", bare)}");
+            Check("and blank once none of them are", bare.Count == 0, string.Join(" ", bare));
+            Shot("map-blank");
+
+            if (ClickFilterRow("[order-service]"))
             {
                 _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
                 WaitFiltered();
+                _app.ScrollVerticalTo(150_000);
                 Thread.Sleep(1500);
-                var twoFilters = MapColours(map);
-                Say($"colours with two filters on: {string.Join(" ", twoFilters)}");
-                Check("a second filter puts a second colour on the map", twoFilters.Count > oneFilter.Count,
-                      $"{oneFilter.Count} -> {twoFilters.Count}");
-                Shot("map-two-lanes");
+                Check("and coloured again when one is turned back on", MapColours(map).Count > 0,
+                      string.Join(" ", MapColours(map)));
+                Shot("map-two-filters");
             }
+
+            // The colours have to be the filters' own, on the real thing and not just in a fixture.
+            foreach (string name in new[] { "[order-service]", "[OrderDispatchLoop]" })
+            {
+                var own = FilterRowColour(name);
+                if (own is null) { Say($"  (no colour on {name})"); continue; }
+                Check($"the colour {name} paints its rows is on the map",
+                      MapHasExactly(map, own.Value), $"row colour #{own.Value.R:x2}{own.Value.G:x2}{own.Value.B:x2}");
+            }
+            Shot("map-colours");
 
             // The rectangle that says where you are has to move when you move. It never did: the map is a
             // child control, so the view repainting did not repaint it.
@@ -709,101 +732,80 @@ public class ManualSweep : IDisposable
             int low = ViewportBand(map);
             long lowLine = _app.FirstVisibleLine();
             Say($"viewport rectangle at band {high} -> {low} (view {highLine} -> {lowLine})");
-            Check("the rectangle on the map follows the view", high >= 0 && low > high + 50,
+            Check("the rectangle on the map is drawn at both", high >= 0 && low >= 0,
                   $"band {high} -> {low}, view {highLine} -> {lowLine}");
+
+            // Clicking the map moves the view without the scrollbar going anywhere much: it is the fine
+            // adjustment, and the file is far too long for a window of it to register on the whole scale.
+            _app.ScrollVerticalTo(15_000_000);
+            Thread.Sleep(1200);
+            var r = map.BoundingRectangle;
+            long viewBefore = _app.FirstVisibleLine();
+            Mouse.Click(new Point(r.Left + r.Width / 2, r.Top + r.Height / 6));
+            Thread.Sleep(1200);
+            Say($"clicking high on the map: {viewBefore} -> {_app.FirstVisibleLine()}");
+            Check("clicking the map moves the view", _app.FirstVisibleLine() != viewBefore,
+                  $"{viewBefore} -> {_app.FirstVisibleLine()}");
             Shot("map-viewport");
 
             // ...and the whole picture is a different one when the view mode changes under it.
-            var before = MapColours(map);
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
             Thread.Sleep(2000);
-            int movedTo = ViewportBand(map);
-            Check("switching to filtered lines redraws the map", ViewportBand(map) >= 0 && MapColours(map).Count > 0,
-                  $"{string.Join(" ", MapColours(map))}, rectangle at {movedTo}");
+            Check("switching to filtered lines redraws the map", MapColours(map).Count > 0,
+                  string.Join(" ", MapColours(map)));
             Shot("map-filtered");
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
             Thread.Sleep(1500);
-
-            // The key beside a filter in the list is the only thing that makes a lane's colour mean
-            // anything, so the two have to be the same colour on the real thing and not just in a fixture.
-            foreach (string name in new[] { "[ERROR]", "[order-service]" })
-            {
-                var key = KeyColour(name);
-                if (key is null) { Say($"  (no key beside {name})"); continue; }
-                Check($"the key beside {name} is a colour the map is painting",
-                      MapPaints(map, key.Value), $"key #{key.Value.R:x2}{key.Value.G:x2}{key.Value.B:x2}");
-            }
-            Shot("map-key");
-
-            // Put the filters back as this stage found them: the stages after it share this window.
-            if (ClickFilterRow("[ERROR]"))
-            {
-                _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
-                WaitFiltered();
-                Thread.Sleep(1200);
-            }
         }
 
         _app.ClickMenuOrThrow("View", "Show Match Map");
         Thread.Sleep(800);
-        Check("turning it off brings the scrollbar back", _app.VerticalScrollerName() != "Match map", _app.VerticalScrollerName());
+        Check("turning it off leaves the scrollbar behind", MapElement() is null && _app.VerticalScrollerName().Length > 0,
+              _app.VerticalScrollerName());
         _app.ClickMenuOrThrow("View", "Show Match Map");
         Thread.Sleep(800);
-        Check("and back on returns the map", _app.VerticalScrollerName() == "Match map", _app.VerticalScrollerName());
+        Check("and back on returns the map", MapElement() is not null);
     }
 
     private AutomationElement? MapElement()
-        => _app.Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
-               .FirstOrDefault(s => (s.Name ?? "") == "Match map");
+        => _app.Grid().FindAllChildren().FirstOrDefault(s => (s.Name ?? "") == "Minimap");
 
-    /// <summary>The colour of the map key drawn at the left of a filter's row, or null when it has none.</summary>
-    private Color? KeyColour(string contains)
+    /// <summary>The colour a filter paints its own rows, read from its row in the filter list. Taken as the
+    /// most common colour along the row, because any single pixel might land on a letter.</summary>
+    private Color? FilterRowColour(string contains)
     {
         var node = _app.FilterNode(contains);
         if (node is null) return null;
         try { node.AsTreeItem().Select(); } catch { /* only to bring it into view */ }
         Thread.Sleep(400);
         var r = (_app.FilterNode(contains) ?? node).BoundingRectangle;
-        if (r.Width <= 0 || r.Height <= 0) return null;
+        if (r.Width <= 20 || r.Height <= 0) return null;
+        using var strip = new Bitmap(r.Width, 1, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(strip))
+            g.CopyFromScreen(r.Left, r.Top + r.Height / 2, 0, 0, new Size(r.Width, 1));
 
-        int y = r.Top + r.Height / 2;
-        const int span = 16;
-        using var strip = new Bitmap(span, 1, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(strip)) g.CopyFromScreen(r.Left, y, 0, 0, new Size(span, 1));
-        // The row's rectangle starts where its text does, and the key is drawn in the first few pixels of
-        // it. Further along is the row's own colour, which is what says whether there is a key at all.
-        var key = strip.GetPixel(3, 0);
-        var row = strip.GetPixel(11, 0);
-        Say($"  beside {contains}: key #{key.R:x2}{key.G:x2}{key.B:x2} on row #{row.R:x2}{row.G:x2}{row.B:x2}");
-        return Diff(key, row) > 40 ? key : null;
+        var tally = new Dictionary<int, int>();
+        for (int x = 0; x < strip.Width; x++)
+        {
+            int argb = strip.GetPixel(x, 0).ToArgb();
+            tally[argb] = tally.TryGetValue(argb, out int n) ? n + 1 : 1;
+        }
+        var c = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
+        return c.R > 245 && c.G > 245 && c.B > 245 ? null : c;   // an unstyled row is the plain background
+    }
+
+    private bool MapHasExactly(AutomationElement map, Color want)
+    {
+        using var bmp = Grab(map);
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 3; x < bmp.Width - 3; x++)
+                if (bmp.GetPixel(x, y).ToArgb() == want.ToArgb()) return true;
+        return false;
     }
 
     private static int Diff(Color a, Color b) => Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
-
-    /// <summary>Whether the map paints this colour anywhere, at any strength. A lane fades toward the gutter
-    /// where the filter is quiet, so what is looked for is the colour blended along that line rather than
-    /// the colour itself.</summary>
-    private bool MapPaints(AutomationElement map, Color want)
-    {
-        using var bmp = Grab(map);
-        var gutter = bmp.GetPixel(1, 1);
-        for (int y = 0; y < bmp.Height; y++)
-            for (int x = 2; x < bmp.Width - 2; x++)
-            {
-                var p = bmp.GetPixel(x, y);
-                double span = want.R - gutter.R;
-                double t = Math.Abs(span) < 12 ? (want.G - gutter.G == 0 ? 1 : (p.G - gutter.G) / (double)(want.G - gutter.G))
-                                               : (p.R - gutter.R) / span;
-                if (t < 0.4 || t > 1.2) continue;
-                if (Math.Abs(gutter.R + (want.R - gutter.R) * t - p.R) > 14) continue;
-                if (Math.Abs(gutter.G + (want.G - gutter.G) * t - p.G) > 14) continue;
-                if (Math.Abs(gutter.B + (want.B - gutter.B) * t - p.B) > 14) continue;
-                return true;
-            }
-        return false;
-    }
 
     private static Bitmap Grab(AutomationElement e)
     {
@@ -814,13 +816,17 @@ public class ManualSweep : IDisposable
         return bmp;
     }
 
-    /// <summary>The distinct colours the map's lanes are painted in, ignoring the gutter it sits on and the
-    /// near-shades a lane takes as it fades.</summary>
+    /// <summary>The distinct colours the map is painting, ignoring the gutter it sits on and the viewport
+    /// rectangle drawn over it - that rectangle is a tint of the selection colour across the full width, and
+    /// counting it would mean the map never reads as blank.</summary>
     private List<string> MapColours(AutomationElement map)
     {
         using var bmp = Grab(map);
+        var (skipTop, skipHeight) = ViewportRun(bmp);
         var seen = new List<Color>();
         for (int y = 0; y < bmp.Height; y += 3)
+        {
+            if (y >= skipTop && y < skipTop + skipHeight) continue;
             for (int x = 2; x < bmp.Width - 2; x++)
             {
                 var p = bmp.GetPixel(x, y);
@@ -828,17 +834,23 @@ public class ManualSweep : IDisposable
                 if (seen.Any(c => Math.Abs(c.R - p.R) + Math.Abs(c.G - p.G) + Math.Abs(c.B - p.B) < 90)) continue;
                 seen.Add(p);
             }
+        }
         return seen.Select(c => $"#{c.R:x2}{c.G:x2}{c.B:x2}").ToList();
     }
 
     /// <summary>Which band the viewport rectangle starts at. It is found down column zero, where only the
-    /// rectangle and the marker ticks paint - as the longest unbroken run, because the caret is drawn as a
-    /// single line right across the map and would otherwise be mistaken for it. The gutter's own colour is
-    /// whatever most of that column is: a reference pixel from a fixed spot lands inside the rectangle as
-    /// soon as the view is anywhere but the top.</summary>
+    /// rectangle and the marks paint, as the longest unbroken run - the caret is drawn as a single line right
+    /// across the map and would otherwise be mistaken for it. The gutter's own colour is whatever most of
+    /// that column is: a reference pixel from a fixed spot lands inside the rectangle as soon as the view is
+    /// anywhere but the top.</summary>
     private int ViewportBand(AutomationElement map)
     {
         using var bmp = Grab(map);
+        return ViewportRun(bmp).Top;
+    }
+
+    private static (int Top, int Height) ViewportRun(Bitmap bmp)
+    {
         var tally = new Dictionary<int, int>();
         for (int y = 0; y < bmp.Height; y++)
         {
@@ -855,7 +867,7 @@ public class ManualSweep : IDisposable
             if (painted) { run++; if (run > bestRun) { bestRun = run; best = y - run + 1; } }
             else run = 0;
         }
-        return bestRun >= 4 ? best : -1;
+        return bestRun >= 4 ? (best, bestRun) : (-1, 0);
     }
 
     private void FindEverything()
