@@ -241,6 +241,21 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Evaluates a decoded line against the current filters (for coloring visible rows).</summary>
     public LineEval EvaluateText(ReadOnlySpan<char> text, long line) => CurrentSnapshot.Evaluate(text, line, Markers);
 
+    /// <summary>Every filter that deep-matches a line, switched-off ones included, in document order.
+    /// For explaining a line to the user; not on any hot path.</summary>
+    public List<Filter> FiltersMatching(long line)
+    {
+        var snapshot = CurrentSnapshot;
+        var result = new List<Filter>();
+        if (snapshot.NodeCount == 0) return result;
+
+        var bits = new ulong[(snapshot.NodeCount + 63) / 64];
+        snapshot.MatchingFilters(GetLineText(line), line, Markers, bits);
+        for (int i = 0; i < snapshot.NodeCount; i++)
+            if ((bits[i >> 6] & (1UL << (i & 63))) != 0) result.Add(snapshot.FilterAt(i));
+        return result;
+    }
+
     /// <summary>Lines currently matching (deep-match) <paramref name="filter"/>, or -1 if unknown
     /// (no active filtering generation). The value grows while filtering streams, final when idle.</summary>
     public long MatchCountFor(Filter filter)

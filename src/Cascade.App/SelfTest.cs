@@ -63,6 +63,7 @@ internal static class SelfTest
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
+            ok &= Timed("filter tips", RunFilterTipChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -860,6 +861,98 @@ internal static class SelfTest
                     detail.Contains("891") && detail.Contains("1,204"), detail);
 
         return ok;
+    }
+
+    /// <summary>The hover tip is the only place the app answers "why is this line here, and why that
+    /// colour?". It has to name every filter that matched - including switched-off ones, which are the whole
+    /// point of asking - and spell out patterns in full, since a friendly description is exactly what stops
+    /// being enough at that moment.</summary>
+    private static bool RunFilterTipChecks()
+    {
+        Line("-- filter tips --");
+        var filters = new FilterCollection();
+
+        var error = new Filter { Enabled = true, Description = "Errors", Match = { Text = "ERROR" } };
+        filters.Add(error);
+        var timeout = new Filter { Enabled = true, Match = { Text = "timeout" } };
+        filters.Add(timeout, error);
+        var noisy = new Filter { Enabled = false, Match = { Text = "heartbeat" } };
+        filters.Add(noisy);
+        var drop = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "healthz" } };
+        filters.Add(drop);
+        var rx = new Filter { Enabled = false, Match = { Text = "[0-9]+ms", Regex = true, CaseSensitive = true } };
+        filters.Add(rx);
+
+        bool ok = Check("nothing matched means no tip at all", FilterTipText.Build(Array.Empty<Filter>()).Length == 0);
+
+        string tip = FilterTipText.Build(new[] { error, timeout });
+        ok &= Check("a described filter still shows its pattern in full",
+                    tip.Contains("Errors") && tip.Contains("ERROR"), tip);
+
+        tip = FilterTipText.Build(new[] { noisy, error });
+        ok &= Check("switched-on filters come first", tip.IndexOf("ERROR", StringComparison.Ordinal) <
+                                                     tip.IndexOf("heartbeat", StringComparison.Ordinal), tip);
+        ok &= Check("a switched-off filter says so", tip.Contains("heartbeat (off)"), tip);
+
+        tip = FilterTipText.Build(new[] { drop });
+        ok &= Check("an exclude is marked as one", tip.StartsWith('\u2260'), tip);
+
+        tip = FilterTipText.Build(new[] { rx });
+        ok &= Check("a regex reads as one", tip.Contains("/[0-9]+ms/"), tip);
+        ok &= Check("case sensitivity is spelled out", tip.Contains("(case)"), tip);
+
+        var many = new List<Filter>();
+        for (int i = 0; i < FilterTipText.MaxListed + 5; i++)
+            many.Add(new Filter { Enabled = true, Match = { Text = "f" + i } });
+        tip = FilterTipText.Build(many);
+        ok &= Check("a long list is cut short and says by how much",
+                    tip.Split('\n').Length == FilterTipText.MaxListed + 1 && tip.EndsWith("and 5 more"), tip);
+
+        // ...and end to end: the tip for a real line in a real grid.
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_tip_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "ERROR db timeout after 30s\nplain line\nheartbeat ok\n", new UTF8Encoding(false));
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            foreach (var f in filters.Roots) doc.Filters.Add(f.Clone(newIds: false));
+            doc.ApplyFilters();
+            WaitForFiltering(doc);
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(700, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            string first = grid.TipTextForTesting(0);
+            ok &= Check("the tip names the filters that matched the line",
+                        first.Contains("Errors") && first.Contains("timeout"), first);
+            ok &= Check("and not one that did not", !first.Contains("healthz"), first);
+            ok &= Check("a line nothing matched gets no tip", grid.TipTextForTesting(1).Length == 0,
+                        grid.TipTextForTesting(1));
+            ok &= Check("a switched-off filter that matched is still named",
+                        grid.TipTextForTesting(2).Contains("heartbeat (off)"), grid.TipTextForTesting(2));
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>Word wrap breaks the "one row, one line of pixels" rule the whole view is built on, so what

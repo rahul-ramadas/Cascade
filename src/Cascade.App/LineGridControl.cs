@@ -68,6 +68,15 @@ public sealed class LineGridControl : Control
     private int _charAnchor, _charFocus;
     private bool _charDragging;
     private DateTime _lastClickAt;
+
+    // Hover tip naming the filters that matched a line. Held off until the pointer has settled, so it never
+    // flickers past while someone is just moving across the window.
+    private readonly ToolTip _tips = new() { UseAnimation = false, UseFading = false };
+    private readonly System.Windows.Forms.Timer _tipTimer = new() { Interval = HoverDelayMs };
+    private const int HoverDelayMs = 600;
+    private const int TipDurationMs = 20_000;
+    private long _tipRow = -1;
+    private Point _tipPoint;
     private Point _lastClickAtPoint;
     private int _clickCount;
 
@@ -104,6 +113,7 @@ public sealed class LineGridControl : Control
         };
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
+        _tipTimer.Tick += (_, _) => ShowTipNow();
         TabStop = true;
         AccessibleRole = AccessibleRole.List;
         AccessibleName = "Cascade log view";
@@ -1073,6 +1083,7 @@ public sealed class LineGridControl : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        TrackHover(e.Location);
         if (_dragging && _doc is not null)
         {
             long row = Math.Clamp(RowAtY(e.Y), 0, Math.Max(0, _doc.RowCount - 1));
@@ -1109,6 +1120,56 @@ public sealed class LineGridControl : Control
         _charDragging = false;
         base.OnMouseUp(e);
     }
+
+    protected override void Dispose(bool disposing)
+    {
+        // Neither of these is a child control, so nothing else would clean them up.
+        if (disposing) { _tipTimer.Dispose(); _tips.Dispose(); }
+        base.Dispose(disposing);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        HideTip();
+        base.OnMouseLeave(e);
+    }
+
+    /// <summary>Restarts the hover countdown whenever the pointer moves to a different row, so the tip
+    /// describes where the pointer settled rather than where it passed through.</summary>
+    private void TrackHover(Point at)
+    {
+        if (_doc is null || !_settings.ShowFilterTooltips || _dragging) { HideTip(); return; }
+        long row = RowAtY(at.Y);
+        if (at.Y < HeaderHeight || row < 0 || row >= _doc.RowCount) { HideTip(); return; }
+        if (row == _tipRow) return;
+
+        HideTip();
+        _tipRow = row;
+        _tipPoint = at;
+        _tipTimer.Stop();
+        _tipTimer.Start();
+    }
+
+    private void HideTip()
+    {
+        _tipTimer.Stop();
+        if (_tipRow >= 0) _tips.Hide(this);
+        _tipRow = -1;
+    }
+
+    private void ShowTipNow()
+    {
+        _tipTimer.Stop();
+        if (_doc is null || _tipRow < 0 || _tipRow >= _doc.RowCount) return;
+
+        string text = FilterTipText.Build(_doc.FiltersMatching(_doc.RowToLine(_tipRow)));
+        if (text.Length == 0) return;
+        _tips.Show(text, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+    }
+
+    /// <summary>Builds the tip a hover would show, without the wait or the window.</summary>
+    internal string TipTextForTesting(long row)
+        => _doc is null ? "" : FilterTipText.Build(_doc.FiltersMatching(_doc.RowToLine(row)));
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {

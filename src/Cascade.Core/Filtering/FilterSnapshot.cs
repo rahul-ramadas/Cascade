@@ -162,6 +162,37 @@ public sealed class FilterSnapshot
     /// <summary>Maps a source filter to its count index (aligned with the counts array).</summary>
     public bool TryGetIndex(Filter filter, out int index) => _index.TryGetValue(filter, out index);
 
+    /// <summary>The filter at a count index - the reverse of <see cref="TryGetIndex"/>.</summary>
+    public Filter FilterAt(int index) => _nodesByIndex[index].Source;
+
+    /// <summary>How many filters this snapshot holds, i.e. the width of the index space.</summary>
+    public int NodeCount => _nodesByIndex.Length;
+
+    /// <summary>Records a bit (indexed by <see cref="TryGetIndex"/>) for every filter that deep-matches the
+    /// line, <i>including</i> ones that are switched off. Evaluation proper prunes subtrees with nothing
+    /// enabled, since they cannot change what is shown; this is for telling the user why a line looks the
+    /// way it does, where a switched-off filter that would have matched is worth knowing about.</summary>
+    public void MatchingFilters(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, Span<ulong> deepMatches)
+    {
+        var context = ThreadContext;
+        var hits = context.Hits.AsSpan();
+        if (_hitWords > 0)
+        {
+            hits.Clear();
+            _ciAutomaton?.Match(line, hits[.._ciWords]);
+            _csAutomaton?.Match(line, hits[_ciWords..]);
+        }
+        foreach (var root in _roots) DfsAll(root, line, lineNumber, markers, context, deepMatches);
+    }
+
+    private void DfsAll(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,
+        MatchContext context, Span<ulong> deepMatches)
+    {
+        if (!Matches(node, line, lineNumber, markers, context)) return;   // descendants require this match
+        deepMatches[node.Index >> 6] |= 1UL << (node.Index & 63);
+        foreach (var child in node.Children) DfsAll(child, line, lineNumber, markers, context, deepMatches);
+    }
+
     /// <summary>The key identifying a filter's deep-match results in the match cache. False when the filter
     /// is not in this snapshot, or its chain involves a marker (whose results must never be reused).</summary>
     public bool TryGetCacheKey(Filter filter, out string key)
