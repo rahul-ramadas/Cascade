@@ -310,6 +310,11 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>True once every line has been examined for the current term.</summary>
     public bool FindComplete => _search?.Complete ?? true;
 
+    /// <summary>How much the current term matches, split by what the view is showing. Null when no term is
+    /// live. Walks the hits, so it is for the caller to ask at a human rate rather than per frame.</summary>
+    public FindTally? FindTally(long currentLine)
+        => _search?.Count(FilteredMode ? IsLineVisible : null, currentLine);
+
     /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
     /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept
     /// until the term changes - so asking again costs nothing and no line is ever examined twice.
@@ -348,7 +353,7 @@ public sealed class CascadeDocument : IDisposable
         var matchers = new ThreadLocal<FindEngine.FindMatcher>(() => FindEngine.CompileQuery(query)!);
         var readers = new ThreadLocal<LineReader>(() => new LineReader(src, encoding));
 
-        void ScanRange(long from, long count, List<long> hits, CancellationToken ct)
+        void ScanRange(long from, long count, List<FindHit> hits, CancellationToken ct)
         {
             var matcher = matchers.Value!;
             var reader = readers.Value!;
@@ -358,7 +363,8 @@ public sealed class CascadeDocument : IDisposable
                 if ((line & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
                 long s = index.Get(line);
                 long e = (line + 1 < index.Count) ? index.Get(line + 1) : length;
-                if (matcher.Matches(reader.GetChars(s, e))) hits.Add(line);
+                int occurrences = matcher.CountIn(reader.GetChars(s, e));
+                if (occurrences > 0) hits.Add(new FindHit(line, occurrences));
             }
         }
 

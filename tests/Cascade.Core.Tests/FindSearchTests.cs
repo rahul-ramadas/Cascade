@@ -23,7 +23,7 @@ public class FindSearchTests
             _match = match; _gate = gate; _gateWhen = gateWhen;
         }
 
-        public void Scan(long from, long count, List<long> hits, CancellationToken ct)
+        public void Scan(long from, long count, List<FindHit> hits, CancellationToken ct)
         {
             if (_gate is not null && (_gateWhen is null || _gateWhen(from))) _gate.Wait(ct);
             Interlocked.Increment(ref Blocks);
@@ -31,7 +31,7 @@ public class FindSearchTests
             for (long i = from; i < from + count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (_match(i)) hits.Add(i);
+                if (_match(i)) hits.Add(new FindHit(i, 1));
             }
         }
     }
@@ -264,7 +264,7 @@ public class FindSearchTests
     [Fact]
     public async Task A_scanner_that_fails_is_reported_rather_than_waited_on_for_ever()
     {
-        var search = new FindSearch(Q, 1000, 0, (long _, long _, List<long> _, CancellationToken _)
+        var search = new FindSearch(Q, 1000, 0, (long _, long _, List<FindHit> _, CancellationToken _)
             => throw new InvalidDataException("bad encoding"));
         search.Start();
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
