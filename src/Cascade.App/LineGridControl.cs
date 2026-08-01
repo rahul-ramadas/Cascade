@@ -113,6 +113,10 @@ public sealed class LineGridControl : Control
         };
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
+        // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
+        // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
+        // file, because one of those would eventually be forgotten.
+        Invalidated += (_, _) => _map?.SyncToGrid();
         _tipTimer.Tick += (_, _) => ShowTipNow();
         TabStop = true;
         AccessibleRole = AccessibleRole.List;

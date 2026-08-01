@@ -90,6 +90,13 @@ public sealed class FindSearch : IDisposable
     /// <summary>Matches found so far. Only meaningful once <see cref="Complete"/>.</summary>
     public long Found { get { lock (_sync) return _found; } }
 
+    /// <summary>How many matching lines fall in <c>[from, toExclusive)</c>. Whole words at a time, so
+    /// summarising the file band by band costs one pass over the bitmap, not one per band.</summary>
+    public long HitsInRange(long from, long toExclusive)
+    {
+        lock (_sync) return _hits.CountInRange(from, toExclusive);
+    }
+
     private const int MaxExtraLines = 2_000_000;
 
     /// <summary>Words of visibility to read at a time. Big enough that the call is amortised away, small

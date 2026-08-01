@@ -330,6 +330,14 @@ public sealed class CascadeDocument : IDisposable
     public FindTally? FindTally(long currentLine)
         => _search?.Count(FilteredMode ? MatchView.VisibleWords : null, currentLine);
 
+    /// <summary>Lines the current find term has been found on so far, or 0 when nothing is being looked for.
+    /// A summary of the whole file keys its cache on this, so that a sweep filling in matches behind it is
+    /// noticed without polling the bitmap.</summary>
+    public long FindHitCount => _search?.Found ?? 0;
+
+    /// <summary>How many of the find term's lines fall in <c>[from, toExclusive)</c>.</summary>
+    public long FindHitsInRange(long from, long toExclusive) => _search?.HitsInRange(from, toExclusive) ?? 0;
+
     /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
     /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept
     /// until the term changes - so asking again costs nothing and no line is ever examined twice.
