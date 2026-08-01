@@ -27,6 +27,15 @@ public sealed class RowSelection
         return false;
     }
 
+    /// <summary>Whether anything in <c>[from, toExclusive)</c> is selected. A summary that stands for many
+    /// rows in one pixel has to ask about the whole span, not the one row it happens to name.</summary>
+    public bool IntersectsRange(long from, long toExclusive)
+    {
+        foreach (var (a, b) in _ranges)
+            if (a < toExclusive && b >= from) return true;
+        return false;
+    }
+
     public void SetSingle(long row)
     {
         _ranges.Clear();

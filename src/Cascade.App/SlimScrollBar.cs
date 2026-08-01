@@ -1,29 +1,31 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Windows.Forms;
-using Cascade.Core.Document;
 
 namespace Cascade.App;
 
 /// <summary>
-/// The vertical scrollbar, drawn rather than borrowed: a third the width of the system one, and with the
-/// marked lines of the whole file ticked down its trough.
+/// The vertical scrollbar, drawn rather than borrowed: sunk into a trough of its own so it does not read as
+/// more of the minimap beside it, with a rounded grey thumb rather than the map's square blue rectangle, and
+/// with the marked lines of the whole file ticked down it.
 ///
-/// The trough is the only place those marks can go. The minimap beside it shows a window of a few hundred
-/// rows, so a mark outside that window has nowhere to appear - and "where are my marks in this file" is
-/// exactly the question the scrollbar's own scale answers.
+/// The trough is the only place those marks can go. The minimap shows a window of a few hundred rows, so a
+/// mark outside that window has nowhere to appear - and "where are my marks in this file" is exactly the
+/// question the scrollbar's own scale answers.
 /// </summary>
 internal sealed class SlimScrollBar : Control
 {
-    public const int LogicalWidth = 9;
+    public const int LogicalWidth = 14;
 
     private const int MarkHeight = 2;      // device px; a single marked line has to be findable at file scale
-    private const int MinThumbHeight = 12;
+    private const int MinThumbHeight = 16;
 
     private readonly LineGridControl _grid;
     private long _value;
     private long _rows;
     private long _visible = 1;
     private bool _dragging;
+    private bool _hot;
     private int _grabOffset;
 
     /// <summary>Raised when the user moves it. Not raised by <see cref="Value"/> being set from outside,
@@ -53,8 +55,7 @@ internal sealed class SlimScrollBar : Control
     {
         _rows = Math.Max(0, rows);
         _visible = Math.Max(1, visible);
-        long clamped = Math.Clamp(_value, 0, MaxValue);
-        if (clamped != _value) { _value = clamped; }
+        _value = Math.Clamp(_value, 0, MaxValue);
         Invalidate();
     }
 
@@ -77,6 +78,7 @@ internal sealed class SlimScrollBar : Control
 
     // ---- painting ----
 
+    private int Divider => Math.Max(1, LogicalToDeviceUnits(1));
     private int TrackHeight => Math.Max(1, ClientSize.Height);
 
     private int ThumbHeight
@@ -95,8 +97,7 @@ internal sealed class SlimScrollBar : Control
         {
             long max = MaxValue;
             if (max <= 0) return 0;
-            double at = (double)_value / max;
-            return (int)Math.Round(at * (TrackHeight - ThumbHeight));
+            return (int)Math.Round((double)_value / max * (TrackHeight - ThumbHeight));
         }
     }
 
@@ -104,25 +105,46 @@ internal sealed class SlimScrollBar : Control
     {
         var g = e.Graphics;
         var settings = _grid.Settings;
-        g.Clear(settings.GutterBack);
+        int left = Divider;
 
-        DrawMarks(g);
+        // A trough a shade off the gutter, and a rule down the left: side by side with the map, two strips of
+        // the same colour read as one strip and neither can be aimed at.
+        g.Clear(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07));
+        using (var rule = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.30)))
+            g.FillRectangle(rule, 0, 0, left, ClientSize.Height);
 
-        var thumb = new Rectangle(1, ThumbTop, Math.Max(1, ClientSize.Width - 2), ThumbHeight);
-        using (var fill = new SolidBrush(Blend(settings.SelectionBack, settings.GutterBack, CanScroll ? 0.45 : 0.2)))
-            g.FillRectangle(fill, thumb);
-        using (var pen = new Pen(Blend(settings.SelectionBack, settings.GutterBack, CanScroll ? 0.8 : 0.3)))
-            g.DrawRectangle(pen, thumb.X, thumb.Y, thumb.Width - 1, thumb.Height - 1);
+        DrawMarks(g, left);
+
+        int inset = Math.Max(1, LogicalToDeviceUnits(2));
+        var thumb = new Rectangle(left + inset, ThumbTop, Math.Max(2, ClientSize.Width - left - inset * 2), ThumbHeight);
+        double strength = !CanScroll ? 0.20 : _dragging ? 0.62 : _hot ? 0.50 : 0.38;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = Rounded(thumb, Math.Max(2, thumb.Width / 2));
+        using (var fill = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength)))
+            g.FillPath(fill, path);
+        g.SmoothingMode = SmoothingMode.Default;
+    }
+
+    private static GraphicsPath Rounded(Rectangle r, int radius)
+    {
+        int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
+        var path = new GraphicsPath();
+        path.AddArc(r.Left, r.Top, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
     }
 
     /// <summary>Every marked line in the file, at its place on the scrollbar's own scale.</summary>
-    private void DrawMarks(Graphics g)
+    private void DrawMarks(Graphics g, int left)
     {
         if (_grid.Document is not { } doc || _rows <= 0) return;
         var marks = doc.Markers.Snapshot();
         if (marks.Length == 0) return;
 
-        int width = Math.Max(1, ClientSize.Width);
+        int width = Math.Max(1, ClientSize.Width - left);
         foreach (var (line, mask) in marks)
         {
             long row = doc.FilteredMode ? doc.RowForLine(line) : line;
@@ -130,14 +152,9 @@ internal sealed class SlimScrollBar : Control
             int y = (int)(row * (TrackHeight - MarkHeight) / _rows);
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
             using var brush = new SolidBrush(AppSettings.MarkerColors[Math.Clamp(index, 0, AppSettings.MarkerColors.Length - 1)]);
-            g.FillRectangle(brush, 0, y, width, MarkHeight);
+            g.FillRectangle(brush, left, y, width, MarkHeight);
         }
     }
-
-    private static Color Blend(Color c, Color back, double t) => Color.FromArgb(
-        (int)Math.Round(back.R + (c.R - back.R) * t),
-        (int)Math.Round(back.G + (c.G - back.G) * t),
-        (int)Math.Round(back.B + (c.B - back.B) * t));
 
     // ---- interaction ----
 
@@ -151,6 +168,7 @@ internal sealed class SlimScrollBar : Control
             _dragging = true;
             _grabOffset = e.Y - top;
             Capture = true;
+            Invalidate();
             return;
         }
         // Trough: a page towards the pointer, as a scrollbar has always done. The minimap next door is
@@ -171,7 +189,11 @@ internal sealed class SlimScrollBar : Control
         base.OnMouseUp(e);
         _dragging = false;
         Capture = false;
+        Invalidate();
     }
+
+    protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hot = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hot = false; Invalidate(); }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -186,6 +208,10 @@ internal sealed class SlimScrollBar : Control
         _value = v;
         Invalidate();
         Scrolled?.Invoke(v);
+        // A held drag never lets the message queue empty, and WM_PAINT only arrives when it does - so
+        // without these nothing moves until the mouse stops.
+        Update();
+        _grid.Update();
     }
 
     /// <summary>Test seam: what a drag to this y would scroll to.</summary>
@@ -196,6 +222,7 @@ internal sealed class SlimScrollBar : Control
     }
 
     internal (int Top, int Height) ThumbForTesting => (ThumbTop, ThumbHeight);
+    internal Rectangle TroughForTesting => new(Divider, 0, Math.Max(1, ClientSize.Width - Divider), ClientSize.Height);
 
     protected override AccessibleObject CreateAccessibilityInstance() => new BarAccessibleObject(this);
 
