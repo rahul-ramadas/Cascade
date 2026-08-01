@@ -754,6 +754,12 @@ internal sealed class CascadeApp : IDisposable
         return double.TryParse(legacy?.Value.ValueOrDefault, out double v) ? v : double.MaxValue;
     }
 
+    /// <summary>Whatever currently has the keyboard, anywhere on the desktop.</summary>
+    public AutomationElement FocusedElement() => _automation.FocusedElement();
+
+    /// <summary>Top-level windows, for the things that live outside the main one (tips, drop-downs).</summary>
+    public AutomationElement[] DesktopChildren() => _automation.GetDesktop().FindAllChildren();
+
     /// <summary>Whether the log view is showing a horizontal scrollbar at all.</summary>
     public bool HasHorizontalScrollBar()
         => Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
