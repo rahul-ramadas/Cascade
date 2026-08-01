@@ -171,6 +171,7 @@ public sealed class FindDialog : Form
 
         // Typing marks the hits already on screen, after a pause so a burst of keystrokes costs one pass.
         _text.TextChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _text.DropDown += (_, _) => { if (History is { } h) SetHistory(h()); };
         _regex.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _case.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _preview.Tick += (_, _) =>
@@ -180,13 +181,22 @@ public sealed class FindDialog : Form
         };
     }
 
+    /// <summary>Where the terms searched for before come from. Read when the drop-down opens rather than
+    /// pushed after every search: rebuilding the list puts the caret back to the start of the box and drops
+    /// any selection, which is not what pressing Enter should do to what you just typed.
+    /// A field, not a property - the WinForms analyser flags public properties on a Control.</summary>
+    public Func<IEnumerable<string>>? History;
+
     /// <summary>Fills the drop-down with the terms searched for before, most recent first.</summary>
     public void SetHistory(IEnumerable<string> terms)
     {
         string current = _text.Text;
+        int at = _text.SelectionStart, length = _text.SelectionLength;
         _text.Items.Clear();
         foreach (var t in terms) _text.Items.Add(t);
-        _text.Text = current;
+        if (_text.Text != current) _text.Text = current;
+        _text.SelectionStart = at;
+        _text.SelectionLength = length;
     }
 
     /// <summary>Find keys work anywhere in the dialog, not just in the text box. ProcessCmdKey runs before
@@ -239,12 +249,17 @@ public sealed class FindDialog : Form
         _search(new FindQuery(_text.Text, _regex.Checked, _case.Checked), forward);
     }
 
-    public void SetStatus(string text) => _status.Text = text;
+    public void SetStatus(string text)
+    {
+        if (_status.Text != text) _status.Text = text;
+    }
 
     /// <summary>Shows/hides the in-progress UI (progress bar + Cancel) and enables/disables the find
-    /// buttons while a background search runs.</summary>
+    /// buttons while a background search runs. Doing nothing when nothing changed matters: this sits in an
+    /// auto-sizing dialog, so each flip is a full relayout, and an answer already gathered needs none.</summary>
     public void SetSearching(bool searching)
     {
+        if (_searching == searching) return;
         _searching = searching;
         _next.Enabled = _prev.Enabled = !searching;
         _cancel.Enabled = searching;
@@ -265,4 +280,19 @@ public sealed class FindDialog : Form
     }
 
     public void FocusInput() { _text.Focus(); _text.SelectionStart = 0; _text.SelectionLength = _text.Text.Length; }
+
+    internal void SetTermForTesting(string text, int start, int length)
+    {
+        _text.Text = text;
+        _text.SelectionStart = start;
+        _text.SelectionLength = length;
+    }
+
+    internal string TermForTesting() => _text.Text;
+
+    internal (int Start, int Length) SelectionForTesting() => (_text.SelectionStart, _text.SelectionLength);
+
+    internal bool SearchingForTesting() => _searching;
+
+    internal void EnterForTesting() => Run(true);
 }
