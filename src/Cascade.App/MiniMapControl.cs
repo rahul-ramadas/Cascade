@@ -57,11 +57,13 @@ internal sealed class MiniMapControl : Control
     private bool _builtFilteredMode;
     private int _builtMarkers = -1;
     private long _builtFindHits = -1;
-    private long _builtSelection = -1;
+    private long _drawnSelection = -1;
     private (int Top, int Height) _drawnViewport = (-1, -1);
 
     private bool _dragging;
     private bool _hovering;
+    private long _trackedView = -1;   // the view position the window was last placed for
+    private int _grabOffset;         // where inside the rectangle the drag took hold of it
     private int _tipSlot = -1;
     private Point _tipPoint;
     private int _paints;
@@ -87,7 +89,7 @@ internal sealed class MiniMapControl : Control
     }
 
     /// <summary>Throws away the summary so the next paint rebuilds it.</summary>
-    public void InvalidateSummary() { _builtGeneration = -1; Invalidate(); }
+    public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; Invalidate(); }
 
     protected override void OnResize(EventArgs e)
     {
@@ -105,8 +107,14 @@ internal sealed class MiniMapControl : Control
     internal long RowAtForTesting(int slot) => slot >= 0 && slot < _slots ? _rowAt[slot] : -1;
     internal int ColourAtForTesting(int slot) => slot >= 0 && slot < _slots ? _colour[slot] : 0;
     internal int SlotOfForTesting(long row) => SlotOf(row);
+    internal (long From, long To) RowsAtForTesting(int slot) => slot >= 0 && slot < _slots ? RowsAt(slot) : (-1, -1);
+    internal long[] RowsForTesting() => _rowAt.Take(_slots).ToArray();
     internal string TipTextForTesting(int slot) => SlotTipText(slot);
-    internal void ClickForTesting(int y) => ScrollTo(y);
+    internal void ClickForTesting(int y) { Grab(y); DropForTesting(); LeaveForTesting(); }
+    internal void GrabForTesting(int y) { _dragging = true; _hovering = true; Grab(y); }
+    internal void DragToForTesting(int y) => ScrollToTop(y - _grabOffset);
+    internal void DropForTesting() { _dragging = false; }
+    internal void LeaveForTesting() { _hovering = false; }
     internal (int Top, int Height) ViewportForTesting => Geometry();
     internal Rectangle ContentForTesting => new(Divider, 0, Math.Max(1, ClientSize.Width - Divider), ClientSize.Height);
 
@@ -121,18 +129,58 @@ internal sealed class MiniMapControl : Control
     private int Divider => Math.Max(1, LogicalToDeviceUnits(1));
     private int EdgeWidth => Math.Max(2, LogicalToDeviceUnits(EdgeLane));
 
-    /// <summary>Puts the view in the middle of the window.
+    /// <summary>Slots the map has room for at the size it is now.</summary>
+    private int SlotCapacity => Math.Max(1, Math.Max(1, ClientSize.Height) / Math.Max(1, _rowPixels));
+
+    /// <summary>Puts the view back in the middle of the window, but only when the view has moved for a
+    /// reason of its own - a key, the wheel, the scrollbar. Returns whether it moved the window.
     ///
-    /// Any scroll from anywhere else - a key, the wheel, the scrollbar - re-centres it, so the rectangle
-    /// stays put and the picture moves under it rather than the rectangle drifting to an edge. The one
-    /// exception is while the pointer is on the map: a window that moved under a drag would chase itself,
-    /// and what you clicked has to still be where you clicked it.</summary>
-    private void TrackView(long rows)
+    /// Re-centring on every look would undo the map's own dragging: the drop position would spring back to
+    /// the middle the moment the pointer left. So a scroll the map itself caused is recorded as accounted
+    /// for and left alone, and the window only re-centres when something else moves the view.</summary>
+    private bool TrackView(long rows, int slots)
     {
-        if (_dragging || _hovering) return;
         long viewTop = _grid.FirstVisibleRow;
-        long viewRows = Math.Max(1, _grid.VisibleRows);
-        _top = Math.Clamp(viewTop + viewRows / 2 - _span / 2, 0, Math.Max(0, rows - 1));
+        if (_dragging || _hovering) { _trackedView = viewTop; return false; }
+        if (viewTop == _trackedView) return false;
+        _trackedView = viewTop;
+        Recentre(rows, slots);
+        return true;
+    }
+
+    /// <summary>Starts the window half a map above the view, measured in the pixels the fill will actually
+    /// spend rather than in rows. Guessing from the last build's span cannot work: a build that crosses
+    /// into a compressed stretch reaches many times further than the one before it, so the guess and the
+    /// correction chase each other and the view can settle hard against an edge.</summary>
+    private void Recentre(long rows, int slots)
+    {
+        if (_grid.Document is not { } doc || rows <= 0) return;
+        long viewTop = Math.Clamp(_grid.FirstVisibleRow, 0, rows - 1);
+        _top = BackFrom(doc, viewTop, slots / 2);
+    }
+
+    /// <summary>Where the map has to begin for <paramref name="from"/> to land <paramref name="pixels"/>
+    /// down it: the fill's own gap rule walked backwards, without resolving any colours.</summary>
+    private static long BackFrom(CascadeDocument doc, long from, int pixels)
+    {
+        long row = from;
+        int spent = 0;
+        while (spent < pixels && row > 0)
+        {
+            long stop = PrevStop(doc, row);
+            if (stop < row)
+            {
+                long gap = row - stop;
+                int cost = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
+                if (spent + cost >= pixels) return Math.Max(0, row - (pixels - spent) * gap / cost);
+                spent += cost;
+                row = Math.Max(0, stop);
+                continue;
+            }
+            spent++;
+            row--;
+        }
+        return Math.Max(0, row);
     }
 
     private void EnsureSummary()
@@ -143,23 +191,7 @@ internal sealed class MiniMapControl : Control
         long rows = doc.RowCount;
         int height = Math.Max(1, ClientSize.Height);
         int width = Math.Max(1, ClientSize.Width);
-        long selection = _grid.SelectionVersion;
         long findHits = doc.FindHitCount;
-        if (rows > 0) TrackView(rows);
-
-        if (_builtGeneration == doc.FilterGeneration && _builtRows == rows && _builtTop == _top &&
-            _builtHeight == height && _builtWidth == width && _builtFilteredMode == doc.FilteredMode &&
-            _builtMarkers == doc.Markers.Version && _builtFindHits == findHits && _builtSelection == selection)
-            return;
-
-        _builtGeneration = doc.FilterGeneration;
-        _builtRows = rows;
-        _builtHeight = height;
-        _builtWidth = width;
-        _builtFilteredMode = doc.FilteredMode;
-        _builtMarkers = doc.Markers.Version;
-        _builtFindHits = findHits;
-        _builtSelection = selection;
 
         _rowPixels = MinRowPixels;
         int slots = Math.Max(1, height / _rowPixels);
@@ -169,37 +201,42 @@ internal sealed class MiniMapControl : Control
             _rowPixels = Math.Max(_rowPixels, height / (int)Math.Max(1, rows));
             slots = Math.Max(1, height / _rowPixels);
         }
+        TrackView(rows, slots);
+
+        // The selection is drawn over the picture rather than into it, so moving the caret needs a repaint
+        // but not a rebuild - which matters, because holding an arrow key asks for one per keypress.
+        if (_builtGeneration == doc.FilterGeneration && _builtRows == rows && _builtTop == _top &&
+            _builtHeight == height && _builtWidth == width && _builtFilteredMode == doc.FilteredMode &&
+            _builtMarkers == doc.Markers.Version && _builtFindHits == findHits)
+            return;
+
+        _builtGeneration = doc.FilterGeneration;
+        _builtRows = rows;
+        _builtHeight = height;
+        _builtWidth = width;
+        _builtFilteredMode = doc.FilteredMode;
+        _builtMarkers = doc.Markers.Version;
+        _builtFindHits = findHits;
+
         if (_rowAt.Length < slots) { _rowAt = new long[slots]; _colour = new int[slots]; }
 
         _top = Math.Clamp(_top, 0, Math.Max(0, rows - 1));
-        long caret = _grid.CaretRow;
-        // The window is placed from the span the last build produced, and a build that crosses into a
-        // compressed stretch reaches far further than the one before it did. One correcting pass, so the
-        // view ends up where the placement meant to put it rather than at an edge.
-        for (int pass = 0; ; pass++)
+        _slots = rows <= 0 ? 0 : Fill(doc, rows, slots);
+        // Ran out of file before the map was full: anchor to the end instead, so the last row of the file is
+        // the last pixel. Otherwise the map empties out as you reach the bottom.
+        if (_slots < slots && _top > 0 && rows > 0)
         {
-            _slots = rows <= 0 ? 0 : Fill(doc, rows, slots, caret);
-            // Ran out of file before the map was full: anchor to the end instead, so the last row of the
-            // file is the last pixel. Otherwise the map empties out as you reach the bottom.
-            if (_slots < slots && _top > 0 && rows > 0)
-            {
-                _slots = FillBackward(doc, rows, slots, caret);
-                _top = _slots > 0 ? _rowAt[0] : 0;
-            }
-            _span = Math.Max(1, (_slots > 0 ? _rowAt[_slots - 1] + 1 : _top + 1) - _top);
-            if (pass > 0 || rows <= 0) break;
-            long was = _top;
-            TrackView(rows);
-            _top = Math.Clamp(_top, 0, Math.Max(0, rows - 1));
-            if (_top == was) break;
+            _slots = FillBackward(doc, rows, slots);
+            _top = _slots > 0 ? _rowAt[0] : 0;
         }
+        _span = Math.Max(1, (_slots > 0 ? _rowAt[_slots - 1] + 1 : _top + 1) - _top);
         _builtTop = _top;
         RedrawPicture(width, height);
     }
 
     /// <summary>Walks rows forward into pixel slots: one slot per matched row, and one slot per
     /// <see cref="GapRows"/> unmatched rows in between. Returns how many slots were filled.</summary>
-    private int Fill(CascadeDocument doc, long rows, int slots, long caret)
+    private int Fill(CascadeDocument doc, long rows, int slots)
     {
         var settings = _grid.Settings;
         var defaults = Defaults(settings);
@@ -207,7 +244,7 @@ internal sealed class MiniMapControl : Control
         long row = _top;
         while (at < slots && row < rows)
         {
-            long stop = NextStop(doc, rows, row, caret);
+            long stop = NextStop(doc, rows, row);
             if (stop > row)
             {
                 // Nothing matches between here and there, so the whole stretch is worth a few pixels - at a
@@ -235,7 +272,7 @@ internal sealed class MiniMapControl : Control
 
     /// <summary>The same walk from the end of the file backwards, for when there is not enough file left
     /// below the window to fill it. Returns how many slots were filled, packed to the start.</summary>
-    private int FillBackward(CascadeDocument doc, long rows, int slots, long caret)
+    private int FillBackward(CascadeDocument doc, long rows, int slots)
     {
         var settings = _grid.Settings;
         var defaults = Defaults(settings);
@@ -243,7 +280,7 @@ internal sealed class MiniMapControl : Control
         long row = rows - 1;
         while (at >= 0 && row >= 0)
         {
-            long stop = PrevStop(doc, row, caret);
+            long stop = PrevStop(doc, row);
             if (stop < row)
             {
                 long gap = row - stop;
@@ -271,23 +308,22 @@ internal sealed class MiniMapControl : Control
         return filled;
     }
 
-    /// <summary>Where the walk stops next going down: the next matched row, or the caret when it comes
-    /// first. The caret keeps a pixel of its own even in a stretch that is otherwise skipped over, or it
-    /// would vanish from the map exactly when it is on a line nothing matched.</summary>
-    private static long NextStop(CascadeDocument doc, long rows, long row, long caret)
+    /// <summary>Where the walk stops next going down: the next matched row, or the end of the file.
+    ///
+    /// The caret deliberately does NOT stop it. Stopping here would split the stretch it sits in, and the
+    /// two halves round to a different number of pixels than the whole did - so every arrow key re-laid out
+    /// everything below the caret and the map shivered. The caret is drawn from the rows a pixel stands for
+    /// instead, so it still shows up wherever it is without having a pixel to itself.</summary>
+    private static long NextStop(CascadeDocument doc, long rows, long row)
     {
         long nextLine = doc.NextMatchedLine(doc.RowToLine(row));
-        long stop = nextLine < 0 ? rows : Math.Min(rows, doc.RowAtOrAfterLine(nextLine));
-        if (caret > row && caret < stop) stop = caret;
-        return stop;
+        return nextLine < 0 ? rows : Math.Min(rows, doc.RowAtOrAfterLine(nextLine));
     }
 
-    private static long PrevStop(CascadeDocument doc, long row, long caret)
+    private static long PrevStop(CascadeDocument doc, long row)
     {
         long prevLine = doc.PrevMatchedLine(doc.RowToLine(row));
-        long stop = prevLine < 0 ? -1 : doc.RowForLine(prevLine);
-        if (caret < row && caret > stop) stop = caret;
-        return stop;
+        return prevLine < 0 ? -1 : doc.RowForLine(prevLine);
     }
 
     private static ResolvedStyle Defaults(AppSettings settings) => new(
@@ -308,8 +344,9 @@ internal sealed class MiniMapControl : Control
         return fg.ToArgb() != settings.Foreground.ToArgb() ? fg.ToArgb() : 0;
     }
 
-    /// <summary>The slot showing a row, or the nearest one. The rows are non-decreasing across the slots but
-    /// not evenly spaced, so this is a search rather than arithmetic.</summary>
+    /// <summary>The slot standing for a row: the last one whose own row is at or before it, so it is the
+    /// pixel that row is actually drawn on even where a stretch was compressed and one pixel covers thirty.
+    /// The rows increase across the slots but not evenly, so this is a search.</summary>
     private int SlotOf(long row)
     {
         if (_slots <= 0) return -1;
@@ -318,8 +355,8 @@ internal sealed class MiniMapControl : Control
         int lo = 0, hi = _slots - 1;
         while (lo < hi)
         {
-            int mid = (lo + hi) >> 1;
-            if (_rowAt[mid] < row) lo = mid + 1; else hi = mid;
+            int mid = (lo + hi + 1) >> 1;
+            if (_rowAt[mid] <= row) lo = mid; else hi = mid - 1;
         }
         return lo;
     }
@@ -383,6 +420,7 @@ internal sealed class MiniMapControl : Control
     {
         int edge = EdgeWidth, left = Divider;
         long first = _rowAt[0], last = _rowAt[_slots - 1];
+        _drawnSelection = _grid.SelectionVersion;
 
         // Selected rows and find hits share the map with the colours, so they take an edge each rather than
         // covering the row they belong to. The selection goes down first: a mark is deliberate and stays,
@@ -457,7 +495,7 @@ internal sealed class MiniMapControl : Control
         if (!Visible || _grid.Document is not { } doc) return;
         if (_builtRows != doc.RowCount || _builtFilteredMode != doc.FilteredMode ||
             _builtGeneration != doc.FilterGeneration || _builtMarkers != doc.Markers.Version ||
-            _builtFindHits != doc.FindHitCount || _builtSelection != _grid.SelectionVersion)
+            _builtFindHits != doc.FindHitCount || _drawnSelection != _grid.SelectionVersion)
         {
             Invalidate();
             return;
@@ -465,7 +503,7 @@ internal sealed class MiniMapControl : Control
         if (_slots <= 0) return;
         long rows = doc.RowCount;
         long before = _top;
-        if (rows > 0) TrackView(rows);
+        if (rows > 0) TrackView(rows, SlotCapacity);
         if (_top != before || Geometry() != _drawnViewport) Invalidate();
     }
 
@@ -478,14 +516,25 @@ internal sealed class MiniMapControl : Control
         _dragging = true;
         Capture = true;
         HideTip();
-        ScrollTo(e.Y);
+        Grab(e.Y);
+    }
+
+    /// <summary>Takes hold at a pixel row. Inside the window that is a grab, and it stays exactly where it
+    /// is under the pointer; outside it, the view jumps there first with the window centred on the
+    /// pointer.</summary>
+    private void Grab(int y)
+    {
+        var (top, height) = Geometry();
+        if (y >= top && y < top + height) { _grabOffset = y - top; return; }
+        _grabOffset = height / 2;
+        ScrollToTop(y - _grabOffset);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         _hovering = true;
-        if (_dragging) { ScrollTo(e.Y); return; }
+        if (_dragging) { ScrollToTop(e.Y - _grabOffset); return; }
         TrackHover(e.Location);
     }
 
@@ -516,13 +565,16 @@ internal sealed class MiniMapControl : Control
         _grid.ScrollByWheel(e.Delta);
     }
 
-    /// <summary>Centres the view on the row under the pointer. The window itself does not move while the
-    /// pointer is here, so a row stays where it was clicked and the next click lands where it looks.</summary>
-    private void ScrollTo(int y)
+    /// <summary>Puts the top of the view at the pixel row <paramref name="y"/>, without letting it leave the
+    /// stretch of file the map is showing - dragging past either end would otherwise carry the view on while
+    /// the rectangle sat stuck against the edge, doing nothing you could see.</summary>
+    private void ScrollToTop(int y)
     {
         if (_slots <= 0) return;
         int slot = Math.Clamp(y / _rowPixels, 0, _slots - 1);
-        _grid.ScrollToRow(_rowAt[slot] - _grid.VisibleRows / 2);
+        long lowest = _rowAt[0];
+        long highest = Math.Max(lowest, _rowAt[_slots - 1] - _grid.VisibleRows + 1);
+        _grid.ScrollToRow(Math.Clamp(_rowAt[slot], lowest, highest));
         // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without these
         // nothing moves until the mouse stops.
         _grid.Update();
