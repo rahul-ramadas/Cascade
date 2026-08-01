@@ -59,9 +59,10 @@ public class ManualSweep : IDisposable
         Say($"launched: {Status()}");
 
         string only = Environment.GetEnvironmentVariable("CASCADE_MANUAL_ONLY") ?? "";
+        var wanted = only.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         void Stage(string name, Action run)
         {
-            if (only.Length > 0 && name != "content" && !name.Contains(only, StringComparison.OrdinalIgnoreCase)) return;
+            if (wanted.Length > 0 && name != "content" && !wanted.Any(w => name.Contains(w, StringComparison.OrdinalIgnoreCase))) return;
             Say($"===== {name} =====");
             try { run(); }
             catch (Exception ex) { Check($"{name} ran to the end", false, ex.Message); }
@@ -287,8 +288,7 @@ public class ManualSweep : IDisposable
     {
         var node = _app.FilterNode("[ORDER_SET_STATE]") ?? _app.FilterNode("[order-service]");
         if (node is null) { Check("a filter to edit", false); return; }
-        var nr = node.BoundingRectangle;
-        Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));
+        if (!ClickFilterRow("[ORDER_SET_STATE]") && !ClickFilterRow("[order-service]")) { Check("the filter is reachable", false); return; }
         Thread.Sleep(500);
         Chord(VirtualKeyShort.KEY_D);
         Thread.Sleep(2000);
@@ -302,10 +302,26 @@ public class ManualSweep : IDisposable
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
 
-        Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));
+        if (!ClickFilterRow("[ORDER_SET_STATE]")) ClickFilterRow("[order-service]");
         Thread.Sleep(400);
         Chord(VirtualKeyShort.KEY_Z);
         Thread.Sleep(2000);
+    }
+
+    /// <summary>Puts a filter row on screen and clicks it, so the list has focus and that row is selected.
+    /// Scrolled out of sight, a row's rectangle is empty and a click on it lands on the menu bar - and the
+    /// list is deliberately left where the user put it, so it will not scroll itself back.</summary>
+    private bool ClickFilterRow(string contains)
+    {
+        var node = _app.FilterNode(contains);
+        if (node is null) return false;
+        try { node.AsTreeItem().Select(); } catch { /* selecting is only to scroll it into view */ }
+        Thread.Sleep(400);
+        var nr = (_app.FilterNode(contains) ?? node).BoundingRectangle;
+        if (nr.Width <= 0 || nr.Height <= 0) { Say($"  ({contains} is still not on screen)"); return false; }
+        Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));
+        Thread.Sleep(400);
+        return true;
     }
 
     private void PresetEditing()
@@ -664,12 +680,124 @@ public class ManualSweep : IDisposable
               $"{first} -> {_app.FirstVisibleLine()}");
         Shot("map");
 
+        var map = MapElement();
+        if (map is not null)
+        {
+            // A lane per filter, so turning a second one on has to put a second colour on the map.
+            var oneFilter = MapColours(map);
+            Say($"colours with one filter on: {string.Join(" ", oneFilter)}");
+            if (ClickFilterRow("[ERROR]"))
+            {
+                _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
+                WaitFiltered();
+                Thread.Sleep(1500);
+                var twoFilters = MapColours(map);
+                Say($"colours with two filters on: {string.Join(" ", twoFilters)}");
+                Check("a second filter puts a second colour on the map", twoFilters.Count > oneFilter.Count,
+                      $"{oneFilter.Count} -> {twoFilters.Count}");
+                Shot("map-two-lanes");
+            }
+
+            // The rectangle that says where you are has to move when you move. It never did: the map is a
+            // child control, so the view repainting did not repaint it.
+            _app.ScrollVerticalTo(1_000_000);
+            Thread.Sleep(900);
+            int high = ViewportBand(map);
+            long highLine = _app.FirstVisibleLine();
+            _app.ScrollVerticalTo(25_000_000);
+            Thread.Sleep(900);
+            int low = ViewportBand(map);
+            long lowLine = _app.FirstVisibleLine();
+            Say($"viewport rectangle at band {high} -> {low} (view {highLine} -> {lowLine})");
+            Check("the rectangle on the map follows the view", high >= 0 && low > high + 50,
+                  $"band {high} -> {low}, view {highLine} -> {lowLine}");
+            Shot("map-viewport");
+
+            // ...and the whole picture is a different one when the view mode changes under it.
+            var before = MapColours(map);
+            _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
+            WaitFiltered();
+            Thread.Sleep(2000);
+            int movedTo = ViewportBand(map);
+            Check("switching to filtered lines redraws the map", ViewportBand(map) >= 0 && MapColours(map).Count > 0,
+                  $"{string.Join(" ", MapColours(map))}, rectangle at {movedTo}");
+            Shot("map-filtered");
+            _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
+            WaitFiltered();
+            Thread.Sleep(1500);
+
+            // Put the filters back as this stage found them: the stages after it share this window.
+            if (ClickFilterRow("[ERROR]"))
+            {
+                _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
+                WaitFiltered();
+                Thread.Sleep(1200);
+            }
+        }
+
         _app.ClickMenuOrThrow("View", "Show Match Map");
         Thread.Sleep(800);
         Check("turning it off brings the scrollbar back", _app.VerticalScrollerName() != "Match map", _app.VerticalScrollerName());
         _app.ClickMenuOrThrow("View", "Show Match Map");
         Thread.Sleep(800);
         Check("and back on returns the map", _app.VerticalScrollerName() == "Match map", _app.VerticalScrollerName());
+    }
+
+    private AutomationElement? MapElement()
+        => _app.Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+               .FirstOrDefault(s => (s.Name ?? "") == "Match map");
+
+    private static Bitmap Grab(AutomationElement e)
+    {
+        var r = e.BoundingRectangle;
+        var bmp = new Bitmap(Math.Max(1, r.Width), Math.Max(1, r.Height), PixelFormat.Format32bppArgb);
+        using var g = Graphics.FromImage(bmp);
+        g.CopyFromScreen(r.Left, r.Top, 0, 0, new Size(bmp.Width, bmp.Height));
+        return bmp;
+    }
+
+    /// <summary>The distinct colours the map's lanes are painted in, ignoring the gutter it sits on and the
+    /// near-shades a lane takes as it fades.</summary>
+    private List<string> MapColours(AutomationElement map)
+    {
+        using var bmp = Grab(map);
+        var seen = new List<Color>();
+        for (int y = 0; y < bmp.Height; y += 3)
+            for (int x = 2; x < bmp.Width - 2; x++)
+            {
+                var p = bmp.GetPixel(x, y);
+                if (p.R > 230 && p.G > 230 && p.B > 230) continue;                     // gutter
+                if (seen.Any(c => Math.Abs(c.R - p.R) + Math.Abs(c.G - p.G) + Math.Abs(c.B - p.B) < 90)) continue;
+                seen.Add(p);
+            }
+        return seen.Select(c => $"#{c.R:x2}{c.G:x2}{c.B:x2}").ToList();
+    }
+
+    /// <summary>Which band the viewport rectangle starts at. It is found down column zero, where only the
+    /// rectangle and the marker ticks paint - as the longest unbroken run, because the caret is drawn as a
+    /// single line right across the map and would otherwise be mistaken for it. The gutter's own colour is
+    /// whatever most of that column is: a reference pixel from a fixed spot lands inside the rectangle as
+    /// soon as the view is anywhere but the top.</summary>
+    private int ViewportBand(AutomationElement map)
+    {
+        using var bmp = Grab(map);
+        var tally = new Dictionary<int, int>();
+        for (int y = 0; y < bmp.Height; y++)
+        {
+            int argb = bmp.GetPixel(0, y).ToArgb();
+            tally[argb] = tally.TryGetValue(argb, out int n) ? n + 1 : 1;
+        }
+        var gutter = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
+
+        int best = -1, bestRun = 0, run = 0;
+        for (int y = 0; y < bmp.Height; y++)
+        {
+            var p = bmp.GetPixel(0, y);
+            bool painted = Math.Abs(p.R - gutter.R) + Math.Abs(p.G - gutter.G) + Math.Abs(p.B - gutter.B) > 24;
+            if (painted) { run++; if (run > bestRun) { bestRun = run; best = y - run + 1; } }
+            else run = 0;
+        }
+        return bestRun >= 4 ? best : -1;
     }
 
     private void FindEverything()
@@ -791,10 +919,7 @@ public class ManualSweep : IDisposable
 
     private void UndoRedo()
     {
-        var node = _app.FilterNode("[order-service]");
-        if (node is null) { Check("a filter to work on", false); return; }
-        var nr = node.BoundingRectangle;
-        Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));   // real click, so the tree has focus
+        if (!ClickFilterRow("[order-service]")) { Check("a filter to work on", false); return; }
         Thread.Sleep(600);
         int before = _app.RootFilterNames().Length;
         Say($"roots before: {before}");
@@ -861,14 +986,12 @@ public class ManualSweep : IDisposable
         Shot("presets");
 
         // Turning its filters off must clear it; clicking it must bring them back.
-        var node = _app.FilterNode("[order-service]");
-        if (node is not null)
+        if (ClickFilterRow("[order-service]"))
         {
-            var nr = node.BoundingRectangle;
-            Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));
-            Thread.Sleep(400);
             _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
             Thread.Sleep(4000);
+            Say($"after switching [order-service] off: {Status()}");
+            Say($"still ticked: {string.Join(" | ", TickedFilters())}");
             Check("switching its filters off drops the preset out of effect",
                   !_app.ActivePresets().Any(n => n.Contains("order-service")), string.Join("|", _app.ActivePresets()));
 
@@ -884,6 +1007,19 @@ public class ManualSweep : IDisposable
     private string[] SafePresetNames()
     {
         try { return _app.PresetNames(); } catch { return Array.Empty<string>(); }
+    }
+
+    /// <summary>Every filter row whose checkbox is on, wherever it is in the tree.</summary>
+    private string[] TickedFilters()
+    {
+        try
+        {
+            return _app.Tree().FindAllDescendants(cf => cf.ByControlType(ControlType.TreeItem))
+                       .Where(t => t.Patterns.Toggle.PatternOrDefault?.ToggleState.ValueOrDefault == ToggleState.On)
+                       .Select(t => t.Name ?? "")
+                       .ToArray();
+        }
+        catch { return new[] { "(could not read)" }; }
     }
 
     private string DescribePanes()
