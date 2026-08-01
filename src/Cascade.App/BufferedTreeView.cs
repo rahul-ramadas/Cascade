@@ -13,6 +13,11 @@ internal sealed class BufferedTreeView : TreeView
     private const int TVS_NOHSCROLL = 0x8000;
     private const int WM_LBUTTONDOWN = 0x0201;
     private const int WM_LBUTTONDBLCLK = 0x0203;
+    private const int WM_PAINT = 0x000F;
+
+    /// <summary>How many times the list has actually repainted. Flicker is repaints nobody asked for, and
+    /// counting them is the only way to see it without filming the screen.</summary>
+    internal int Paints { get; private set; }
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -48,6 +53,7 @@ internal sealed class BufferedTreeView : TreeView
     /// reporting a double-click on the box at all.</summary>
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == WM_PAINT) Paints++;
         if (m.Msg == WM_LBUTTONDBLCLK && IsOnCheckBox(m.LParam)) m.Msg = WM_LBUTTONDOWN;
         base.WndProc(ref m);
     }
