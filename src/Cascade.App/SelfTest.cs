@@ -62,6 +62,7 @@ internal static class SelfTest
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
+            ok &= Timed("word wrap", RunWordWrapChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -859,6 +860,119 @@ internal static class SelfTest
                     detail.Contains("891") && detail.Contains("1,204"), detail);
 
         return ok;
+    }
+
+    /// <summary>Word wrap breaks the "one row, one line of pixels" rule the whole view is built on, so what
+    /// matters is that everything downstream reads where a row was actually painted: hit-testing, how many
+    /// rows fit, and the accessible bounds.</summary>
+    private static bool RunWordWrapChecks()
+    {
+        Line("-- word wrap --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_wrap_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 60; i++)
+            sb.Append(i % 3 == 0 ? $"line {i:00} short\n" : $"line {i:00} " + string.Join(' ', Enumerable.Repeat("wordy", 40)) + "\n");
+        sb.Append("runaway " + string.Join(' ', Enumerable.Repeat("endless", 600)) + "\n");
+        for (int i = 0; i < 10; i++) sb.Append($"tail {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(420, 400),   // narrow, so the long lines have to break
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            bool ok = Check("a long line is one row while wrapping is off", grid.SegmentsForTesting(1) == 1,
+                            $"{grid.SegmentsForTesting(1)} segments");
+            int rowsWithoutWrap = grid.RowsPaintedForTesting;
+
+            settings.WordWrap = true;
+            grid.RefreshView();
+            Pump();
+
+            ok &= Check("a long line breaks into several rows", grid.SegmentsForTesting(1) > 1,
+                        $"{grid.SegmentsForTesting(1)} segments");
+            ok &= Check("a short line still takes one", grid.SegmentsForTesting(0) == 1,
+                        $"{grid.SegmentsForTesting(0)} segments");
+            ok &= Check("fewer lines fit once they wrap", grid.RowsPaintedForTesting < rowsWithoutWrap,
+                        $"{grid.RowsPaintedForTesting} of {rowsWithoutWrap}");
+
+            // Clicking a wrapped row's second segment has to select that row, not the one below it.
+            long tall = 1;
+            int top = grid.RowTopForTesting(tall);
+            grid.ClickForTesting2(top + grid.RowHeightForTesting + 2, 60);
+            ok &= Check("clicking the second half of a wrapped line selects that line",
+                        grid.CaretRowForTesting == tall, $"caret on row {grid.CaretRowForTesting}");
+
+            // ...and the row after it is still reachable, at its own place further down.
+            int after = grid.RowTopForTesting(2);
+            grid.ClickForTesting2(after + 2, 60);
+            ok &= Check("the row below a wrapped one is still where it is drawn",
+                        grid.CaretRowForTesting == 2, $"caret on row {grid.CaretRowForTesting}");
+
+            // Page down must move by what is actually on screen, or it skips content.
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            long caretBefore = Math.Max(0, grid.CaretRowForTesting);
+            int fits = grid.RowsPaintedForTesting;
+            grid.PressKeyForTesting(Keys.PageDown);
+            Pump();
+            ok &= Check("page down moves by the rows that fit, not by the rows that would have",
+                        grid.CaretRowForTesting > caretBefore && grid.CaretRowForTesting <= caretBefore + fits,
+                        $"caret {caretBefore} -> {grid.CaretRowForTesting} with {fits} rows on screen");
+
+            // A pathological line must not be allowed to fill the window on its own.
+            grid.ScrollToRow(60);
+            grid.RefreshView();
+            Pump();
+            ok &= Check("a runaway line is capped rather than taking over the window",
+                        grid.SegmentsForTesting(60) is > 1 and <= 20,
+                        $"{grid.SegmentsForTesting(60)} segments, top row {grid.FirstRowForTesting}, {grid.RowsPaintedForTesting} painted, {doc.RowCount} rows");
+
+            // Wrapping fits fewer lines on screen, so scrolling has to be allowed to go further, or the end
+            // of the file becomes unreachable.
+            grid.ScrollToRow(doc.RowCount - 1);
+            grid.RefreshView();
+            Pump();
+            ok &= Check("the end of the file is still reachable while wrapping",
+                        grid.SegmentsForTesting(doc.RowCount - 1) >= 1,
+                        $"top row {grid.FirstRowForTesting} of {doc.RowCount}");
+
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            settings.WordWrap = false;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("turning it off puts the lines back on one row each", grid.SegmentsForTesting(1) == 1,
+                        $"{grid.SegmentsForTesting(1)} segments");
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the

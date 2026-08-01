@@ -605,6 +605,24 @@ internal sealed class CascadeApp : IDisposable
                                                 ". The requested menu item was not found or could not be invoked.");
     }
 
+    /// <summary>Tick state of a menu item, for checks that need to know the app agreed it toggled.</summary>
+    public bool? MenuItemChecked(string topMenu, string item)
+    {
+        var top = TopItems().FirstOrDefault(m => Norm(m.Name) == Norm(topMenu));
+        if (top is null) return null;
+        Expand(top);
+        try
+        {
+            var found = FindOpenMenuItem(item);
+            if (found is null) return null;
+            var toggle = found.Patterns.Toggle.PatternOrDefault;
+            if (toggle is not null) return toggle.ToggleState.ValueOrDefault == ToggleState.On;
+            var legacy = found.Patterns.LegacyIAccessible.PatternOrDefault;
+            return legacy?.State.ValueOrDefault.HasFlag(AccessibilityState.STATE_SYSTEM_CHECKED);
+        }
+        finally { Collapse(top); Settle(1); }
+    }
+
     private bool? TryReadFilteredModeFromMenu()
     {
         var top = TopItems().FirstOrDefault(m => Norm(m.Name) == Norm("View"));
@@ -730,6 +748,11 @@ internal sealed class CascadeApp : IDisposable
         if (rv is not null) return rv.Value.ValueOrDefault;
         return double.TryParse(legacy?.Value.ValueOrDefault, out double v) ? v : double.MaxValue;
     }
+
+    /// <summary>Whether the log view is showing a horizontal scrollbar at all.</summary>
+    public bool HasHorizontalScrollBar()
+        => Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+                 .Any(s => s.BoundingRectangle.Width > s.BoundingRectangle.Height);
 
     /// <summary>How far the log view is scrolled sideways, read from the horizontal scrollbar.</summary>
     public double HorizontalScroll()

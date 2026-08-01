@@ -56,6 +56,9 @@ public sealed class AppSettings
     /// <summary>Whether the match map replaces the log view's vertical scrollbar.</summary>
     public bool ShowMatchMap { get; set; } = true;
 
+    /// <summary>Whether long lines are broken to fit the width instead of running off the side.</summary>
+    public bool WordWrap { get; set; }
+
     /// <summary>Behind every occurrence of the find term on a visible line.</summary>
     public int FindHighlightArgb { get; set; } = Color.FromArgb(255, 236, 150).ToArgb();
 
