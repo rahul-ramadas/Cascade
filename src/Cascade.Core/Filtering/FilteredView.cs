@@ -1,3 +1,5 @@
+using Cascade.Core.Find;
+
 namespace Cascade.Core.Filtering;
 
 /// <summary>
@@ -38,6 +40,10 @@ public sealed class FilteredView
     /// <summary>True when this view is currently showing <paramref name="line"/>.</summary>
     public bool IsVisible(long line)
         => IsIdentity ? line >= 0 && line < Count : _set!.IsVisible(line);
+
+    /// <summary>Reads visibility 64 lines to a word. Null when everything is visible, which lets a caller
+    /// skip the intersection entirely rather than ask about lines that cannot be hidden.</summary>
+    public VisibleWordReader? VisibleWords => IsIdentity ? null : _set!.CopyVisibleWords;
 
     /// <summary>How many visible lines fall in <c>[from, toExclusive)</c>.</summary>
     public long CountInRange(long from, long toExclusive)

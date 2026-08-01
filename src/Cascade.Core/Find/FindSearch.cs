@@ -1,3 +1,5 @@
+using System.Numerics;
+
 namespace Cascade.Core.Find;
 
 /// <summary>A line that matched, and how many times it did.</summary>
@@ -7,6 +9,10 @@ public readonly record struct FindHit(long Line, int Occurrences);
 /// appends every one that matches to <paramref name="hits"/>. Whether that reads a file, and whether it uses
 /// one thread or all of them, is the caller's business - a search only cares about the answers.</summary>
 public delegate void FindRangeScanner(long from, long count, List<FindHit> hits, CancellationToken ct);
+
+/// <summary>Fills <paramref name="words"/> with the visibility of the lines starting at
+/// <paramref name="fromWord"/> * 64, one bit per line.</summary>
+public delegate void VisibleWordReader(long fromWord, Span<ulong> words);
 
 /// <summary>How much a term matches, split by what the view is currently showing.</summary>
 /// <param name="Position">Which visible match the caret is on, 1-based, or 0 when it is not on one.</param>
@@ -86,27 +92,113 @@ public sealed class FindSearch : IDisposable
 
     private const int MaxExtraLines = 2_000_000;
 
-    /// <summary>How much has been found, split by whether the view is currently showing it. Walks the hits,
-    /// so it is for the status bar to ask at a human rate rather than per frame.</summary>
-    public FindTally Count(Func<long, bool>? visible, long currentLine)
+    /// <summary>Words of visibility to read at a time. Big enough that the call is amortised away, small
+    /// enough to sit on the stack.</summary>
+    private const int VisibilityChunk = 512;
+
+    /// <summary>How much has been found, split by whether the view is currently showing it.
+    ///
+    /// <paramref name="visible"/> reads the visibility of 64 lines per word, or is null when nothing is
+    /// hidden. Both are answered a machine word at a time: asking line by line meant twenty million
+    /// callbacks on a term like "OrderService", which was 160 ms of frozen window every time the caret moved.</summary>
+    public FindTally Count(VisibleWordReader? visible, long currentLine)
     {
         lock (_sync)
         {
-            long visibleLines = 0, hiddenLines = 0, visibleOcc = 0, position = 0;
-            for (long line = _hits.Next(0); line >= 0; line = _hits.Next(line + 1))
+            bool complete = _lo <= 0 && _hi >= _lines;
+
+            // Nothing hidden: the totals are the ones already kept as the sweep runs, so the only thing left
+            // to work out is where the caret sits among them.
+            if (visible is null)
             {
-                int occ = _extras.TryGetValue(line, out int extra) ? extra + 1 : 1;
-                if (visible is null || visible(line))
-                {
-                    visibleLines++;
-                    visibleOcc += occ;
-                    if (line == currentLine) position = visibleLines;
-                }
-                else hiddenLines++;
+                long at = _hits.Contains(currentLine) ? _hits.CountUpTo(currentLine) : 0;
+                return new FindTally(at, _found, 0, _occurrences, _occurrences, complete, _extrasCapped);
             }
-            return new FindTally(position, visibleLines, hiddenLines, visibleOcc, _occurrences,
-                                 _lo <= 0 && _hi >= _lines, _extrasCapped);
+
+            long visibleLines = 0, hiddenLines = 0, position = 0;
+            long caretWord = currentLine < 0 ? -1 : currentLine >> 6;
+            bool onVisibleHit = false;
+            Span<ulong> shownWords = stackalloc ulong[VisibilityChunk];
+
+            for (long start = 0; start < _hits.WordCount; start += VisibilityChunk)
+            {
+                int n = (int)Math.Min(VisibilityChunk, _hits.WordCount - start);
+                visible(start, shownWords[..n]);
+                for (int i = 0; i < n; i++)
+                {
+                    ulong hit = _hits.Word(start + i);
+                    if (hit == 0) continue;
+                    ulong shown = hit & shownWords[i];
+                    visibleLines += BitOperations.PopCount(shown);
+                    hiddenLines += BitOperations.PopCount(hit & ~shown);
+
+                    long w = start + i;
+                    if (w < caretWord) position += BitOperations.PopCount(shown);
+                    else if (w == caretWord)
+                    {
+                        int bit = (int)(currentLine & 63);
+                        ulong upTo = bit == 63 ? ulong.MaxValue : (1UL << (bit + 1)) - 1;
+                        position += BitOperations.PopCount(shown & upTo);
+                        onVisibleHit = (shown & (1UL << bit)) != 0;
+                    }
+                }
+            }
+
+            return new FindTally(onVisibleHit ? position : 0, visibleLines, hiddenLines,
+                                 VisibleOccurrences(visible, visibleLines, hiddenLines), _occurrences,
+                                 complete, _extrasCapped);
         }
+    }
+
+    /// <summary>Occurrences on the lines the view is showing.
+    ///
+    /// Three ways to the same number, and which is cheapest depends entirely on the shape of the data: the
+    /// lines shown, the lines hidden, and the lines that matched more than once can each be the small one.
+    /// Filtering a 33M-line trace down to a screenful leaves 60 shown against two million recorded, so
+    /// reading the recorded list would be 20 ms of frozen window for an answer that 60 lookups give.</summary>
+    private long VisibleOccurrences(VisibleWordReader visible, long visibleLines, long hiddenLines)
+    {
+        if (hiddenLines == 0) return _occurrences;      // nothing kept back, so all of them are shown
+        if (_extras.Count == 0) return visibleLines;    // one occurrence each, so lines and hits agree
+
+        // Counting up from the shown lines is the only way that stays a floor once the record is capped;
+        // subtracting the hidden ones would credit the shown side with occurrences nobody counted.
+        bool byShown = _extrasCapped || visibleLines <= hiddenLines;
+        long side = byShown ? visibleLines : hiddenLines;
+        if (side <= _extras.Count)
+        {
+            long counted = 0;
+            Span<ulong> words = stackalloc ulong[VisibilityChunk];
+            for (long start = 0; start < _hits.WordCount; start += VisibilityChunk)
+            {
+                int n = (int)Math.Min(VisibilityChunk, _hits.WordCount - start);
+                visible(start, words[..n]);
+                for (int i = 0; i < n; i++)
+                {
+                    ulong hit = _hits.Word(start + i);
+                    if (hit == 0) continue;
+                    ulong walk = byShown ? hit & words[i] : hit & ~words[i];
+                    while (walk != 0)
+                    {
+                        long line = ((start + i) << 6) + BitOperations.TrailingZeroCount(walk);
+                        if (_extras.TryGetValue(line, out int extra)) counted += extra;
+                        walk &= walk - 1;
+                    }
+                }
+            }
+            return byShown ? visibleLines + counted : _occurrences - hiddenLines - counted;
+        }
+
+        long total = visibleLines;
+        Span<ulong> word = stackalloc ulong[1];
+        long cached = -1;
+        foreach (var (line, extra) in _extras)
+        {
+            long w = line >> 6;
+            if (w != cached) { visible(w, word); cached = w; }
+            if ((word[0] & (1UL << (int)(line & 63))) != 0) total += extra;
+        }
+        return total;
     }
 
     public void Start()

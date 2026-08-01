@@ -27,6 +27,24 @@ internal sealed class LineBitSet
     public bool Contains(long line)
         => line >= 0 && line < _lines && (_words[line >> 6] & (1UL << (int)(line & 63))) != 0;
 
+    public long WordCount => _words.LongLength;
+
+    public ulong Word(long index) => _words[index];
+
+    /// <summary>How many lines at or before <paramref name="line"/> are set. Counts whole words at a time,
+    /// so it costs the same whether the term matched once or twenty million times.</summary>
+    public long CountUpTo(long line)
+    {
+        if (line < 0 || _lines <= 0) return 0;
+        if (line >= _lines) line = _lines - 1;
+        long last = line >> 6;
+        long n = 0;
+        for (long w = 0; w < last; w++) n += BitOperations.PopCount(_words[w]);
+        int bit = (int)(line & 63);
+        ulong mask = bit == 63 ? ulong.MaxValue : (1UL << (bit + 1)) - 1;
+        return n + BitOperations.PopCount(_words[last] & mask);
+    }
+
     /// <summary>The first set line at or after <paramref name="from"/>, or -1.</summary>
     public long Next(long from)
     {
