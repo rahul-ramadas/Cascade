@@ -1589,12 +1589,47 @@ internal static class SelfTest
             Pump();
             ok &= Check("and once it is done the box takes Enter again", RunsAnother() == 1);
 
+            // Down reaches the terms searched for before - with the list open, so it is clear where the
+            // term came from and what else is there.
+            dlg.SetTermForTesting("", 0, 0);
+            dlg.History = () => new[] { "newest", "middle", "oldest" };
+            dlg.StepHistoryForTesting(1);
+            Pump();
+            ok &= Check("down opens the history", dlg.HistoryIsOpenForTesting());
+            ok &= Check("and takes the most recent term first", dlg.TermForTesting() == "newest", dlg.TermForTesting());
+            dlg.StepHistoryForTesting(1);
+            ok &= Check("again goes further back", dlg.TermForTesting() == "middle", dlg.TermForTesting());
+            dlg.StepHistoryForTesting(-1);
+            ok &= Check("and up comes back", dlg.TermForTesting() == "newest", dlg.TermForTesting());
+            dlg.StepHistoryForTesting(-1);
+            ok &= Check("which stops at the most recent rather than emptying the box",
+                        dlg.TermForTesting() == "newest", dlg.TermForTesting());
+
             int RunsAnother()
             {
                 int was = searched.Count;
                 dlg.EnterForTesting();
                 return searched.Count - was;
             }
+
+            // When the counts get re-read. A sweep of a large file takes a second or so, and the numbers
+            // climb the whole time - stopping short of the end is what makes them look wrong.
+            var fresh = TimeSpan.Zero;
+            var old = TimeSpan.FromSeconds(1);
+            ok &= Check("a running sweep is re-read as it goes",
+                        MainForm.TallyIsStale(complete: false, wasComplete: false, sameLine: true,
+                                              sameFilters: true, haveText: true, age: old));
+            ok &= Check("but not faster than the eye",
+                        !MainForm.TallyIsStale(false, false, true, true, true, fresh));
+            ok &= Check("the sweep finishing is a reason on its own",
+                        MainForm.TallyIsStale(complete: true, wasComplete: false, sameLine: true,
+                                              sameFilters: true, haveText: true, age: fresh));
+            ok &= Check("a finished search that nothing has touched is left alone",
+                        !MainForm.TallyIsStale(true, true, true, true, true, old));
+            ok &= Check("moving the caret changes which match you are on",
+                        MainForm.TallyIsStale(true, true, sameLine: false, sameFilters: true, haveText: true, age: fresh));
+            ok &= Check("and changing the filters changes what is hidden",
+                        MainForm.TallyIsStale(true, true, true, sameFilters: false, haveText: true, age: fresh));
 
             return ok;
         }

@@ -70,6 +70,7 @@ public sealed class MainForm : Form
     private DateTime _tallyAt;
     private long _tallyLine = -1;
     private int _tallyGeneration = -1;
+    private bool _tallyComplete;
     private int _activitySlot, _progressSlot;
     private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
@@ -1244,6 +1245,9 @@ public sealed class MainForm : Form
         _findDialog.SetHistory(_state.RecentFindTerms);
         _findDialog.History = () => _state.RecentFindTerms;
         if (!_findDialog.Visible) _findDialog.Show(this);
+        // Already open but behind the window, Focus() on its text box would do nothing - Ctrl+F has to put
+        // the keyboard in the box wherever the bar happens to be.
+        _findDialog.Activate();
         _findDialog.FocusInput();
     }
 
@@ -1302,9 +1306,11 @@ public sealed class MainForm : Form
         {
             GoToLine(found + 1);
             _findDialog?.SetStatus("");
-            // Held down, the key repeats faster than an idle moment comes round, and WM_PAINT only arrives
-            // when nothing else is queued - so without this the view sits still until the key is let go.
+            // Held down, the key repeats faster than an idle moment comes round: WM_PAINT and the refresh
+            // timer both wait for one, so without this the view and the counts sit still until it is let go.
+            UpdateStatus();
             _grid.Update();
+            _status.Update();
         }
         else
         {
@@ -1331,20 +1337,30 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    /// <summary>The "Match 12 of 348" text, recomputed when there is reason to: counting walks every hit, so
-    /// doing it on the 33ms tick would cost more than the answer is worth.</summary>
+    /// <summary>How long a tally may stand while the sweep behind it is still running.</summary>
+    private static readonly TimeSpan TallyMaxAge = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>Whether the counts need re-reading. The sweep finishing is a reason in its own right: without
+    /// it the numbers stop wherever they happened to be a moment before the end, and a search of a large file
+    /// would sit there claiming half of what it found.</summary>
+    internal static bool TallyIsStale(bool complete, bool wasComplete, bool sameLine, bool sameFilters,
+                                      bool haveText, TimeSpan age)
+        => !haveText || !sameLine || !sameFilters || complete != wasComplete || (!complete && age > TallyMaxAge);
+
+    /// <summary>The "Match 12 of 348" text, re-read whenever <see cref="TallyIsStale"/> says so.</summary>
     private string RefreshTally()
     {
         if (_lastQuery is not { } query) return "";
         long caret = _grid.CaretLine;
-        bool stale = caret != _tallyLine
-                     || _tallyGeneration != _doc.FilterGeneration
-                     || (!_doc.FindComplete && DateTime.UtcNow - _tallyAt > TimeSpan.FromMilliseconds(250))
-                     || _tally.Length == 0;
-        if (!stale) return _tally;
+        bool complete = _doc.FindComplete;
+        if (!TallyIsStale(complete, _tallyComplete, caret == _tallyLine,
+                          _tallyGeneration == _doc.FilterGeneration, _tally.Length > 0,
+                          DateTime.UtcNow - _tallyAt))
+            return _tally;
 
         _tallyLine = caret;
         _tallyGeneration = _doc.FilterGeneration;
+        _tallyComplete = complete;
         _tallyAt = DateTime.UtcNow;
         if (_doc.FindTally(caret) is not { } t) { _tally = _tallyDetail = ""; return ""; }
         _tally = FindStatusText.Short(t);
