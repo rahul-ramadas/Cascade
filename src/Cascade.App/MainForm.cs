@@ -70,8 +70,8 @@ public sealed class MainForm : Form
     private DateTime _tallyAt;
     private long _tallyLine = -1;
     private int _tallyGeneration = -1;
-    private bool _tallyComplete;
-    private int _activitySlot, _progressSlot;
+    private bool _tallyHiding, _tallySwept, _tallySettled;
+    private int _activitySlot, _progressSlot, _baseActivitySlot;
     private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
 
@@ -476,8 +476,9 @@ public sealed class MainForm : Form
         _busyLabel.Margin = new Padding(Dpi(6), 0, Dpi(4), 0);
         _busyLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
         _progressSlot = _progress.Width + _progress.Margin.Horizontal;
-        // Size the slot to the widest thing it will ever hold, so the wording is never clipped.
-        _activitySlot = TextRenderer.MeasureText(WidestActivityText, _busyLabel.Font).Width + _progressSlot + Dpi(16);
+        // Sized for the wording alone; a search's counts widen it further, see EnsureActivitySlot.
+        _baseActivitySlot = TextRenderer.MeasureText(WidestActivityText, _busyLabel.Font).Width + _progressSlot + Dpi(16);
+        _activitySlot = _baseActivitySlot;
         _busyLabel.Width = _activitySlot;
 
         // Each metric is a fixed box, so a value growing a digit never shifts its neighbours. The UI font is
@@ -520,15 +521,7 @@ public sealed class MainForm : Form
     /// </summary>
     private bool EnsureMetricWidths()
     {
-        long actual = Math.Max(1_000, _doc.CompletedLineCount);
-        long rounded = 9;
-        while (rounded < actual) rounded = rounded * 10 + 9;
-
-        long magnitude = Math.Max(99_999_999, rounded);
-        // Only a window too narrow to afford that falls back to what this file actually needs.
-        if (_status.Width > 0 && _status.Width - TotalMetricWidth(magnitude) - _activitySlot < Dpi(300))
-            magnitude = rounded;
-
+        long magnitude = MetricMagnitude();
         var labels = MetricLabels;
         string[] samples = MetricSamples(magnitude);
         bool changed = false;
@@ -538,6 +531,48 @@ public sealed class MainForm : Form
             if (labels[i].Width != w) { labels[i].Width = w; changed = true; }
         }
         return changed;
+    }
+
+    private long MetricMagnitude()
+    {
+        long actual = Math.Max(1_000, _doc.CompletedLineCount);
+        long rounded = 9;
+        while (rounded < actual) rounded = rounded * 10 + 9;
+
+        long magnitude = Math.Max(99_999_999, rounded);
+        // Only a window too narrow to afford that falls back to what this file actually needs.
+        if (_status.Width > 0 && _status.Width - TotalMetricWidth(magnitude) - _activitySlot < Dpi(300))
+            magnitude = rounded;
+        return magnitude;
+    }
+
+    /// <summary>Widens the activity slot to hold a search's counts, and only while there is a search: the
+    /// numbers are as long as the file is big, and "Match 1 of 18,020,848 lines · 20,017,440 hits" needs
+    /// twice the room that a slot sized for a small file reserves. The space comes from the two paths, which
+    /// spring - so nothing to the right of it moves. Capped so they always keep a readable share.</summary>
+    private bool EnsureActivitySlot()
+    {
+        int want = _baseActivitySlot;
+        if (_lastQuery is not null && _status.Width > 0)
+        {
+            string n = MetricMagnitude().ToString("N0");
+            string widest = $"Match {n} of {n} lines \u00b7 {n} hidden \u00b7 {n} of {n} hits";
+            int room = Math.Min(_status.Width * 45 / 100,
+                                _status.Width - CurrentMetricWidth() - Dpi(300));
+            int needed = TextRenderer.MeasureText(widest, _busyLabel.Font).Width + _progressSlot + Dpi(16);
+            want = Math.Max(want, Math.Min(needed, room));
+        }
+        if (want == _activitySlot) return false;
+        _activitySlot = want;
+        _busyLabel.Width = _activitySlot - (_progress.Visible ? _progressSlot : 0);
+        return true;
+    }
+
+    private int CurrentMetricWidth()
+    {
+        int total = 0;
+        foreach (var l in MetricLabels) total += l.Width + l.Margin.Horizontal;
+        return total;
     }
 
     private ToolStripStatusLabel[] MetricLabels => new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel };
@@ -1255,6 +1290,9 @@ public sealed class MainForm : Form
     {
         bool sameTerm = _lastQuery == query;
         _lastQuery = query;
+        // A different term counts differently, and nothing else here would notice if it happened to land on
+        // the line the last one did.
+        if (!sameTerm) _tally = _tallyDetail = "";
         if (_state.AddRecentFindTerm(query.Text)) _stateDirty = true;
         // The highlight outlives the dialog: F3 keeps working with it closed, so the hits have to stay
         // marked until the term is deliberately put away.
@@ -1337,30 +1375,40 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    /// <summary>How long a tally may stand while the sweep behind it is still running.</summary>
+    /// <summary>How long a tally may stand while something behind it is still moving.</summary>
     private static readonly TimeSpan TallyMaxAge = TimeSpan.FromMilliseconds(250);
 
-    /// <summary>Whether the counts need re-reading. The sweep finishing is a reason in its own right: without
-    /// it the numbers stop wherever they happened to be a moment before the end, and a search of a large file
-    /// would sit there claiming half of what it found.</summary>
-    internal static bool TallyIsStale(bool complete, bool wasComplete, bool sameLine, bool sameFilters,
-                                      bool haveText, TimeSpan age)
-        => !haveText || !sameLine || !sameFilters || complete != wasComplete || (!complete && age > TallyMaxAge);
+    /// <summary>Whether the counts need re-reading.
+    ///
+    /// Two things move underneath them and both have to be watched the same way - while they run the numbers
+    /// climb, and when they stop the numbers have to be read one last time or they stand at whatever they
+    /// reached a moment before the end. The sweep is one; the filter pass is the other, since what is hidden
+    /// decides the shown/hidden split and which match the caret counts as. Hiding is listed apart from the
+    /// filters themselves because showing only the filtered lines changes no filter.</summary>
+    internal static bool TallyIsStale(bool swept, bool wasSwept, bool settled, bool wasSettled,
+                                      bool sameLine, bool sameFilters, bool sameHiding, bool haveText,
+                                      TimeSpan age)
+        => !haveText || !sameLine || !sameFilters || !sameHiding
+           || swept != wasSwept || settled != wasSettled
+           || ((!swept || !settled) && age > TallyMaxAge);
 
     /// <summary>The "Match 12 of 348" text, re-read whenever <see cref="TallyIsStale"/> says so.</summary>
     private string RefreshTally()
     {
         if (_lastQuery is not { } query) return "";
         long caret = _grid.CaretLine;
-        bool complete = _doc.FindComplete;
-        if (!TallyIsStale(complete, _tallyComplete, caret == _tallyLine,
-                          _tallyGeneration == _doc.FilterGeneration, _tally.Length > 0,
-                          DateTime.UtcNow - _tallyAt))
+        bool swept = _doc.FindComplete;
+        bool settled = _doc.IsFilterIdle;
+        if (!TallyIsStale(swept, _tallySwept, settled, _tallySettled, caret == _tallyLine,
+                          _tallyGeneration == _doc.FilterGeneration, _tallyHiding == _doc.FilteredMode,
+                          _tally.Length > 0, DateTime.UtcNow - _tallyAt))
             return _tally;
 
         _tallyLine = caret;
         _tallyGeneration = _doc.FilterGeneration;
-        _tallyComplete = complete;
+        _tallyHiding = _doc.FilteredMode;
+        _tallySwept = swept;
+        _tallySettled = settled;
         _tallyAt = DateTime.UtcNow;
         if (_doc.FindTally(caret) is not { } t) { _tally = _tallyDetail = ""; return ""; }
         _tally = FindStatusText.Short(t);
@@ -1473,6 +1521,7 @@ public sealed class MainForm : Form
         // Settle every fixed width BEFORE measuring the paths: the springs only get their real size after a
         // layout pass, and measuring against a stale width leaves a path needlessly truncated.
         bool structural = EnsureMetricWidths();
+        structural |= EnsureActivitySlot();
         structural |= EnsureFilterSlot();
         if (structural && !_inStatusLayout)
         {
