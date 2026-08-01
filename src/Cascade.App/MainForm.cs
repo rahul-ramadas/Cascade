@@ -767,7 +767,9 @@ public sealed class MainForm : Form
     {
         if (label is null) { ShowFindMessage(emptyMessage); return; }
         _history.Abandon();
-        _filterTree.Rebuild();
+        // In place, not a rebuild: the snapshot keeps every filter's id, so the list already has the rows
+        // and only what the undo actually changed has to be redrawn.
+        _filterTree.SyncToModel();
         _filtersDirty = true;
         var anchor = _grid.CaptureViewAnchor();
         _doc.ApplyFilters();
@@ -800,7 +802,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _doc.Filters.Add(filter, parent);
-            _filterTree.Rebuild();
+            _filterTree.SyncToModel();
             OnFiltersChanged();
         }
         else _history.Abandon();
@@ -812,7 +814,7 @@ public sealed class MainForm : Form
         _history.Begin("Edit Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            _filterTree.Rebuild();
+            _filterTree.SyncToModel();
             OnFiltersChanged();
         }
         else _history.Abandon();
@@ -851,7 +853,7 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _doc.Filters.Add(filter);
-            _filterTree.Rebuild();
+            _filterTree.SyncToModel();
             OnFiltersChanged();
         }
         else _history.Abandon();

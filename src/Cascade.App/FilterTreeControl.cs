@@ -43,6 +43,7 @@ public sealed class FilterTreeControl : UserControl
     private CascadeDocument? _doc;
     private bool _building;
     private bool _tooltipsQueued;
+    private int _nodesBuilt;
     private readonly List<TreeNode> _flat = new();
     private readonly HashSet<string> _collapsed = new(); // filter ids the user has collapsed
 
@@ -207,10 +208,94 @@ public sealed class FilterTreeControl : UserControl
     private TreeNode BuildNode(Filter f)
     {
         var node = new TreeNode(f.Match.ToDisplayString()) { Tag = f, Checked = f.Enabled };
+        _nodesBuilt++;
         foreach (var child in f.Children) node.Nodes.Add(BuildNode(child));
         if (f.Children.Count > 0 && !_collapsed.Contains(f.Id)) node.Expand();
         return node;
     }
+
+    /// <summary>Brings the list back in line with the model without blanking it.
+    ///
+    /// Nodes are matched to filters by id and only what actually differs is touched, so an undo - whose
+    /// snapshot keeps every id - reuses the rows already on screen and repaints none of the ones it did not
+    /// change. <see cref="Rebuild"/> throws the lot away and then has to put the selection and the scroll
+    /// position back afterwards, and those two restores each scroll the tree: that is the flash. Use this
+    /// whenever the same filters are still there, and Rebuild only when they are genuinely a different set.</summary>
+    public void SyncToModel()
+    {
+        if (_doc is null) return;
+        _building = true;
+        _tree.BeginUpdate();
+        try { SyncLevel(_tree.Nodes, _doc.Filters.Roots); }
+        finally { _tree.EndUpdate(); _building = false; }
+
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
+        if (_collapsed.Count > 0) _collapsed.IntersectWith(_flat.Select(n => (n.Tag as Filter)?.Id ?? ""));
+        MeasureDescriptions();
+        MeasureCounts();
+    }
+
+    private void SyncLevel(TreeNodeCollection nodes, List<Filter> filters)
+    {
+        for (int i = 0; i < filters.Count; i++)
+        {
+            var f = filters[i];
+            var node = i < nodes.Count && IdOf(nodes[i]) == f.Id ? nodes[i] : NodeAt(nodes, f, i);
+            // The filter object is a different instance after a restore even though it is the same filter,
+            // so the tag is re-pointed every time; text and tick only when they read differently.
+            node.Tag = f;
+            string text = f.Match.ToDisplayString();
+            if (node.Text != text) node.Text = text;
+            if (node.Checked != f.Enabled) node.Checked = f.Enabled;
+            SyncLevel(node.Nodes, f.Children);
+            if (f.Children.Count > 0)
+            {
+                if (_collapsed.Contains(f.Id)) node.Collapse();
+                else node.Expand();
+            }
+        }
+        while (nodes.Count > filters.Count) nodes.RemoveAt(nodes.Count - 1);
+    }
+
+    /// <summary>Puts this filter's node at <paramref name="index"/>: moved up from further down the level if
+    /// it is already somewhere in it, and built if it is not.</summary>
+    private TreeNode NodeAt(TreeNodeCollection nodes, Filter f, int index)
+    {
+        for (int j = index + 1; j < nodes.Count; j++)
+        {
+            if (IdOf(nodes[j]) != f.Id) continue;
+            var moved = nodes[j];
+            nodes.RemoveAt(j);
+            nodes.Insert(index, moved);
+            return moved;
+        }
+        var made = new TreeNode(f.Match.ToDisplayString()) { Tag = f, Checked = f.Enabled };
+        _nodesBuilt++;
+        nodes.Insert(index, made);
+        return made;
+    }
+
+    private static string? IdOf(TreeNode node) => (node.Tag as Filter)?.Id;
+
+    /// <summary>Test seam: how many rows have ever been built. A sync that reuses the list leaves it alone,
+    /// which is what "no flash" actually means.</summary>
+    internal int NodesBuiltForTesting => _nodesBuilt;
+
+    internal TreeNode? NodeForTesting(Filter f) => NodeFor(f);
+
+    /// <summary>The filter at the top of the visible part of the list, which a rebuild loses and puts back
+    /// - and putting it back is a scroll you can see.</summary>
+    internal Filter? TopFilterForTesting => _tree.TopNode?.Tag as Filter;
+
+    internal int PaintsForTesting => _tree.Paints;
+
+    /// <summary>Rows on screen, flattened, and the order they are in.</summary>
+    internal int RowCountForTesting => _flat.Count;
+
+    internal string[] RowOrderForTesting => _flat.Select(n => n.Text).ToArray();
+
+    internal void ScrollToForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.TopNode = n; }
 
     private void FlattenInto(TreeNodeCollection nodes)
     {
@@ -1010,7 +1095,7 @@ public sealed class FilterTreeControl : UserControl
         var copy = f.Clone();
         var siblings = f.Parent?.Children ?? _doc.Filters.Roots;
         _doc.Filters.Add(copy, f.Parent, siblings.IndexOf(f) + 1);
-        Rebuild();
+        SyncToModel();
         if (NodeFor(copy) is { } node) { _tree.SelectedNode = node; node.EnsureVisible(); }
         FiltersChanged?.Invoke();
     }
