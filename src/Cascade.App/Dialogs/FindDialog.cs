@@ -172,6 +172,14 @@ public sealed class FindDialog : Form
         // Typing marks the hits already on screen, after a pause so a burst of keystrokes costs one pass.
         _text.TextChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _text.DropDown += (_, _) => { if (History is { } h) SetHistory(h()); };
+        _text.KeyDown += (_, e) =>
+        {
+            if (e.Alt || e.Control || e.Shift) return;
+            if (e.KeyCode is not (Keys.Down or Keys.Up)) return;
+            // A closed drop-down would change the term with no sign of where in the list it came from.
+            StepHistory(e.KeyCode == Keys.Down ? 1 : -1);
+            e.Handled = e.SuppressKeyPress = true;
+        };
         _regex.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _case.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _preview.Tick += (_, _) =>
@@ -280,6 +288,27 @@ public sealed class FindDialog : Form
     }
 
     public void FocusInput() { _text.Focus(); _text.SelectionStart = 0; _text.SelectionLength = _text.Text.Length; }
+
+    /// <summary>Opens the list of earlier terms and moves through it. The first press picks the most recent,
+    /// which is what a search box that remembers is for.</summary>
+    private void StepHistory(int delta)
+    {
+        // Only refill it on the way in: rebuilding the list drops the place in it, so refreshing on every
+        // press would leave Down stuck on the most recent term.
+        if (!_text.DroppedDown)
+        {
+            if (History is { } h) SetHistory(h());
+            if (_text.Items.Count == 0) return;
+            _text.DroppedDown = true;
+        }
+        if (_text.Items.Count == 0) return;
+        int next = Math.Clamp(_text.SelectedIndex + delta, 0, _text.Items.Count - 1);
+        if (next != _text.SelectedIndex) _text.SelectedIndex = next;
+    }
+
+    internal void StepHistoryForTesting(int delta) => StepHistory(delta);
+
+    internal bool HistoryIsOpenForTesting() => _text.DroppedDown;
 
     internal void SetTermForTesting(string text, int start, int length)
     {
