@@ -400,6 +400,48 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Typing_a_search_term_marks_matches_without_moving_the_view()
+    {
+        // Typing marks what is already on screen and nothing else. Moving the view as the term grows would
+        // walk it away from whatever you were looking at, one keystroke at a time.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile();
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            app.SelectLine(5);
+            int before = app.FirstVisibleLine();
+
+            var dlg = app.OpenFindDialog();
+            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))
+                       ?? throw new InvalidOperationException("Find box not found: " + app.DescribeTextElements());
+            edit.Patterns.Value.Pattern.SetValue("line 999");
+            Thread.Sleep(700);   // longer than the preview's own pause
+
+            Check("typing does not move the view", app.FirstVisibleLine() == before,
+                  $"{before} -> {app.FirstVisibleLine()}");
+
+            dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))?.AsButton().Invoke();
+            Check("asking for the search does move it",
+                  Retry.WhileFalse(() => app.FirstVisibleLine() != before, TimeSpan.FromSeconds(6)).Result,
+                  $"{before} -> {app.FirstVisibleLine()}");
+            Check("and it lands on the match", app.WaitSelectedRowText("line 999"), app.SelectedRowText());
+
+            // The term outlives the dialog, so the status bar keeps reporting it.
+            try { dlg.Close(); } catch { /* modeless: hides */ }
+            Check("the tally survives the dialog closing",
+                  app.WaitForFindMessage("of 1", 4000), app.AllStatusText());
+
+            Assert.True(fails.Count == 0, "Find-as-you-type failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
     public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
     {
         string log = TestData.WriteLogFile();
