@@ -59,6 +59,9 @@ public sealed class AppSettings
     /// <summary>Whether long lines are broken to fit the width instead of running off the side.</summary>
     public bool WordWrap { get; set; }
 
+    /// <summary>Whether hovering a line names the filters that matched it.</summary>
+    public bool ShowFilterTooltips { get; set; } = true;
+
     /// <summary>Behind every occurrence of the find term on a visible line.</summary>
     public int FindHighlightArgb { get; set; } = Color.FromArgb(255, 236, 150).ToArgb();
 
