@@ -13,8 +13,8 @@ namespace Cascade.App;
 /// shows as nothing, which is the honest answer.
 ///
 /// A pixel per row means the map holds only as many rows as it is tall, so it shows a <b>window</b> of the
-/// file rather than the whole of it, and the window follows the view. That is the same trade Wireshark makes
-/// with its scrollbar overlay, and it is why the scrollbar beside it keeps the whole-file scale.
+/// file rather than the whole of it, centred on the view. That is the same trade Wireshark makes with its
+/// scrollbar overlay, and it is why the scrollbar beside it keeps the whole-file scale.
 ///
 /// With unmatched lines on screen (dim mode) that window would be nearly empty - a filter set matching half a
 /// percent of a file leaves four coloured pixels in nine hundred - so a <b>run of unmatched rows is
@@ -25,17 +25,15 @@ namespace Cascade.App;
 /// </summary>
 internal sealed class MiniMapControl : Control
 {
-    /// <summary>Logical width. Enough to read a colour and to grab the viewport rectangle.</summary>
-    public const int LogicalWidth = 13;
+    /// <summary>Logical width. Wide enough to hit with a mouse and to read a colour off.</summary>
+    public const int LogicalWidth = 18;
 
     /// <summary>Unmatched rows skipped per pixel of gap. Only matched rows are worth a pixel each; this is
     /// how much of the space between them the map is prepared to spend.</summary>
     private const int GapRows = 32;
 
-    private const int EdgeWidth = 3;          // device px; marks down the left, find hits down the right
-    private const int MarkHeight = 2;
+    private const int EdgeLane = 3;           // logical; marks down the left, find hits down the right
     private const int MinViewportHeight = 8;  // a compressed stretch would otherwise leave it a hairline
-    private const int MarginPercent = 15;     // of the window, before it re-centres
     private const int HoverDelayMs = 400;
     private const int TipDurationMs = 8000;
 
@@ -110,33 +108,31 @@ internal sealed class MiniMapControl : Control
     internal string TipTextForTesting(int slot) => SlotTipText(slot);
     internal void ClickForTesting(int y) => ScrollTo(y);
     internal (int Top, int Height) ViewportForTesting => Geometry();
+    internal Rectangle ContentForTesting => new(Divider, 0, Math.Max(1, ClientSize.Width - Divider), ClientSize.Height);
 
     /// <summary>How many times the map has actually painted. A picture of it cannot answer that: capturing a
     /// control draws it whether or not it was invalidated, so a screenshot always looks up to date even when
     /// the real window has been sitting stale for minutes.</summary>
     internal int PaintsForTesting => _paints;
 
-    // ---- the window ----
+    // ---- geometry ----
 
     private int MinRowPixels => Math.Max(1, LogicalToDeviceUnits(1));
+    private int Divider => Math.Max(1, LogicalToDeviceUnits(1));
+    private int EdgeWidth => Math.Max(2, LogicalToDeviceUnits(EdgeLane));
 
-    /// <summary>Moves the window so the viewport sits in the middle of it, but only when it has to.
+    /// <summary>Puts the view in the middle of the window.
     ///
-    /// Left alone the map is a fixed trough with the viewport rectangle sliding down it, which is what makes
-    /// it usable as a scrollbar: what you clicked stays where you clicked it. It re-centres in one step when
-    /// the viewport approaches an edge, and never moves at all while the pointer is on it - otherwise a drag
-    /// would chase itself.</summary>
+    /// Any scroll from anywhere else - a key, the wheel, the scrollbar - re-centres it, so the rectangle
+    /// stays put and the picture moves under it rather than the rectangle drifting to an edge. The one
+    /// exception is while the pointer is on the map: a window that moved under a drag would chase itself,
+    /// and what you clicked has to still be where you clicked it.</summary>
     private void TrackView(long rows)
     {
+        if (_dragging || _hovering) return;
         long viewTop = _grid.FirstVisibleRow;
         long viewRows = Math.Max(1, _grid.VisibleRows);
-        long margin = Math.Max(1, _span * MarginPercent / 100);
-        bool inside = viewTop >= _top + margin && viewTop + viewRows <= _top + _span - margin;
-        bool anywhere = viewTop + viewRows > _top && viewTop < _top + _span;
-        if (inside || ((_dragging || _hovering) && anywhere)) return;
-
-        long want = viewTop + viewRows / 2 - _span / 2;
-        _top = Math.Clamp(want, 0, Math.Max(0, rows - 1));
+        _top = Math.Clamp(viewTop + viewRows / 2 - _span / 2, 0, Math.Max(0, rows - 1));
     }
 
     private void EnsureSummary()
@@ -176,12 +172,20 @@ internal sealed class MiniMapControl : Control
         if (_rowAt.Length < slots) { _rowAt = new long[slots]; _colour = new int[slots]; }
 
         _top = Math.Clamp(_top, 0, Math.Max(0, rows - 1));
+        long caret = _grid.CaretRow;
         // The window is placed from the span the last build produced, and a build that crosses into a
         // compressed stretch reaches far further than the one before it did. One correcting pass, so the
         // view ends up where the placement meant to put it rather than at an edge.
         for (int pass = 0; ; pass++)
         {
-            _slots = rows <= 0 ? 0 : Fill(doc, rows, slots);
+            _slots = rows <= 0 ? 0 : Fill(doc, rows, slots, caret);
+            // Ran out of file before the map was full: anchor to the end instead, so the last row of the
+            // file is the last pixel. Otherwise the map empties out as you reach the bottom.
+            if (_slots < slots && _top > 0 && rows > 0)
+            {
+                _slots = FillBackward(doc, rows, slots, caret);
+                _top = _slots > 0 ? _rowAt[0] : 0;
+            }
             _span = Math.Max(1, (_slots > 0 ? _rowAt[_slots - 1] + 1 : _top + 1) - _top);
             if (pass > 0 || rows <= 0) break;
             long was = _top;
@@ -193,27 +197,22 @@ internal sealed class MiniMapControl : Control
         RedrawPicture(width, height);
     }
 
-    /// <summary>Walks rows into pixel slots: one slot per matched row, and one slot per <see cref="GapRows"/>
-    /// unmatched rows in between. Returns how many slots were filled.</summary>
-    private int Fill(CascadeDocument doc, long rows, int slots)
+    /// <summary>Walks rows forward into pixel slots: one slot per matched row, and one slot per
+    /// <see cref="GapRows"/> unmatched rows in between. Returns how many slots were filled.</summary>
+    private int Fill(CascadeDocument doc, long rows, int slots, long caret)
     {
         var settings = _grid.Settings;
-        var defaults = new ResolvedStyle(
-            new RgbColor(settings.Foreground.R, settings.Foreground.G, settings.Foreground.B),
-            new RgbColor(settings.Background.R, settings.Background.G, settings.Background.B), false, false);
-
+        var defaults = Defaults(settings);
         int at = 0;
         long row = _top;
         while (at < slots && row < rows)
         {
-            long line = doc.RowToLine(row);
-            long nextLine = doc.NextMatchedLine(line);
-            long nextRow = nextLine < 0 ? rows : doc.RowAtOrAfterLine(nextLine);
-            if (nextRow > row)
+            long stop = NextStop(doc, rows, row, caret);
+            if (stop > row)
             {
                 // Nothing matches between here and there, so the whole stretch is worth a few pixels - at a
                 // fixed rate, so that one enormous gap does not quietly rescale the whole map.
-                long gap = Math.Min(nextRow, rows) - row;
+                long gap = stop - row;
                 int wanted = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
                 int pixels = Math.Min(wanted, slots - at);
                 for (int i = 0; i < pixels; i++)
@@ -223,16 +222,77 @@ internal sealed class MiniMapControl : Control
                     at++;
                 }
                 if (pixels < wanted) break;   // the map filled up part way through the gap
-                row = Math.Min(nextRow, rows);
+                row = stop;
                 continue;
             }
             _rowAt[at] = row;
-            _colour[at] = ColourOf(doc, line, defaults, settings);
+            _colour[at] = ColourOf(doc, doc.RowToLine(row), defaults, settings);
             at++;
             row++;
         }
         return at;
     }
+
+    /// <summary>The same walk from the end of the file backwards, for when there is not enough file left
+    /// below the window to fill it. Returns how many slots were filled, packed to the start.</summary>
+    private int FillBackward(CascadeDocument doc, long rows, int slots, long caret)
+    {
+        var settings = _grid.Settings;
+        var defaults = Defaults(settings);
+        int at = slots - 1;
+        long row = rows - 1;
+        while (at >= 0 && row >= 0)
+        {
+            long stop = PrevStop(doc, row, caret);
+            if (stop < row)
+            {
+                long gap = row - stop;
+                int wanted = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
+                int pixels = Math.Min(wanted, at + 1);
+                for (int i = 0; i < pixels; i++)
+                {
+                    _rowAt[at] = row - gap * i / wanted;
+                    _colour[at] = 0;
+                    at--;
+                }
+                if (pixels < wanted) break;
+                row = stop;
+                continue;
+            }
+            _rowAt[at] = row;
+            _colour[at] = ColourOf(doc, doc.RowToLine(row), defaults, settings);
+            at--;
+            row--;
+        }
+        if (at < 0) return slots;
+        int filled = slots - at - 1;
+        Array.Copy(_rowAt, at + 1, _rowAt, 0, filled);
+        Array.Copy(_colour, at + 1, _colour, 0, filled);
+        return filled;
+    }
+
+    /// <summary>Where the walk stops next going down: the next matched row, or the caret when it comes
+    /// first. The caret keeps a pixel of its own even in a stretch that is otherwise skipped over, or it
+    /// would vanish from the map exactly when it is on a line nothing matched.</summary>
+    private static long NextStop(CascadeDocument doc, long rows, long row, long caret)
+    {
+        long nextLine = doc.NextMatchedLine(doc.RowToLine(row));
+        long stop = nextLine < 0 ? rows : Math.Min(rows, doc.RowAtOrAfterLine(nextLine));
+        if (caret > row && caret < stop) stop = caret;
+        return stop;
+    }
+
+    private static long PrevStop(CascadeDocument doc, long row, long caret)
+    {
+        long prevLine = doc.PrevMatchedLine(doc.RowToLine(row));
+        long stop = prevLine < 0 ? -1 : doc.RowForLine(prevLine);
+        if (caret < row && caret > stop) stop = caret;
+        return stop;
+    }
+
+    private static ResolvedStyle Defaults(AppSettings settings) => new(
+        new RgbColor(settings.Foreground.R, settings.Foreground.G, settings.Foreground.B),
+        new RgbColor(settings.Background.R, settings.Background.G, settings.Background.B), false, false);
 
     /// <summary>The colour the text area paints this line's background in, or its text colour when the
     /// filter sets only that, or nothing at all. Resolved through the same evaluation the grid uses, so the
@@ -264,6 +324,10 @@ internal sealed class MiniMapControl : Control
         return lo;
     }
 
+    /// <summary>The rows a slot stands for, which is more than one wherever a stretch was compressed.</summary>
+    private (long From, long To) RowsAt(int slot)
+        => (_rowAt[slot], slot + 1 < _slots ? Math.Max(_rowAt[slot] + 1, _rowAt[slot + 1]) : _rowAt[slot] + 1);
+
     // ---- painting ----
 
     private void RedrawPicture(int width, int height)
@@ -272,7 +336,11 @@ internal sealed class MiniMapControl : Control
         _picture = null;
         if (_slots <= 0) return;
 
-        int backArgb = _grid.Settings.GutterBack.ToArgb();
+        var settings = _grid.Settings;
+        int backArgb = settings.GutterBack.ToArgb();
+        int dividerArgb = Blend(settings.Foreground, settings.GutterBack, 0.30).ToArgb();
+        int left = Divider;
+
         var picture = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         var data = picture.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         try
@@ -283,12 +351,20 @@ internal sealed class MiniMapControl : Control
                 int slot = y / _rowPixels;
                 int argb = slot < _slots && _colour[slot] != 0 ? _colour[slot] : backArgb;
                 Array.Fill(row, argb);
+                // A rule down the left, or a coloured row runs straight into the text beside it and there is
+                // no telling where one ends and the other starts.
+                for (int x = 0; x < left && x < width; x++) row[x] = dividerArgb;
                 System.Runtime.InteropServices.Marshal.Copy(row, 0, data.Scan0 + y * data.Stride, width);
             }
         }
         finally { picture.UnlockBits(data); }
         _picture = picture;
     }
+
+    internal static Color Blend(Color c, Color back, double t) => Color.FromArgb(
+        (int)Math.Round(back.R + (c.R - back.R) * t),
+        (int)Math.Round(back.G + (c.G - back.G) * t),
+        (int)Math.Round(back.B + (c.B - back.B) * t));
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -305,18 +381,21 @@ internal sealed class MiniMapControl : Control
 
     private void DrawMarks(Graphics g, CascadeDocument doc)
     {
-        int edge = Math.Max(1, LogicalToDeviceUnits(1) * EdgeWidth);
+        int edge = EdgeWidth, left = Divider;
         long first = _rowAt[0], last = _rowAt[_slots - 1];
 
         // Selected rows and find hits share the map with the colours, so they take an edge each rather than
         // covering the row they belong to. The selection goes down first: a mark is deliberate and stays,
-        // a selection is wherever you last clicked, and the two want the same three pixels.
+        // a selection is wherever you last clicked, and the two want the same few pixels.
         if (_grid.HasSelection)
         {
             using var brush = new SolidBrush(_grid.Settings.SelectionBack);
             for (int s = 0; s < _slots; s++)
-                if (_grid.IsRowSelected(_rowAt[s]))
-                    g.FillRectangle(brush, 0, s * _rowPixels, edge, Math.Max(MarkHeight, _rowPixels));
+            {
+                var (from, to) = RowsAt(s);
+                if (_grid.SelectionIntersects(from, to))
+                    g.FillRectangle(brush, left, s * _rowPixels, edge, Math.Max(2, _rowPixels));
+            }
         }
 
         foreach (var (line, mask) in doc.Markers.Snapshot())
@@ -325,19 +404,20 @@ internal sealed class MiniMapControl : Control
             if (row < first || row > last) continue;
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
             using var brush = new SolidBrush(AppSettings.MarkerColors[Math.Clamp(index, 0, AppSettings.MarkerColors.Length - 1)]);
-            g.FillRectangle(brush, 0, SlotOf(row) * _rowPixels, edge, Math.Max(MarkHeight, _rowPixels));
+            g.FillRectangle(brush, left, SlotOf(row) * _rowPixels, edge, Math.Max(2, _rowPixels));
         }
 
         if (doc.FindHitCount > 0)
         {
             using var brush = new SolidBrush(_grid.Settings.FindCurrent);
-            int x = Math.Max(0, ClientSize.Width - edge);
+            int x = Math.Max(left, ClientSize.Width - edge);
             for (int s = 0; s < _slots; s++)
             {
-                long from = doc.RowToLine(_rowAt[s]);
-                long to = s + 1 < _slots ? doc.RowToLine(_rowAt[s + 1]) : from + 1;
-                if (doc.FindHitsInRange(from, Math.Max(from + 1, to)) > 0)
-                    g.FillRectangle(brush, x, s * _rowPixels, edge, Math.Max(MarkHeight, _rowPixels));
+                var (from, to) = RowsAt(s);
+                long lineFrom = doc.RowToLine(from);
+                long lineTo = doc.RowToLine(Math.Max(from, to - 1)) + 1;
+                if (doc.FindHitsInRange(lineFrom, Math.Max(lineFrom + 1, lineTo)) > 0)
+                    g.FillRectangle(brush, x, s * _rowPixels, edge, Math.Max(2, _rowPixels));
             }
         }
     }
@@ -361,10 +441,12 @@ internal sealed class MiniMapControl : Control
         _drawnViewport = (top, height);
 
         var settings = _grid.Settings;
-        using (var fill = new SolidBrush(Color.FromArgb(48, settings.SelectionBack)))
-            g.FillRectangle(fill, 0, top, ClientSize.Width, height);
-        using var pen = new Pen(Color.FromArgb(200, settings.SelectionBack));
-        g.DrawRectangle(pen, 0, top, ClientSize.Width - 1, height - 1);
+        int left = Divider;
+        int width = Math.Max(1, ClientSize.Width - left);
+        using (var fill = new SolidBrush(Color.FromArgb(40, settings.SelectionBack)))
+            g.FillRectangle(fill, left, top, width, height);
+        using var pen = new Pen(Color.FromArgb(210, settings.SelectionBack));
+        g.DrawRectangle(pen, left, top, width - 1, height - 1);
     }
 
     /// <summary>Repaints when anything the map draws has actually changed. The map is a child control, so the
@@ -425,7 +507,7 @@ internal sealed class MiniMapControl : Control
         _hovering = false;
         HideTip();
         base.OnMouseLeave(e);
-        Invalidate();   // frozen while the pointer was here; it may have a window to catch up on
+        Invalidate();   // frozen while the pointer was here; it has a window to catch up on
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -441,6 +523,10 @@ internal sealed class MiniMapControl : Control
         if (_slots <= 0) return;
         int slot = Math.Clamp(y / _rowPixels, 0, _slots - 1);
         _grid.ScrollToRow(_rowAt[slot] - _grid.VisibleRows / 2);
+        // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without these
+        // nothing moves until the mouse stops.
+        _grid.Update();
+        Update();
     }
 
     // ---- what is under the pointer ----
@@ -482,10 +568,9 @@ internal sealed class MiniMapControl : Control
         sb.Append("Line ").Append((line + 1).ToString("N0"));
         if (_colour[slot] == 0)
         {
-            long next = slot + 1 < _slots ? _rowAt[slot + 1] : row + 1;
-            if (next > row + 1) sb.Append('\u2013').Append(next.ToString("N0")).Append("  (nothing matching)");
-            else sb.Append("  (nothing matching)");
-            return sb.ToString();
+            var (from, to) = RowsAt(slot);
+            if (to > from + 1) sb.Append('\u2013').Append(doc.RowToLine(to - 1).ToString("N0"));
+            return sb.Append("  (nothing matching)").ToString();
         }
         string tip = FilterTipText.Build(doc.FiltersMatching(line));
         return tip.Length == 0 ? sb.ToString() : sb.Append('\n').Append(tip).ToString();

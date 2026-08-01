@@ -98,6 +98,15 @@ public sealed class CascadeDocument : IDisposable
         return row >= view.Count ? -1 : view.LineAt(row);
     }
 
+    /// <summary>The last line at or before <paramref name="line"/> that the filters match, or -1.</summary>
+    public long PrevMatchedLine(long line)
+    {
+        if (line < 0) return -1;
+        var view = MatchView;
+        long row = view.RowAtOrAfterLine(line + 1);
+        return row <= 0 ? -1 : view.LineAt(row - 1);
+    }
+
     /// <summary>Resolves one whole screen of rows against a <b>single</b> consistent snapshot of the visible
     /// set, anchoring <paramref name="anchorLine"/> at <paramref name="anchorOffset"/> rows from the top and
     /// filling <paramref name="lines"/> with the file lines to paint. A streaming pass keeps adding and

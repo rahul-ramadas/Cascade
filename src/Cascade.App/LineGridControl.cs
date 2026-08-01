@@ -335,6 +335,7 @@ public sealed class LineGridControl : Control
     /// <summary>What the minimap needs to draw the selection, and to know when it has moved.</summary>
     internal bool HasSelection => _sel.Count > 0;
     internal bool IsRowSelected(long row) => _sel.Contains(row);
+    internal bool SelectionIntersects(long from, long toExclusive) => _sel.IntersectsRange(from, toExclusive);
     internal long SelectionVersion => _sel.Version * 1_000_003L + _caretRow;
 
     /// <summary>Scrolls so <paramref name="row"/> is the top visible row. Used by the map, which stands in
