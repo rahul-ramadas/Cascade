@@ -28,9 +28,9 @@ public sealed class LineGridControl : Control
     private const int DefaultColumnWidth = 160;
     private const long CopyLineCap = 2_000_000;
 
-    private readonly VScrollBar _vbar = new() { Dock = DockStyle.Right };
     private readonly HScrollBar _hbar = new() { Dock = DockStyle.Bottom };
-    private MatchMapControl? _map;
+    private SlimScrollBar _vbar = null!;
+    private MiniMapControl? _map;
     private readonly RowSelection _sel = new();
     private readonly List<ColumnValue> _cols = new();
 
@@ -92,31 +92,20 @@ public sealed class LineGridControl : Control
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         BackColor = Color.White;
-        _map = new MatchMapControl(this);
+        // Added in this order so the scrollbar ends up outermost, with the map inside it against the text -
+        // the map is the fine-grained one and belongs next to what it describes.
+        _map = new MiniMapControl(this);
         Controls.Add(_map);
+        _vbar = new SlimScrollBar(this);
         Controls.Add(_vbar);
-        // The map stands in for the scrollbar rather than sitting beside it - it carries the viewport
-        // rectangle, so a scrollbar next to it would be saying the same thing twice.
-        _vbar.Visible = false;
         Controls.Add(_hbar);
-        _vbar.Scroll += (_, e) => { ClearViewAnchor(); _firstRow = e.NewValue; Invalidate(); };
-        // Setting Value programmatically - which is what an accessibility tool or UI automation does, since
-        // Scroll only fires for a physical drag - is just as much a deliberate move as dragging the thumb,
-        // so it must drop the view anchor too. Without that, the next refresh re-applies the anchor and
-        // snaps the view straight back, and scrolling appears to do nothing at all.
-        _vbar.ValueChanged += (_, _) =>
-        {
-            if (_syncingScroll) return;
-            ClearViewAnchor();
-            _firstRow = _vbar.Value;
-            Invalidate();
-        };
+        _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; Invalidate(); };
         _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
         _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
         // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
         // file, because one of those would eventually be forgotten.
-        Invalidated += (_, _) => _map?.SyncToGrid();
+        Invalidated += (_, _) => { _map?.SyncToGrid(); _vbar?.Invalidate(); };
         _tipTimer.Tick += (_, _) => ShowTipNow();
         TabStop = true;
         AccessibleRole = AccessibleRole.List;
@@ -343,6 +332,11 @@ public sealed class LineGridControl : Control
     internal int VisibleRows => EffectiveVisibleRows;
     internal long CaretRow => _caretRow;
 
+    /// <summary>What the minimap needs to draw the selection, and to know when it has moved.</summary>
+    internal bool HasSelection => _sel.Count > 0;
+    internal bool IsRowSelected(long row) => _sel.Contains(row);
+    internal long SelectionVersion => _sel.Version * 1_000_003L + _caretRow;
+
     /// <summary>Scrolls so <paramref name="row"/> is the top visible row. Used by the map, which stands in
     /// for the scrollbar, so it drops the view anchor exactly as dragging the thumb does.</summary>
     internal void ScrollToRow(long row)
@@ -355,25 +349,34 @@ public sealed class LineGridControl : Control
     /// <summary>A wheel turn over the map scrolls the text, as it does over the scrollbar.</summary>
     internal void ScrollByWheel(int delta) => ScrollBy(-Math.Sign(delta) * SystemInformation.MouseWheelScrollLines);
 
-    /// <summary>Shows the match map in the vertical scrollbar's place, or puts the scrollbar back. Only one
-    /// of the two is ever visible: the map carries the viewport rectangle, so a scrollbar beside it would be
-    /// saying the same thing twice.</summary>
+    /// <summary>Shows or hides the minimap. The scrollbar stays either way: it is the one that covers the
+    /// whole file, and the map only ever shows a window of it.</summary>
     internal void SetMatchMapVisible(bool visible)
     {
         if (_map is null) return;
         _map.Visible = visible;
-        _vbar.Visible = !visible;
         RefreshView();
     }
 
     /// <summary>Tells the map its summary is stale (the filters, markers or file changed).</summary>
     internal void InvalidateMatchMap() => _map?.InvalidateSummary();
 
-    internal MatchMapControl? MatchMapForTesting => _map;
+    internal MiniMapControl? MatchMapForTesting => _map;
+
+    internal SlimScrollBar ScrollBarForTesting => _vbar;
+
+    internal int MapWidthForTesting => _map?.Visible == true ? _map.Width : 0;
+
+    internal int ScrollBarWidthForTesting => _vbar.Visible ? _vbar.Width : 0;
+
+    /// <summary>Where the two actually are, so a test never has to work it out from docking order.</summary>
+    internal Rectangle MapBoundsForTesting => _map?.Visible == true ? _map.Bounds : Rectangle.Empty;
+
+    internal Rectangle ScrollBarBoundsForTesting => _vbar.Visible ? _vbar.Bounds : Rectangle.Empty;
 
     internal bool VerticalScrollBarVisibleForTesting => _vbar.Visible;
 
-    /// <summary>Width taken by whichever of the map and the scrollbar is showing.</summary>
+    /// <summary>Width taken by the map and the scrollbar together.</summary>
     private int RightGutterWidth => (_map?.Visible == true ? _map.Width : 0) + (_vbar.Visible ? _vbar.Width : 0);
 
     /// <summary>Captures the viewport's current position so it can be restored after the visible-line set
@@ -485,16 +488,12 @@ public sealed class LineGridControl : Control
         SyncVScrollValue();
     }
 
-    /// <summary>Pushes <see cref="_firstRow"/> into the scrollbar without letting the scrollbar's own clamping
-    /// (its Maximum/LargeChange keep growing as rows stream in) drag the visible text back.</summary>
+    /// <summary>Pushes <see cref="_firstRow"/> into the scrollbar. It clamps to its own range, which keeps
+    /// growing as rows stream in, so this must not be echoed back into the view.</summary>
     private void SyncVScrollValue()
     {
         _syncingScroll = true;
-        try
-        {
-            int max = Math.Max(_vbar.Minimum, _vbar.Maximum - _vbar.LargeChange + 1);
-            _vbar.Value = (int)Math.Clamp(_firstRow, _vbar.Minimum, max);
-        }
+        try { _vbar.Value = _firstRow; }
         finally { _syncingScroll = false; }
     }
 
@@ -548,17 +547,7 @@ public sealed class LineGridControl : Control
         if (_caretRow >= rows) _caretRow = rows - 1;
 
         int vMax = (int)Math.Min(int.MaxValue, Math.Max(0, rows - 1));
-        // Grow the scrollbar's range silently: while filtering streams, Maximum/LargeChange change on every
-        // refresh, and letting the scrollbar echo that back into _firstRow would drag the visible text.
-        _syncingScroll = true;
-        try
-        {
-            _vbar.Maximum = vMax;
-            _vbar.LargeChange = Math.Max(1, visible);
-            _vbar.SmallChange = 1;
-            _vbar.Enabled = rows > visible;
-        }
-        finally { _syncingScroll = false; }
+        _vbar.Configure(rows, visible);
 
         UpdateHScroll();
         AnchorToViewportIfStreaming();
@@ -759,7 +748,7 @@ public sealed class LineGridControl : Control
 
     /// <summary>Drives the vertical scrollbar the way UI Automation does: by setting Value, which raises
     /// ValueChanged but never Scroll.</summary>
-    internal void SetVerticalScrollValue(int firstRow) => _vbar.Value = firstRow;
+    internal void SetVerticalScrollValue(int firstRow) { ClearViewAnchor(); SetFirstRow(firstRow); Invalidate(); }
 
     /// <summary>
     /// The margin that horizontal scrolling must leave pixel-identical: the marker and line-number columns,

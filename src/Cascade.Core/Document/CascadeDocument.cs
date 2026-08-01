@@ -87,6 +87,17 @@ public sealed class CascadeDocument : IDisposable
     public bool IsLineVisible(long line)
         => FilteredMode ? MatchView.IsVisible(line) : line >= 0 && line < CompletedLineCount;
 
+    /// <summary>The first line at or after <paramref name="line"/> that the filters match, or -1 when there
+    /// is none. A rank lookup and a bit scan, so skipping a million unmatched lines costs the same as
+    /// skipping one - which is what lets a summary walk past the stretches with nothing in them.</summary>
+    public long NextMatchedLine(long line)
+    {
+        if (line < 0) line = 0;
+        var view = MatchView;
+        long row = view.RowAtOrAfterLine(line);
+        return row >= view.Count ? -1 : view.LineAt(row);
+    }
+
     /// <summary>Resolves one whole screen of rows against a <b>single</b> consistent snapshot of the visible
     /// set, anchoring <paramref name="anchorLine"/> at <paramref name="anchorOffset"/> rows from the top and
     /// filling <paramref name="lines"/> with the file lines to paint. A streaming pass keeps adding and

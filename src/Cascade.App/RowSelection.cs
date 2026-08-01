@@ -9,7 +9,11 @@ public sealed class RowSelection
 
     public long Anchor { get; private set; } = -1;
 
-    public void Clear() { _ranges.Clear(); Anchor = -1; }
+    /// <summary>Bumped by every change. Anything that summarises the selection keys its cache on this rather
+    /// than walking the ranges to find out whether they moved.</summary>
+    public int Version { get; private set; }
+
+    public void Clear() { _ranges.Clear(); Anchor = -1; Version++; }
 
     public long Count
     {
@@ -28,6 +32,7 @@ public sealed class RowSelection
         _ranges.Clear();
         if (row >= 0) _ranges.Add((row, row));
         Anchor = row;
+        Version++;
     }
 
     public void SetRange(long a, long b)
@@ -36,6 +41,7 @@ public sealed class RowSelection
         _ranges.Clear();
         _ranges.Add((Math.Min(a, b), Math.Max(a, b)));
         Anchor = a;
+        Version++;
     }
 
     public void SelectAll(long count)
@@ -43,6 +49,7 @@ public sealed class RowSelection
         _ranges.Clear();
         if (count > 0) _ranges.Add((0, count - 1));
         Anchor = 0;
+        Version++;
     }
 
     public void ToggleSingle(long row)
@@ -51,6 +58,7 @@ public sealed class RowSelection
         Anchor = row;
         if (Contains(row)) Remove(row);
         else Add(row);
+        Version++;
     }
 
     private void Add(long row)

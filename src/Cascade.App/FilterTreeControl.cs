@@ -44,8 +44,6 @@ public sealed class FilterTreeControl : UserControl
     private bool _building;
     private bool _tooltipsQueued;
     private int _nodesBuilt;
-    private Dictionary<string, Color> _laneKeys = new();
-    private bool _showLaneKeys = true;
     private readonly List<TreeNode> _flat = new();
     private readonly HashSet<string> _collapsed = new(); // filter ids the user has collapsed
 
@@ -298,22 +296,6 @@ public sealed class FilterTreeControl : UserControl
     internal string[] RowOrderForTesting => _flat.Select(n => n.Text).ToArray();
 
     internal void ScrollToForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.TopNode = n; }
-
-    /// <summary>The colour of the map key beside a filter, or null when it has no lane on the map.</summary>
-    internal Color? LaneKeyForTesting(Filter f) => _laneKeys.TryGetValue(f.Id, out var c) ? c : null;
-
-    /// <summary>Where that key is drawn, so a test can look at the pixels rather than the intent. In this
-    /// control's own coordinates: a node's bounds are relative to the tree inside it, which sits below the
-    /// search box and right of the focus bar.</summary>
-    internal Rectangle LaneKeyBoundsForTesting(Filter f)
-    {
-        if (NodeFor(f) is not { } n || LaneKeyWidth <= 0) return Rectangle.Empty;
-        var b = n.Bounds;
-        int inset = Math.Max(1, b.Height / 5);
-        var r = new Rectangle(ContentLeft(n), b.Top + inset, LaneKeyWidth - Inset, b.Height - inset * 2);
-        r.Offset(_tree.Left, _tree.Top);
-        return r;
-    }
 
     private void FlattenInto(TreeNodeCollection nodes)
     {
@@ -572,18 +554,6 @@ public sealed class FilterTreeControl : UserControl
         int textY = bounds.Top + Math.Max(0, (h - textHeight) / 2);
         string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + e.Node.Text;
 
-        // The key: the colour this filter is drawn in on the match map, so a lane over there can be looked
-        // up here. Half the filters in a real set have no colour of their own and take one from a palette,
-        // which is unguessable without this. Only filters that actually have a lane get one.
-        int keyWidth = LaneKeyWidth;
-        if (keyWidth > 0 && _laneKeys.TryGetValue(f.Id, out var laneColor))
-        {
-            int inset = Math.Max(1, h / 5);
-            using var keyBrush = new SolidBrush(laneColor);
-            g.FillRectangle(keyBrush, contentLeft, bounds.Top + inset, keyWidth - Inset, h - inset * 2);
-        }
-        contentLeft += keyWidth;
-
         var savedClip = g.Clip;
         g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, filterRight - Inset), bounds.Bottom));
         DrawWithSearchHighlight(g, pattern, new Point(contentLeft, textY),
@@ -621,31 +591,6 @@ public sealed class FilterTreeControl : UserControl
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
     private static Color ToColor(RgbColor c) => Color.FromArgb(c.R, c.G, c.B);
-
-    /// <summary>Width reserved for the map key at the left of every row. Reserved on all of them, not only
-    /// the ones that have a lane, or the text would sit at a different place row to row.</summary>
-    private int LaneKeyWidth => _showLaneKeys ? LogicalToDeviceUnits(7) : 0;
-
-    /// <summary>Whether the map is on screen. Its key has nothing to point at when it is not.</summary>
-    [System.ComponentModel.DefaultValue(true)]
-    public bool ShowLaneKeys
-    {
-        get => _showLaneKeys;
-        set { if (_showLaneKeys == value) return; _showLaneKeys = value; LayoutColumns(); _tree.Invalidate(); }
-    }
-
-    /// <summary>Re-reads which filters the map gives a lane to, and in what colour. Worked out from the same
-    /// rule the map uses rather than a second one of its own, so the key can never name a colour the map is
-    /// not painting.</summary>
-    private void RefreshLaneKeys()
-    {
-        if (_doc is null) { _laneKeys.Clear(); return; }
-        var lanes = MapLanes.For(_doc, _settings);
-        if (_laneKeys.Count == lanes.Count && lanes.All(l => _laneKeys.TryGetValue(l.Filter.Id, out var c) && c == l.Color))
-            return;
-        _laneKeys = lanes.ToDictionary(l => l.Filter.Id, l => l.Color);
-        _tree.Invalidate();
-    }
 
     private void EnsureFonts()
     {
@@ -1251,7 +1196,6 @@ public sealed class FilterTreeControl : UserControl
     public void RefreshCounts()
     {
         MeasureCounts();
-        RefreshLaneKeys();
         _tree.Invalidate();
     }
 }
