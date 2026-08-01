@@ -1233,6 +1233,7 @@ public sealed class LineGridControl : Control
         // needlessly rebuild the view and shift the scroll position / selection.
         if (_doc.CurrentSnapshot.HasMarkerFilter) _doc.ApplyFilters();
         RefreshView();
+        InvalidateMatchMap();   // the map draws the marks down its edge, so it has to be told
     }
 
     private void NavigateMarker(int index, bool forward)

@@ -56,7 +56,13 @@ public sealed class FilterPresetsControl : UserControl
 
     public FilterPresetsControl()
     {
-        _list.ContextMenuStrip = BuildContextMenu();
+        // The list is hidden until there is a preset to show, and the empty pane invites a right-click - so
+        // the menu has to belong to the whole pane, not just to the list nobody can see yet.
+        var menu = BuildContextMenu();
+        ContextMenuStrip = menu;
+        _list.ContextMenuStrip = menu;
+        _empty.ContextMenuStrip = menu;
+        _header.ContextMenuStrip = menu;
         _list.SelectedIndexChanged += (_, _) => QueueApply();
         _list.KeyDown += OnKeyDown;
         _list.DoubleClick += (_, _) => RenameSelected();
@@ -142,11 +148,19 @@ public sealed class FilterPresetsControl : UserControl
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Save Enabled Filters as Preset…", null, (_, _) => SaveCurrent());
-        menu.Items.Add("Update Preset from Enabled Filters", null, (_, _) => UpdateSelected());
+        var update = menu.Items.Add("Update Preset from Enabled Filters", null, (_, _) => UpdateSelected());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Rename Preset…", null, (_, _) => RenameSelected()) { ShortcutKeyDisplayString = "F2" });
-        menu.Items.Add("Duplicate Preset", null, (_, _) => DuplicateSelected());
-        menu.Items.Add(new ToolStripMenuItem("Delete Preset", null, (_, _) => DeleteSelected()) { ShortcutKeyDisplayString = "Del" });
+        var rename = new ToolStripMenuItem("Rename Preset\u2026", null, (_, _) => RenameSelected()) { ShortcutKeyDisplayString = "F2" };
+        menu.Items.Add(rename);
+        var duplicate = menu.Items.Add("Duplicate Preset", null, (_, _) => DuplicateSelected());
+        var delete = new ToolStripMenuItem("Delete Preset", null, (_, _) => DeleteSelected()) { ShortcutKeyDisplayString = "Del" };
+        menu.Items.Add(delete);
+        // Everything but saving needs a preset picked out; greyed says so, where doing nothing would not.
+        menu.Opening += (_, _) =>
+        {
+            bool one = Current is not null;
+            update.Enabled = rename.Enabled = duplicate.Enabled = delete.Enabled = one;
+        };
         return menu;
     }
 

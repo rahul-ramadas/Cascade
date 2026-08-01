@@ -29,6 +29,12 @@ public sealed class MarkerStore
 
     public bool AnyInUse => !_mask.IsEmpty;
 
+    /// <summary>Steps on every change. Anything holding a <see cref="Snapshot"/> can tell whether it is still
+    /// the current one without comparing the marks themselves.</summary>
+    public int Version => Volatile.Read(ref _version);
+
+    private int _version;
+
     /// <summary>Every marked line with its mask, in line order. Marked lines are hand-picked, so this stays
     /// small however large the file - which is what lets a whole-file summary just walk it.</summary>
     public (long Line, byte Mask)[] Snapshot()
@@ -67,6 +73,7 @@ public sealed class MarkerStore
             if (m == 0) _mask.TryRemove(line, out _);
             else _mask[line] = m;
         }
+        Interlocked.Increment(ref _version);
         Changed?.Invoke();
         return set;
     }
@@ -84,6 +91,7 @@ public sealed class MarkerStore
             if (m == 0) _mask.TryRemove(line, out _);
             else _mask[line] = m;
         }
+        Interlocked.Increment(ref _version);
         Changed?.Invoke();
     }
 
@@ -117,6 +125,7 @@ public sealed class MarkerStore
             _mask.Clear();
             foreach (var s in _byMarker) s.Clear();
         }
+        Interlocked.Increment(ref _version);
         Changed?.Invoke();
     }
 }

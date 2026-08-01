@@ -37,6 +37,7 @@ internal sealed class MatchMapControl : Control
     private long _builtRows = -1;
     private int _builtHeight = -1;
     private bool _builtFilteredMode;
+    private int _builtMarkers = -1;
     private bool _dragging;
 
     /// <summary>What one pixel row of the map shows: how much of it matched, and the colours in it.</summary>
@@ -88,13 +89,15 @@ internal sealed class MatchMapControl : Control
         long rows = doc.RowCount;
         int height = Math.Max(1, ClientSize.Height);
         if (_builtGeneration == doc.FilterGeneration && _builtRows == rows &&
-            _builtHeight == height && _builtFilteredMode == doc.FilteredMode && _bands.Length == height)
+            _builtHeight == height && _builtFilteredMode == doc.FilteredMode &&
+            _builtMarkers == doc.Markers.Version && _bands.Length == height)
             return;
 
         _builtGeneration = doc.FilterGeneration;
         _builtRows = rows;
         _builtHeight = height;
         _builtFilteredMode = doc.FilteredMode;
+        _builtMarkers = doc.Markers.Version;
         _markers = doc.Markers.Snapshot();
 
         var bands = new Band[height];

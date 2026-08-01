@@ -215,6 +215,10 @@ public sealed class FindDialog : Form
     {
         switch (keyData)
         {
+            // Asking to find while the bar is already up means "let me type a new term".
+            case Keys.Control | Keys.F:
+                FocusInput();
+                return true;
             case Keys.Enter when ActiveControl is not Button:
                 Run(true);
                 return true;
@@ -287,7 +291,16 @@ public sealed class FindDialog : Form
         else _progress.Value = v;
     }
 
-    public void FocusInput() { _text.Focus(); _text.SelectionStart = 0; _text.SelectionLength = _text.Text.Length; }
+    public void FocusInput()
+    {
+        // Activate first: focusing a control on a form that is not the active one does nothing at all, which
+        // is exactly the case when Ctrl+F is pressed with the bar already open behind the window.
+        if (!ContainsFocus) Activate();
+        ActiveControl = _text;
+        _text.Focus();
+        _text.SelectionStart = 0;
+        _text.SelectionLength = _text.Text.Length;
+    }
 
     /// <summary>Opens the list of earlier terms and moves through it. The first press picks the most recent,
     /// which is what a search box that remembers is for.</summary>
