@@ -45,6 +45,26 @@ internal sealed class LineBitSet
         return n + BitOperations.PopCount(_words[last] & mask);
     }
 
+    /// <summary>How many lines in <c>[from, toExclusive)</c> are set. Only the words in the range are
+    /// touched, so summarising the file band by band costs one pass over the bitmap in total rather than one
+    /// pass per band.</summary>
+    public long CountInRange(long from, long toExclusive)
+    {
+        if (from < 0) from = 0;
+        if (toExclusive > _lines) toExclusive = _lines;
+        if (toExclusive <= from) return 0;
+
+        long first = from >> 6, last = (toExclusive - 1) >> 6;
+        ulong head = ulong.MaxValue << (int)(from & 63);
+        int lastBit = (int)((toExclusive - 1) & 63);
+        ulong tail = lastBit == 63 ? ulong.MaxValue : (1UL << (lastBit + 1)) - 1;
+        if (first == last) return BitOperations.PopCount(_words[first] & head & tail);
+
+        long n = BitOperations.PopCount(_words[first] & head);
+        for (long w = first + 1; w < last; w++) n += BitOperations.PopCount(_words[w]);
+        return n + BitOperations.PopCount(_words[last] & tail);
+    }
+
     /// <summary>The first set line at or after <paramref name="from"/>, or -1.</summary>
     public long Next(long from)
     {

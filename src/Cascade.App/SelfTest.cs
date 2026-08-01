@@ -68,6 +68,7 @@ internal static class SelfTest
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
+            ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
@@ -475,16 +476,17 @@ internal static class SelfTest
     }
 
     /// <summary>The match map is a summary of the whole file in one pixel column, so what matters is that a
-    /// band says the right thing - how much of it matched and in what colours - not what the picture looks
-    /// like. Both are checked: the summary directly, and that the picture actually gets painted.</summary>
+    /// band says the right thing - which filters are in it and how much of it they account for - not what the
+    /// picture looks like. Both are checked: the summary directly, and that the picture actually gets
+    /// painted, moves with the view, and keeps up when the view mode changes underneath it.</summary>
     private static bool RunMatchMapChecks()
     {
         Line("-- match map --");
         const int lines = 40_000;
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_map_" + Guid.NewGuid().ToString("N") + ".log");
         var sb = new StringBuilder();
-        // Lines 0..999 are COMMON; line 2500 alone is RARE. One band is a many-line block, so the rare one
-        // is what proves a lone match is not rounded away.
+        // Lines 0..9,999 are COMMON; line 25,000 alone is RARE. One band is a many-line block, so the rare
+        // one is what proves a lone match is not rounded away.
         for (int i = 0; i < lines; i++)
             sb.Append(i < 10_000 ? "COMMON " : i == 25_000 ? "RARE " : "plain ").Append("line ").Append(i).Append('\n');
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
@@ -530,40 +532,90 @@ internal static class SelfTest
 
             int BandOf(long line) => (int)(line * height / lines);
 
-            ok &= Check("a band of matches is dense", map.DensityForTesting(BandOf(5000)) > 0.99,
-                        map.DensityForTesting(BandOf(5000)).ToString("0.000"));
+            // ---- lanes ----
+            ok &= Check("a lane per enabled filter", map.LaneCountForTesting == 2, $"{map.LaneCountForTesting} lanes");
+            ok &= Check("in the order the list has them", map.LaneNamesForTesting is ["COMMON", "RARE"],
+                        string.Join(",", map.LaneNamesForTesting));
+            ok &= Check("and they fit side by side", map.LanesFitForTesting);
+            var laneColors = map.LaneColorsForTesting;
+            ok &= Check("each lane keeps its filter's hue", laneColors.Length == 2 && laneColors[0].B > laneColors[0].R && laneColors[1].R > laneColors[1].B,
+                        string.Join(" ", laneColors.Select(c => $"{c.R},{c.G},{c.B}")));
+
+            ok &= Check("a filter's own band is full", map.ShareForTesting(BandOf(5000), 0) > 0.99,
+                        map.ShareForTesting(BandOf(5000), 0).ToString("0.000"));
+            ok &= Check("and the other lane is empty there", map.ShareForTesting(BandOf(5000), 1) == 0,
+                        map.ShareForTesting(BandOf(5000), 1).ToString("0.000"));
             ok &= Check("a band with nothing in it is empty", map.DensityForTesting(BandOf(18_000)) == 0,
                         map.DensityForTesting(BandOf(18_000)).ToString("0.000"));
 
-            // The band holding the single RARE line: thin, but it must still be there and in its own colour.
-            double rareDensity = map.DensityForTesting(BandOf(25_000));
-            ok &= Check("a lone match still registers in its band", rareDensity > 0 && rareDensity < 0.2,
-                        rareDensity.ToString("0.0000"));
-            var rareColors = map.ColorsForTesting(BandOf(25_000));
-            ok &= Check("the lone match keeps its own colour", rareColors.Length == 1 && rareColors[0].R == 0xEE,
-                        string.Join(",", rareColors.Select(c => c.Name)));
-            var commonColors = map.ColorsForTesting(BandOf(5000));
-            ok &= Check("a dense band takes its filter's colour", commonColors.Length == 1 && commonColors[0].B == 0xEE,
-                        string.Join(",", commonColors.Select(c => c.Name)));
+            // The band holding the single RARE line: thin, but it must still be there, in its own lane.
+            double rareShare = map.ShareForTesting(BandOf(25_000), 1);
+            ok &= Check("a lone match still registers in its lane", rareShare > 0 && rareShare < 0.2,
+                        rareShare.ToString("0.0000"));
+            ok &= Check("and does not leak into the other one", map.ShareForTesting(BandOf(25_000), 0) == 0,
+                        map.ShareForTesting(BandOf(25_000), 0).ToString("0.0000"));
 
-            // ...and it is actually painted: the band with the lone match must differ from an empty one.
-            using var picture = Capture(host);
-            int mapLeft = picture.Width - map.Width;
-            bool rareRowPainted = RowHasColor(picture, mapLeft, map.Width, MapRowY(map, BandOf(25_000)), 0xEE, 0x22, 0x22);
-            ok &= Check("the lone match is painted, not rounded away", rareRowPainted);
+            // ...and it is actually painted, at full strength. The whole point of the redesign is that one
+            // line in a band of a hundred is not a barely-tinted pixel: a lane is scaled against its own
+            // busiest band, so wherever a filter is at its densest it is at its brightest, however little of
+            // the file it accounts for overall.
+            ok &= Check("the lone match is the whole of that lane's peak",
+                        Math.Abs(map.LanePeakForTesting(1) - rareShare) < 1e-6,
+                        $"peak {map.LanePeakForTesting(1):0.0000} vs share {rareShare:0.0000}");
+            using (var picture = Capture(host))
+            {
+                int mapLeft = picture.Width - map.Width;
+                var rareLane = LanePixel(picture, mapLeft, map.Width, MapRowY(map, BandOf(25_000)), lane: 1, lanes: 2);
+                var back = new AppSettings().GutterBack;
+                ok &= Check("and so it is painted at full strength, not as a faint tint",
+                            Distance(rareLane, map.LaneColorsForTesting[1]) < 24,
+                            $"{rareLane.R},{rareLane.G},{rareLane.B} vs lane {map.LaneColorsForTesting[1].R}," +
+                            $"{map.LaneColorsForTesting[1].G},{map.LaneColorsForTesting[1].B}");
+                var commonLane = LanePixel(picture, mapLeft, map.Width, MapRowY(map, BandOf(5000)), lane: 0, lanes: 2);
+                ok &= Check("a full band is its lane's colour too",
+                            Distance(commonLane, back) > 60 && commonLane.B > commonLane.R,
+                            $"{commonLane.R},{commonLane.G},{commonLane.B}");
+            }
 
-            // The viewport rectangle is the thumb: it has to follow the view.
+            // ---- the viewport rectangle actually follows the view ----
+            // Counted in paints, not looked at in a screenshot: DrawToBitmap draws a control whether or not
+            // it was ever invalidated, so a captured picture is always up to date even when the window on
+            // screen has been frozen for minutes. That is exactly the fault being guarded against here.
             long before = grid.FirstVisibleRow;
+            int topBefore = ViewportTop(host, map);
+            int paintsBefore = map.PaintsForTesting;
             grid.ScrollToRow(30_000);
             Pump();
+            ok &= Check("scrolling repaints the map without anyone asking it to",
+                        map.PaintsForTesting > paintsBefore, $"{paintsBefore} -> {map.PaintsForTesting} paints");
+            int topAfter = ViewportTop(host, map);
             ok &= Check("scrolling moves the view the map reports", grid.FirstVisibleRow > before,
                         $"{before} -> {grid.FirstVisibleRow}");
+            ok &= Check("and the rectangle on the map moves with it", topAfter > topBefore + 100,
+                        $"y {topBefore} -> {topAfter}");
+            grid.ScrollToRow(0);
+            Pump();
+            ok &= Check("and comes back", ViewportTop(host, map) < 40, ViewportTop(host, map).ToString());
 
-            // Filtered mode: the map covers the same rows the scrollbar does, and there every row is a
-            // match - so the whole strip fills, and the density channel gives way to the colours.
+            // A repaint per scroll is only affordable because the lanes are drawn once into a bitmap; if
+            // that ever goes back to thousands of rectangles this is where it will show.
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < 100; i++) { map.Invalidate(); map.Update(); }
+            watch.Stop();
+            ok &= Check("and a repaint of the map is cheap", watch.ElapsedMilliseconds < 150,
+                        $"{watch.ElapsedMilliseconds} ms for 100 repaints");
+
+            // ---- filtered mode ----
+            // Every row is a match there, so density says nothing and the lanes carry it all - and the map
+            // has to notice the switch at all, which is a repaint nothing else asks for. Checked on the
+            // summary the map is actually holding, with no rebuild forced first: a stale one still describes
+            // the file it was built from, and would read as sparse here.
+            paintsBefore = map.PaintsForTesting;
             doc.Filters.ShowOnlyFilteredLines = true;
             grid.RefreshView();
-            map.RebuildForTesting();
+            Pump();
+            ok &= Check("switching to filtered lines repaints the map",
+                        map.PaintsForTesting > paintsBefore, $"{paintsBefore} -> {map.PaintsForTesting} paints");
             int solid = 0, sparse = 0;
             for (int y = 0; y < map.BandCountForTesting; y++)
             {
@@ -571,15 +623,144 @@ internal static class SelfTest
                 if (d > 0.99) solid++;
                 else if (d > 0) sparse++;
             }
-            ok &= Check("every band is solid once only matching lines are shown", sparse == 0 && solid > 50,
-                        $"{solid} solid, {sparse} partial");
+            ok &= Check("and the summary it is holding is the new one, not the old",
+                        sparse == 0 && solid > 50, $"{solid} solid, {sparse} partial");
 
-            // Markers draw down the map's own edge, and they change without any filter changing - so the
-            // real gesture has to reach the map, or a mark never appears on it at all.
+            map.RebuildForTesting();
+            ok &= Check("the lanes still say which filter is where",
+                        map.ShareForTesting(0, 0) > 0.99 && map.ShareForTesting(map.BandCountForTesting - 1, 1) > 0,
+                        $"{map.ShareForTesting(0, 0):0.000} / {map.ShareForTesting(map.BandCountForTesting - 1, 1):0.000}");
+
             doc.Filters.ShowOnlyFilteredLines = false;
             grid.RefreshView();
-            map.RebuildForTesting();
             Pump();
+
+            // ---- nesting collapses into one lane ----
+            var child = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 1" } };
+            collection.Add(child, common);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+            ok &= Check("a filter nested under an enabled one does not take a lane of its own",
+                        map.LaneCountForTesting == 2, string.Join(",", map.LaneNamesForTesting));
+            common.Enabled = false;
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+            ok &= Check("but it takes one as soon as nothing above it is on",
+                        map.LaneNamesForTesting.Any(n => n.Contains("line 1")), string.Join(",", map.LaneNamesForTesting));
+            common.Enabled = true;
+            collection.Remove(child);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+
+            // ---- filters with no colour of their own ----
+            // Every one of them used to come out as the text colour, so a dozen unstyled filters were one
+            // indistinguishable black block down the map.
+            var plainA = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 2" } };
+            var plainB = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 3" } };
+            // Black on yellow is a real thing people style a filter: it has no hue, so there is none to
+            // preserve, and forcing saturation onto it used to turn the lane red.
+            var monochrome = new Filter
+            {
+                Enabled = true,
+                Match = new FilterMatch { Text = "line 4" },
+                Style = { Background = new RgbColor(0, 0, 0), Foreground = new RgbColor(0xFF, 0xE0, 0x00) }
+            };
+            collection.Roots.Add(plainA);
+            collection.Roots.Add(plainB);
+            collection.Roots.Add(monochrome);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+            var colours = map.LaneColorsForTesting;
+            var theme = new AppSettings();
+            ok &= Check("a filter with no colour of its own takes one from the palette, not the text colour",
+                        colours.Length == 5 && colours[2].ToArgb() == MatchMapControl.FallbackForTesting(2).ToArgb()
+                                            && colours[3].ToArgb() == MatchMapControl.FallbackForTesting(3).ToArgb(),
+                        string.Join(" ", colours.Select(c => $"{c.R},{c.G},{c.B}")));
+            ok &= Check("and so does one whose colour has no hue to keep",
+                        colours.Length == 5 && colours[4].ToArgb() == MatchMapControl.FallbackForTesting(4).ToArgb(),
+                        colours.Length == 5 ? $"{colours[4].R},{colours[4].G},{colours[4].B}" : "?");
+            ok &= Check("and two of them do not look the same",
+                        colours.Length == 5 && Distance(colours[2], colours[3]) > 80,
+                        colours.Length == 5 ? $"{Distance(colours[2], colours[3]):0}" : "?");
+            ok &= Check("every lane stands out from the gutter",
+                        colours.All(c => Distance(c, theme.GutterBack) > 90),
+                        string.Join(" ", colours.Select(c => $"{Distance(c, theme.GutterBack):0}")));
+
+            // A saved filter set carries filters for every log its owner reads. The ones this file has
+            // nothing for would otherwise be blank columns, taking width off the ones that do.
+            var absent = new Filter { Enabled = true, Match = new FilterMatch { Text = "nothing says this" } };
+            collection.Roots.Add(absent);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+            ok &= Check("a filter this file has nothing for takes no lane at all",
+                        map.LaneCountForTesting == 5, string.Join(",", map.LaneNamesForTesting));
+            collection.Remove(absent);
+            collection.Remove(plainA);
+            collection.Remove(plainB);
+            collection.Remove(monochrome);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            map.RebuildForTesting();
+
+            // A pale highlight, chosen to be quiet enough to read text on, has to survive being reduced to a
+            // three-pixel column - which means it cannot stay pale.
+            var pale = MatchMapControl.Vivid(Color.FromArgb(0xDC, 0xDC, 0xDC), theme.GutterBack);
+            ok &= Check("a pale filter colour is pushed until it reads against the gutter",
+                        Distance(pale, theme.GutterBack) > 90, $"{pale.R},{pale.G},{pale.B}");
+
+            // ---- a view with no rows at all ----
+            // Filters that match nothing, with only matching lines shown, is how a saved filter set often
+            // opens - and it is also every file's state for the first instant. Painting has to survive it:
+            // an exception in OnPaint is not a blank map, it is WinForms drawing a red box with a cross in
+            // it where the map should be, which then sits there until something invalidates it.
+            var nothing = new Filter { Enabled = true, Match = new FilterMatch { Text = "no line says this" } };
+            collection.Roots.Add(nothing);
+            common.Enabled = rare.Enabled = false;
+            doc.Filters.ShowOnlyFilteredLines = true;
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            grid.RefreshView();
+            Pump();
+            int paintsAtZero = map.PaintsForTesting;
+            using (var blank = Capture(host)) { _ = blank.Width; }
+            Pump();
+            ok &= Check("a view with no rows still paints", doc.RowCount == 0 && map.PaintsForTesting > paintsAtZero,
+                        $"{doc.RowCount} rows, {paintsAtZero} -> {map.PaintsForTesting} paints");
+            ok &= Check("and the map is blank rather than broken",
+                        map.BandCountForTesting > 0 && map.DensityForTesting(0) == 0 && map.ShareForTesting(0, 0) == -1,
+                        $"{map.BandCountForTesting} bands");
+
+            doc.Filters.ShowOnlyFilteredLines = false;
+            collection.Remove(nothing);
+            common.Enabled = rare.Enabled = true;
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            grid.RefreshView();
+            Pump();
+            map.RebuildForTesting();
+
+            // ---- the tip names what is under the pointer ----
+            string tip = map.TipTextForTesting(BandOf(25_000));
+            ok &= Check("hovering a band says which filter is in it", tip.Contains("RARE") && tip.Contains("Lines "), tip.Replace("\n", " | "));
+            ok &= Check("and an empty band says so", map.TipTextForTesting(BandOf(18_000)).Contains("nothing"),
+                        map.TipTextForTesting(BandOf(18_000)).Replace("\n", " | "));
+
+            // ---- find hits get their own edge ----
+            ok &= Check("no find, no marks down the find edge", !map.FindInBandForTesting(BandOf(25_000)));
+            doc.FindNextAsync(new FindQuery("RARE", false, false), 0, true).GetAwaiter().GetResult();
+            while (!doc.FindComplete) Thread.Sleep(20);
+            map.RebuildForTesting();
+            ok &= Check("the band holding a find hit is marked", map.FindInBandForTesting(BandOf(25_000)));
+            ok &= Check("and one that holds none is not", !map.FindInBandForTesting(BandOf(18_000)));
+            doc.DropSearch();
+
+            // ---- markers ----
+            map.RebuildForTesting();
             grid.ScrollToRow(12_345);
             grid.RefreshView();
             Pump();
@@ -617,6 +798,35 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>The pixel in the middle of one of the map's lanes.</summary>
+    private static Color LanePixel(Bitmap picture, int mapLeft, int mapWidth, int y, int lane, int lanes)
+    {
+        int edge = Math.Max(1, mapWidth * 2 / MatchMapControl.LogicalWidth);
+        int barLeft = mapLeft + edge, barWidth = Math.Max(1, mapWidth - edge * 2);
+        int x = barLeft + barWidth * lane / lanes + barWidth / (lanes * 2);
+        return picture.GetPixel(Math.Clamp(x, 0, picture.Width - 1), Math.Clamp(y, 0, picture.Height - 1));
+    }
+
+    private static double Distance(Color a, Color b)
+        => Math.Sqrt(Math.Pow(a.R - b.R, 2) + Math.Pow(a.G - b.G, 2) + Math.Pow(a.B - b.B, 2));
+
+    /// <summary>Top of the viewport rectangle on the map, found by its tinted left edge.</summary>
+    private static int ViewportTop(Form host, MatchMapControl map)
+    {
+        using var picture = Capture(host);
+        int left = picture.Width - map.Width;
+        var gutter = new AppSettings().GutterBack;
+        for (int band = 0; band < map.BandCountForTesting; band++)
+        {
+            int y = MapRowY(map, band);
+            if (y < 0 || y >= picture.Height) continue;
+            // Column 0 is the marker lane: nothing paints it here, so the only thing that can change it is
+            // the rectangle's own fill.
+            if (Distance(picture.GetPixel(left, y), gutter) > 8) return band;
+        }
+        return -1;
     }
 
     /// <summary>Y of a band within the captured window (the map fills the grid's height).</summary>
@@ -1352,6 +1562,154 @@ internal static class SelfTest
     /// <summary>A filter's checkbox has to keep meaning that filter and nothing else: a parent's pattern is
     /// required of its children whether or not the parent is on, so "off here, on underneath" is a real and
     /// useful arrangement that cascading by default would wipe out. Shift is what asks for the subtree.</summary>
+    /// <summary>Putting a restored filter tree on screen must not throw the list away and build it again.
+    ///
+    /// That is what the flash on every undo was: clear every node, recreate every node, then put the
+    /// selection and the scroll position back - and each of those two restores scrolls the list. Flicker
+    /// cannot be seen in a screenshot, so it is measured here instead, as rows built and repaints taken.</summary>
+    private static bool RunFilterSyncChecks()
+    {
+        Line("-- keeping the filter list still --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_sync_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, string.Concat(Enumerable.Range(0, 200).Select(i => $"line {i}\n")), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(300, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            // Long enough to scroll, and nested, so the sync has more than one level to walk.
+            var filters = new FilterCollection();
+            for (int i = 0; i < 60; i++)
+            {
+                var f = new Filter { Enabled = i % 3 == 0, Match = new FilterMatch { Text = $"filter {i:00}" } };
+                filters.Roots.Add(f);
+                if (i % 10 == 5)
+                    for (int k = 0; k < 2; k++)
+                    {
+                        var kid = new Filter { Match = new FilterMatch { Text = $"kid {i:00}.{k}" } };
+                        filters.Roots.Add(kid);
+                        filters.Move(kid, f, f.Children.Count);
+                    }
+            }
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            var history = new FilterHistory();
+            var target = filters.Roots[30];
+            tree.SelectForTesting(target);
+            tree.ScrollToForTesting(filters.Roots[25]);
+            Pump();
+
+            var nodesBefore = filters.Roots.Select(tree.NodeForTesting).ToArray();
+            var topBefore = tree.TopFilterForTesting;
+            int builtBefore = tree.NodesBuiltForTesting;
+            int paintsBefore = tree.PaintsForTesting;
+
+            // An edit and an undo of it: exactly what the user does.
+            history.Begin("Edit Filter", filters);
+            target.Match.Text = "filter 30 changed";
+            history.Commit(filters);
+            tree.SyncToModel();
+            Pump();
+            bool ok = Check("an edit shows up in the list", tree.NodeForTesting(filters.Roots[30])?.Text == "filter 30 changed",
+                            tree.NodeForTesting(filters.Roots[30])?.Text ?? "(gone)");
+            ok &= Check("without building a single new row", tree.NodesBuiltForTesting == builtBefore,
+                        $"{tree.NodesBuiltForTesting - builtBefore} built");
+
+            history.Undo(filters);
+            tree.SyncToModel();
+            Pump();
+            ok &= Check("undo puts the text back", tree.NodeForTesting(filters.Roots[30])?.Text == "filter 30",
+                        tree.NodeForTesting(filters.Roots[30])?.Text ?? "(gone)");
+            ok &= Check("and still builds nothing", tree.NodesBuiltForTesting == builtBefore,
+                        $"{tree.NodesBuiltForTesting - builtBefore} built");
+            ok &= Check("the very same rows are still there",
+                        filters.Roots.Take(60).Select(tree.NodeForTesting)
+                               .Zip(nodesBefore, (a, b) => ReferenceEquals(a, b)).All(x => x));
+            ok &= Check("the list has not scrolled", ReferenceEquals2(tree.TopFilterForTesting, topBefore, filters),
+                        $"{tree.TopFilterForTesting?.Match.Text} (was {topBefore?.Match.Text})");
+            ok &= Check("and the selection is where it was", tree.SelectedFilter?.Match.Text == "filter 30",
+                        tree.SelectedFilter?.Match.Text ?? "(none)");
+            int paints = tree.PaintsForTesting - paintsBefore;
+            ok &= Check("two edits cost a handful of repaints, not a rebuild's worth", paints <= 8, $"{paints} repaints");
+
+            // A rebuild is the thing being avoided: it must look measurably different, or the check above
+            // is measuring nothing.
+            builtBefore = tree.NodesBuiltForTesting;
+            tree.Rebuild();
+            Pump();
+            ok &= Check("(and a full rebuild really does build them all again)",
+                        tree.NodesBuiltForTesting - builtBefore >= 60, $"{tree.NodesBuiltForTesting - builtBefore} built");
+
+            // Structure, not just text: an undo that puts a removed filter back, and one that reorders.
+            tree.Rebuild();
+            Pump();
+            int rows = tree.RowCountForTesting;
+            builtBefore = tree.NodesBuiltForTesting;
+            history.Begin("Remove Filter", filters);
+            filters.Remove(filters.Roots[10]);
+            history.Commit(filters);
+            tree.SyncToModel();
+            Pump();
+            ok &= Check("removing a filter drops exactly its row", tree.RowCountForTesting == rows - 1,
+                        $"{tree.RowCountForTesting} rows, was {rows}");
+            ok &= Check("and builds nothing to do it", tree.NodesBuiltForTesting == builtBefore,
+                        $"{tree.NodesBuiltForTesting - builtBefore} built");
+
+            history.Undo(filters);
+            tree.SyncToModel();
+            Pump();
+            ok &= Check("undoing the removal puts one row back", tree.RowCountForTesting == rows,
+                        $"{tree.RowCountForTesting} rows, was {rows}");
+            ok &= Check("building exactly one row to do it", tree.NodesBuiltForTesting - builtBefore == 1,
+                        $"{tree.NodesBuiltForTesting - builtBefore} built");
+            ok &= Check("in its old place",
+                        Array.IndexOf(tree.RowOrderForTesting, "filter 10") == Array.IndexOf(tree.RowOrderForTesting, "filter 09") + 1,
+                        string.Join(",", tree.RowOrderForTesting.Skip(9).Take(4)));
+
+            builtBefore = tree.NodesBuiltForTesting;
+            history.Begin("Move Filter", filters);
+            filters.Reorder(filters.Roots[3], +1);
+            history.Commit(filters);
+            tree.SyncToModel();
+            Pump();
+            ok &= Check("reordering moves a row rather than remaking one",
+                        tree.NodesBuiltForTesting == builtBefore && tree.RowOrderForTesting[3].Contains("filter 04"),
+                        $"{tree.NodesBuiltForTesting - builtBefore} built; {string.Join(",", tree.RowOrderForTesting.Take(6))}");
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Same filter, allowing for the fact that undo hands back a fresh object with the same id.</summary>
+    private static bool ReferenceEquals2(Filter? a, Filter? b, FilterCollection _)
+        => a is null ? b is null : b is not null && a.Id == b.Id;
+
     private static bool RunFilterEnableChecks()
     {
         Line("-- enabling a filter and its subtree --");
