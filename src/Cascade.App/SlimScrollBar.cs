@@ -1,28 +1,29 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 
 namespace Cascade.App;
 
 /// <summary>
-/// The vertical scrollbar, drawn rather than borrowed: sunk into a trough of its own so it does not read as
-/// more of the minimap beside it, with a rounded grey thumb rather than the map's square blue rectangle, and
-/// with the marked lines of the whole file ticked down it.
+/// A scrollbar drawn rather than borrowed, in both directions. It sits in a trough with a rule all the way
+/// round it so it reads as its own strip - beside the minimap, two bare bands of much the same colour looked
+/// like one band and neither could be aimed at - and its thumb is a plain rectangle in grey against the
+/// map's blue window, so shape and colour both say which is which.
 ///
-/// The trough is the only place those marks can go. The minimap shows a window of a few hundred rows, so a
-/// mark outside that window has nowhere to appear - and "where are my marks in this file" is exactly the
-/// question the scrollbar's own scale answers.
+/// The vertical one also carries the marked lines of the whole file down its trough. That is the only place
+/// they can go: the minimap shows a window of a few hundred rows, so a mark outside that window has nowhere
+/// to appear, and "where are my marks in this file" is exactly the question the scrollbar's scale answers.
 /// </summary>
 internal sealed class SlimScrollBar : Control
 {
     public const int LogicalWidth = 14;
 
-    private const int MarkHeight = 2;      // device px; a single marked line has to be findable at file scale
-    private const int MinThumbHeight = 16;
+    private const int MarkThickness = 2;   // device px; a single marked line has to be findable at file scale
+    private const int MinThumbLength = 16;
 
     private readonly LineGridControl _grid;
+    private readonly bool _vertical;
     private long _value;
-    private long _rows;
+    private long _total;
     private long _visible = 1;
     private bool _dragging;
     private bool _hot;
@@ -32,34 +33,38 @@ internal sealed class SlimScrollBar : Control
     /// which is the view telling the scrollbar where it already is.</summary>
     public event Action<long>? Scrolled;
 
-    public SlimScrollBar(LineGridControl grid)
+    public SlimScrollBar(LineGridControl grid, bool vertical = true)
     {
         _grid = grid;
+        _vertical = vertical;
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-        Dock = DockStyle.Right;
-        Width = LogicalToDeviceUnits(LogicalWidth);
+        Dock = vertical ? DockStyle.Right : DockStyle.Bottom;
+        if (vertical) Width = LogicalToDeviceUnits(LogicalWidth);
+        else Height = LogicalToDeviceUnits(LogicalWidth);
         TabStop = false;
         AccessibleRole = AccessibleRole.ScrollBar;
-        AccessibleName = "Vertical";
+        AccessibleName = vertical ? "Vertical" : "Horizontal";
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        Width = LogicalToDeviceUnits(LogicalWidth);
+        if (_vertical) Width = LogicalToDeviceUnits(LogicalWidth);
+        else Height = LogicalToDeviceUnits(LogicalWidth);
     }
 
-    /// <summary>Total rows and how many of them are on screen.</summary>
-    public void Configure(long rows, long visible)
+    /// <summary>How much there is to scroll through, and how much of it is on screen. Rows for the vertical
+    /// one, pixels for the horizontal - the bar does not care which.</summary>
+    public void Configure(long total, long visible)
     {
-        _rows = Math.Max(0, rows);
+        _total = Math.Max(0, total);
         _visible = Math.Max(1, visible);
         _value = Math.Clamp(_value, 0, MaxValue);
         Invalidate();
     }
 
-    public long MaxValue => Math.Max(0, _rows - _visible);
+    public long MaxValue => Math.Max(0, _total - _visible);
 
     [System.ComponentModel.DefaultValue(0L)]
     public long Value
@@ -74,114 +79,130 @@ internal sealed class SlimScrollBar : Control
         }
     }
 
-    internal bool CanScroll => _rows > _visible;
+    internal bool CanScroll => _total > _visible;
 
-    // ---- painting ----
+    // ---- geometry ----
 
-    private int Divider => Math.Max(1, LogicalToDeviceUnits(1));
-    private int TrackHeight => Math.Max(1, ClientSize.Height);
+    private int Rule => Math.Max(1, LogicalToDeviceUnits(1));
 
-    private int ThumbHeight
+    /// <summary>The trough, inside the rule that frames it.</summary>
+    private Rectangle Track
     {
         get
         {
-            if (_rows <= 0) return TrackHeight;
-            double share = Math.Clamp((double)_visible / _rows, 0, 1);
-            return (int)Math.Clamp(Math.Round(TrackHeight * share), MinThumbHeight, TrackHeight);
+            int r = Rule;
+            return new Rectangle(r, r, Math.Max(1, ClientSize.Width - r * 2), Math.Max(1, ClientSize.Height - r * 2));
         }
     }
 
-    private int ThumbTop
+    private int TrackLength => Math.Max(1, _vertical ? Track.Height : Track.Width);
+
+    private int ThumbLength
+    {
+        get
+        {
+            if (_total <= 0) return TrackLength;
+            double share = Math.Clamp((double)_visible / _total, 0, 1);
+            return (int)Math.Clamp(Math.Round(TrackLength * share), MinThumbLength, TrackLength);
+        }
+    }
+
+    private int ThumbStart
     {
         get
         {
             long max = MaxValue;
             if (max <= 0) return 0;
-            return (int)Math.Round((double)_value / max * (TrackHeight - ThumbHeight));
+            return (int)Math.Round((double)_value / max * (TrackLength - ThumbLength));
         }
     }
+
+    private Rectangle Thumb
+    {
+        get
+        {
+            var track = Track;
+            int inset = Math.Max(1, LogicalToDeviceUnits(2));
+            return _vertical
+                ? new Rectangle(track.Left + inset, track.Top + ThumbStart,
+                                Math.Max(2, track.Width - inset * 2), ThumbLength)
+                : new Rectangle(track.Left + ThumbStart, track.Top + inset,
+                                ThumbLength, Math.Max(2, track.Height - inset * 2));
+        }
+    }
+
+    // ---- painting ----
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         var settings = _grid.Settings;
-        int left = Divider;
 
-        // A trough a shade off the gutter, and a rule down the left: side by side with the map, two strips of
-        // the same colour read as one strip and neither can be aimed at.
-        g.Clear(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07));
+        // A rule all the way round, not just down the side facing the text: an open-ended strip runs into
+        // whatever it meets at the top and bottom, which is exactly where it meets the other scrollbar.
         using (var rule = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.30)))
-            g.FillRectangle(rule, 0, 0, left, ClientSize.Height);
+            g.FillRectangle(rule, ClientRectangle);
+        using (var trough = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07)))
+            g.FillRectangle(trough, Track);
 
-        DrawMarks(g, left);
+        if (_vertical) DrawMarks(g);
 
-        int inset = Math.Max(1, LogicalToDeviceUnits(2));
-        var thumb = new Rectangle(left + inset, ThumbTop, Math.Max(2, ClientSize.Width - left - inset * 2), ThumbHeight);
         double strength = !CanScroll ? 0.20 : _dragging ? 0.62 : _hot ? 0.50 : 0.38;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = Rounded(thumb, Math.Max(2, thumb.Width / 2));
-        using (var fill = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength)))
-            g.FillPath(fill, path);
-        g.SmoothingMode = SmoothingMode.Default;
-    }
-
-    private static GraphicsPath Rounded(Rectangle r, int radius)
-    {
-        int d = Math.Max(1, Math.Min(radius * 2, Math.Min(r.Width, r.Height)));
-        var path = new GraphicsPath();
-        path.AddArc(r.Left, r.Top, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
+        using var fill = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength));
+        g.FillRectangle(fill, Thumb);
     }
 
     /// <summary>Every marked line in the file, at its place on the scrollbar's own scale.</summary>
-    private void DrawMarks(Graphics g, int left)
+    private void DrawMarks(Graphics g)
     {
-        if (_grid.Document is not { } doc || _rows <= 0) return;
+        if (_grid.Document is not { } doc || _total <= 0) return;
         var marks = doc.Markers.Snapshot();
         if (marks.Length == 0) return;
 
-        int width = Math.Max(1, ClientSize.Width - left);
+        var track = Track;
         foreach (var (line, mask) in marks)
         {
             long row = doc.FilteredMode ? doc.RowForLine(line) : line;
-            if (row < 0 || row >= _rows) continue;
-            int y = (int)(row * (TrackHeight - MarkHeight) / _rows);
+            if (row < 0 || row >= _total) continue;
+            int y = track.Top + (int)(row * (track.Height - MarkThickness) / _total);
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
             using var brush = new SolidBrush(AppSettings.MarkerColors[Math.Clamp(index, 0, AppSettings.MarkerColors.Length - 1)]);
-            g.FillRectangle(brush, left, y, width, MarkHeight);
+            g.FillRectangle(brush, track.Left, y, track.Width, MarkThickness);
         }
     }
 
     // ---- interaction ----
 
+    private int Along(MouseEventArgs e) => _vertical ? e.Y : e.X;
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
         if (e.Button != MouseButtons.Left || !CanScroll) return;
-        int top = ThumbTop, height = ThumbHeight;
-        if (e.Y >= top && e.Y < top + height)
+        var thumb = Thumb;
+        int at = Along(e);
+        int start = _vertical ? thumb.Top : thumb.Left;
+        int length = _vertical ? thumb.Height : thumb.Width;
+        if (at >= start && at < start + length)
         {
             _dragging = true;
-            _grabOffset = e.Y - top;
+            _grabOffset = at - start;
             Capture = true;
             Invalidate();
             return;
         }
         // Trough: a page towards the pointer, as a scrollbar has always done. The minimap next door is
         // there for landing somewhere exactly.
-        Move(_value + (e.Y < top ? -_visible : _visible));
+        Move(_value + (at < start ? -_visible : _visible));
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         if (!_dragging) return;
-        int span = Math.Max(1, TrackHeight - ThumbHeight);
-        Move((long)Math.Round((e.Y - _grabOffset) * (double)MaxValue / span));
+        int span = Math.Max(1, TrackLength - ThumbLength);
+        int origin = _vertical ? Track.Top : Track.Left;
+        Move((long)Math.Round((Along(e) - _grabOffset - origin) * (double)MaxValue / span));
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -214,15 +235,16 @@ internal sealed class SlimScrollBar : Control
         _grid.Update();
     }
 
-    /// <summary>Test seam: what a drag to this y would scroll to.</summary>
-    internal long ValueAtForTesting(int y)
+    /// <summary>Test seam: what a drag to this offset along the bar would scroll to.</summary>
+    internal long ValueAtForTesting(int along)
     {
-        int span = Math.Max(1, TrackHeight - ThumbHeight);
-        return Math.Clamp((long)Math.Round(y * (double)MaxValue / span), 0, MaxValue);
+        int span = Math.Max(1, TrackLength - ThumbLength);
+        int origin = _vertical ? Track.Top : Track.Left;
+        return Math.Clamp((long)Math.Round((along - origin) * (double)MaxValue / span), 0, MaxValue);
     }
 
-    internal (int Top, int Height) ThumbForTesting => (ThumbTop, ThumbHeight);
-    internal Rectangle TroughForTesting => new(Divider, 0, Math.Max(1, ClientSize.Width - Divider), ClientSize.Height);
+    internal Rectangle ThumbForTesting => Thumb;
+    internal Rectangle TroughForTesting => Track;
 
     protected override AccessibleObject CreateAccessibilityInstance() => new BarAccessibleObject(this);
 
