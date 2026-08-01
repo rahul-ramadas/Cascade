@@ -64,6 +64,7 @@ internal static class SelfTest
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
             ok &= Timed("filter tips", RunFilterTipChecks);
+            ok &= Timed("find bar", RunFindBarChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -1541,6 +1542,68 @@ internal static class SelfTest
         var editDlg = new FilterEditDialog(broken, isNew: true);
         ok &= NothingShifts("filter", editDlg, () => editDlg.SetTextForTesting("((unclosed"));
         return ok;
+    }
+
+    /// <summary>The find bar as a text box: pressing Enter is a request to search, not a reason to disturb
+    /// what has been typed. Repeating a search must also cost nothing - it is held down.</summary>
+    private static bool RunFindBarChecks()
+    {
+        Line("-- the find bar --");
+        var searched = new List<(FindQuery Query, bool Forward)>();
+        var dlg = new FindDialog((q, f) => searched.Add((q, f)));
+        try
+        {
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(0, 0);
+            dlg.Opacity = 0;
+            dlg.Show();
+            Pump();
+
+            dlg.SetTermForTesting("order-service", 3, 2);
+            var before = dlg.SelectionForTesting();
+            bool ok = Check("the term and the place in it are set up", dlg.TermForTesting() == "order-service" && before == (3, 2),
+                            $"{dlg.TermForTesting()} at {before}");
+
+            // Filling the drop-down used to reset the box, and it ran after every single search.
+            dlg.SetHistory(new[] { "order-service", "earlier", "older still" });
+            Pump();
+            ok &= Check("recalling the history leaves the term alone", dlg.TermForTesting() == "order-service",
+                        dlg.TermForTesting());
+            ok &= Check("and leaves the caret and selection where they were",
+                        dlg.SelectionForTesting() == before, $"{dlg.SelectionForTesting()} was {before}");
+
+            dlg.EnterForTesting();
+            Pump();
+            ok &= Check("Enter searches for what is in the box",
+                        searched.Count == 1 && searched[0].Query.Text == "order-service" && searched[0].Forward,
+                        string.Join(",", searched.Select(s => s.Query.Text)));
+            ok &= Check("and does not disturb it", dlg.TermForTesting() == "order-service" && dlg.SelectionForTesting() == before,
+                        $"{dlg.TermForTesting()} at {dlg.SelectionForTesting()}");
+
+            dlg.SetSearching(true);
+            Pump();
+            ok &= Check("a search that has to wait shows itself", dlg.SearchingForTesting());
+            ok &= Check("and refuses a second one while it runs", RunsAnother() == 0);
+
+            dlg.SetSearching(false);
+            Pump();
+            ok &= Check("and once it is done the box takes Enter again", RunsAnother() == 1);
+
+            int RunsAnother()
+            {
+                int was = searched.Count;
+                dlg.EnterForTesting();
+                return searched.Count - was;
+            }
+
+            return ok;
+        }
+        finally
+        {
+            dlg.Close();
+            dlg.Dispose();
+            Pump();
+        }
     }
 
     /// <summary>Windows slides a progress bar's fill towards a rising value over a few hundred milliseconds,

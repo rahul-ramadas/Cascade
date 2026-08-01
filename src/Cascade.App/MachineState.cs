@@ -25,12 +25,17 @@ public sealed class MachineState
     public void AddRecentFile(string path) => AddRecent(RecentFiles, path);
     public void AddRecentFilterFile(string path) => AddRecent(RecentFilterFiles, path);
 
-    public void AddRecentFindTerm(string term)
+    /// <summary>Records a term, most recent first. False when the list already said exactly that, which is
+    /// every repeat of a search - and saves the callers redrawing a list that has not moved.</summary>
+    public bool AddRecentFindTerm(string term)
     {
-        if (string.IsNullOrEmpty(term)) return;
+        if (string.IsNullOrEmpty(term)) return false;
+        if (RecentFindTerms.Count > 0 && string.Equals(RecentFindTerms[0], term, StringComparison.Ordinal))
+            return false;
         RecentFindTerms.RemoveAll(t => string.Equals(t, term, StringComparison.Ordinal));
         RecentFindTerms.Insert(0, term);
         while (RecentFindTerms.Count > 20) RecentFindTerms.RemoveAt(RecentFindTerms.Count - 1);
+        return true;
     }
 
     private static void AddRecent(List<string> list, string path)

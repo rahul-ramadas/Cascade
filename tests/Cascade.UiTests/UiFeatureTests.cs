@@ -580,6 +580,48 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Repeating_a_search_keeps_up_with_the_key()
+    {
+        // Held down, Enter repeats about thirty times a second. Every one of them has to land: the bar used
+        // to refuse a repeat while it thought a search was running, and to rebuild its history and flip its
+        // progress UI around answers it already had - so on a term matching most lines it appeared stuck.
+        string log = TestData.WriteLogFile();
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, null, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            app.SelectLine(1);
+            var dlg = app.OpenFindDialog();
+            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+            app.SetText(edit, "line");                      // every line matches, so each Enter moves one line
+            app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
+            Check("the first search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
+
+            const int repeats = 12;
+            for (int i = 0; i < repeats; i++) app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
+            Check("every repeat moved the caret on one match",
+                  app.WaitStatus("Ln:", $"Ln: {2 + repeats} / 1,000"), app.StatusText("Ln:"));
+
+            // Searching must not touch what was typed. Backspace is the giveaway: with the caret still at
+            // the end it takes the last character, and from the start of the box it takes nothing - which is
+            // exactly where refilling the history drop-down used to put it.
+            app.SendKeyAsDialogKey(edit, VirtualKeyShort.END);
+            app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
+            app.SendKeyAsDialogKey(edit, VirtualKeyShort.BACK);
+            Check("Enter leaves the caret where it was in the box",
+                  Retry.WhileFalse(() => app.TextOf(edit) == "lin", TimeSpan.FromSeconds(3)).Result,
+                  app.TextOf(edit));
+
+            try { dlg.Close(); } catch { /* modeless: hides */ }
+            Assert.True(fails.Count == 0, "Find repeat failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); }
+    }
+
+    [Fact]
     public void Reaching_the_end_of_a_search_shows_feedback()
     {
         // Every find command has to say so when there is nothing further that way. Two of them used to be

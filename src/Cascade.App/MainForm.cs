@@ -874,6 +874,7 @@ public sealed class MainForm : Form
 
     private void SetFindBusy(bool busy, string? what = null, string? detail = null, Func<double>? progress = null)
     {
+        if (!busy && !_findBusy) return;   // nothing to take down, and this is called after every search
         _findBusy = busy;
         _findProgress = busy ? progress : null;
         _findWhat = busy ? what ?? "Searching" : "";
@@ -1241,30 +1242,38 @@ public sealed class MainForm : Form
             };
         }
         _findDialog.SetHistory(_state.RecentFindTerms);
+        _findDialog.History = () => _state.RecentFindTerms;
         if (!_findDialog.Visible) _findDialog.Show(this);
         _findDialog.FocusInput();
     }
 
     private async void DoFind(FindQuery query, bool forward)
     {
+        bool sameTerm = _lastQuery == query;
         _lastQuery = query;
-        _state.AddRecentFindTerm(query.Text);
-        _stateDirty = true;
-        _findDialog?.SetHistory(_state.RecentFindTerms);
+        if (_state.AddRecentFindTerm(query.Text)) _stateDirty = true;
         // The highlight outlives the dialog: F3 keeps working with it closed, so the hits have to stay
         // marked until the term is deliberately put away.
-        _grid.SetFindHighlight(FindEngine.CompileQuery(query));
+        if (!sameTerm) _grid.SetFindHighlight(FindEngine.CompileQuery(query));
         long start = _grid.CaretLine;
         start = start < 0 ? 0 : start + (forward ? 1 : -1);
 
-        // F3 usually repeats the search with the dialog closed, so the progress has to reach the status bar
-        // too - a search that is waiting on the sweep would otherwise look like the window had locked up.
-        SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgressFor(forward));
-        _findDialog?.SetSearching(true);
+        // Ask first, and only put up the progress UI if the answer is not already known. Everything the
+        // sweep has covered answers at once, which is the whole point of it - and showing then hiding a
+        // progress bar around an instant answer cost fifteen times the search itself, so holding Enter down
+        // on a common term looked like the window had stopped responding.
+        var pending = _doc.FindNextAsync(query, start, forward);
+        if (!pending.IsCompleted)
+        {
+            // F3 usually repeats the search with the dialog closed, so the progress has to reach the status
+            // bar too - a search that is waiting on the sweep would otherwise look like a hang.
+            SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgressFor(forward));
+            _findDialog?.SetSearching(true);
+        }
         long found;
         try
         {
-            found = await _doc.FindNextAsync(query, start, forward);
+            found = await pending;
         }
         catch (OperationCanceledException)
         {
@@ -1278,9 +1287,25 @@ public sealed class MainForm : Form
             }
             return;
         }
+        catch (ObjectDisposedException)
+        {
+            // The term was put away while this was still waiting - emptying the box does that.
+            SetFindBusy(false);
+            _findDialog?.SetSearching(false);
+            return;
+        }
+        // Unconditional: a slower search that this one superseded may have put the progress UI up, and both
+        // of these do nothing when there is nothing to take down.
         SetFindBusy(false);
         _findDialog?.SetSearching(false);
-        if (found >= 0) { GoToLine(found + 1); _findDialog?.SetStatus(""); }
+        if (found >= 0)
+        {
+            GoToLine(found + 1);
+            _findDialog?.SetStatus("");
+            // Held down, the key repeats faster than an idle moment comes round, and WM_PAINT only arrives
+            // when nothing else is queued - so without this the view sits still until the key is let go.
+            _grid.Update();
+        }
         else
         {
             _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
