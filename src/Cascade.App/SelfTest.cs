@@ -68,6 +68,7 @@ internal static class SelfTest
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
+            ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
@@ -475,18 +476,18 @@ internal static class SelfTest
         }
     }
 
-    /// <summary>The match map is a summary of the whole file in one pixel column, so what matters is that a
-    /// band says the right thing - which filters are in it and how much of it they account for - not what the
-    /// picture looks like. Both are checked: the summary directly, and that the picture actually gets
-    /// painted, moves with the view, and keeps up when the view mode changes underneath it.</summary>
+    /// <summary>The minimap is the log seen from far enough away that a row is a pixel, so what matters is
+    /// that a pixel stands for the right row in the right colour - and that the window it shows follows the
+    /// view without chasing it. The summary is checked directly, and separately that it is painted, that it
+    /// repaints when it must, and that it stays cheap.</summary>
     private static bool RunMatchMapChecks()
     {
-        Line("-- match map --");
+        Line("-- minimap --");
         const int lines = 40_000;
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_map_" + Guid.NewGuid().ToString("N") + ".log");
         var sb = new StringBuilder();
-        // Lines 0..9,999 are COMMON; line 25,000 alone is RARE. One band is a many-line block, so the rare
-        // one is what proves a lone match is not rounded away.
+        // Lines 0..9,999 are COMMON; line 25,000 alone is RARE. The lone one is what proves a match is never
+        // rounded away, and the twenty-five thousand plain lines around it are what the gaps compress.
         for (int i = 0; i < lines; i++)
             sb.Append(i < 10_000 ? "COMMON " : i == 25_000 ? "RARE " : "plain ").Append("line ").Append(i).Append('\n');
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
@@ -512,8 +513,9 @@ internal static class SelfTest
             host.Show();
             Pump();
 
+            var settings = new AppSettings();
             var common = new Filter { Enabled = true, Match = new FilterMatch { Text = "COMMON" }, Style = { Background = new RgbColor(0x22, 0x44, 0xEE) } };
-            var rare = new Filter { Enabled = true, Match = new FilterMatch { Text = "RARE" }, Style = { Background = new RgbColor(0xEE, 0x22, 0x22) } };
+            var rare = new Filter { Enabled = true, Match = new FilterMatch { Text = "RARE" }, Style = { Foreground = new RgbColor(0xEE, 0x22, 0x22) } };
             var collection = new FilterCollection();
             collection.Roots.Add(common);
             collection.Roots.Add(rare);
@@ -522,309 +524,143 @@ internal static class SelfTest
             Pump();
 
             var map = grid.MatchMapForTesting;
-            bool ok = Check("the map replaces the vertical scrollbar", map is not null && map.Visible && !grid.VerticalScrollBarVisibleForTesting);
+            bool ok = Check("the map and the scrollbar are both there",
+                            map is not null && map.Visible && grid.VerticalScrollBarVisibleForTesting);
             if (map is null) return false;
 
+            grid.ScrollToRow(0);
             map.RebuildForTesting();
-            int height = map.BandCountForTesting;
-            ok &= Check("the map has one band per pixel row", height > 50, $"{height} bands");
-            if (height <= 50) return false;
+            int slots = map.SlotCountForTesting;
+            ok &= Check("the map is one pixel row per row of text", slots > 50 && map.RowPixelsForTesting >= 1,
+                        $"{slots} slots of {map.RowPixelsForTesting}px");
+            if (slots <= 50) return false;
 
-            int BandOf(long line) => (int)(line * height / lines);
+            // ---- one pixel per row, in that row's own colour ----
+            ok &= Check("it starts at the top of the file", map.TopRowForTesting == 0, map.TopRowForTesting.ToString());
+            ok &= Check("and the first rows are one to a pixel",
+                        map.RowAtForTesting(0) == 0 && map.RowAtForTesting(1) == 1 && map.RowAtForTesting(20) == 20,
+                        $"{map.RowAtForTesting(0)},{map.RowAtForTesting(1)},{map.RowAtForTesting(20)}");
+            ok &= Check("a matching row takes its filter's background",
+                        map.ColourAtForTesting(5) == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb(),
+                        Color.FromArgb(map.ColourAtForTesting(5)).ToString());
 
-            // ---- lanes ----
-            ok &= Check("a lane per enabled filter", map.LaneCountForTesting == 2, $"{map.LaneCountForTesting} lanes");
-            ok &= Check("in the order the list has them", map.LaneNamesForTesting is ["COMMON", "RARE"],
-                        string.Join(",", map.LaneNamesForTesting));
-            ok &= Check("and they fit side by side", map.LanesFitForTesting);
-            var laneColors = map.LaneColorsForTesting;
-            ok &= Check("each lane keeps its filter's hue", laneColors.Length == 2 && laneColors[0].B > laneColors[0].R && laneColors[1].R > laneColors[1].B,
-                        string.Join(" ", laneColors.Select(c => $"{c.R},{c.G},{c.B}")));
+            // A filter with a text colour and no background of its own: the row would be invisible without
+            // falling back to it.
+            grid.ScrollToRow(25_000);
+            map.RebuildForTesting();
+            int rareSlot = map.SlotOfForTesting(25_000);
+            ok &= Check("the lone match is somewhere on the map", rareSlot >= 0 && map.RowAtForTesting(rareSlot) == 25_000,
+                        $"slot {rareSlot} holds row {map.RowAtForTesting(rareSlot)}");
+            ok &= Check("and takes its filter's text colour when it sets no background",
+                        map.ColourAtForTesting(rareSlot) == Color.FromArgb(0xEE, 0x22, 0x22).ToArgb(),
+                        Color.FromArgb(map.ColourAtForTesting(rareSlot)).ToString());
 
-            ok &= Check("a filter's own band is full", map.ShareForTesting(BandOf(5000), 0) > 0.99,
-                        map.ShareForTesting(BandOf(5000), 0).ToString("0.000"));
-            ok &= Check("and the other lane is empty there", map.ShareForTesting(BandOf(5000), 1) == 0,
-                        map.ShareForTesting(BandOf(5000), 1).ToString("0.000"));
-            ok &= Check("a band with nothing in it is empty", map.DensityForTesting(BandOf(18_000)) == 0,
-                        map.DensityForTesting(BandOf(18_000)).ToString("0.000"));
+            // ---- gaps ----
+            // Twenty-five thousand plain lines lie between the two filters. At one pixel a row the map would
+            // never reach the second from the first; compressed, it does.
+            ok &= Check("a stretch with nothing in it is compressed", map.SpanForTesting > slots * 4,
+                        $"{map.SpanForTesting} rows across {slots} pixels");
+            ok &= Check("but the compression is bounded, not unlimited",
+                        map.SpanForTesting < (long)slots * 40, map.SpanForTesting.ToString());
+            ok &= Check("a compressed pixel is blank", map.ColourAtForTesting(Math.Max(0, rareSlot - 3)) == 0,
+                        Color.FromArgb(map.ColourAtForTesting(Math.Max(0, rareSlot - 3))).ToString());
+            ok &= Check("and the rows behind the pixels never go backwards",
+                        Enumerable.Range(1, slots - 1).All(s => map.RowAtForTesting(s) >= map.RowAtForTesting(s - 1)));
 
-            // The band holding the single RARE line: thin, but it must still be there, in its own lane.
-            double rareShare = map.ShareForTesting(BandOf(25_000), 1);
-            ok &= Check("a lone match still registers in its lane", rareShare > 0 && rareShare < 0.2,
-                        rareShare.ToString("0.0000"));
-            ok &= Check("and does not leak into the other one", map.ShareForTesting(BandOf(25_000), 0) == 0,
-                        map.ShareForTesting(BandOf(25_000), 0).ToString("0.0000"));
+            // With every unmatched row hidden there is nothing to compress, so it is one pixel a row again.
+            doc.Filters.ShowOnlyFilteredLines = true;
+            grid.RefreshView();
+            grid.ScrollToRow(0);
+            map.RebuildForTesting();
+            ok &= Check("with only matching lines shown it is one row per pixel again",
+                        map.SpanForTesting <= map.SlotCountForTesting,
+                        $"{map.SpanForTesting} rows across {map.SlotCountForTesting} pixels");
+            ok &= Check("and every pixel is coloured", Enumerable.Range(0, map.SlotCountForTesting).All(s => map.ColourAtForTesting(s) != 0));
+            doc.Filters.ShowOnlyFilteredLines = false;
+            grid.RefreshView();
+            Pump();
 
-            // ...and it is actually painted, at full strength. The whole point of the redesign is that one
-            // line in a band of a hundred is not a barely-tinted pixel: a lane is scaled against its own
-            // busiest band, so wherever a filter is at its densest it is at its brightest, however little of
-            // the file it accounts for overall.
-            ok &= Check("the lone match is the whole of that lane's peak",
-                        Math.Abs(map.LanePeakForTesting(1) - rareShare) < 1e-6,
-                        $"peak {map.LanePeakForTesting(1):0.0000} vs share {rareShare:0.0000}");
+            // ---- the window follows the view, without chasing it ----
+            grid.ScrollToRow(5_000);
+            map.RebuildForTesting();
+            long settled = map.TopRowForTesting;
+            var before = map.ViewportForTesting;
+            grid.ScrollToRow(5_020);
+            map.RebuildForTesting();
+            ok &= Check("a small scroll leaves the window where it was", map.TopRowForTesting == settled,
+                        $"{settled} -> {map.TopRowForTesting}");
+            ok &= Check("but the rectangle moves down it", map.ViewportForTesting.Top > before.Top,
+                        $"y {before.Top} -> {map.ViewportForTesting.Top}");
+            grid.ScrollToRow(30_000);
+            map.RebuildForTesting();
+            int at = map.SlotOfForTesting(30_000), of = map.SlotCountForTesting;
+            ok &= Check("a scroll right out of the window re-centres it",
+                        map.TopRowForTesting != settled && at > of / 5 && at < of * 4 / 5,
+                        $"top {map.TopRowForTesting}, view at slot {at} of {of}");
+            ok &= Check("and the rectangle never collapses to nothing", map.ViewportForTesting.Height >= 8,
+                        map.ViewportForTesting.Height.ToString());
+
+            // ---- painted, and repainted when it must be ----
+            grid.ScrollToRow(0);
+            Pump();
             using (var picture = Capture(host))
             {
-                int mapLeft = picture.Width - map.Width;
-                var rareLane = LanePixel(picture, mapLeft, map.Width, MapRowY(map, BandOf(25_000)), lane: 1, lanes: 2);
-                var back = new AppSettings().GutterBack;
-                ok &= Check("and so it is painted at full strength, not as a faint tint",
-                            Distance(rareLane, map.LaneColorsForTesting[1]) < 24,
-                            $"{rareLane.R},{rareLane.G},{rareLane.B} vs lane {map.LaneColorsForTesting[1].R}," +
-                            $"{map.LaneColorsForTesting[1].G},{map.LaneColorsForTesting[1].B}");
-                var commonLane = LanePixel(picture, mapLeft, map.Width, MapRowY(map, BandOf(5000)), lane: 0, lanes: 2);
-                ok &= Check("a full band is its lane's colour too",
-                            Distance(commonLane, back) > 60 && commonLane.B > commonLane.R,
-                            $"{commonLane.R},{commonLane.G},{commonLane.B}");
+                var r = grid.MapBoundsForTesting;
+                // Well below the viewport rectangle, whose tint would be blended into whatever is under it.
+                int y = r.Top + 100 * map.RowPixelsForTesting;
+                var pixel = picture.GetPixel(r.Left + r.Width / 2, y);
+                ok &= Check("the map is painted in the row's own colour",
+                            pixel.R == 0x22 && pixel.G == 0x44 && pixel.B == 0xEE, pixel.ToString());
             }
 
-            // ---- the viewport rectangle actually follows the view ----
-            // Counted in paints, not looked at in a screenshot: DrawToBitmap draws a control whether or not
-            // it was ever invalidated, so a captured picture is always up to date even when the window on
-            // screen has been frozen for minutes. That is exactly the fault being guarded against here.
-            long before = grid.FirstVisibleRow;
-            int topBefore = ViewportTop(host, map);
             int paintsBefore = map.PaintsForTesting;
-            grid.ScrollToRow(30_000);
+            grid.ScrollToRow(200);
             Pump();
             ok &= Check("scrolling repaints the map without anyone asking it to",
                         map.PaintsForTesting > paintsBefore, $"{paintsBefore} -> {map.PaintsForTesting} paints");
-            int topAfter = ViewportTop(host, map);
-            ok &= Check("scrolling moves the view the map reports", grid.FirstVisibleRow > before,
-                        $"{before} -> {grid.FirstVisibleRow}");
-            ok &= Check("and the rectangle on the map moves with it", topAfter > topBefore + 100,
-                        $"y {topBefore} -> {topAfter}");
-            grid.ScrollToRow(0);
-            Pump();
-            ok &= Check("and comes back", ViewportTop(host, map) < 40, ViewportTop(host, map).ToString());
 
-            // A repaint per scroll is only affordable because the lanes are drawn once into a bitmap; if
-            // that ever goes back to thousands of rectangles this is where it will show.
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-            for (int i = 0; i < 100; i++) { map.Invalidate(); map.Update(); }
-            watch.Stop();
-            ok &= Check("and a repaint of the map is cheap", watch.ElapsedMilliseconds < 150,
-                        $"{watch.ElapsedMilliseconds} ms for 100 repaints");
-
-            // ---- filtered mode ----
-            // Every row is a match there, so density says nothing and the lanes carry it all - and the map
-            // has to notice the switch at all, which is a repaint nothing else asks for. Checked on the
-            // summary the map is actually holding, with no rebuild forced first: a stale one still describes
-            // the file it was built from, and would read as sparse here.
             paintsBefore = map.PaintsForTesting;
             doc.Filters.ShowOnlyFilteredLines = true;
             grid.RefreshView();
             Pump();
-            ok &= Check("switching to filtered lines repaints the map",
+            ok &= Check("switching to filtered lines repaints it too",
                         map.PaintsForTesting > paintsBefore, $"{paintsBefore} -> {map.PaintsForTesting} paints");
-            int solid = 0, sparse = 0;
-            for (int y = 0; y < map.BandCountForTesting; y++)
-            {
-                double d = map.DensityForTesting(y);
-                if (d > 0.99) solid++;
-                else if (d > 0) sparse++;
-            }
-            ok &= Check("and the summary it is holding is the new one, not the old",
-                        sparse == 0 && solid > 50, $"{solid} solid, {sparse} partial");
-
-            map.RebuildForTesting();
-            ok &= Check("the lanes still say which filter is where",
-                        map.ShareForTesting(0, 0) > 0.99 && map.ShareForTesting(map.BandCountForTesting - 1, 1) > 0,
-                        $"{map.ShareForTesting(0, 0):0.000} / {map.ShareForTesting(map.BandCountForTesting - 1, 1):0.000}");
-
             doc.Filters.ShowOnlyFilteredLines = false;
             grid.RefreshView();
             Pump();
 
-            // ---- nesting collapses into one lane ----
-            var child = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 1" } };
-            collection.Add(child, common);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-            ok &= Check("a filter nested under an enabled one does not take a lane of its own",
-                        map.LaneCountForTesting == 2, string.Join(",", map.LaneNamesForTesting));
-            common.Enabled = false;
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-            ok &= Check("but it takes one as soon as nothing above it is on",
-                        map.LaneNamesForTesting.Any(n => n.Contains("line 1")), string.Join(",", map.LaneNamesForTesting));
-            // The parent is still in play - its pattern goes on scoping the child - but it is switched off,
-            // so it is not one of the filters being looked at and gets no lane of its own.
-            ok &= Check("and the switched-off filter above it does not",
-                        !map.LaneNamesForTesting.Contains("COMMON"), string.Join(",", map.LaneNamesForTesting));
-            common.Enabled = true;
-            collection.Remove(child);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            for (int i = 0; i < 100; i++) { map.Invalidate(); map.Update(); }
+            watch.Stop();
+            ok &= Check("and a repaint is a blit, not a rebuild", watch.ElapsedMilliseconds < 200,
+                        $"{watch.ElapsedMilliseconds} ms for 100 repaints");
 
-            // An exclude filter takes lines away rather than picking them out, so there is no such thing as
-            // where its lines are.
-            var without = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "line 7" } };
-            collection.Roots.Add(without);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-            ok &= Check("an exclude filter gets no lane", map.LaneCountForTesting == 2,
-                        string.Join(",", map.LaneNamesForTesting));
-            collection.Remove(without);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-
-            // ---- filters with no colour of their own ----
-            // Every one of them used to come out as the text colour, so a dozen unstyled filters were one
-            // indistinguishable black block down the map.
-            var plainA = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 2" } };
-            var plainB = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 3" } };
-            // Black on yellow is a real thing people style a filter: it has no hue, so there is none to
-            // preserve, and forcing saturation onto it used to turn the lane red.
-            var monochrome = new Filter
-            {
-                Enabled = true,
-                Match = new FilterMatch { Text = "line 4" },
-                Style = { Background = new RgbColor(0, 0, 0), Foreground = new RgbColor(0xFF, 0xE0, 0x00) }
-            };
-            collection.Roots.Add(plainA);
-            collection.Roots.Add(plainB);
-            collection.Roots.Add(monochrome);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-            var colours = map.LaneColorsForTesting;
-            var theme = new AppSettings();
-            ok &= Check("a filter with no colour of its own takes one from the palette, not the text colour",
-                        colours.Length == 5 && colours[2].ToArgb() == MapLanes.FallbackForTesting(2).ToArgb()
-                                            && colours[3].ToArgb() == MapLanes.FallbackForTesting(3).ToArgb(),
-                        string.Join(" ", colours.Select(c => $"{c.R},{c.G},{c.B}")));
-            ok &= Check("and so does one whose colour has no hue to keep",
-                        colours.Length == 5 && colours[4].ToArgb() == MapLanes.FallbackForTesting(4).ToArgb(),
-                        colours.Length == 5 ? $"{colours[4].R},{colours[4].G},{colours[4].B}" : "?");
-            ok &= Check("and two of them do not look the same",
-                        colours.Length == 5 && Distance(colours[2], colours[3]) > 80,
-                        colours.Length == 5 ? $"{Distance(colours[2], colours[3]):0}" : "?");
-            ok &= Check("every lane stands out from the gutter",
-                        colours.All(c => Distance(c, theme.GutterBack) > 90),
-                        string.Join(" ", colours.Select(c => $"{Distance(c, theme.GutterBack):0}")));
-
-            // A saved filter set carries filters for every log its owner reads. The ones this file has
-            // nothing for would otherwise be blank columns, taking width off the ones that do.
-            var absent = new Filter { Enabled = true, Match = new FilterMatch { Text = "nothing says this" } };
-            collection.Roots.Add(absent);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-            ok &= Check("a filter this file has nothing for takes no lane at all",
-                        map.LaneCountForTesting == 5, string.Join(",", map.LaneNamesForTesting));
-            collection.Remove(absent);
-            collection.Remove(plainA);
-            collection.Remove(plainB);
-            collection.Remove(monochrome);
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            map.RebuildForTesting();
-
-            // A pale highlight, chosen to be quiet enough to read text on, has to survive being reduced to a
-            // three-pixel column - which means it cannot stay pale.
-            var pale = MapLanes.Vivid(Color.FromArgb(0xDC, 0xDC, 0xDC), theme.GutterBack);
-            ok &= Check("a pale filter colour is pushed until it reads against the gutter",
-                        Distance(pale, theme.GutterBack) > 90, $"{pale.R},{pale.G},{pale.B}");
-
-            // ---- a view with no rows at all ----
-            // Filters that match nothing, with only matching lines shown, is how a saved filter set often
-            // opens - and it is also every file's state for the first instant. Painting has to survive it:
-            // an exception in OnPaint is not a blank map, it is WinForms drawing a red box with a cross in
-            // it where the map should be, which then sits there until something invalidates it.
-            var nothing = new Filter { Enabled = true, Match = new FilterMatch { Text = "no line says this" } };
-            collection.Roots.Add(nothing);
-            common.Enabled = rare.Enabled = false;
-            doc.Filters.ShowOnlyFilteredLines = true;
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            grid.RefreshView();
-            Pump();
-            int paintsAtZero = map.PaintsForTesting;
-            using (var blank = Capture(host)) { _ = blank.Width; }
-            Pump();
-            ok &= Check("a view with no rows still paints", doc.RowCount == 0 && map.PaintsForTesting > paintsAtZero,
-                        $"{doc.RowCount} rows, {paintsAtZero} -> {map.PaintsForTesting} paints");
-            ok &= Check("and the map is blank rather than broken",
-                        map.BandCountForTesting > 0 && map.DensityForTesting(0) == 0 && map.ShareForTesting(0, 0) == -1,
-                        $"{map.BandCountForTesting} bands");
-
-            doc.Filters.ShowOnlyFilteredLines = false;
-            collection.Remove(nothing);
-            common.Enabled = rare.Enabled = true;
-            doc.SetFilters(collection);
-            WaitForFiltering(doc);
-            grid.RefreshView();
-            Pump();
-            map.RebuildForTesting();
-
-            // ---- the tip names what is under the pointer ----
-            string tip = map.TipTextForTesting(BandOf(25_000));
-            ok &= Check("hovering a band says which filter is in it", tip.Contains("RARE") && tip.Contains("Lines "), tip.Replace("\n", " | "));
-            ok &= Check("and an empty band says so", map.TipTextForTesting(BandOf(18_000)).Contains("nothing"),
-                        map.TipTextForTesting(BandOf(18_000)).Replace("\n", " | "));
-
-            // Which lane you are actually on, which is the question a colour cannot answer by itself.
-            string overRare = map.TipOverLaneForTesting(BandOf(5000), lane: 1);
-            ok &= Check("pointing at a lane names that lane first", overRare.StartsWith("This lane: RARE"),
-                        overRare.Replace("\n", " | "));
-            string overCommon = map.TipOverLaneForTesting(BandOf(5000), lane: 0);
-            ok &= Check("and the other lane names the other filter", overCommon.StartsWith("This lane: COMMON"),
-                        overCommon.Replace("\n", " | "));
-            ok &= Check("off the lanes it names none of them", !map.TipTextForTesting(BandOf(5000)).StartsWith("This lane"),
-                        map.TipTextForTesting(BandOf(5000)).Replace("\n", " | "));
-
-            // And the pointer really lands on the lane it looks like it is over.
-            var (barLeft, barWidth) = map.BarBoundsForTesting;
-            ok &= Check("the left of the bar is the first lane", map.LaneAtForTesting(barLeft + 1) == 0,
-                        map.LaneAtForTesting(barLeft + 1).ToString());
-            ok &= Check("and the right of it is the last", map.LaneAtForTesting(barLeft + barWidth - 1) == map.LaneCountForTesting - 1,
-                        map.LaneAtForTesting(barLeft + barWidth - 1).ToString());
-            ok &= Check("the edges belong to no lane",
-                        map.LaneAtForTesting(0) == -1 && map.LaneAtForTesting(barLeft + barWidth + 1) == -1,
-                        $"{map.LaneAtForTesting(0)} / {map.LaneAtForTesting(barLeft + barWidth + 1)}");
-
-            // ---- find hits get their own edge ----
-            ok &= Check("no find, no marks down the find edge", !map.FindInBandForTesting(BandOf(25_000)));
-            doc.FindNextAsync(new FindQuery("RARE", false, false), 0, true).GetAwaiter().GetResult();
-            while (!doc.FindComplete) Thread.Sleep(20);
-            map.RebuildForTesting();
-            ok &= Check("the band holding a find hit is marked", map.FindInBandForTesting(BandOf(25_000)));
-            ok &= Check("and one that holds none is not", !map.FindInBandForTesting(BandOf(18_000)));
-            doc.DropSearch();
-
-            // ---- markers ----
-            map.RebuildForTesting();
-            grid.ScrollToRow(12_345);
-            grid.RefreshView();
-            Pump();
-            grid.SelectRowForAccessibility(12_345);
-            Pump();
-            int markerBand = BandOf(12_345);
-            // Look at the band from a distance: the viewport rectangle is drawn over the same lane, and its
-            // blue blended with the mark's red is neither one nor the other.
+            // ---- clicking it ----
             grid.ScrollToRow(0);
-            grid.RefreshView();
+            map.RebuildForTesting();
+            int target = map.SlotCountForTesting / 2;
+            long wanted = map.RowAtForTesting(target);
+            map.ClickForTesting(target * map.RowPixelsForTesting);
             Pump();
-            bool beforeMark = MapRowHasMarker(host, map, markerBand);
-            grid.PressKeyForTesting(Keys.Control | Keys.D1);
-            grid.ScrollToRow(0);
-            grid.RefreshView();
-            Pump();
-            bool afterMark = MapRowHasMarker(host, map, markerBand);
-            ok &= Check("marking a line shows up on the map at once", !beforeMark && afterMark,
-                        $"before {beforeMark}, after {afterMark}; marks {doc.Markers.UsedMarkers}, " +
-                        $"band {markerBand}; got {MapLaneColours(host, map, markerBand)}");
+            ok &= Check("clicking a pixel goes to the row behind it",
+                        Math.Abs(grid.FirstVisibleRow + grid.VisibleRows / 2 - wanted) <= 2,
+                        $"wanted {wanted}, got {grid.FirstVisibleRow + grid.VisibleRows / 2}");
 
-            grid.PressKeyForTesting(Keys.Control | Keys.D1);
-            grid.ScrollToRow(0);
-            grid.RefreshView();
-            Pump();
-            ok &= Check("and goes again when the mark is cleared", !MapRowHasMarker(host, map, markerBand),
-                        MapLaneColours(host, map, markerBand));
+            // ---- markers and the selection ----
+            ok &= RunMapMarkChecks(doc, grid, map, host);
 
-            ok &= RunMapKeyChecks(doc, map);
+            // ---- the tip ----
+            grid.ScrollToRow(0);
+            map.RebuildForTesting();
+            string tip = map.TipTextForTesting(5);
+            ok &= Check("hovering a pixel names its line and filter", tip.Contains("Line 6") && tip.Contains("COMMON"),
+                        tip.Replace("\n", " | "));
+            grid.ScrollToRow(20_000);
+            map.RebuildForTesting();
+            string blank = map.TipTextForTesting(2);
+            ok &= Check("and a compressed stretch says there is nothing in it", blank.Contains("nothing matching"),
+                        blank.Replace("\n", " | "));
+
             return ok;
         }
         finally
@@ -836,168 +672,80 @@ internal static class SelfTest
         }
     }
 
-    /// <summary>The key beside each filter in the list, which is the only thing that makes a lane's colour
-    /// mean anything: about half the filters in a real set have no colour of their own and take one from a
-    /// palette, and there is no guessing those. Both sides work it out from the same rule, so what is
-    /// checked here is that they agree - and that the key is actually painted.</summary>
-    private static bool RunMapKeyChecks(CascadeDocument doc, MatchMapControl map)
+    /// <summary>Marks down the map's left edge, and every marked line in the file down the scrollbar's
+    /// trough - which is the only place a mark outside the map's window can appear.</summary>
+    private static bool RunMapMarkChecks(CascadeDocument doc, LineGridControl grid, MiniMapControl map, Form host)
     {
-        var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-        var host = new Form
-        {
-            StartPosition = FormStartPosition.Manual,
-            Location = new Point(0, 0),
-            ClientSize = new Size(400, 300),
-            Opacity = 0,
-            FormBorderStyle = FormBorderStyle.None
-        };
-        try
-        {
-            // An unstyled filter is the one that matters: its row is plain, so the palette colour of its key
-            // appears nowhere else on that row and cannot be found by accident.
-            var plain = new Filter { Enabled = true, Match = new FilterMatch { Text = "plain" } };
-            doc.Filters.Roots.Add(plain);
-            doc.SetFilters(doc.Filters);
-            WaitForFiltering(doc);
+        grid.ScrollToRow(0);
+        grid.RefreshView();
+        Pump();
 
-            host.Controls.Add(tree);
-            tree.Attach(doc);
-            host.Show();
-            tree.RefreshCounts();
-            Pump();
-            map.RebuildForTesting();
+        int MarkPixels(Color want) => CountColour(host, grid.MapBoundsForTesting, want, leftEdgeOnly: true);
+        int TroughPixels(Color want) => CountColour(host, grid.ScrollBarBoundsForTesting, want, leftEdgeOnly: false);
 
-            var lanes = map.LaneNamesForTesting;
-            var colours = map.LaneColorsForTesting;
-            var filters = doc.Filters.EnumerateDepthFirst().ToList();
-            bool ok = Check("there are lanes to key", lanes.Length >= 3, $"{lanes.Length} lanes");
+        var markColour = AppSettings.MarkerColors[0];
+        int mapBefore = MarkPixels(markColour), troughBefore = TroughPixels(markColour);
 
-            for (int i = 0; i < lanes.Length; i++)
-            {
-                var f = filters.FirstOrDefault(x => x.DisplayName == lanes[i]);
-                if (f is null) { ok &= Check($"the filter behind lane {lanes[i]} is findable", false); continue; }
-                ok &= Check($"the key beside {lanes[i]} is the colour its lane is painted",
-                            tree.LaneKeyForTesting(f) is { } c && c.ToArgb() == colours[i].ToArgb(),
-                            $"{tree.LaneKeyForTesting(f)} vs {colours[i]}");
-            }
+        // A mark well outside the map's window: it can only show on the scrollbar.
+        grid.ScrollToRow(30_000);
+        grid.SelectRowForAccessibility(30_000);
+        Pump();
+        grid.PressKeyForTesting(Keys.Control | Keys.D1);
+        grid.ScrollToRow(0);
+        grid.RefreshView();
+        Pump();
 
-            // A filter that has lines but is switched off has no lane, so it must have no key either - the
-            // list would otherwise promise a colour the map is not painting anywhere.
-            var live = filters.First(x => x.DisplayName == lanes[0]);
-            var keyBefore = tree.LaneKeyForTesting(live);
-            live.Enabled = false;
-            doc.SetFilters(doc.Filters);
-            WaitForFiltering(doc);
-            tree.RefreshCounts();
-            Pump();
-            ok &= Check("switching a filter off takes its key away",
-                        keyBefore is not null && tree.LaneKeyForTesting(live) is null,
-                        $"{keyBefore} -> {tree.LaneKeyForTesting(live)?.ToString() ?? "none"}");
-            live.Enabled = true;
-            doc.SetFilters(doc.Filters);
-            WaitForFiltering(doc);
-            tree.RefreshCounts();
-            Pump();
-            map.RebuildForTesting();
+        bool ok = Check("a mark outside the map's window still shows on the scrollbar",
+                        TroughPixels(markColour) > troughBefore,
+                        $"{troughBefore} -> {TroughPixels(markColour)} pixels");
+        ok &= Check("and not on the map, which is not looking there",
+                    MarkPixels(markColour) == mapBefore, $"{mapBefore} -> {MarkPixels(markColour)}");
 
-            // ...and it is really on screen, not merely worked out. Checked on the unstyled filter, whose
-            // row is not painted in anything like its key.
-            var r = tree.LaneKeyBoundsForTesting(plain);
-            var want = tree.LaneKeyForTesting(plain);
-            ok &= Check("the unstyled filter has a key with somewhere to be drawn",
-                        r.Width > 0 && r.Height > 0 && want is not null, $"{r}, {want?.ToString() ?? "no colour"}");
-            if (r.Width > 0 && want is { } colour)
-            {
-                using var picture = Capture(host);
-                bool painted = false;
-                for (int y = r.Top; y < r.Bottom && y < picture.Height && !painted; y++)
-                    for (int x = r.Left; x < r.Right && x < picture.Width; x++)
-                        if (picture.GetPixel(x, y).ToArgb() == colour.ToArgb()) { painted = true; break; }
-                ok &= Check("and it is painted there", painted,
-                            $"looked for {colour.R},{colour.G},{colour.B} in {r}");
-            }
+        // Bring it into the window and it shows on both. Not right under the viewport rectangle, whose tint
+        // is drawn over the mark - still visible, but no longer exactly the marker's colour.
+        grid.ScrollToRow(28_000);
+        grid.RefreshView();
+        Pump();
+        ok &= Check("scroll near it and the map shows it too", MarkPixels(markColour) > 0,
+                    MarkPixels(markColour).ToString());
 
-            // Turning the map off takes the key with it: it would be pointing at nothing.
-            tree.ShowLaneKeys = false;
-            Pump();
-            ok &= Check("no map, no key", tree.LaneKeyBoundsForTesting(plain) == Rectangle.Empty);
+        grid.PressKeyForTesting(Keys.Control | Keys.D1);
+        grid.RefreshView();
+        Pump();
+        ok &= Check("clearing it takes it off both", MarkPixels(markColour) == 0 && TroughPixels(markColour) == troughBefore,
+                    $"map {MarkPixels(markColour)}, trough {TroughPixels(markColour)}");
 
-            doc.Filters.Remove(plain);
-            doc.SetFilters(doc.Filters);
-            WaitForFiltering(doc);
-            return ok;
-        }
-        finally
-        {
-            host.Close();
-            host.Dispose();
-        }
+        // The selection gets the same edge, in the selection colour - well below the viewport rectangle,
+        // which is drawn in the same colour and would otherwise be what the count found.
+        grid.ScrollToRow(0);
+        grid.RefreshView();
+        Pump();
+        int selBefore = MarkPixels(new AppSettings().SelectionBack);
+        grid.SelectRowForAccessibility(150);
+        grid.ScrollToRow(0);
+        grid.RefreshView();
+        Pump();
+        ok &= Check("a selected row is marked on the map", MarkPixels(new AppSettings().SelectionBack) > selBefore,
+                    $"{selBefore} -> {MarkPixels(new AppSettings().SelectionBack)}");
+        return ok;
     }
 
-    /// <summary>The pixel in the middle of one of the map's lanes.</summary>
-    private static Color LanePixel(Bitmap picture, int mapLeft, int mapWidth, int y, int lane, int lanes)
+    /// <summary>Pixels of exactly a colour inside a control's own rectangle - taken from the control rather
+    /// than worked out from docking order, which is exactly the kind of guess that makes a test lie. Exact,
+    /// because the marks are drawn solid and the viewport rectangle over them is not: a tolerance would
+    /// count its tint as a mark.</summary>
+    private static int CountColour(Form host, Rectangle r, Color want, bool leftEdgeOnly)
     {
-        int edge = Math.Max(1, mapWidth * 2 / MatchMapControl.LogicalWidth);
-        int barLeft = mapLeft + edge, barWidth = Math.Max(1, mapWidth - edge * 2);
-        int x = barLeft + barWidth * lane / lanes + barWidth / (lanes * 2);
-        return picture.GetPixel(Math.Clamp(x, 0, picture.Width - 1), Math.Clamp(y, 0, picture.Height - 1));
-    }
-
-    private static double Distance(Color a, Color b)
-        => Math.Sqrt(Math.Pow(a.R - b.R, 2) + Math.Pow(a.G - b.G, 2) + Math.Pow(a.B - b.B, 2));
-
-    /// <summary>Top of the viewport rectangle on the map, found by its tinted left edge.</summary>
-    private static int ViewportTop(Form host, MatchMapControl map)
-    {
+        if (r.Width <= 0 || r.Height <= 0) return 0;
         using var picture = Capture(host);
-        int left = picture.Width - map.Width;
-        var gutter = new AppSettings().GutterBack;
-        for (int band = 0; band < map.BandCountForTesting; band++)
-        {
-            int y = MapRowY(map, band);
-            if (y < 0 || y >= picture.Height) continue;
-            // Column 0 is the marker lane: nothing paints it here, so the only thing that can change it is
-            // the rectangle's own fill.
-            if (Distance(picture.GetPixel(left, y), gutter) > 8) return band;
-        }
-        return -1;
+        int right = leftEdgeOnly ? Math.Min(r.Left + 4, r.Right) : r.Right;
+        int n = 0;
+        for (int y = r.Top; y < r.Bottom && y < picture.Height; y++)
+            for (int x = r.Left; x < right && x < picture.Width; x++)
+                if (picture.GetPixel(x, y).ToArgb() == want.ToArgb()) n++;
+        return n;
     }
 
-    /// <summary>Y of a band within the captured window (the map fills the grid's height).</summary>
-    private static int MapRowY(MatchMapControl map, int band) => map.Top + band;
-
-    /// <summary>Whether marker 1's colour is painted in the map's marker lane at a band. The tick is three
-    /// pixels tall, so a band either side counts as the same mark.</summary>
-    private static bool MapRowHasMarker(Form host, MatchMapControl map, int band)
-    {
-        var c = AppSettings.MarkerColors[0];
-        using var picture = Capture(host);
-        int left = picture.Width - map.Width;
-        for (int dy = -2; dy <= 3; dy++)
-            if (RowHasColor(picture, left, Math.Min(map.Width, 6), MapRowY(map, band + dy), c.R, c.G, c.B))
-                return true;
-        return false;
-    }
-
-    /// <summary>What is actually painted in the map's marker lane around a band, for diagnosing a miss.</summary>
-    private static string MapLaneColours(Form host, MatchMapControl map, int band)
-    {
-        using var picture = Capture(host);
-        int left = picture.Width - map.Width;
-        var seen = new List<string>();
-        for (int dy = -3; dy <= 4; dy++)
-        {
-            int y = MapRowY(map, band + dy);
-            if (y < 0 || y >= picture.Height) continue;
-            for (int x = left; x < Math.Min(picture.Width, left + 6); x++)
-            {
-                var p = picture.GetPixel(x, y);
-                string s = $"{p.R},{p.G},{p.B}";
-                if (!seen.Contains(s)) seen.Add(s);
-            }
-        }
-        return string.Join(" | ", seen);
-    }
 
     private static bool RowHasColor(Bitmap bmp, int left, int width, int y, int r, int g, int b)
     {
@@ -1843,6 +1591,99 @@ internal static class SelfTest
     /// <summary>Same filter, allowing for the fact that undo hands back a fresh object with the same id.</summary>
     private static bool ReferenceEquals2(Filter? a, Filter? b, FilterCollection _)
         => a is null ? b is null : b is not null && a.Id == b.Id;
+
+    /// <summary>The suggested colours have one job each: to be readable, and to not be a colour some other
+    /// filter is already wearing. A near-miss is worse than a repeat - two filters you cannot tell apart are
+    /// two you will confuse without noticing.</summary>
+    private static bool RunLuckyColorChecks()
+    {
+        Line("-- suggested filter colours --");
+
+        bool ok = Check("there are enough of them to be worth cycling", LuckyColors.Count >= 12,
+                        LuckyColors.Count.ToString());
+
+        double worstContrast = double.MaxValue;
+        int worstAt = -1;
+        for (int i = 0; i < LuckyColors.Count; i++)
+        {
+            var p = LuckyColors.At(i);
+            double c = LuckyColors.Contrast(p.Fore, p.Back);
+            if (c < worstContrast) { worstContrast = c; worstAt = i; }
+        }
+        ok &= Check("every pair is readable, by the ratio and not by eye", worstContrast >= 4.5,
+                    $"worst is {worstContrast:0.0}:1 at {worstAt}");
+
+        double closest = double.MaxValue;
+        for (int i = 0; i < LuckyColors.Count; i++)
+            for (int j = i + 1; j < LuckyColors.Count; j++)
+                closest = Math.Min(closest, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(j).Back));
+        ok &= Check("and no two of them look the same", closest > 55, $"closest pair is {closest:0} apart");
+
+        double neighbours = double.MaxValue;
+        for (int i = 0; i < LuckyColors.Count; i++)
+            neighbours = Math.Min(neighbours, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 1).Back));
+        ok &= Check("consecutive presses give visibly different colours", neighbours > 120,
+                    $"nearest neighbours are {neighbours:0} apart");
+
+        // Every other offer is the same lightness as the one before it, so those are the pair that has to be
+        // pulled apart by hue - it is no good alternating pale and deep if the two pales are next-door
+        // shades of the same colour.
+        double sameLightness = double.MaxValue;
+        for (int i = 0; i < LuckyColors.Count; i++)
+            sameLightness = Math.Min(sameLightness, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 2).Back));
+        ok &= Check("and two of the same lightness in a row are well apart on the wheel", sameLightness > 110,
+                    $"nearest are {sameLightness:0} apart");
+
+        // Colours already in use are skipped.
+        var mine = new Filter();
+        var taken = new List<Filter>();
+        for (int i = 0; i < 3; i++)
+            taken.Add(new Filter { Style = { Background = LuckyColors.At(i + 1).Back } });
+
+        int at = LuckyColors.Next(0, taken, mine);
+        ok &= Check("a colour another filter is using is passed over",
+                    taken.All(f => f.Style.Background != LuckyColors.At(at).Back),
+                    $"offered {LuckyColors.At(at).Back}");
+
+        // ...and pressing again keeps moving rather than settling on one.
+        var seen = new List<RgbColor>();
+        int cursor = -1;
+        for (int i = 0; i < 5; i++) { cursor = LuckyColors.Next(cursor, taken, mine); seen.Add(LuckyColors.At(cursor).Back); }
+        ok &= Check("and every press offers something new", seen.Distinct().Count() == seen.Count,
+                    string.Join(" ", seen));
+
+        // Down to almost nothing acceptable it still has to keep moving, not stick on one colour.
+        var crowded = new List<Filter>();
+        for (int i = 0; i < LuckyColors.Count - 2; i++)
+            crowded.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
+        int a = LuckyColors.Next(0, crowded, mine);
+        int b = LuckyColors.Next(a, crowded, mine);
+        ok &= Check("and keeps moving even when barely anything is free",
+                    LuckyColors.At(a).Back != LuckyColors.At(b).Back,
+                    $"{LuckyColors.At(a).Back} then {LuckyColors.At(b).Back}");
+
+        // With every colour spoken for it still has to answer.
+        var all = new List<Filter>();
+        for (int i = 0; i < LuckyColors.Count; i++) all.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
+        int fallback = LuckyColors.Next(3, all, mine);
+        ok &= Check("with nothing left it still moves on rather than stopping", fallback == 4, fallback.ToString());
+
+        // The dialog wires it to both colours at once - a background with no matching text colour is how a
+        // filter ends up unreadable.
+        var target = new Filter();
+        using (var dlg = new FilterEditDialog(target, isNew: true, taken))
+        {
+            dlg.FeelLuckyForTesting();
+            var (fore, back) = dlg.ColorsForTesting;
+            ok &= Check("the button sets a text colour as well as a background",
+                        LuckyColors.Contrast(fore, back) >= 4.5, $"{fore} on {back}");
+            var first = back;
+            dlg.FeelLuckyForTesting();
+            ok &= Check("and pressing it again changes them", dlg.ColorsForTesting.Back != first,
+                        dlg.ColorsForTesting.Back.ToString());
+        }
+        return ok;
+    }
 
     private static bool RunFilterEnableChecks()
     {

@@ -105,8 +105,7 @@ public class MapLook : IDisposable
     /// and the window beside it for context.</summary>
     private void Capture(string name)
     {
-        var map = _app.Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
-                      .FirstOrDefault(s => (s.Name ?? "") == "Match map");
+        var map = _app.Grid().FindAllChildren().FirstOrDefault(s => (s.Name ?? "") == "Minimap");
         if (map is null) { Say($"  ({name}: no map)"); return; }
         var r = map.BoundingRectangle;
         using var strip = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
