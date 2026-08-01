@@ -335,10 +335,16 @@ public sealed class CascadeDocument : IDisposable
         return await search.NextAsync(fromLine, forward, IsLineVisible, ct).ConfigureAwait(false);
     }
 
+    private const int ScanGroupLines = 64;
+    private const long ParallelScanThreshold = 16 * 1024;
+
+    /// <summary>Threads per sweep direction. Both directions run at once, so giving each of them every core
+    /// would have the two fighting for the same ones.</summary>
+    private static readonly int FindParallelism = Math.Max(1, Environment.ProcessorCount / 2);
+
     /// <summary>The search for a term, started if this is the first time it has been asked for. Replacing the
     /// term throws the old one away, which is what keeps one file's worth of results in memory at most.</summary>
-    private FindSearch? SearchFor(FindQuery query, long startLine)
-    {
+    private FindSearch? SearchFor(FindQuery query, long startLine)    {
         if (_search is { } current && current.Query == query) return current;
 
         DropSearch();
@@ -355,16 +361,43 @@ public sealed class CascadeDocument : IDisposable
 
         void ScanRange(long from, long count, List<FindHit> hits, CancellationToken ct)
         {
-            var matcher = matchers.Value!;
-            var reader = readers.Value!;
-            long end = from + count;
-            for (long line = from; line < end; line++)
+            // Below this a pass is over before threads could be handed out, and the first block of a sweep
+            // is deliberately small so the first result lands at once - that latency must not be traded away
+            // for throughput that only matters much later.
+            if (count < ParallelScanThreshold) { ScanSequential(from, count, hits, ct); return; }
+
+            // Groups of 64 lines, as the filter pass uses: enough work per group to be worth a thread, small
+            // enough that a cancelled search stops promptly.
+            int groups = (int)((count + ScanGroupLines - 1) / ScanGroupLines);
+            var perThread = new List<List<FindHit>>();
+            var options = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = FindParallelism };
+            Parallel.For(0, groups, options,
+                () => new List<FindHit>(),
+                (g, _, local) =>
+                {
+                    long start = from + (long)g * ScanGroupLines;
+                    ScanSequential(start, Math.Min(ScanGroupLines, from + count - start), local, ct);
+                    return local;
+                },
+                local => { lock (perThread) perThread.Add(local); });
+
+            // Order does not matter: these go into a bitset, and coverage only advances once the whole
+            // block is done, so nothing can observe a half-finished range.
+            foreach (var list in perThread) hits.AddRange(list);
+
+            void ScanSequential(long start, long lines, List<FindHit> into, CancellationToken token)
             {
-                if ((line & 0x3FFF) == 0) ct.ThrowIfCancellationRequested();
-                long s = index.Get(line);
-                long e = (line + 1 < index.Count) ? index.Get(line + 1) : length;
-                int occurrences = matcher.CountIn(reader.GetChars(s, e));
-                if (occurrences > 0) hits.Add(new FindHit(line, occurrences));
+                var matcher = matchers.Value!;
+                var reader = readers.Value!;
+                long end = start + lines;
+                for (long line = start; line < end; line++)
+                {
+                    if ((line & 0x3FFF) == 0) token.ThrowIfCancellationRequested();
+                    long s = index.Get(line);
+                    long e = (line + 1 < index.Count) ? index.Get(line + 1) : length;
+                    int occurrences = matcher.CountIn(reader.GetChars(s, e));
+                    if (occurrences > 0) into.Add(new FindHit(line, occurrences));
+                }
             }
         }
 
