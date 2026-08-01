@@ -782,13 +782,25 @@ internal sealed class CascadeApp : IDisposable
         => Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
                  .Any(s => s.BoundingRectangle.Width > s.BoundingRectangle.Height);
 
-    /// <summary>How far the log view is scrolled sideways, read from the horizontal scrollbar.</summary>
+    /// <summary>What the log view's scrollbars are and what each says about itself. For diagnosing a
+    /// "scrollbar not found" or a value that will not move.</summary>
+    public string DescribeScrollBars()
+        => string.Join(" ; ", Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+            .Select(s => $"'{s.Name}' {s.BoundingRectangle.Width}x{s.BoundingRectangle.Height} " +
+                         $"legacy='{s.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault ?? "none"}' " +
+                         $"range={(s.Patterns.RangeValue.PatternOrDefault is { } r ? r.Value.ValueOrDefault.ToString() : "none")}"));
+
+    /// <summary>How far the log view is scrolled sideways, read from the horizontal scrollbar. Both bars are
+    /// drawn controls, which expose a value through MSAA rather than the RangeValue pattern.</summary>
     public double HorizontalScroll()
     {
         var hbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
                          .FirstOrDefault(s => s.BoundingRectangle.Width > s.BoundingRectangle.Height)
                    ?? throw new InvalidOperationException("Horizontal scrollbar not found.");
-        return hbar.Patterns.RangeValue.Pattern.Value.Value;
+        var rv = hbar.Patterns.RangeValue.PatternOrDefault;
+        if (rv is not null) return rv.Value.ValueOrDefault;
+        string? value = hbar.Patterns.LegacyIAccessible.PatternOrDefault?.Value.ValueOrDefault;
+        return double.TryParse(value, out double v) ? v : 0;
     }
 
     /// <summary>Waits for the horizontal scroll offset to satisfy <paramref name="predicate"/>.</summary>

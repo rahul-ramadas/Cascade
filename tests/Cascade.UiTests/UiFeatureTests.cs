@@ -30,7 +30,7 @@ public class UiFeatureTests
         Assert.Equal(0, app.HorizontalScroll());
 
         app.Key(grid, VirtualKeyShort.END);
-        Assert.True(app.WaitHorizontalScroll(v => v > 0), "End did not scroll the view right");
+        Assert.True(app.WaitHorizontalScroll(v => v > 0), "End did not scroll the view right: " + app.DescribeScrollBars());
         double rightEdge = app.HorizontalScroll();
 
         // Already at the extreme: pressing End again must not creep further.
