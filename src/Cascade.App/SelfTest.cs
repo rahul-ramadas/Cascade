@@ -528,6 +528,36 @@ internal static class SelfTest
                             map is not null && map.Visible && grid.VerticalScrollBarVisibleForTesting);
             if (map is null) return false;
 
+            // Side by side and both hittable: two narrow strips of the same colour cannot be told apart or
+            // aimed at, which is what they were. In device pixels, so it holds at whatever the screen is
+            // scaled to - measured against the same scaling, or a high-DPI screen would pass it on its own.
+            var mapBounds = grid.MapBoundsForTesting;
+            var barBounds = grid.ScrollBarBoundsForTesting;
+            ok &= Check("each is wide enough to hit",
+                        mapBounds.Width >= map.LogicalToDeviceUnits(16) &&
+                        barBounds.Width >= map.LogicalToDeviceUnits(12),
+                        $"map {mapBounds.Width}px, scrollbar {barBounds.Width}px, " +
+                        $"wanting {map.LogicalToDeviceUnits(16)} and {map.LogicalToDeviceUnits(12)}");
+            ok &= Check("the scrollbar is the outer one", barBounds.Left >= mapBounds.Right - 1,
+                        $"map ends {mapBounds.Right}, scrollbar starts {barBounds.Left}");
+            using (var picture = Capture(host))
+            {
+                int y = mapBounds.Top + mapBounds.Height / 2;
+                var textSide = picture.GetPixel(Math.Max(0, mapBounds.Left - 2), y);
+                var rule = picture.GetPixel(mapBounds.Left, y);
+                var mapSide = picture.GetPixel(mapBounds.Left + mapBounds.Width / 2, y);
+                var trough = picture.GetPixel(barBounds.Left + barBounds.Width - 2, y);
+                ok &= Check("a rule separates the map from the text", rule.ToArgb() != textSide.ToArgb() &&
+                            rule.ToArgb() != mapSide.ToArgb(),
+                            $"text {textSide}, rule {rule}, map {mapSide}");
+                // Against the gutter the map is drawn on, not against whatever row happens to be at this
+                // height: the two strips have to stay apart where the map has nothing on it, which is most
+                // of it, and a coloured row would answer for the trough by accident.
+                ok &= Check("and the scrollbar's trough is not the map's background",
+                            trough.ToArgb() != settings.GutterBack.ToArgb() && trough.ToArgb() != mapSide.ToArgb(),
+                            $"map background {settings.GutterBack}, row here {mapSide}, trough {trough}");
+            }
+
             grid.ScrollToRow(0);
             map.RebuildForTesting();
             int slots = map.SlotCountForTesting;
@@ -580,25 +610,76 @@ internal static class SelfTest
             grid.RefreshView();
             Pump();
 
-            // ---- the window follows the view, without chasing it ----
+            // ---- the window stays centred on the view ----
+            // The rectangle holds still and the picture moves under it. Letting it drift instead means the
+            // context runs out ahead of you exactly as you scroll towards it.
             grid.ScrollToRow(5_000);
             map.RebuildForTesting();
             long settled = map.TopRowForTesting;
             var before = map.ViewportForTesting;
+            long behindBefore = map.RowAtForTesting(map.SlotCountForTesting / 2);
             grid.ScrollToRow(5_020);
             map.RebuildForTesting();
-            ok &= Check("a small scroll leaves the window where it was", map.TopRowForTesting == settled,
+            ok &= Check("a scroll carries the window with it", map.TopRowForTesting > settled,
                         $"{settled} -> {map.TopRowForTesting}");
-            ok &= Check("but the rectangle moves down it", map.ViewportForTesting.Top > before.Top,
+            ok &= Check("so the rectangle stays where it is", Math.Abs(map.ViewportForTesting.Top - before.Top) <= 4,
                         $"y {before.Top} -> {map.ViewportForTesting.Top}");
+            ok &= Check("and the picture moves under it",
+                        map.RowAtForTesting(map.SlotCountForTesting / 2) != behindBefore,
+                        $"row {behindBefore} -> {map.RowAtForTesting(map.SlotCountForTesting / 2)}");
             grid.ScrollToRow(30_000);
             map.RebuildForTesting();
             int at = map.SlotOfForTesting(30_000), of = map.SlotCountForTesting;
-            ok &= Check("a scroll right out of the window re-centres it",
-                        map.TopRowForTesting != settled && at > of / 5 && at < of * 4 / 5,
+            ok &= Check("a jump lands centred too", at > of / 5 && at < of * 4 / 5,
                         $"top {map.TopRowForTesting}, view at slot {at} of {of}");
             ok &= Check("and the rectangle never collapses to nothing", map.ViewportForTesting.Height >= 8,
                         map.ViewportForTesting.Height.ToString());
+
+            // ---- the end of the file ----
+            // There is no file left below the window there, so it has to be filled from the bottom up
+            // instead. Otherwise the map empties out just as you reach the end of what you are reading.
+            grid.ScrollToRow(0);
+            map.RebuildForTesting();
+            int full = map.SlotCountForTesting;
+            grid.ScrollToRow(lines);
+            map.RebuildForTesting();
+            ok &= Check("at the end of the file the map is still full", map.SlotCountForTesting == full,
+                        $"{map.SlotCountForTesting} of {full} pixels");
+            ok &= Check("and its last pixel is the last row",
+                        map.RowAtForTesting(map.SlotCountForTesting - 1) == lines - 1,
+                        map.RowAtForTesting(map.SlotCountForTesting - 1).ToString());
+            var end = map.ViewportForTesting;
+            ok &= Check("so the rectangle is at the bottom", end.Top + end.Height >= map.Height - map.RowPixelsForTesting * 2,
+                        $"{end.Top}+{end.Height} of {map.Height}");
+
+            // ---- the caret is never compressed away ----
+            grid.ScrollToRow(20_000);
+            grid.SelectRowForAccessibility(20_000);
+            grid.RefreshView();
+            Pump();
+            map.RebuildForTesting();
+            int caretSlot = map.SlotOfForTesting(20_000);
+            ok &= Check("a caret on a line nothing matched still gets a pixel of its own",
+                        map.RowAtForTesting(caretSlot) == 20_000,
+                        $"slot {caretSlot} holds row {map.RowAtForTesting(caretSlot)}");
+            ok &= Check("and the stretch around it is still compressed",
+                        map.RowAtForTesting(caretSlot + 1) > 20_001,
+                        map.RowAtForTesting(caretSlot + 1).ToString());
+
+            // The same at the end of the file, where the map is filled the other way round.
+            long lastPlain = lines - 3_000;
+            grid.ScrollToRow(lines);
+            grid.SelectRowForAccessibility(lastPlain);
+            grid.RefreshView();
+            Pump();
+            map.RebuildForTesting();
+            int endSlot = map.SlotOfForTesting(lastPlain);
+            ok &= Check("and it keeps one when the map is filled from the bottom up",
+                        map.RowAtForTesting(endSlot) == lastPlain,
+                        $"slot {endSlot} holds row {map.RowAtForTesting(endSlot)}, wanted {lastPlain}");
+            grid.SelectRowForAccessibility(0);
+            grid.RefreshView();
+            Pump();
 
             // ---- painted, and repainted when it must be ----
             grid.ScrollToRow(0);
@@ -634,6 +715,14 @@ internal static class SelfTest
             watch.Stop();
             ok &= Check("and a repaint is a blit, not a rebuild", watch.ElapsedMilliseconds < 200,
                         $"{watch.ElapsedMilliseconds} ms for 100 repaints");
+
+            // Scrubbing the scrollbar re-centres the window on every mouse move, so a rebuild has to be
+            // cheap enough to keep up with a hand - the whole point of the live update.
+            watch.Restart();
+            for (int i = 0; i < 60; i++) { grid.ScrollToRow(1_000 + i * 40); map.RebuildForTesting(); }
+            watch.Stop();
+            ok &= Check("and a rebuild keeps up with a dragging hand", watch.ElapsedMilliseconds < 400,
+                        $"{watch.ElapsedMilliseconds} ms for 60 rebuilds");
 
             // ---- clicking it ----
             grid.ScrollToRow(0);
