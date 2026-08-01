@@ -137,8 +137,7 @@ public sealed class FilterPresetsControl : UserControl
             _applyQueued = false;
             if (_doc is null) return;
             var selected = _list.SelectedIndices.Cast<int>().Where(i => i < Presets.Count).Select(i => Presets[i]).ToList();
-            _doc.Filters.ApplyPresets(selected);
-            PresetsApplied?.Invoke();
+            if (_doc.Filters.ApplyPresets(selected)) PresetsApplied?.Invoke();
         });
     }
 

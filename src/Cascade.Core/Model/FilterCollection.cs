@@ -174,11 +174,23 @@ public sealed class FilterCollection
 
     /// <summary>Switches on exactly the union of the given presets, and everything else off. Selecting one
     /// preset therefore means "just this", and adding a second means "both" - which is what makes the list's
-    /// selection and the enabled set the same thing.</summary>
-    public void ApplyPresets(IEnumerable<FilterPreset> presets)
+    /// selection and the enabled set the same thing.
+    ///
+    /// Returns whether that changed anything, so a click that lands on the same set of filters costs
+    /// nothing - re-running a pass over a multi-gigabyte file to arrive back where it started is a visible
+    /// flicker of the progress bar and a lot of work for no answer.</summary>
+    public bool ApplyPresets(IEnumerable<FilterPreset> presets)
     {
         var wanted = new HashSet<string>(presets.SelectMany(p => p.FilterIds), StringComparer.Ordinal);
-        foreach (var f in EnumerateDepthFirst()) f.Enabled = wanted.Contains(f.Id);
+        bool changed = false;
+        foreach (var f in EnumerateDepthFirst())
+        {
+            bool on = wanted.Contains(f.Id);
+            if (f.Enabled == on) continue;
+            f.Enabled = on;
+            changed = true;
+        }
+        return changed;
     }
 
     private static IEnumerable<Filter> Walk(Filter f)
