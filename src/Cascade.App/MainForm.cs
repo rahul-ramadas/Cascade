@@ -196,7 +196,6 @@ public sealed class MainForm : Form
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
         LayoutPresetPane();
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
-        _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -303,7 +302,6 @@ public sealed class MainForm : Form
             _settings.ShowMatchMap = !_settings.ShowMatchMap;
             _miMatchMap.Checked = _settings.ShowMatchMap;
             _grid.SetMatchMapVisible(_settings.ShowMatchMap);
-            _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
             SaveSettingsSoon();
         })
         { Checked = _settings.ShowMatchMap, ShortcutKeys = Keys.Control | Keys.M };
@@ -804,7 +802,7 @@ public sealed class MainForm : Form
             return;
         }
         var filter = new Filter { Enabled = true };
-        using var dlg = new FilterEditDialog(filter, isNew: true);
+        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList());
         _history.Begin("Add Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -817,7 +815,7 @@ public sealed class MainForm : Form
 
     private void EditFilter(Filter filter)
     {
-        using var dlg = new FilterEditDialog(filter, isNew: false);
+        using var dlg = new FilterEditDialog(filter, isNew: false, _doc.Filters.EnumerateDepthFirst().ToList());
         _history.Begin("Edit Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -855,7 +853,7 @@ public sealed class MainForm : Form
     private void CreateFilterFrom(string pattern)
     {
         var filter = new Filter { Enabled = true, Match = { Text = pattern } };
-        using var dlg = new FilterEditDialog(filter, isNew: true);
+        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList());
         _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -1229,7 +1227,6 @@ public sealed class MainForm : Form
         _miWordWrap.Checked = _settings.WordWrap;
         _miFilterTips.Checked = _settings.ShowFilterTooltips;
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
-        _filterTree.ShowLaneKeys = _settings.ShowMatchMap;
         LayoutPresetPane();
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);

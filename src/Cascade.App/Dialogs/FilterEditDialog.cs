@@ -28,15 +28,24 @@ public sealed class FilterEditDialog : DialogBase
     private readonly Button _foreBtn = new() { FlatStyle = FlatStyle.Flat };
     private readonly CheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(28, 4, 6, 3) };
     private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat };
+    private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(24, 3, 0, 3) };
     private readonly CheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(0, 4, 24, 3) };
     private readonly CheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true };
+
+    private readonly IReadOnlyList<Filter> _siblings;
+    private int _lucky = -1;
 
     private RgbColor _fore = new(0, 0, 0);
     private RgbColor _back = new(255, 255, 255);
 
-    public FilterEditDialog(Filter filter, bool isNew)
+    public FilterEditDialog(Filter filter, bool isNew) : this(filter, isNew, Array.Empty<Filter>()) { }
+
+    /// <summary><paramref name="siblings"/> is every filter in the set, so a suggested colour can avoid the
+    /// ones already in use.</summary>
+    public FilterEditDialog(Filter filter, bool isNew, IReadOnlyList<Filter> siblings)
     {
         _filter = filter;
+        _siblings = siblings;
         Text = isNew ? "Add Filter" : "Edit Filter";
 
         // Accessible names so screen readers announce these fields (the visual labels aren't linked).
@@ -91,7 +100,7 @@ public sealed class FilterEditDialog : DialogBase
         // All three options on one row: the excluding flag used to sit alone under a blank label, which
         // read as though it belonged to nothing.
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
-        Row("Colors:", Strip(_setFore, _foreBtn, _setBack, _backBtn));
+        Row("Colors:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn));
         Row("Style:", Strip(_bold, _italic));
         NoteRow(new Label
         {
@@ -133,6 +142,7 @@ public sealed class FilterEditDialog : DialogBase
 
         _foreBtn.Click += (_, _) => PickColor(ref _fore, _setFore);
         _backBtn.Click += (_, _) => PickColor(ref _back, _setBack);
+        _luckyBtn.Click += (_, _) => FeelLucky();
         _setFore.CheckedChanged += (_, _) => UpdateColorButtons();
         _setBack.CheckedChanged += (_, _) => UpdateColorButtons();
         _typeText.CheckedChanged += (_, _) => UpdateTypeEnabled();
@@ -217,6 +227,21 @@ public sealed class FilterEditDialog : DialogBase
             UpdateColorButtons();
         }
     }
+
+    /// <summary>Offers a legible colour pair nobody else is using, and a different one on every press.</summary>
+    private void FeelLucky()
+    {
+        _lucky = LuckyColors.Next(_lucky, _siblings, _filter);
+        var pair = LuckyColors.At(_lucky);
+        _back = pair.Back;
+        _fore = pair.Fore;
+        _setBack.Checked = true;
+        _setFore.Checked = true;
+        UpdateColorButtons();
+    }
+
+    internal void FeelLuckyForTesting() => FeelLucky();
+    internal (RgbColor Fore, RgbColor Back) ColorsForTesting => (_fore, _back);
 
     private void ValidateRegex()
     {
