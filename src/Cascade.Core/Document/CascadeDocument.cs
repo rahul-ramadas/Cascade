@@ -326,9 +326,9 @@ public sealed class CascadeDocument : IDisposable
     public bool FindComplete => _search?.Complete ?? true;
 
     /// <summary>How much the current term matches, split by what the view is showing. Null when no term is
-    /// live. Walks the hits, so it is for the caller to ask at a human rate rather than per frame.</summary>
+    /// live.</summary>
     public FindTally? FindTally(long currentLine)
-        => _search?.Count(FilteredMode ? IsLineVisible : null, currentLine);
+        => _search?.Count(FilteredMode ? MatchView.VisibleWords : null, currentLine);
 
     /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
     /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept

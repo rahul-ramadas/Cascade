@@ -225,6 +225,20 @@ public sealed class VisibleLineSet
         return (GetWord(pages, line / WordBits) & (1L << (int)(line % WordBits))) != 0;
     }
 
+    /// <summary>Visibility of 64 lines at once, for callers that hold their own bitmap and want to intersect
+    /// it a word at a time rather than ask line by line.</summary>
+    public void CopyVisibleWords(long fromWord, Span<ulong> words)
+    {
+        var idx = Volatile.Read(ref _index);
+        long[][] pages = Volatile.Read(ref _pages);
+        long have = (idx.Lines + WordBits - 1) / WordBits;
+        for (int i = 0; i < words.Length; i++)
+        {
+            long w = fromWord + i;
+            words[i] = w >= 0 && w < have ? (ulong)GetWord(pages, w) : 0;
+        }
+    }
+
     /// <summary>How many visible lines fall in <c>[from, toExclusive)</c>. Two rank lookups, so it costs
     /// the same whether the range is one line or ten million - which is what makes a per-pixel summary of
     /// the whole file affordable.</summary>
