@@ -711,6 +711,20 @@ internal sealed class CascadeApp : IDisposable
     public AutomationElement? Minimap()
         => Grid().FindAllChildren().FirstOrDefault(c => (c.Name ?? "") == "Minimap");
 
+    /// <summary>What the scrollbar says its own range is, for working out which scale a value is on.</summary>
+    public string ScrollBarScale()
+    {
+        var vbar = Grid().FindAllChildren(cf => cf.ByControlType(ControlType.ScrollBar))
+                         .FirstOrDefault(s => s.BoundingRectangle.Height >= s.BoundingRectangle.Width);
+        if (vbar is null) return "no scrollbar";
+        var rv = vbar.Patterns.RangeValue.PatternOrDefault;
+        var legacy = vbar.Patterns.LegacyIAccessible.PatternOrDefault;
+        string range = rv is null ? "no RangeValue"
+            : $"RangeValue {rv.Minimum.ValueOrDefault}..{rv.Maximum.ValueOrDefault} = {rv.Value.ValueOrDefault}" +
+              (rv.IsReadOnly.ValueOrDefault ? " (read-only)" : "");
+        return $"{range}; legacy '{legacy?.Value.ValueOrDefault ?? "none"}'";
+    }
+
     /// <summary>Scrolls the log vertically, so an off-screen line can be brought into view.
     /// <paramref name="firstRow"/> is the display row to put at the top. Returns false if the view could not
     /// be moved there.

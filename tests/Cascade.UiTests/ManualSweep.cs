@@ -674,6 +674,7 @@ public class ManualSweep : IDisposable
     private void MatchMap()
     {
         Check("there is a scrollbar", _app.VerticalScrollerName().Length > 0, _app.VerticalScrollerName());
+        Say($"scrollbar scale: {_app.ScrollBarScale()}");
         long first = _app.FirstVisibleLine();
         bool scrolled = _app.ScrollVerticalTo(150_000);
         Check("and it scrolls the view", scrolled && _app.FirstVisibleLine() != first,
@@ -721,19 +722,22 @@ public class ManualSweep : IDisposable
             }
             Shot("map-colours");
 
-            // The rectangle that says where you are has to move when you move. It never did: the map is a
-            // child control, so the view repainting did not repaint it.
+            // The rectangle that says where you are stays put, and the map under it moves: that is what
+            // keeps the same amount of file on either side of you no matter where you scroll to. Both of
+            // these rows are well inside the filtered view - past its end the map anchors to the bottom
+            // instead, which is a different thing being tested below.
             _app.ScrollVerticalTo(1_000_000);
             Thread.Sleep(900);
-            int high = ViewportBand(map);
             long highLine = _app.FirstVisibleLine();
-            _app.ScrollVerticalTo(25_000_000);
+            using var atHigh = Grab(map);
+            _app.ScrollVerticalTo(8_000_000);
             Thread.Sleep(900);
-            int low = ViewportBand(map);
             long lowLine = _app.FirstVisibleLine();
-            Say($"viewport rectangle at band {high} -> {low} (view {highLine} -> {lowLine})");
-            Check("the rectangle on the map is drawn at both", high >= 0 && low >= 0,
-                  $"band {high} -> {low}, view {highLine} -> {lowLine}");
+            using var atLow = Grab(map);
+            Say($"map across a 7-million-row jump ({highLine} -> {lowLine}): " +
+                $"{PictureDiff(atHigh, atLow):P0} of the pixels changed");
+            Check("the map shows somewhere else entirely after a long scroll", PictureDiff(atHigh, atLow) > 0.10,
+                  $"{PictureDiff(atHigh, atLow):P0} of the pixels changed, view {highLine} -> {lowLine}");
 
             // Clicking the map moves the view without the scrollbar going anywhere much: it is the fine
             // adjustment, and the file is far too long for a window of it to register on the whole scale.
@@ -748,6 +752,19 @@ public class ManualSweep : IDisposable
                   $"{viewBefore} -> {_app.FirstVisibleLine()}");
             Shot("map-viewport");
 
+            DragIsLive("the minimap", map, r.Left + r.Width / 2, r.Top + r.Height / 4, r.Top + r.Height * 3 / 4);
+            var bar = ScrollBarElement();
+            if (bar is not null)
+            {
+                // Halfway down the view, so the thumb is halfway down the trough and the press lands on it
+                // rather than paging.
+                var br = bar.BoundingRectangle;
+                _app.ScrollVerticalTo(8_300_000);
+                Thread.Sleep(1200);
+                DragIsLive("the scrollbar", bar, br.Left + br.Width / 2, br.Top + br.Height / 2,
+                           br.Top + br.Height * 3 / 4);
+            }
+
             // ...and the whole picture is a different one when the view mode changes under it.
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
@@ -755,6 +772,34 @@ public class ManualSweep : IDisposable
             Check("switching to filtered lines redraws the map", MapColours(map).Count > 0,
                   string.Join(" ", MapColours(map)));
             Shot("map-filtered");
+
+            // With every line on show, the last screenful has almost no file below it - and the map used to
+            // run out there, because the fill only ever walked forwards. It has to fill from the bottom up.
+            // Ctrl+End rather than a row number: only the app knows exactly where the end is.
+            _app.ClickMenuOrThrow("View", "Focus Text Area");
+            Thread.Sleep(300);
+            Keyboard.Pressing(VirtualKeyShort.CONTROL);
+            Keyboard.Type(VirtualKeyShort.END);
+            Keyboard.Release(VirtualKeyShort.CONTROL);
+            Thread.Sleep(2500);
+            using (var atEnd = Grab(map))
+            {
+                Say($"at the end of the file, view {_app.FirstVisibleLine()}");
+                // Where exactly the rectangle lands is asserted to the pixel in the self-test, which can ask
+                // the control. Here it is only worth knowing the map does not run out - a one-pixel outline
+                // is not something a screenshot of the real thing can pick out from 160 filters' colours.
+                Check("at the end of the file the map is still drawn the whole way down", BottomIsDrawn(atEnd),
+                      $"bottom eighth of {atEnd.Height}px is blank");
+            }
+            Shot("map-end-of-file");
+
+            // Back to the top: Ctrl+End left the caret on the last line of 33 million, and the stage after
+            // this one searches forward from wherever the caret is.
+            Keyboard.Pressing(VirtualKeyShort.CONTROL);
+            Keyboard.Type(VirtualKeyShort.HOME);
+            Keyboard.Release(VirtualKeyShort.CONTROL);
+            Thread.Sleep(1500);
+
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
             Thread.Sleep(1500);
@@ -807,6 +852,20 @@ public class ManualSweep : IDisposable
 
     private static int Diff(Color a, Color b) => Math.Abs(a.R - b.R) + Math.Abs(a.G - b.G) + Math.Abs(a.B - b.B);
 
+    /// <summary>What fraction of two grabs of the same control differ.</summary>
+    private static double PictureDiff(Bitmap a, Bitmap b)
+    {
+        if (a.Width != b.Width || a.Height != b.Height) return 1;
+        int changed = 0, total = 0;
+        for (int y = 0; y < a.Height; y++)
+            for (int x = 4; x < a.Width - 2; x++)
+            {
+                total++;
+                if (Diff(a.GetPixel(x, y), b.GetPixel(x, y)) > 24) changed++;
+            }
+        return total == 0 ? 0 : (double)changed / total;
+    }
+
     private static Bitmap Grab(AutomationElement e)
     {
         var r = e.BoundingRectangle;
@@ -827,7 +886,7 @@ public class ManualSweep : IDisposable
         for (int y = 0; y < bmp.Height; y += 3)
         {
             if (y >= skipTop && y < skipTop + skipHeight) continue;
-            for (int x = 2; x < bmp.Width - 2; x++)
+            for (int x = 4; x < bmp.Width - 2; x++)                                    // past the rule down the left
             {
                 var p = bmp.GetPixel(x, y);
                 if (p.R > 230 && p.G > 230 && p.B > 230) continue;                     // gutter
@@ -838,23 +897,17 @@ public class ManualSweep : IDisposable
         return seen.Select(c => $"#{c.R:x2}{c.G:x2}{c.B:x2}").ToList();
     }
 
-    /// <summary>Which band the viewport rectangle starts at. It is found down column zero, where only the
-    /// rectangle and the marks paint, as the longest unbroken run - the caret is drawn as a single line right
-    /// across the map and would otherwise be mistaken for it. The gutter's own colour is whatever most of
-    /// that column is: a reference pixel from a fixed spot lands inside the rectangle as soon as the view is
-    /// anywhere but the top.</summary>
-    private int ViewportBand(AutomationElement map)
-    {
-        using var bmp = Grab(map);
-        return ViewportRun(bmp).Top;
-    }
-
+    /// <summary>The stretch of the map the viewport rectangle covers, so <see cref="MapColours"/> can leave
+    /// it out: it is a tint of the selection colour laid over everything under it, and counting it would
+    /// mean the map never reads as blank. Found down the last column as the longest run of anything that is
+    /// not the gutter - which only holds when the map is mostly blank, and blank is when it is needed.</summary>
     private static (int Top, int Height) ViewportRun(Bitmap bmp)
     {
+        int x = bmp.Width - 3;
         var tally = new Dictionary<int, int>();
         for (int y = 0; y < bmp.Height; y++)
         {
-            int argb = bmp.GetPixel(0, y).ToArgb();
+            int argb = bmp.GetPixel(x, y).ToArgb();
             tally[argb] = tally.TryGetValue(argb, out int n) ? n + 1 : 1;
         }
         var gutter = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
@@ -862,12 +915,34 @@ public class ManualSweep : IDisposable
         int best = -1, bestRun = 0, run = 0;
         for (int y = 0; y < bmp.Height; y++)
         {
-            var p = bmp.GetPixel(0, y);
+            var p = bmp.GetPixel(x, y);
             bool painted = Math.Abs(p.R - gutter.R) + Math.Abs(p.G - gutter.G) + Math.Abs(p.B - gutter.B) > 24;
             if (painted) { run++; if (run > bestRun) { bestRun = run; best = y - run + 1; } }
             else run = 0;
         }
         return bestRun >= 4 ? (best, bestRun) : (-1, 0);
+    }
+
+    /// <summary>Whether the bottom eighth of the map has anything on it at all - which is where it used to
+    /// run out, because the fill only ever walked forwards and there was no file left to walk through.</summary>
+    private static bool BottomIsDrawn(Bitmap bmp)
+    {
+        var tally = new Dictionary<int, int>();
+        for (int y = 0; y < bmp.Height; y++)
+            for (int x = 4; x < bmp.Width - 2; x += 3)
+            {
+                int argb = bmp.GetPixel(x, y).ToArgb();
+                tally[argb] = tally.TryGetValue(argb, out int n) ? n + 1 : 1;
+            }
+        var gutter = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
+
+        for (int y = bmp.Height * 7 / 8; y < bmp.Height; y++)
+            for (int x = 4; x < bmp.Width - 2; x++)
+            {
+                var p = bmp.GetPixel(x, y);
+                if (Math.Abs(p.R - gutter.R) + Math.Abs(p.G - gutter.G) + Math.Abs(p.B - gutter.B) > 24) return true;
+            }
+        return false;
     }
 
     private void FindEverything()
@@ -1200,6 +1275,47 @@ public class ManualSweep : IDisposable
         foreach (var w in _app.DesktopChildren())
             if (w.ControlType == ControlType.ToolTip && (w.Name ?? "").Length > 0) return w;
         return null;
+    }
+
+    private AutomationElement? ScrollBarElement()
+    {
+        foreach (var e in _app.Grid().FindAllDescendants())
+            if (e.ControlType == ControlType.ScrollBar && (e.Name ?? "").Contains("Vertical")) return e;
+        return null;
+    }
+
+    /// <summary>
+    /// Holds the button down and moves in steps, sampling the view between moves. A repaint only happens when
+    /// the message queue empties, and a held drag never lets it - so this is the one thing a screenshot after
+    /// the gesture cannot tell you, and the one the eye notices immediately.
+    /// </summary>
+    private void DragIsLive(string what, AutomationElement target, int x, int fromY, int toY)
+    {
+        Mouse.MovePixelsPerMillisecond = 100;
+        Mouse.Position = new Point(x, fromY);
+        Thread.Sleep(200);
+        Mouse.Down(MouseButton.Left);
+        Thread.Sleep(150);
+        long start = _app.FirstVisibleLine();
+        var seen = new List<long>();
+        int steps = 6;
+        for (int i = 1; i <= steps; i++)
+        {
+            Mouse.Position = new Point(x, fromY + (toY - fromY) * i / steps);
+            Thread.Sleep(120);
+            seen.Add(_app.FirstVisibleLine());   // still held
+        }
+        Mouse.Up(MouseButton.Left);
+        Thread.Sleep(600);
+        long end = _app.FirstVisibleLine();
+        Say($"dragging {what}: start {start}, during [{string.Join(", ", seen)}], after release {end}");
+        Check($"dragging {what} moves the view while the button is still down",
+              seen.Any(v => v != start), $"start {start}, during [{string.Join(", ", seen)}]");
+        Check($"and dragging {what} keeps moving it the whole way down",
+              seen.Distinct().Count() >= 3, $"[{string.Join(", ", seen)}]");
+        Check($"and letting go of {what} does not jump somewhere else",
+              seen.Count == 0 || Math.Abs(end - seen[^1]) <= Math.Max(64, Math.Abs(end) / 1000),
+              $"during ended {seen.LastOrDefault()}, after release {end}");
     }
 
     private string DescribeTopLevel()
