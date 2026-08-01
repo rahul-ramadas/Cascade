@@ -28,7 +28,7 @@ public sealed class LineGridControl : Control
     private const int DefaultColumnWidth = 160;
     private const long CopyLineCap = 2_000_000;
 
-    private readonly HScrollBar _hbar = new() { Dock = DockStyle.Bottom };
+    private SlimScrollBar _hbar = null!;
     private SlimScrollBar _vbar = null!;
     private MiniMapControl? _map;
     private readonly RowSelection _sel = new();
@@ -67,6 +67,10 @@ public sealed class LineGridControl : Control
     private long _charRow = -1;
     private int _charAnchor, _charFocus;
     private bool _charDragging;
+    // Where a drag first took hold. Kept while the drag wanders onto other rows, which is what lets coming
+    // back to that row go back to selecting characters on it.
+    private long _charOriginRow = -1;
+    private int _charOriginAt;
     private DateTime _lastClickAt;
 
     // Hover tip naming the filters that matched a line. Held off until the pointer has settled, so it never
@@ -98,10 +102,10 @@ public sealed class LineGridControl : Control
         Controls.Add(_map);
         _vbar = new SlimScrollBar(this);
         Controls.Add(_vbar);
+        _hbar = new SlimScrollBar(this, vertical: false);
         Controls.Add(_hbar);
         _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; Invalidate(); };
-        _hbar.Scroll += (_, e) => { _hScroll = e.NewValue; Invalidate(); };
-        _hbar.ValueChanged += (_, _) => { _hScroll = _hbar.Value; Invalidate(); };
+        _hbar.Scrolled += v => { _hScroll = (int)v; Invalidate(); };
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
         // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
         // file, because one of those would eventually be forgotten.
@@ -365,6 +369,7 @@ public sealed class LineGridControl : Control
     internal MiniMapControl? MatchMapForTesting => _map;
 
     internal SlimScrollBar ScrollBarForTesting => _vbar;
+    internal SlimScrollBar HScrollBarForTesting => _hbar;
 
     internal int MapWidthForTesting => _map?.Visible == true ? _map.Width : 0;
 
@@ -479,7 +484,10 @@ public sealed class LineGridControl : Control
     private long ClampFirstRow(long first)
     {
         long rows = _doc?.RowCount ?? 0;
-        return Math.Clamp(first, 0, Math.Max(0, rows - EffectiveVisibleRows));
+        // While wrapping, the last screenful may hold fewer rows than the one just measured, so the count
+        // from the last frame is not a limit - stopping at it would put the end of the file out of reach.
+        long last = Wrapping ? rows - 1 : rows - EffectiveVisibleRows;
+        return Math.Clamp(first, 0, Math.Max(0, last));
     }
 
     /// <summary>Scrolls so <paramref name="first"/> is the top visible row (clamped), syncing the scrollbar.</summary>
@@ -562,14 +570,33 @@ public sealed class LineGridControl : Control
         // Nothing runs off the side while wrapping, so the scrollbar has nothing to say.
         _hbar.Visible = !Wrapping;
         if (Wrapping) { _hScroll = 0; return; }
+        // The paint keeps the widest line up to date as it draws, but the range has to be right before the
+        // first paint too - a window that has not painted reports nothing to scroll, and then Home and End
+        // have nowhere to go.
+        if (_maxContentWidth <= 0) _maxContentWidth = MeasureVisibleWidth();
         int viewport = Math.Max(1, ContentWidth);
         int max = Math.Max(_maxContentWidth, viewport);
-        _hbar.Maximum = max;
-        _hbar.LargeChange = viewport;
-        _hbar.SmallChange = _charWidth * 4;
+        _hbar.Configure(max, viewport);
         if (_hScroll > max - viewport) _hScroll = Math.Max(0, max - viewport);
-        _hbar.Value = Math.Clamp(_hScroll, 0, Math.Max(0, _hbar.Maximum - _hbar.LargeChange + 1));
-        _hbar.Enabled = _maxContentWidth > viewport;
+        _hbar.Value = _hScroll;
+    }
+
+    /// <summary>The widest of the rows on screen. The same measurement the paint makes, so the two agree.</summary>
+    private int MeasureVisibleWidth()
+    {
+        if (_doc is null || Wrapping) return 0;
+        long rows = _doc.RowCount;
+        int widest = 0;
+        for (int i = 0; i < VisibleRowCount; i++)
+        {
+            long row = _firstRow + i;
+            if (row >= rows) break;
+            string text = Expand(_doc.GetLineText(_doc.RowToLine(row)));
+            widest = Math.Max(widest, TextRenderer.MeasureText(text, _fontRegular,
+                new Size(int.MaxValue, _rowHeight),
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 8);
+        }
+        return widest;
     }
 
     private int ContentWidth => Math.Max(0, ClientSize.Width - RightGutterWidth - GutterWidth());
@@ -688,6 +715,7 @@ public sealed class LineGridControl : Control
     }
 
     internal int RowsPaintedForTesting => _layout.Count;
+    internal long CharOriginForTesting => _charOriginRow;
 
     /// <summary>Top of a row as painted, so a check can aim at a wrapped row's second segment.</summary>
     internal int RowTopForTesting(long row)
@@ -722,6 +750,13 @@ public sealed class LineGridControl : Control
         OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, YForRowForTesting(row), 0));
     }
 
+    /// <summary>Presses without letting go, so a drag can be followed step by step.</summary>
+    internal void PressForTesting(long row, int x)
+    {
+        ForgetLastClick();
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, YForRowForTesting(row), 0));
+    }
+
     internal void DoubleClickForTesting(long row, int x)
     {
         ClickForTesting(row, x);
@@ -747,6 +782,16 @@ public sealed class LineGridControl : Control
         OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
     }
 
+    /// <summary>Moves the pointer mid-drag without letting go, so a wandering drag can be followed.</summary>
+    internal void DragOverRowForTesting(long row, int x)
+    {
+        _dragging = true;
+        OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x, YForRowForTesting(row), 0));
+    }
+
+    internal void ReleaseForTesting(long row, int x)
+        => OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, YForRowForTesting(row), 0));
+
     /// <summary>Drives the vertical scrollbar the way UI Automation does: by setting Value, which raises
     /// ValueChanged but never Scroll.</summary>
     internal void SetVerticalScrollValue(int firstRow) { ClearViewAnchor(); SetFirstRow(firstRow); Invalidate(); }
@@ -764,7 +809,7 @@ public sealed class LineGridControl : Control
 
     /// <summary>The furthest right the view can go: the scrollbar's own limit, so it can never be driven
     /// past the longest line currently measured.</summary>
-    private int MaxHScroll => Math.Max(0, _hbar.Maximum - _hbar.LargeChange + 1);
+    private int MaxHScroll => (int)_hbar.MaxValue;
 
     /// <summary>The single way the view scrolls sideways - clamped, and with the scrollbar kept in step so
     /// the thumb never disagrees with what is drawn.</summary>
@@ -1064,12 +1109,13 @@ public sealed class LineGridControl : Control
         _caretRow = row;
         _dragging = true;
         _charDragging = false;
+        _charOriginRow = -1;
         if (CharSelectionAvailable && (ModifierKeys & (Keys.Shift | Keys.Control)) == 0)
         {
-            // Armed, not shown: a drag that stays on this row turns into a character selection, and one that
-            // leaves it goes back to selecting whole rows.
-            _charRow = row;
-            _charAnchor = _charFocus = CharIndexAt(row, e.X, e.Y);
+            // Armed, not shown: a drag that stays on this row turns into a character selection, one that
+            // leaves it selects whole rows, and one that comes back picks the characters up again.
+            _charRow = _charOriginRow = row;
+            _charAnchor = _charFocus = _charOriginAt = CharIndexAt(row, e.X, e.Y);
         }
         Invalidate();
         SelectionChanged?.Invoke();
@@ -1081,18 +1127,23 @@ public sealed class LineGridControl : Control
         if (_dragging && _doc is not null)
         {
             long row = Math.Clamp(RowAtY(e.Y), 0, Math.Max(0, _doc.RowCount - 1));
-            if (_charRow >= 0 && row == _charRow)
+            if (row == _charOriginRow)
             {
+                // Back on the row it started from, so it is a selection within that line again.
+                _charRow = _charOriginRow;
+                _charAnchor = _charOriginAt;
                 int at = CharIndexAt(_charRow, e.X, e.Y);
-                if (at != _charFocus)
+                if (at != _charFocus || _caretRow != row || _sel.Count != 1)
                 {
                     _charFocus = at;
                     _charDragging = true;
+                    _caretRow = row;
+                    _sel.SetSingle(row);
                     Invalidate();
                     SelectionChanged?.Invoke();
                 }
             }
-            else if (row != _caretRow)
+            else if (row != _caretRow || _charRow >= 0)
             {
                 // Left the row: this is a selection of whole lines after all.
                 ClearCharSelection();
@@ -1109,6 +1160,7 @@ public sealed class LineGridControl : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         _dragging = false;
+        _charOriginRow = -1;
         // A press that never moved sideways selected the whole line, so drop the empty range it armed.
         if (!_charDragging && !HasCharSelection) ClearCharSelection();
         _charDragging = false;
@@ -1174,10 +1226,7 @@ public sealed class LineGridControl : Control
         }
         if ((ModifierKeys & Keys.Shift) != 0)
         {
-            _hScroll = Math.Clamp(_hScroll - Math.Sign(e.Delta) * _charWidth * 6, 0,
-                Math.Max(0, _hbar.Maximum - _hbar.LargeChange + 1));
-            _hbar.Value = _hScroll;
-            Invalidate();
+            SetHScroll(_hScroll - Math.Sign(e.Delta) * _charWidth * 6);
             return;
         }
         int lines = SystemInformation.MouseWheelScrollLines;
@@ -1293,11 +1342,42 @@ public sealed class LineGridControl : Control
         Invalidate();
     }
 
+    /// <summary>Scrolls a row into view by the shortest move that gets it there.
+    ///
+    /// Counted in rows the view is actually showing, which is not the arithmetic answer while wrapping: a
+    /// row can be several segments tall, so far fewer of them fit. Using the flat count there left the
+    /// caret believed to be on screen when a page down had carried it well past the bottom.</summary>
     private void EnsureVisible(long row)
     {
-        int visible = VisibleRowCount;
-        if (row < _firstRow) SetFirstRow(row);
-        else if (row >= _firstRow + visible) SetFirstRow(row - visible + 1);
+        if (row < _firstRow) { SetFirstRow(row); return; }
+        if (row < _firstRow + EffectiveVisibleRows) return;
+        SetFirstRow(FirstRowShowing(row));
+    }
+
+    /// <summary>Which row has to be at the top for <paramref name="last"/> to be the bottom one on screen.
+    /// While wrapping this is measured rather than counted back: rows differ in height, so the number that
+    /// fitted at one place in the file says nothing about how many fit at another.</summary>
+    private long FirstRowShowing(long last)
+    {
+        if (_doc is null || !Wrapping) return last - VisibleRowCount + 1;
+        int room = Math.Max(1, ClientSize.Height - _hbar.Height - HeaderHeight);
+        int width = ContentWidth;
+        var defaults = new ResolvedStyle(
+            new RgbColor(_settings.Foreground.R, _settings.Foreground.G, _settings.Foreground.B),
+            new RgbColor(_settings.Background.R, _settings.Background.G, _settings.Background.B), false, false);
+        long row = last, used = 0;
+        while (row >= 0)
+        {
+            long line = _doc.RowToLine(row);
+            string text = _doc.GetLineText(line);
+            var eval = _doc.EvaluateText(text, line);
+            var font = SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
+            long height = (long)WrapInto(Expand(text), width, font, _segments) * _rowHeight;
+            if (used + height > room) break;
+            used += height;
+            row--;
+        }
+        return Math.Clamp(row + 1, 0, last);
     }
 
     /// <summary>Scrolls a jumped-to row into the middle half of the view, so it arrives with context on
@@ -1306,7 +1386,7 @@ public sealed class LineGridControl : Control
     /// nearby matches does not drag the view about.</summary>
     private void RevealRow(long row)
     {
-        int visible = VisibleRowCount;
+        int visible = EffectiveVisibleRows;
         long top = visible / 4;
         long bottom = Math.Max(top, visible * 3 / 4 - 1);   // Max guards a viewport only a row or two tall
         if (row < _firstRow + top) SetFirstRow(row - top);
