@@ -55,6 +55,12 @@ public sealed class LineGridControl : Control
     private bool _syncingScroll;     // true while pushing _firstRow into the scrollbar (ignore its echo)
     private long[] _window = new long[64];   // file lines resolved for the current frame
 
+    // Where each row was actually painted this frame. With word wrap a row is as tall as the number of
+    // segments it broke into, so hit-testing, page keys and the accessible bounds all have to read the
+    // layout rather than multiply by a fixed row height.
+    private readonly List<(long Row, int Top, int Height, int Segments)> _layout = new();
+    private readonly List<int> _segments = new();   // wrap points for the row being painted
+
     // Character selection within one row. There is no caret and none is drawn - nothing here is editable -
     // so this is purely a highlighted range that any navigation drops. Indices are into the row's DISPLAYED
     // text (tabs already expanded), which is what the hit test and the painting both work in.
@@ -152,28 +158,47 @@ public sealed class LineGridControl : Control
 
     /// <summary>Character index in a row's displayed text nearest to <paramref name="x"/>, by binary search
     /// on the measured width of the prefix - the same measurement the drawing uses, so the highlight lands
-    /// exactly where the pointer did.</summary>
-    private int CharIndexAt(long row, int x)
+    /// exactly where the pointer did. <paramref name="y"/> picks the wrapped segment.</summary>
+    private int CharIndexAt(long row, int x, int y)
     {
         string text = DisplayText(row);
         if (text.Length == 0) return 0;
         var font = FontForRow(row, text);
-        int left = GutterWidth() - _hScroll;
-        int target = Math.Max(0, x - left);
+        (int from, int to) = SegmentAt(row, text, font, y);
 
-        int lo = 0, hi = text.Length;
+        int left = GutterWidth() - (Wrapping ? 0 : _hScroll);
+        int target = Math.Max(0, x - left);
+        string part = text[from..to];
+
+        int lo = 0, hi = part.Length;
         while (lo < hi)
         {
             int mid = (lo + hi + 1) / 2;
-            if (PrefixWidth(text, mid, font) <= target) lo = mid; else hi = mid - 1;
+            if (PrefixWidth(part, mid, font) <= target) lo = mid; else hi = mid - 1;
         }
         // Round to the nearer edge of the character the pointer is inside, as a text box does.
-        if (lo < text.Length)
+        if (lo < part.Length)
         {
-            int a = PrefixWidth(text, lo, font), b = PrefixWidth(text, lo + 1, font);
+            int a = PrefixWidth(part, lo, font), b = PrefixWidth(part, lo + 1, font);
             if (target - a > b - target) lo++;
         }
-        return lo;
+        return from + lo;
+    }
+
+    /// <summary>The stretch of a line drawn at a given y. The whole line when nothing is wrapped.</summary>
+    private (int From, int To) SegmentAt(long row, string text, Font font, int y)
+    {
+        if (!Wrapping) return (0, text.Length);
+        int top = HeaderHeight;
+        foreach (var (r, rowTop, height, _) in _layout)
+            if (r == row) { top = rowTop; break; }
+        int index = Math.Max(0, (y - top) / Math.Max(1, _rowHeight));
+
+        int count = WrapInto(text, ContentWidth, font, _segments);
+        index = Math.Min(index, count - 1);
+        int from = _segments[index];
+        int to = index + 1 < _segments.Count ? _segments[index + 1] : text.Length;
+        return (from, to);
     }
 
     /// <summary>The font a row is drawn in. Measuring with anything else would put the highlight in a
@@ -187,7 +212,12 @@ public sealed class LineGridControl : Control
     }
 
     private int PrefixWidth(string text, int count, Font font)
-        => count <= 0 ? 0 : TextRenderer.MeasureText(text[..count], font, new Size(int.MaxValue, _rowHeight),
+        => MeasureWidth(text.AsSpan(0, Math.Clamp(count, 0, text.Length)), font);
+
+    /// <summary>Width of a stretch of text. Takes a span because wrapping binary-searches for the break,
+    /// and a substring per probe would churn the heap on every frame.</summary>
+    private int MeasureWidth(ReadOnlySpan<char> text, Font font)
+        => text.IsEmpty ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
 
     /// <summary>Word boundaries around <paramref name="index"/>, for double-click. "Word" is a run of
@@ -265,27 +295,29 @@ public sealed class LineGridControl : Control
         }
     }
 
-    private void FillHighlights(Graphics g, string text, int gutter, int y, Font font)
+    private void FillHighlights(Graphics g, string text, int from, int to, int gutter, int y, Font font)
     {
         foreach (var (at, len, colour) in _highlights)
         {
-            int x0 = gutter - _hScroll + PrefixWidth(text, at, font);
-            int x1 = gutter - _hScroll + PrefixWidth(text, at + len, font);
-            using var b = new SolidBrush(colour);
-            g.FillRectangle(b, x0, y, Math.Max(1, x1 - x0), _rowHeight);
+            int a = Math.Max(at, from), b = Math.Min(at + len, to);
+            if (b <= a) continue;
+            int x0 = SegmentX(text, from, a, gutter, font);
+            int x1 = SegmentX(text, from, b, gutter, font);
+            using var brush = new SolidBrush(colour);
+            g.FillRectangle(brush, x0, y, Math.Max(1, x1 - x0), _rowHeight);
         }
     }
 
     /// <summary>Re-draws the marked text over its own fill in the ordinary text colour. Without this a hit on
     /// a selected row would be white on orange - and the row the search just landed on is always selected.</summary>
-    private void DrawHighlightText(Graphics g, string text, int gutter, int y, Font font)
+    private void DrawHighlightText(Graphics g, string text, int from, int to, int gutter, int y, Font font)
     {
         foreach (var (at, len, _) in _highlights)
         {
-            int end = Math.Min(text.Length, at + len);
-            if (at >= end) continue;
-            int x0 = gutter - _hScroll + PrefixWidth(text, at, font);
-            TextRenderer.DrawText(g, text[at..end], font, new Point(x0, y), _settings.Foreground, TextFlags);
+            int a = Math.Max(at, from), b = Math.Min(at + len, to);
+            if (b <= a) continue;
+            int x0 = SegmentX(text, from, a, gutter, font);
+            TextRenderer.DrawText(g, text[a..b], font, new Point(x0, y), _settings.Foreground, TextFlags);
         }
     }
 
@@ -294,7 +326,7 @@ public sealed class LineGridControl : Control
     internal CascadeDocument? Document => _doc;
     internal AppSettings Settings => _settings;
     internal long FirstVisibleRow => _firstRow;
-    internal int VisibleRows => VisibleRowCount;
+    internal int VisibleRows => EffectiveVisibleRows;
     internal long CaretRow => _caretRow;
 
     /// <summary>Scrolls so <paramref name="row"/> is the top visible row. Used by the map, which stands in
@@ -342,7 +374,7 @@ public sealed class LineGridControl : Control
         long caretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
         // Hold the caret line still when it is actually on screen; otherwise hold the top visible line, so
         // the text never jumps to a caret the user cannot see.
-        bool caretOnScreen = _caretRow >= top && _caretRow < Math.Min(rows, top + VisibleRowCount);
+        bool caretOnScreen = _caretRow >= top && _caretRow < Math.Min(rows, top + EffectiveVisibleRows);
         long pin = caretOnScreen ? _caretRow : top;
         return new ViewAnchor(_doc.RowToLine(pin), (int)(pin - top), caretLine);
     }
@@ -354,7 +386,7 @@ public sealed class LineGridControl : Control
     {
         _anchorLine = anchor.Line;
         _anchorCaretLine = anchor.CaretLine;
-        _anchorOffset = Math.Clamp(anchor.Offset, 0, Math.Max(0, VisibleRowCount - 1));
+        _anchorOffset = Math.Clamp(anchor.Offset, 0, Math.Max(0, EffectiveVisibleRows - 1));
         _anchorSelect = select;
     }
 
@@ -429,7 +461,7 @@ public sealed class LineGridControl : Control
     private long ClampFirstRow(long first)
     {
         long rows = _doc?.RowCount ?? 0;
-        return Math.Clamp(first, 0, Math.Max(0, rows - VisibleRowCount));
+        return Math.Clamp(first, 0, Math.Max(0, rows - EffectiveVisibleRows));
     }
 
     /// <summary>Scrolls so <paramref name="first"/> is the top visible row (clamped), syncing the scrollbar.</summary>
@@ -495,7 +527,7 @@ public sealed class LineGridControl : Control
     public void RefreshView()
     {
         long rows = _doc?.RowCount ?? 0;
-        int visible = VisibleRowCount;
+        int visible = EffectiveVisibleRows;
 
         long maxFirst = Math.Max(0, rows - visible);
         if (_firstRow > maxFirst) _firstRow = maxFirst;
@@ -523,6 +555,9 @@ public sealed class LineGridControl : Control
 
     private void UpdateHScroll()
     {
+        // Nothing runs off the side while wrapping, so the scrollbar has nothing to say.
+        _hbar.Visible = !Wrapping;
+        if (Wrapping) { _hScroll = 0; return; }
         int viewport = Math.Max(1, ContentWidth);
         int max = Math.Max(_maxContentWidth, viewport);
         _hbar.Maximum = max;
@@ -560,6 +595,50 @@ public sealed class LineGridControl : Control
 
     private int GutterWidth() => MarkerGutterWidth + LineNumberGutterWidth;
 
+    /// <summary>Whether lines are broken to fit the width. Not offered while they are split into columns:
+    /// wrapping inside a cell is a different feature, and the menu says so by greying out.</summary>
+    internal bool Wrapping => _settings.WordWrap && !(_doc?.Columns.Enabled ?? false);
+
+    /// <summary>The most segments one line may take. A single enormous line would otherwise fill the window
+    /// on its own, leaving no way to see what surrounds it.</summary>
+    private const int MaxWrapSegments = 20;
+
+    /// <summary>Rows on screen. With wrapping this is what the last frame actually fitted, since a row may
+    /// be several segments tall; without it, the arithmetic answer.</summary>
+    private int EffectiveVisibleRows => Wrapping && _layout.Count > 0 ? _layout.Count : VisibleRowCount;
+
+    /// <summary>Breaks a line into the segments it is drawn as, appending each segment's start index to
+    /// <paramref name="starts"/>. Breaks at a space where there is one, and mid-word only when a single word
+    /// is wider than the view.</summary>
+    private int WrapInto(string text, int width, Font font, List<int> starts)
+    {
+        starts.Clear();
+        starts.Add(0);
+        if (!Wrapping || width <= 0 || text.Length == 0) return 1;
+        if (PrefixWidth(text, text.Length, font) <= width) return 1;
+
+        int at = 0;
+        while (at < text.Length && starts.Count < MaxWrapSegments)
+        {
+            int lo = 1, hi = text.Length - at;
+            while (lo < hi)
+            {
+                int mid = (lo + hi + 1) / 2;
+                if (MeasureWidth(text.AsSpan(at, mid), font) <= width) lo = mid; else hi = mid - 1;
+            }
+            int take = Math.Max(1, lo);
+            if (at + take < text.Length)
+            {
+                int space = text.LastIndexOf(' ', at + take - 1, take);
+                if (space > at) take = space - at + 1;   // keep the space on the line it ends
+            }
+            at += take;
+            if (at < text.Length) starts.Add(at);
+            else break;
+        }
+        return starts.Count;
+    }
+
     /// <summary>
     /// Flags for every piece of scrolling line text.
     ///
@@ -587,9 +666,43 @@ public sealed class LineGridControl : Control
 
     /// <summary>Screen x of a character in a row, so a check can aim at one rather than guess pixels.</summary>
     internal int XForCharForTesting(long row, int index)
-        => GutterWidth() - _hScroll + PrefixWidth(DisplayText(row), index, FontForRow(row, DisplayText(row)));
+        => SegmentX(DisplayText(row), 0, index, GutterWidth(), FontForRow(row, DisplayText(row)));
 
-    private int YForRowForTesting(long row) => HeaderHeight + (int)(row - _firstRow) * _rowHeight + _rowHeight / 2;
+    private int YForRowForTesting(long row)
+    {
+        foreach (var (r, top, height, _) in _layout)
+            if (r == row) return top + Math.Min(height, _rowHeight) / 2;
+        return HeaderHeight + (int)(row - _firstRow) * _rowHeight + _rowHeight / 2;
+    }
+
+    /// <summary>How many segments a row was drawn as. 1 unless it wrapped.</summary>
+    internal int SegmentsForTesting(long row)
+    {
+        foreach (var (r, _, _, segments) in _layout)
+            if (r == row) return segments;
+        return 0;
+    }
+
+    internal int RowsPaintedForTesting => _layout.Count;
+
+    /// <summary>Top of a row as painted, so a check can aim at a wrapped row's second segment.</summary>
+    internal int RowTopForTesting(long row)
+    {
+        foreach (var (r, top, _, _) in _layout)
+            if (r == row) return top;
+        return HeaderHeight;
+    }
+
+    internal int RowHeightForTesting => _rowHeight;
+
+    /// <summary>Clicks at an explicit y, rather than at a row's middle - the point being to land somewhere
+    /// a fixed row height would have put a different row.</summary>
+    internal void ClickForTesting2(int y, int x)
+    {
+        ForgetLastClick();
+        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
+        OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0));
+    }
 
     /// <summary>Y of the middle of a row, for a check that looks at what was painted there.</summary>
     internal int RowMiddleForTesting(long row) => YForRowForTesting(row);
@@ -695,11 +808,15 @@ public sealed class LineGridControl : Control
 
         if (columns) DrawColumnHeader(g, gutter, contentW);
 
+        _layout.Clear();
+        int atY = headerH;
+        int bottom = ClientSize.Height - _hbar.Height;
         for (int i = 0; i < visible; i++)
         {
             long row = _firstRow + i;
             if (row >= rows || i >= windowCount) break;
-            int y = headerH + i * _rowHeight;
+            if (atY >= bottom) break;
+            int y = atY;
             long line = _window[i];
             string text = _doc.GetLineText(line);
             var eval = _doc.EvaluateText(text, line);
@@ -715,26 +832,36 @@ public sealed class LineGridControl : Control
             Color back = selected ? _settings.SelectionBack : ToColor(style.Background);
             Color fore = selected ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
 
-            var rowRect = new Rectangle(0, y, ClientSize.Width - RightGutterWidth, _rowHeight);
+            Font font = SelectFont(style);
+            string shown = columns ? text : Expand(text);
+            int segments = columns ? 1 : WrapInto(shown, contentW, font, _segments);
+            int rowHeight = segments * _rowHeight;
+            _layout.Add((row, y, rowHeight, segments));
+
+            var rowRect = new Rectangle(0, y, ClientSize.Width - RightGutterWidth, rowHeight);
             using (var b = new SolidBrush(back)) g.FillRectangle(b, rowRect);
 
-            DrawMarkers(g, line, y);
+            DrawMarkers(g, line, y, rowHeight);
             DrawLineNumber(g, line, y, selected);
 
-            Font font = SelectFont(style);
-            var contentRect = new Rectangle(gutter, y, contentW, _rowHeight);
+            var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
             var clip = g.Clip;
             g.SetClip(contentRect);
             if (columns && splitter is not null)
                 runningMaxWidth = Math.Max(runningMaxWidth, DrawColumns(g, splitter, text, gutter, y, fore, font));
             else
             {
-                string shown = Expand(text);
                 CollectHighlights(shown, row);
-                FillHighlights(g, shown, gutter, y, font);
-                runningMaxWidth = Math.Max(runningMaxWidth, DrawFullLine(g, text, gutter, y, fore, font));
-                DrawHighlightText(g, shown, gutter, y, font);
-                if (charSel) DrawCharSelection(g, shown, gutter, y, font);
+                for (int s = 0; s < segments; s++)
+                {
+                    int from = _segments[s];
+                    int to = s + 1 < _segments.Count ? _segments[s + 1] : shown.Length;
+                    int sy = y + s * _rowHeight;
+                    FillHighlights(g, shown, from, to, gutter, sy, font);
+                    runningMaxWidth = Math.Max(runningMaxWidth, DrawSegment(g, shown, from, to, gutter, sy, fore, font));
+                    DrawHighlightText(g, shown, from, to, gutter, sy, font);
+                    if (charSel) DrawCharSelection(g, shown, from, to, gutter, sy, font);
+                }
             }
             g.Clip = clip;
 
@@ -743,7 +870,9 @@ public sealed class LineGridControl : Control
                     new Point(ClientSize.Width - RightGutterWidth - 40, y), Color.Gray);
 
             if (row == _caretRow && Focused)
-                using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack))) g.DrawRectangle(pen, 0, y, rowRect.Width - 1, _rowHeight - 1);
+                using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack))) g.DrawRectangle(pen, 0, y, rowRect.Width - 1, rowHeight - 1);
+
+            atY += rowHeight;
         }
 
         DrawFocusBar(g);
@@ -826,26 +955,46 @@ public sealed class LineGridControl : Control
         return w + 8;
     }
 
-    /// <summary>Paints the selected part of a line over the text already drawn. The row keeps its own
-    /// colours - only the range is in the selection colours - which is how a text box reads.</summary>
-    private void DrawCharSelection(Graphics g, string text, int gutter, int y, Font font)
+    /// <summary>Draws one segment of a line - the whole of it when nothing is wrapped. Returns how wide the
+    /// content is, which is what the horizontal scrollbar's range is built from.</summary>
+    private int DrawSegment(Graphics g, string text, int from, int to, int gutter, int y, Color fore, Font font)
     {
-        int from = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
-        int to = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
-        if (to <= from) return;
-        int x0 = gutter - _hScroll + PrefixWidth(text, from, font);
-        int x1 = gutter - _hScroll + PrefixWidth(text, to, font);
-        using (var b = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(b, x0, y, Math.Max(1, x1 - x0), _rowHeight);
-        TextRenderer.DrawText(g, text[from..to], font, new Point(x0, y), _settings.SelectionFore, TextFlags);
+        string part = text[from..to];
+        int x = gutter - (Wrapping ? 0 : _hScroll);
+        TextRenderer.DrawText(g, part, font, new Point(x, y), fore, TextFlags);
+        if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
+        int w = TextRenderer.MeasureText(g, part, font, new Size(int.MaxValue, _rowHeight),
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+        return w + 8;
     }
 
-    private void DrawMarkers(Graphics g, long line, int y)
+    /// <summary>Paints the selected part of a line over the text already drawn, clipped to one segment. The
+    /// row keeps its own colours - only the range is in the selection colours - which is how a text box
+    /// reads.</summary>
+    private void DrawCharSelection(Graphics g, string text, int from, int to, int gutter, int y, Font font)
+    {
+        int a = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
+        int b = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
+        a = Math.Max(a, from);
+        b = Math.Min(b, to);
+        if (b <= a) return;
+        int x0 = SegmentX(text, from, a, gutter, font);
+        int x1 = SegmentX(text, from, b, gutter, font);
+        using (var brush = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(brush, x0, y, Math.Max(1, x1 - x0), _rowHeight);
+        TextRenderer.DrawText(g, text[a..b], font, new Point(x0, y), _settings.SelectionFore, TextFlags);
+    }
+
+    /// <summary>Where a character sits on screen, measured from the start of the segment it is drawn in.</summary>
+    private int SegmentX(string text, int segmentStart, int index, int gutter, Font font)
+        => gutter - (Wrapping ? 0 : _hScroll) + PrefixWidth(text[segmentStart..], index - segmentStart, font);
+
+    private void DrawMarkers(Graphics g, long line, int y, int height)
     {
         if (!MarkersVisible || _doc is null) return;
         // Keep the marker gutter the neutral margin color (not the line's fill color) so the marker
         // bars stay clearly visible regardless of the line's filter highlight or selection.
         using (var bg = new SolidBrush(_settings.GutterBack))
-            g.FillRectangle(bg, 0, y, MarkerGutterWidth, _rowHeight);
+            g.FillRectangle(bg, 0, y, MarkerGutterWidth, height);
         byte mask = _doc.Markers.MaskOf(line);
         if (mask == 0) return;
         for (int m = 0; m < 8; m++)
@@ -892,7 +1041,7 @@ public sealed class LineGridControl : Control
         {
             // Double-click selects the word under the pointer, as a text box does.
             string text = DisplayText(row);
-            (_charAnchor, _charFocus) = WordAt(text, CharIndexAt(row, e.X));
+            (_charAnchor, _charFocus) = WordAt(text, CharIndexAt(row, e.X, e.Y));
             _charRow = row;
             _caretRow = row;
             _sel.SetSingle(row);
@@ -916,7 +1065,7 @@ public sealed class LineGridControl : Control
             // Armed, not shown: a drag that stays on this row turns into a character selection, and one that
             // leaves it goes back to selecting whole rows.
             _charRow = row;
-            _charAnchor = _charFocus = CharIndexAt(row, e.X);
+            _charAnchor = _charFocus = CharIndexAt(row, e.X, e.Y);
         }
         Invalidate();
         SelectionChanged?.Invoke();
@@ -929,7 +1078,7 @@ public sealed class LineGridControl : Control
             long row = Math.Clamp(RowAtY(e.Y), 0, Math.Max(0, _doc.RowCount - 1));
             if (_charRow >= 0 && row == _charRow)
             {
-                int at = CharIndexAt(_charRow, e.X);
+                int at = CharIndexAt(_charRow, e.X, e.Y);
                 if (at != _charFocus)
                 {
                     _charFocus = at;
@@ -985,7 +1134,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) { base.OnKeyDown(e); return; }
         long rows = _doc.RowCount;
-        int page = VisibleRowCount - 1;
+        int page = EffectiveVisibleRows - 1;
 
         switch (e.KeyCode)
         {
@@ -1067,6 +1216,14 @@ public sealed class LineGridControl : Control
         // A running pass shifts every row index between paints, so re-derive the top row from its anchored
         // line first: otherwise a click maps to whatever was under the cursor a frame (thousands of rows) ago.
         SyncFirstRowToAnchor();
+        // With wrapping a row is as tall as it needs to be, so where each one landed is read from the last
+        // frame rather than divided out of a fixed height.
+        if (Wrapping && _layout.Count > 0)
+        {
+            foreach (var (row, top, height, _) in _layout)
+                if (y >= top && y < top + height) return row;
+            return _layout[^1].Row + 1;   // below the last painted row
+        }
         return _firstRow + (y - HeaderHeight) / _rowHeight;
     }
 
@@ -1169,7 +1326,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return 0;
         long rows = _doc.RowCount;
-        return (int)Math.Max(0, Math.Min(VisibleRowCount, rows - _firstRow));
+        return (int)Math.Max(0, Math.Min(EffectiveVisibleRows, rows - _firstRow));
     }
 
     /// <summary>Selects a display row in response to an accessibility client (screen reader / UIA).
@@ -1281,8 +1438,15 @@ public sealed class LineGridControl : Control
         {
             get
             {
-                int y = _g.HeaderHeight + _visibleIndex * _g._rowHeight;
+                // Read where the row was actually painted: with word wrap a row is as tall as the number of
+                // segments it broke into, so its place cannot be multiplied out of a fixed height.
                 int w = Math.Max(0, _g.ClientSize.Width - _g.RightGutterWidth);
+                if (_visibleIndex < _g._layout.Count)
+                {
+                    var (_, top, height, _) = _g._layout[_visibleIndex];
+                    return _g.RectangleToScreen(new Rectangle(0, top, w, height));
+                }
+                int y = _g.HeaderHeight + _visibleIndex * _g._rowHeight;
                 return _g.RectangleToScreen(new Rectangle(0, y, w, _g._rowHeight));
             }
         }

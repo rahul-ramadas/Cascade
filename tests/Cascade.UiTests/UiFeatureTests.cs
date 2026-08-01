@@ -363,6 +363,51 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Word_wrap_is_remembered_and_takes_the_side_scrollbar_away()
+    {
+        // The suite parks the window off every monitor, where Windows never repaints it, so the wrapped
+        // layout itself is checked in-process by the self-test ("word wrap"). What is observable here is the
+        // decision: the item ticks, the sideways scrollbar it makes pointless disappears, and the choice
+        // survives a restart.
+        string log = TestData.WriteLogFile(600);
+        string settingsDir = CascadeApp.NewSettingsDir();
+        try
+        {
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            using (var app = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false, ownsSettingsDir: false))
+            {
+                Check("long lines scroll sideways to begin with", app.HasHorizontalScrollBar());
+                Check("wrapping is off to begin with", app.MenuItemChecked("View", "Word Wrap") == false,
+                      $"{app.MenuItemChecked("View", "Word Wrap")}");
+
+                app.ClickMenuOrThrow("View", "Word Wrap");
+                Check("the item ticks", app.MenuItemChecked("View", "Word Wrap") == true);
+                Check("the sideways scrollbar goes away",
+                      Retry.WhileFalse(() => !app.HasHorizontalScrollBar(), TimeSpan.FromSeconds(4)).Result);
+
+                app.ClickMenuOrThrow("View", "Word Wrap");
+                Check("turning it off brings the scrollbar back",
+                      Retry.WhileFalse(app.HasHorizontalScrollBar, TimeSpan.FromSeconds(4)).Result);
+
+                app.ClickMenuOrThrow("View", "Word Wrap");   // leave it on, to be remembered
+                Check("the app closed", app.CloseGracefully());
+            }
+
+            using (var again = CascadeApp.LaunchExisting(log, null, settingsDir, ownsFiles: false, ownsSettingsDir: false))
+            {
+                Check("the choice is remembered", again.MenuItemChecked("View", "Word Wrap") == true,
+                      $"{again.MenuItemChecked("View", "Word Wrap")}");
+                Check("and applied on the way up", !again.HasHorizontalScrollBar());
+            }
+
+            Assert.True(fails.Count == 0, "Word wrap failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); try { Directory.Delete(settingsDir, true); } catch { /* best effort */ } }
+    }
+
+    [Fact]
     public void The_match_map_stands_in_for_the_vertical_scrollbar()
     {
         // The map carries the viewport rectangle, so a scrollbar beside it would say the same thing twice.

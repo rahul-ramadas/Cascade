@@ -47,7 +47,7 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
-    private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!;
+    private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     private FindDialog? _findDialog;
@@ -300,6 +300,18 @@ public sealed class MainForm : Form
         })
         { Checked = _settings.ShowMatchMap, ShortcutKeys = Keys.Control | Keys.M };
         view.DropDownItems.Add(_miMatchMap);
+        _miWordWrap = new ToolStripMenuItem("&Word Wrap", null, (_, _) =>
+        {
+            _settings.WordWrap = !_settings.WordWrap;
+            _miWordWrap.Checked = _settings.WordWrap;
+            _grid.RefreshView();
+            SaveSettingsSoon();
+        })
+        { Checked = _settings.WordWrap, ShortcutKeys = Keys.Alt | Keys.Z, ShortcutKeyDisplayString = "Alt+Z" };
+        view.DropDownItems.Add(_miWordWrap);
+        // Columns lay text out in fixed cells, which wrapping would tear apart - say so by greying the item
+        // rather than letting it be ticked and quietly ignored.
+        view.DropDownOpening += (_, _) => _miWordWrap.Enabled = !_doc.Columns.Enabled;
         view.DropDownItems.Add(BuildMarkersMenu());
         view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
@@ -1160,6 +1172,7 @@ public sealed class MainForm : Form
         _miLineNumbers.Checked = _settings.ShowLineNumbers;
         _miPresets.Checked = _settings.ShowFilterPresets;
         _miMatchMap.Checked = _settings.ShowMatchMap;
+        _miWordWrap.Checked = _settings.WordWrap;
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
         LayoutPresetPane();
         SyncMarkersMenu();
