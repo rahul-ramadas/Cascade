@@ -56,6 +56,12 @@ public sealed class AppSettings
     /// <summary>Whether the match map replaces the log view's vertical scrollbar.</summary>
     public bool ShowMatchMap { get; set; } = true;
 
+    /// <summary>Behind every occurrence of the find term on a visible line.</summary>
+    public int FindHighlightArgb { get; set; } = Color.FromArgb(255, 236, 150).ToArgb();
+
+    /// <summary>Behind the occurrences on the line the search actually landed on.</summary>
+    public int FindCurrentArgb { get; set; } = Color.FromArgb(255, 170, 60).ToArgb();
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 
@@ -66,6 +72,8 @@ public sealed class AppSettings
     [System.Text.Json.Serialization.JsonIgnore] public Color SelectionBack => Color.FromArgb(SelectionBackArgb);
     [System.Text.Json.Serialization.JsonIgnore] public Color SelectionFore => Color.FromArgb(SelectionForeArgb);
     [System.Text.Json.Serialization.JsonIgnore] public Color DimForeground => Color.FromArgb(DimForegroundArgb);
+    [System.Text.Json.Serialization.JsonIgnore] public Color FindHighlight => Color.FromArgb(FindHighlightArgb);
+    [System.Text.Json.Serialization.JsonIgnore] public Color FindCurrent => Color.FromArgb(FindCurrentArgb);
 
     private static string SettingsPath => Path.Combine(SettingsFolder.Dir, "settings.json");
 

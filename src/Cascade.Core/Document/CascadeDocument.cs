@@ -369,7 +369,9 @@ public sealed class CascadeDocument : IDisposable
         return _search;
     }
 
-    private void DropSearch()
+    /// <summary>Releases the current search: nothing is looking for that term any more, so its sweep and
+    /// the per-thread readers behind it can go.</summary>
+    public void DropSearch()
     {
         _search?.Dispose();          // stops the sweep before anything it reads can be freed
         _search = null;

@@ -4,6 +4,7 @@ using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
+using Cascade.Core.Find;
 using Cascade.Core.Model;
 
 namespace Cascade.App;
@@ -215,6 +216,78 @@ public sealed class LineGridControl : Control
     /// <summary>Character selection is a plain-text idea, so it is not offered while the line is split into
     /// columns - a click there keeps meaning "select this row".</summary>
     private bool CharSelectionAvailable => _doc is not null && !_doc.Columns.Enabled;
+
+    // ---- find highlighting ----
+
+    private FindEngine.FindMatcher? _highlight;
+    private readonly List<(int At, int Length, Color Colour)> _highlights = new();
+
+    /// <summary>Marks every occurrence of a term on the lines currently on screen. Set while a find term is
+    /// live - which outlasts the dialog, since F3 does - and cleared when it is dropped.</summary>
+    public void SetFindHighlight(FindEngine.FindMatcher? matcher)
+    {
+        _highlight = matcher;
+        Invalidate();
+    }
+
+    /// <summary>Every occurrence to mark on a line: the find term, and what is selected elsewhere. The line
+    /// the caret is on gets the stronger colour, so which line the search landed on is obvious without the
+    /// navigation having to work in occurrences.</summary>
+    private void CollectHighlights(string text, long row)
+    {
+        _highlights.Clear();
+        var matcher = _highlight;
+        string? selected = SelectedText;
+        if (matcher is null && selected is null) return;
+
+        Color colour = row == _caretRow ? _settings.FindCurrent : _settings.FindHighlight;
+        if (matcher is not null)
+        {
+            int from = 0;
+            while (matcher.NextMatch(text, from, out int at, out int len))
+            {
+                _highlights.Add((at, len, colour));
+                from = at + Math.Max(1, len);
+            }
+        }
+        // Occurrences of what is selected, so picking a request id out of one line shows the rest at once.
+        if (selected is { Length: > 1 })
+        {
+            int from = 0;
+            while (from < text.Length)
+            {
+                int at = text.AsSpan(from).IndexOf(selected, StringComparison.Ordinal);
+                if (at < 0) break;
+                if (row != _charRow || from + at != Math.Min(_charAnchor, _charFocus))
+                    _highlights.Add((from + at, selected.Length, _settings.FindHighlight));
+                from += at + selected.Length;
+            }
+        }
+    }
+
+    private void FillHighlights(Graphics g, string text, int gutter, int y, Font font)
+    {
+        foreach (var (at, len, colour) in _highlights)
+        {
+            int x0 = gutter - _hScroll + PrefixWidth(text, at, font);
+            int x1 = gutter - _hScroll + PrefixWidth(text, at + len, font);
+            using var b = new SolidBrush(colour);
+            g.FillRectangle(b, x0, y, Math.Max(1, x1 - x0), _rowHeight);
+        }
+    }
+
+    /// <summary>Re-draws the marked text over its own fill in the ordinary text colour. Without this a hit on
+    /// a selected row would be white on orange - and the row the search just landed on is always selected.</summary>
+    private void DrawHighlightText(Graphics g, string text, int gutter, int y, Font font)
+    {
+        foreach (var (at, len, _) in _highlights)
+        {
+            int end = Math.Min(text.Length, at + len);
+            if (at >= end) continue;
+            int x0 = gutter - _hScroll + PrefixWidth(text, at, font);
+            TextRenderer.DrawText(g, text[at..end], font, new Point(x0, y), _settings.Foreground, TextFlags);
+        }
+    }
 
     // ---- what the match map reads ----
 
@@ -656,8 +729,12 @@ public sealed class LineGridControl : Control
                 runningMaxWidth = Math.Max(runningMaxWidth, DrawColumns(g, splitter, text, gutter, y, fore, font));
             else
             {
+                string shown = Expand(text);
+                CollectHighlights(shown, row);
+                FillHighlights(g, shown, gutter, y, font);
                 runningMaxWidth = Math.Max(runningMaxWidth, DrawFullLine(g, text, gutter, y, fore, font));
-                if (charSel) DrawCharSelection(g, Expand(text), gutter, y, font);
+                DrawHighlightText(g, shown, gutter, y, font);
+                if (charSel) DrawCharSelection(g, shown, gutter, y, font);
             }
             g.Clip = clip;
 
