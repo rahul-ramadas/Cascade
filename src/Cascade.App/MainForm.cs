@@ -52,6 +52,11 @@ public sealed class MainForm : Form
 
     private FindDialog? _findDialog;
     private FindQuery? _lastQuery;
+
+    /// <summary>The term Esc put away. Clearing a find is meant to take the highlights off the text, not to
+    /// forget what was being looked for, so F3 picks this up and runs it again from wherever the caret now
+    /// is - highlights, counts and all - instead of opening the bar and waiting to be asked twice.</summary>
+    private FindQuery? _dormantQuery;
     private readonly FilterHistory _history = new();
     private ToolStripMenuItem _miUndo = null!, _miRedo = null!;
     private string? _filterFilePath;
@@ -1362,11 +1367,17 @@ public sealed class MainForm : Form
         }
     }
 
-    private void RepeatFind(bool forward) { if (_lastQuery is { } q) DoFind(q, forward); else ShowFind(); }
+    private void RepeatFind(bool forward)
+    {
+        if ((_lastQuery ?? _dormantQuery) is { } q) DoFind(q, forward);
+        else ShowFind();
+    }
 
-    /// <summary>Drops the find term: highlights off, counts gone, and the sweep behind it released.</summary>
+    /// <summary>Drops the find term: highlights off, counts gone, and the sweep behind it released. What was
+    /// being looked for is remembered - see <see cref="_dormantQuery"/>.</summary>
     private void ClearFind()
     {
+        _dormantQuery = _lastQuery ?? _dormantQuery;
         _lastQuery = null;
         _grid.SetFindHighlight(null);
         _doc.DropSearch();

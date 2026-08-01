@@ -622,6 +622,53 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Escape_puts_the_search_away_but_F3_brings_it_straight_back()
+    {
+        // Escape is for taking the highlights off the text, not for forgetting what was being looked for.
+        // F3 used to reopen the bar with the old term sitting in it, waiting to be asked a second time.
+        string log = TestData.WriteLogFile();
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, null, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            app.SelectLine(1);
+            var dlg = app.OpenFindDialog();
+            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+            app.SetText(edit, "line");
+            app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
+            Check("the search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
+            Check("and the counts are up", app.WaitForStatusContaining("Match "), app.AllStatusText());
+
+            // Escape from the text area, which is where it clears the find rather than closing the bar.
+            // Through the message loop, because both keys are handled at form level, not in a KeyDown.
+            app.ClickMenuOrThrow("View", "Focus Text Area");
+            Thread.Sleep(300);
+            app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.ESCAPE);
+            Check("escape takes the counts away",
+                  Retry.WhileTrue(() => app.AllStatusText().Contains("Match "), TimeSpan.FromSeconds(4)).Success,
+                  app.AllStatusText());
+
+            // F3 must search again there and then: next match, counts back, no dialog waiting on an Enter.
+            app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
+            Check("F3 goes straight to the next match", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
+            Check("and the counts come back with it", app.WaitForStatusContaining("Match 3"), app.AllStatusText());
+
+            app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
+            Check("and again", app.WaitStatus("Ln:", "Ln: 4 / 1,000"), app.StatusText("Ln:"));
+
+            app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
+            Check("Shift+F3 goes back", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
+
+            try { dlg.Close(); } catch { /* modeless: hides */ }
+            Assert.True(fails.Count == 0, "Escape/F3 failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); }
+    }
+
+    [Fact]
     public void Reaching_the_end_of_a_search_shows_feedback()
     {
         // Every find command has to say so when there is nothing further that way. Two of them used to be
