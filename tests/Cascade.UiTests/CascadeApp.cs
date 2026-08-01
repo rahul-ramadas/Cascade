@@ -433,6 +433,11 @@ internal sealed class CascadeApp : IDisposable
         => string.Join(" | ", Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
                                     .Select(t => t.Name ?? "").Where(n => n.Length > 0));
 
+    /// <summary>Waits for any status field to contain <paramref name="text"/>.</summary>
+    public bool WaitForStatusContaining(string text, int ms = 8000)
+        => Retry.WhileFalse(() => AllStatusText().Contains(text, StringComparison.Ordinal),
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
+
     /// <summary>The filter list's search box. Found by name rather than "the first edit", because a hidden
     /// Find dialog is still part of the window's tree and would be picked up instead.</summary>
     public AutomationElement FilterSearchBox()

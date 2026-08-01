@@ -1284,10 +1284,10 @@ public sealed class MainForm : Form
         else
         {
             _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
-            NoMoreMatches(_doc.IsIndexComplete ? "No more matches" : "No more matches yet",
-                _doc.IsIndexComplete
-                    ? $"No more matches for {Quote(query.Text)}"
-                    : $"No more matches yet for {Quote(query.Text)} \u2014 still loading");
+            // No wording in the status bar: the tally already sitting there says how many matches there are
+            // and which one the caret is on, and a message would cover exactly that up for five seconds.
+            AppFlash.Flash(this);
+            System.Media.SystemSounds.Beep.Play();
         }
     }
 
