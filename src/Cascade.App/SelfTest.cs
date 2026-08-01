@@ -574,6 +574,40 @@ internal static class SelfTest
             ok &= Check("every band is solid once only matching lines are shown", sparse == 0 && solid > 50,
                         $"{solid} solid, {sparse} partial");
 
+            // Markers draw down the map's own edge, and they change without any filter changing - so the
+            // real gesture has to reach the map, or a mark never appears on it at all.
+            doc.Filters.ShowOnlyFilteredLines = false;
+            grid.RefreshView();
+            map.RebuildForTesting();
+            Pump();
+            grid.ScrollToRow(12_345);
+            grid.RefreshView();
+            Pump();
+            grid.SelectRowForAccessibility(12_345);
+            Pump();
+            int markerBand = BandOf(12_345);
+            // Look at the band from a distance: the viewport rectangle is drawn over the same lane, and its
+            // blue blended with the mark's red is neither one nor the other.
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            bool beforeMark = MapRowHasMarker(host, map, markerBand);
+            grid.PressKeyForTesting(Keys.Control | Keys.D1);
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            bool afterMark = MapRowHasMarker(host, map, markerBand);
+            ok &= Check("marking a line shows up on the map at once", !beforeMark && afterMark,
+                        $"before {beforeMark}, after {afterMark}; marks {doc.Markers.UsedMarkers}, " +
+                        $"band {markerBand}; got {MapLaneColours(host, map, markerBand)}");
+
+            grid.PressKeyForTesting(Keys.Control | Keys.D1);
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            ok &= Check("and goes again when the mark is cleared", !MapRowHasMarker(host, map, markerBand),
+                        MapLaneColours(host, map, markerBand));
+
             return ok;
         }
         finally
@@ -587,6 +621,39 @@ internal static class SelfTest
 
     /// <summary>Y of a band within the captured window (the map fills the grid's height).</summary>
     private static int MapRowY(MatchMapControl map, int band) => map.Top + band;
+
+    /// <summary>Whether marker 1's colour is painted in the map's marker lane at a band. The tick is three
+    /// pixels tall, so a band either side counts as the same mark.</summary>
+    private static bool MapRowHasMarker(Form host, MatchMapControl map, int band)
+    {
+        var c = AppSettings.MarkerColors[0];
+        using var picture = Capture(host);
+        int left = picture.Width - map.Width;
+        for (int dy = -2; dy <= 3; dy++)
+            if (RowHasColor(picture, left, Math.Min(map.Width, 6), MapRowY(map, band + dy), c.R, c.G, c.B))
+                return true;
+        return false;
+    }
+
+    /// <summary>What is actually painted in the map's marker lane around a band, for diagnosing a miss.</summary>
+    private static string MapLaneColours(Form host, MatchMapControl map, int band)
+    {
+        using var picture = Capture(host);
+        int left = picture.Width - map.Width;
+        var seen = new List<string>();
+        for (int dy = -3; dy <= 4; dy++)
+        {
+            int y = MapRowY(map, band + dy);
+            if (y < 0 || y >= picture.Height) continue;
+            for (int x = left; x < Math.Min(picture.Width, left + 6); x++)
+            {
+                var p = picture.GetPixel(x, y);
+                string s = $"{p.R},{p.G},{p.B}";
+                if (!seen.Contains(s)) seen.Add(s);
+            }
+        }
+        return string.Join(" | ", seen);
+    }
 
     private static bool RowHasColor(Bitmap bmp, int left, int width, int y, int r, int g, int b)
     {
@@ -851,7 +918,15 @@ internal static class SelfTest
         ok &= Check("nothing found yet does not", searching == "Searching\u2026", searching);
 
         string offMatch = FindStatusText.Short(T(0, 348, 0, 348, 348));
-        ok &= Check("no position is claimed when the caret is not on a match", offMatch == "348", offMatch);
+        ok &= Check("off a match the count says what it is a count of", offMatch == "348 matches", offMatch);
+
+        string offMatchDetailed = FindStatusText.Short(T(0, 252, 96, 891, 1204));
+        ok &= Check("and still splits the shown from the hidden",
+                    offMatchDetailed == "252 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits", offMatchDetailed);
+
+        ok &= Check("no bare number ever reaches the status bar",
+                    !long.TryParse(offMatch.Replace(",", ""), out _) &&
+                    !long.TryParse(plain.Replace(",", ""), out _), $"{offMatch} / {plain}");
 
         string approx = FindStatusText.Short(T(1, 10, 0, 99, 99, approx: true));
         ok &= Check("a floored occurrence count says it is a floor", approx.Contains('\u2265'), approx);

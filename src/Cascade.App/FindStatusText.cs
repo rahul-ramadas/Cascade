@@ -20,11 +20,13 @@ internal static class FindStatusText
             return t.Complete ? "No matches" : "Searching\u2026";
 
         string more = t.Complete ? "" : "+";
-        string where = t.Position > 0 ? $"Match {t.Position:N0} of " : "";
-        string lines = t.HiddenLines > 0 || t.Occurrences > t.VisibleLines + t.HiddenLines
-            ? $"{t.VisibleLines:N0}{more} lines"
-            : $"{t.VisibleLines:N0}{more}";
-        var text = $"{where}{lines}";
+        bool detailed = t.HiddenLines > 0 || t.Occurrences > t.VisibleLines + t.HiddenLines;
+
+        // Off a match there is no "Match 12 of" to give the number its meaning, so it has to name itself -
+        // otherwise the status bar reads as a bare "348".
+        string text = t.Position > 0
+            ? $"Match {t.Position:N0} of {t.VisibleLines:N0}{more}{(detailed ? " lines" : "")}"
+            : $"{t.VisibleLines:N0}{more} {(detailed ? "lines" : "matches")}";
 
         if (t.HiddenLines > 0) text += $" \u00b7 {t.HiddenLines:N0}{more} hidden";
         if (t.Occurrences > t.VisibleLines + t.HiddenLines)
