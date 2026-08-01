@@ -65,6 +65,11 @@ public sealed class MainForm : Form
     private string _findWhat = "", _findWhatDetail = "", _findMsg = "", _findMsgDetail = "";
     private double _findFraction;
     private DateTime _findMsgUntil;
+    // The tally walks every hit, so it is recomputed on a human timescale rather than on the 33ms tick.
+    private string _tally = "", _tallyDetail = "";
+    private DateTime _tallyAt;
+    private long _tallyLine = -1;
+    private int _tallyGeneration = -1;
     private int _activitySlot, _progressSlot;
     private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
@@ -864,8 +869,10 @@ public sealed class MainForm : Form
 
     private const int FindMessageSeconds = 5;
 
-    /// <summary>The longest wording the activity slot has to fit; it is sized from this.</summary>
-    private const string WidestActivityText = "Searching\u2026 100%  (Esc)";
+    /// <summary>The longest wording the activity slot has to fit; it is sized from this. A long tally is
+    /// ellipsised instead, with the whole of it on hover - the position and the total come first, so what is
+    /// trimmed is the least of it.</summary>
+    private const string WidestActivityText = "Match 9,999 of 99,999 lines";
 
     private void LoadFilters()
     {
@@ -1260,8 +1267,31 @@ public sealed class MainForm : Form
         _grid.SetFindHighlight(null);
         _doc.DropSearch();
         _findMsg = "";
+        _tally = _tallyDetail = "";
+        _tallyLine = -1;
         _findDialog?.SetStatus("");
         UpdateStatus();
+    }
+
+    /// <summary>The "Match 12 of 348" text, recomputed when there is reason to: counting walks every hit, so
+    /// doing it on the 33ms tick would cost more than the answer is worth.</summary>
+    private string RefreshTally()
+    {
+        if (_lastQuery is not { } query) return "";
+        long caret = _grid.CaretLine;
+        bool stale = caret != _tallyLine
+                     || _tallyGeneration != _doc.FilterGeneration
+                     || (!_doc.FindComplete && DateTime.UtcNow - _tallyAt > TimeSpan.FromMilliseconds(250))
+                     || _tally.Length == 0;
+        if (!stale) return _tally;
+
+        _tallyLine = caret;
+        _tallyGeneration = _doc.FilterGeneration;
+        _tallyAt = DateTime.UtcNow;
+        if (_doc.FindTally(caret) is not { } t) { _tally = _tallyDetail = ""; return ""; }
+        _tally = FindStatusText.Short(t);
+        _tallyDetail = FindStatusText.Long(t, query.Text);
+        return _tally;
     }
 
     /// <summary>Writes the activity slot's text, trimming it to the space reserved for it. The untrimmed
@@ -1355,7 +1385,7 @@ public sealed class MainForm : Form
     {
         if (_doc.RowCount != _lastRowCount || _doc.MatchedLineCount != _lastMatched
             || _doc.IsBusy || _doc.IsBusy != _lastBusy
-            || _findBusy || _findMsg.Length > 0
+            || _findBusy || _findMsg.Length > 0 || _lastQuery is not null
             || (_updater?.PendingVersion is not null || UpdateNoticeOverride is not null) != _updateLabel.Visible)
             UpdateStatus();
     }
@@ -1405,6 +1435,11 @@ public sealed class MainForm : Form
         else if (_findMsg.Length > 0)
         {
             SetActivity(_findMsg, Color.Firebrick, _findMsgDetail);
+            if (showBar) SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
+        }
+        else if (RefreshTally() is { Length: > 0 } tally)
+        {
+            SetActivity(tally, SystemColors.ControlText, _tallyDetail);
             if (showBar) SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
         }
         else if (indexing)

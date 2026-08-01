@@ -61,6 +61,7 @@ internal static class SelfTest
             ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
+            ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -815,6 +816,49 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>What a search reports. The rules are all about saying no more than there is to say: no
+    /// occurrence count when every line matched once, no hidden count when nothing is hidden, and a "+" on
+    /// anything the sweep has not finished counting.</summary>
+    private static bool RunFindStatusChecks()
+    {
+        Line("-- find status wording --");
+        static FindTally T(long pos, long shown, long hidden, long shownOcc, long occ, bool complete = true, bool approx = false)
+            => new(pos, shown, hidden, shownOcc, occ, complete, approx);
+
+        string plain = FindStatusText.Short(T(12, 348, 0, 348, 348));
+        bool ok = Check("the simple case says just where you are", plain == "Match 12 of 348", plain);
+
+        string multi = FindStatusText.Short(T(12, 348, 0, 1204, 1204));
+        ok &= Check("occurrences appear only when a line matched more than once",
+                    multi == "Match 12 of 348 lines \u00b7 1,204 hits", multi);
+
+        string hiddenText = FindStatusText.Short(T(12, 252, 96, 891, 1204));
+        ok &= Check("hidden matches are reported apart from shown ones",
+                    hiddenText == "Match 12 of 252 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits", hiddenText);
+
+        string partial = FindStatusText.Short(T(12, 252, 96, 891, 1204, complete: false));
+        ok &= Check("an unfinished sweep marks every count", partial.Count(c => c == '+') == 4, partial);
+
+        string none = FindStatusText.Short(T(0, 0, 0, 0, 0));
+        ok &= Check("nothing found says so", none == "No matches", none);
+
+        string searching = FindStatusText.Short(T(0, 0, 0, 0, 0, complete: false));
+        ok &= Check("nothing found yet does not", searching == "Searching\u2026", searching);
+
+        string offMatch = FindStatusText.Short(T(0, 348, 0, 348, 348));
+        ok &= Check("no position is claimed when the caret is not on a match", offMatch == "348", offMatch);
+
+        string approx = FindStatusText.Short(T(1, 10, 0, 99, 99, approx: true));
+        ok &= Check("a floored occurrence count says it is a floor", approx.Contains('\u2265'), approx);
+
+        string detail = FindStatusText.Long(T(12, 252, 96, 891, 1204), "disk");
+        ok &= Check("the long form names the term and holds every number",
+                    detail.Contains("disk") && detail.Contains("252") && detail.Contains("96") &&
+                    detail.Contains("891") && detail.Contains("1,204"), detail);
+
+        return ok;
     }
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the

@@ -1,9 +1,19 @@
 namespace Cascade.Core.Find;
 
+/// <summary>A line that matched, and how many times it did.</summary>
+public readonly record struct FindHit(long Line, int Occurrences);
+
 /// <summary>Examines lines <paramref name="from"/> to <paramref name="from"/> + <paramref name="count"/> and
 /// appends every one that matches to <paramref name="hits"/>. Whether that reads a file, and whether it uses
 /// one thread or all of them, is the caller's business - a search only cares about the answers.</summary>
-public delegate void FindRangeScanner(long from, long count, List<long> hits, CancellationToken ct);
+public delegate void FindRangeScanner(long from, long count, List<FindHit> hits, CancellationToken ct);
+
+/// <summary>How much a term matches, split by what the view is currently showing.</summary>
+/// <param name="Position">Which visible match the caret is on, 1-based, or 0 when it is not on one.</param>
+/// <param name="Approximate">Occurrence counts are a floor: too many lines matched more than once to keep
+/// track of every one.</param>
+public readonly record struct FindTally(long Position, long VisibleLines, long HiddenLines,
+                                        long VisibleOccurrences, long Occurrences, bool Complete, bool Approximate);
 
 /// <summary>Every line one search term matches, gathered once and kept until the term changes.
 ///
@@ -28,6 +38,11 @@ public sealed class FindSearch : IDisposable
 
     private long _lo, _hi;              // lines [_lo, _hi) have been examined
     private long _found;
+    private long _occurrences;
+    // Only lines matching MORE than once are recorded: almost every hit line matches exactly once, so this
+    // stays tiny in practice, and the cap keeps a pathological term ("e" in prose) from eating memory.
+    private readonly Dictionary<long, int> _extras = new();
+    private bool _extrasCapped;
     private bool _stopped;
     private Exception? _failure;
     private Task[] _sweeps = Array.Empty<Task>();
@@ -68,6 +83,31 @@ public sealed class FindSearch : IDisposable
 
     /// <summary>Matches found so far. Only meaningful once <see cref="Complete"/>.</summary>
     public long Found { get { lock (_sync) return _found; } }
+
+    private const int MaxExtraLines = 2_000_000;
+
+    /// <summary>How much has been found, split by whether the view is currently showing it. Walks the hits,
+    /// so it is for the status bar to ask at a human rate rather than per frame.</summary>
+    public FindTally Count(Func<long, bool>? visible, long currentLine)
+    {
+        lock (_sync)
+        {
+            long visibleLines = 0, hiddenLines = 0, visibleOcc = 0, position = 0;
+            for (long line = _hits.Next(0); line >= 0; line = _hits.Next(line + 1))
+            {
+                int occ = _extras.TryGetValue(line, out int extra) ? extra + 1 : 1;
+                if (visible is null || visible(line))
+                {
+                    visibleLines++;
+                    visibleOcc += occ;
+                    if (line == currentLine) position = visibleLines;
+                }
+                else hiddenLines++;
+            }
+            return new FindTally(position, visibleLines, hiddenLines, visibleOcc, _occurrences,
+                                 _lo <= 0 && _hi >= _lines, _extrasCapped);
+        }
+    }
 
     public void Start()
     {
@@ -133,7 +173,7 @@ public sealed class FindSearch : IDisposable
 
     private void Sweep(bool forward, CancellationToken ct)
     {
-        var hits = new List<long>();
+        var hits = new List<FindHit>();
         long edge = _start;
         long block = FirstBlockLines;
         try
@@ -159,7 +199,19 @@ public sealed class FindSearch : IDisposable
 
                 lock (_sync)
                 {
-                    foreach (long h in hits) { if (!_hits.Contains(h)) _found++; _hits.Add(h); }
+                    foreach (var h in hits)
+                    {
+                        if (_hits.Contains(h.Line)) continue;
+                        _hits.Add(h.Line);
+                        _found++;
+                        int occ = Math.Max(1, h.Occurrences);
+                        _occurrences += occ;
+                        if (occ > 1)
+                        {
+                            if (_extras.Count < MaxExtraLines) _extras[h.Line] = occ - 1;
+                            else _extrasCapped = true;
+                        }
+                    }
                     if (forward) _hi = from + count; else _lo = from;
                     Pulse();
                 }
@@ -187,6 +239,9 @@ public sealed class FindSearch : IDisposable
     /// <summary>Test seam: waits for the whole file to have been examined.</summary>
     internal bool WaitForCompletion(int timeoutMs = 30000)
         => _sweeps.Length == 0 || Task.WaitAll(_sweeps, timeoutMs);
+
+    /// <summary>Same, for tests outside this assembly.</summary>
+    public bool WaitForCompletionForTesting(int timeoutMs = 30000) => WaitForCompletion(timeoutMs);
 
     public void Dispose()
     {
