@@ -96,14 +96,16 @@ public sealed class LineGridControl : Control
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         BackColor = Color.White;
-        // Added in this order so the scrollbar ends up outermost, with the map inside it against the text -
-        // the map is the fine-grained one and belongs next to what it describes.
+        // Added in this order because docking runs from the end of the collection backwards: the scrollbar
+        // and map take a full-height strip each, and the sideways bar gets what is left, so it stops short
+        // of them - as a scrollbar pair does everywhere else - and they no longer shift up and down by its
+        // height when wrapping is switched on and off.
+        _hbar = new SlimScrollBar(this, vertical: false);
+        Controls.Add(_hbar);
         _map = new MiniMapControl(this);
         Controls.Add(_map);
         _vbar = new SlimScrollBar(this);
         Controls.Add(_vbar);
-        _hbar = new SlimScrollBar(this, vertical: false);
-        Controls.Add(_hbar);
         _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; Invalidate(); };
         _hbar.Scrolled += v => { _hScroll = (int)v; Invalidate(); };
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
@@ -484,10 +486,13 @@ public sealed class LineGridControl : Control
     private long ClampFirstRow(long first)
     {
         long rows = _doc?.RowCount ?? 0;
-        // While wrapping, the last screenful may hold fewer rows than the one just measured, so the count
-        // from the last frame is not a limit - stopping at it would put the end of the file out of reach.
-        long last = Wrapping ? rows - 1 : rows - EffectiveVisibleRows;
-        return Math.Clamp(first, 0, Math.Max(0, last));
+        if (rows <= 0) return 0;
+        long limit = Math.Max(0, rows - EffectiveVisibleRows);
+        // While wrapping, the count from the last frame is only a hint - the last screenful may hold a very
+        // different number of rows. Work the real limit out when it is about to matter, or the view either
+        // stops short of the end or runs off it into empty space.
+        if (Wrapping && first > limit) limit = FirstRowShowing(rows - 1);
+        return Math.Clamp(first, 0, Math.Max(0, limit));
     }
 
     /// <summary>Scrolls so <paramref name="first"/> is the top visible row (clamped), syncing the scrollbar.</summary>
@@ -551,8 +556,7 @@ public sealed class LineGridControl : Control
         long rows = _doc?.RowCount ?? 0;
         int visible = EffectiveVisibleRows;
 
-        long maxFirst = Math.Max(0, rows - visible);
-        if (_firstRow > maxFirst) _firstRow = maxFirst;
+        _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
 
         int vMax = (int)Math.Min(int.MaxValue, Math.Max(0, rows - 1));
@@ -891,7 +895,7 @@ public sealed class LineGridControl : Control
             using (var b = new SolidBrush(back)) g.FillRectangle(b, rowRect);
 
             DrawMarkers(g, line, y, rowHeight);
-            DrawLineNumber(g, line, y, selected);
+            DrawLineNumber(g, line, y, rowHeight, selected);
 
             var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
             var clip = g.Clip;
@@ -1054,13 +1058,14 @@ public sealed class LineGridControl : Control
         }
     }
 
-    private void DrawLineNumber(Graphics g, long line, int y, bool selected)
+    private void DrawLineNumber(Graphics g, long line, int y, int height, bool selected)
     {
         int lnw = LineNumberGutterWidth;
         if (lnw == 0) return;
         int x = MarkerGutterWidth;
-        var rect = new Rectangle(x, y, lnw, _rowHeight);
-        using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, rect);
+        // The whole height of the row, not one line of it: a wrapped row is several lines tall, and the
+        // segments below the first would otherwise keep the row's own fill - or its selection colour.
+        using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, x, y, lnw, height);
         var color = selected ? _settings.SelectionBack : _settings.LineNumberColor;
         TextRenderer.DrawText(g, (line + 1).ToString(), _fontRegular, new Rectangle(x, y, lnw - 6, _rowHeight),
             color, TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
@@ -1248,8 +1253,8 @@ public sealed class LineGridControl : Control
             case Keys.Down when e.Control && !e.Shift && !e.Alt: ScrollBy(1); break;
             case Keys.Up: MoveCaret(-1, e.Shift); break;
             case Keys.Down: MoveCaret(1, e.Shift); break;
-            case Keys.PageUp: MoveCaret(-page, e.Shift); break;
-            case Keys.PageDown: MoveCaret(page, e.Shift); break;
+            case Keys.PageUp: PageCaret(-1, e.Shift); break;
+            case Keys.PageDown: PageCaret(1, e.Shift); break;
             case Keys.Home when e.Control: MoveCaretTo(0, e.Shift); break;
             case Keys.End when e.Control: MoveCaretTo(rows - 1, e.Shift); break;
             // Plain Home/End jump the view to the far left and far right of the longest line on screen.
@@ -1301,7 +1306,19 @@ public sealed class LineGridControl : Control
         MoveCaretTo((_caretRow < 0 ? _firstRow : _caretRow) + delta, extend);
     }
 
-    private void MoveCaretTo(long row, bool extend)
+    /// <summary>Moves the caret a screenful, and leaves it on the row that ends up against the edge it moved
+    /// towards. While wrapping, how many rows a screenful is has to be measured where the caret is going
+    /// rather than counted from where it came: a screenful of tall wrapped rows is fewer rows than a
+    /// screenful of short ones, so counting left the caret short of the bottom.</summary>
+    private void PageCaret(int direction, bool extend)
+    {
+        MoveCaret(direction * Math.Max(1, EffectiveVisibleRows - 1), extend);
+        if (!Wrapping || direction < 0 || _doc is null) return;
+        long last = Math.Min(_doc.RowCount - 1, _firstRow + Math.Max(1, RowsFittingFrom(_firstRow)) - 1);
+        if (last > _caretRow) MoveCaretTo(last, extend, reveal: false);
+    }
+
+    private void MoveCaretTo(long row, bool extend, bool reveal = true)
     {
         if (_doc is null) return;
         ClearCharSelection();
@@ -1310,7 +1327,7 @@ public sealed class LineGridControl : Control
         _caretRow = row;
         if (extend && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, row);
         else _sel.SetSingle(row);
-        EnsureVisible(row);
+        if (reveal) EnsureVisible(row);
         Invalidate();
         SelectionChanged?.Invoke();
     }
@@ -1360,24 +1377,45 @@ public sealed class LineGridControl : Control
     private long FirstRowShowing(long last)
     {
         if (_doc is null || !Wrapping) return last - VisibleRowCount + 1;
-        int room = Math.Max(1, ClientSize.Height - _hbar.Height - HeaderHeight);
-        int width = ContentWidth;
-        var defaults = new ResolvedStyle(
-            new RgbColor(_settings.Foreground.R, _settings.Foreground.G, _settings.Foreground.B),
-            new RgbColor(_settings.Background.R, _settings.Background.G, _settings.Background.B), false, false);
-        long row = last, used = 0;
+        long room = ViewportHeight, used = 0, row = last;
         while (row >= 0)
         {
-            long line = _doc.RowToLine(row);
-            string text = _doc.GetLineText(line);
-            var eval = _doc.EvaluateText(text, line);
-            var font = SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
-            long height = (long)WrapInto(Expand(text), width, font, _segments) * _rowHeight;
+            long height = RowHeightOf(row);
             if (used + height > room) break;
             used += height;
             row--;
         }
         return Math.Clamp(row + 1, 0, last);
+    }
+
+    /// <summary>How many rows fit starting at <paramref name="first"/>, counted the way the paint counts
+    /// them: a row whose top is on screen is drawn, even where its last segment runs past the bottom.</summary>
+    private int RowsFittingFrom(long first)
+    {
+        if (_doc is null || !Wrapping) return VisibleRowCount;
+        long rows = _doc.RowCount, room = ViewportHeight, used = 0, row = first;
+        int fitted = 0;
+        while (row < rows && used < room)
+        {
+            used += RowHeightOf(row);
+            fitted++;
+            row++;
+        }
+        return Math.Max(1, fitted);
+    }
+
+    private int ViewportHeight => Math.Max(1, ClientSize.Height - _hbar.Height - HeaderHeight);
+
+    /// <summary>How tall a row is drawn, measured the way the paint measures it so the two agree.</summary>
+    private int RowHeightOf(long row)
+    {
+        if (_doc is null) return _rowHeight;
+        long line = _doc.RowToLine(row);
+        string text = _doc.GetLineText(line);
+        var eval = _doc.EvaluateText(text, line);
+        var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
+        var font = SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
+        return WrapInto(Expand(text), ContentWidth, font, _segments) * _rowHeight;
     }
 
     /// <summary>Scrolls a jumped-to row into the middle half of the view, so it arrives with context on
