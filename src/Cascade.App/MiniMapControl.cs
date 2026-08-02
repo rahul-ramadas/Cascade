@@ -414,6 +414,18 @@ internal sealed class MiniMapControl : Control
         if (_picture is { } picture) g.DrawImageUnscaled(picture, 0, 0);
         DrawMarks(g, doc);
         DrawViewport(g);
+        DrawFrame(g);
+    }
+
+    /// <summary>Closes the map off at the top and bottom, so it reads as its own strip beside the scrollbar
+    /// rather than running into whatever is above and below it. Drawn last: the viewport rectangle reaches
+    /// the ends of the map and would otherwise paint over it.</summary>
+    private void DrawFrame(Graphics g)
+    {
+        int rule = Divider;
+        using var brush = new SolidBrush(Blend(_grid.Settings.Foreground, _grid.Settings.GutterBack, 0.30));
+        g.FillRectangle(brush, 0, 0, ClientSize.Width, rule);
+        g.FillRectangle(brush, 0, ClientSize.Height - rule, ClientSize.Width, rule);
     }
 
     private void DrawMarks(Graphics g, CascadeDocument doc)
