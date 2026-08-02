@@ -577,9 +577,14 @@ public sealed class CascadeDocument : IDisposable
         _src?.Dispose();
     }
 
+    /// <summary>True once the file has been let go. Releasing the mapping of a large log is slow, so what
+    /// matters is that this happens with the window already down - see MainForm.Dispose.</summary>
+    public bool IsDisposed { get; private set; }
+
     public void Dispose()
     {
         DisposeCurrent();
         _indexCts.Dispose();
+        IsDisposed = true;
     }
 }
