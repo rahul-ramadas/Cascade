@@ -38,6 +38,7 @@ public sealed class LineGridControl : Control
     private AppSettings _settings = new();
 
     private Font _fontRegular = null!, _fontBold = null!, _fontItalic = null!, _fontBoldItalic = null!;
+    private FontFamily? _fontFamily;
     private int _rowHeight = 16;
     private int _charWidth = 8;
 
@@ -535,10 +536,13 @@ public sealed class LineGridControl : Control
     public void RebuildFonts()
     {
         _fontRegular?.Dispose(); _fontBold?.Dispose(); _fontItalic?.Dispose(); _fontBoldItalic?.Dispose();
+        // After the fonts made from it, never before: a font keeps its family alive behind it.
+        _fontFamily?.Dispose();
         float size = _settings.EffectiveFontSize;
         FontFamily family;
         try { family = new FontFamily(_settings.FontFamily); }
         catch { family = FontFamily.GenericMonospace; }
+        _fontFamily = ReferenceEquals(family, FontFamily.GenericMonospace) ? null : family;
         _fontRegular = new Font(family, size, FontStyle.Regular);
         _fontBold = new Font(family, size, FontStyle.Bold);
         _fontItalic = new Font(family, size, FontStyle.Italic);
@@ -739,6 +743,8 @@ public sealed class LineGridControl : Control
     internal long CharOriginForTesting => _charOriginRow;
     internal int ViewportHeightForTesting => ViewportHeight;
     internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
+    internal Font FontForTesting => _fontRegular;
+    internal FontFamily? FontFamilyForTesting => _fontFamily;
 
     /// <summary>Top of a row as painted, so a check can aim at a wrapped row's second segment.</summary>
     internal int RowTopForTesting(long row)
@@ -1197,8 +1203,13 @@ public sealed class LineGridControl : Control
 
     protected override void Dispose(bool disposing)
     {
-        // Neither of these is a child control, so nothing else would clean them up.
-        if (disposing) { _tipTimer.Dispose(); _tips.Dispose(); }
+        // None of these is a child control, so nothing else would clean them up.
+        if (disposing)
+        {
+            _tipTimer.Dispose(); _tips.Dispose();
+            _fontRegular?.Dispose(); _fontBold?.Dispose(); _fontItalic?.Dispose(); _fontBoldItalic?.Dispose();
+            _fontFamily?.Dispose();
+        }
         base.Dispose(disposing);
     }
 
