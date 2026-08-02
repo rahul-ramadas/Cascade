@@ -78,6 +78,7 @@ internal static class SelfTest
             ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("find bar room", RunFindBarRoomChecks);
             ok &= Timed("status bar", RunStatusBarChecks);
+            ok &= Timed("line spacing", RunLineSpacingChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -2888,6 +2889,10 @@ internal static class SelfTest
             ok &= Check($"the bar is open", form.FindBarIsOpenForTesting);
             ok &= Check($"and stands a whole number of lines tall ({barHeight}px of {pitch}px lines)",
                         barHeight % pitch == 0);
+            // ...and no more of them than it needs: rounding up from a generously padded height once bought
+            // a third line that was two thirds empty.
+            ok &= Check($"and no taller than it has to be ({barHeight}px for a {form.FindBarForTesting.RowHeightForTesting}px row)",
+                        barHeight - pitch < form.FindBarForTesting.RowHeightForTesting);
 
             // The report was that the filter pane shrank a little on every trip. It did: the bar was not a
             // whole number of lines, so the divider moved to make the remaining ones fit, and never moved back.
@@ -3069,6 +3074,61 @@ internal static class SelfTest
             host.Dispose();
             Pump();
         }
+    }
+
+    /// <summary>A log line is as tall as the typeface says a line is, and no taller unless the reader asks.
+    /// Two pixels used to be added to every row unasked, which on Consolas is a line in every eleven off the
+    /// screen - the difference that made another viewer look like it fitted more in at the same size.</summary>
+    private static bool RunLineSpacingChecks()
+    {
+        Line("-- how tall a line is --");
+
+        var settings = new AppSettings();
+        var grid = new LineGridControl { Dock = DockStyle.Fill };
+        var host = new Form
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            ClientSize = new Size(700, 400),
+            Opacity = 0,
+            FormBorderStyle = FormBorderStyle.None
+        };
+        host.Controls.Add(grid);
+        try
+        {
+            host.Show();
+            Pump();
+
+            bool ok = Check("nothing is added to a line by default", settings.ExtraLineSpacing == 0,
+                            settings.ExtraLineSpacing.ToString());
+
+            grid.ApplySettings(settings);
+            int natural = grid.FontForTesting.Height;
+            int pitch = grid.RowPitch;
+            Line($"   ({settings.FontFamily} {settings.FontSize}pt: font line height {natural}px, row pitch {pitch}px)");
+            ok &= Check("so a row is exactly the font's own line height", pitch == natural);
+
+            // ...and asking for more gives exactly that much more, which is the point of the preference.
+            foreach (int extra in new[] { 1, 3, 8 })
+            {
+                settings.ExtraLineSpacing = extra;
+                grid.ApplySettings(settings);
+                ok &= Check($"asking for {extra} more gives {natural + extra}px", grid.RowPitch == natural + extra,
+                            grid.RowPitch.ToString());
+            }
+
+            // More room per line means fewer of them, which is the whole reason to care.
+            settings.ExtraLineSpacing = 0;
+            grid.ApplySettings(settings);
+            int tight = grid.VisibleRowCountForTesting;
+            settings.ExtraLineSpacing = 2;
+            grid.ApplySettings(settings);
+            int loose = grid.VisibleRowCountForTesting;
+            ok &= Check($"and costs lines on screen ({tight} tight, {loose} with two pixels added)",
+                        tight > loose);
+            return ok;
+        }
+        finally { host.Close(); host.Dispose(); Pump(); }
     }
 
     /// <summary>The status bar used to repeat the caret's line number and the total beside it. The gutter

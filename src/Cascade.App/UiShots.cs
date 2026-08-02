@@ -321,7 +321,7 @@ internal static class UiShots
         host.Controls.Add(bar);
         host.Show();
         Settle();
-        bar.SnapHeightTo(26);   // as the app does: a whole number of log lines
+        bar.SnapHeightTo(24);   // as the app does: a whole number of log lines
         host.ClientSize = new Size(1500, bar.Height);
         if (badPattern is not null)
         {

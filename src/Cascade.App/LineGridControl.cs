@@ -542,7 +542,10 @@ public sealed class LineGridControl : Control
         _fontBold = new Font(family, size, FontStyle.Bold);
         _fontItalic = new Font(family, size, FontStyle.Italic);
         _fontBoldItalic = new Font(family, size, FontStyle.Bold | FontStyle.Italic);
-        _rowHeight = Math.Max(_fontRegular.Height + 2, 8);
+        // Font.Height is the typeface's own line spacing, which for a monospaced face already includes
+        // whatever gap its designer wanted between lines - so anything added here is the reader's choice,
+        // not a correction. Two pixels used to be added unasked, costing a line in every eleven on screen.
+        _rowHeight = Math.Max(_fontRegular.Height + Math.Max(0, _settings.ExtraLineSpacing), 8);
         _charWidth = Math.Max(1, TextRenderer.MeasureText("0", _fontRegular, new Size(1000, 100),
             TextFormatFlags.NoPadding).Width);
         Invalidate();

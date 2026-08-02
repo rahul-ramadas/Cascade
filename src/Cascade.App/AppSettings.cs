@@ -35,6 +35,11 @@ public sealed class AppSettings
     public float FontSize { get; set; } = 10f;
     public int ZoomPercent { get; set; } = 100;
 
+    /// <summary>Pixels added to each log line on top of the font's own line height. Zero packs the lines as
+    /// tightly as the typeface asks for, which is what a log reader usually wants; a point or two of air
+    /// makes a dense trace easier to scan across.</summary>
+    public int ExtraLineSpacing { get; set; }
+
     public int ForegroundArgb { get; set; } = Color.FromArgb(30, 30, 30).ToArgb();
     public int BackgroundArgb { get; set; } = Color.White.ToArgb();
     public int LineNumberArgb { get; set; } = Color.FromArgb(150, 150, 150).ToArgb();

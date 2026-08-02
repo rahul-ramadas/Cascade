@@ -1299,6 +1299,9 @@ public sealed class MainForm : Form
         LayoutPresetPane();
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);
+        // The line height may have moved with it, and the bar is measured in whole log lines.
+        _findBar.SnapHeightTo(_grid.RowPitch);
+        SnapSplitter();
         _filterTree.SetSettings(_settings);
         RefreshRecentMenus();
         UpdateStatus();
