@@ -245,16 +245,14 @@ public sealed class CascadeDocument : IDisposable
     public string GetLineText(long line)
     {
         if (line < 0 || line >= _index.Count) return "";
-        long s = _index.Get(line);
-        long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _src.Length;
+        _index.GetRange(line, _src.Length, out long s, out long e);
         return _uiReader.GetString(s, e);
     }
 
     public bool IsLineTruncated(long line)
     {
         if (line < 0 || line >= _index.Count) return false;
-        long s = _index.Get(line);
-        long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _src.Length;
+        _index.GetRange(line, _src.Length, out long s, out long e);
         return LineReader.IsTruncated(s, e);
     }
 
@@ -436,8 +434,7 @@ public sealed class CascadeDocument : IDisposable
                 for (long line = start; line < end; line++)
                 {
                     if ((line & 0x3FFF) == 0) token.ThrowIfCancellationRequested();
-                    long s = index.Get(line);
-                    long e = (line + 1 < index.Count) ? index.Get(line + 1) : length;
+                    index.GetRange(line, length, out long s, out long e);
                     int occurrences = matcher.CountIn(reader.GetChars(s, e));
                     if (occurrences > 0) into.Add(new FindHit(line, occurrences));
                 }
@@ -555,8 +552,7 @@ public sealed class CascadeDocument : IDisposable
 
     private bool DeepMatchesLine(LineReader reader, FilterSnapshot snapshot, Filter filter, long line)
     {
-        long s = _index.Get(line);
-        long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _src.Length;
+        _index.GetRange(line, _src.Length, out long s, out long e);
         return snapshot.DeepMatches(reader.GetChars(s, e), line, Markers, filter);
     }
 

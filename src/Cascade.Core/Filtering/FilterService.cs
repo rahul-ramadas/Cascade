@@ -381,8 +381,7 @@ public sealed class FilterService : IDisposable
                     for (int k = from; k < until; k++)
                     {
                         long line = start + k;
-                        long s = _index.Get(line);
-                        long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _fileLength;
+                        _index.GetRange(line, _fileLength, out long s, out long e);
                         var span = w.Reader.GetChars(s, e);
 
                         if (deepBits is null)
