@@ -18,7 +18,13 @@ public sealed class FilterEditDialog : DialogBase
     /// anything past its MaxLength, so the limit is stated here rather than left to the default.</summary>
     internal const int MaxPatternLength = 32_000;
 
-    private readonly TextBox _text = new() { Dock = DockStyle.Fill, Font = new Font("Consolas", 9.75f), MaxLength = MaxPatternLength };
+    private static readonly Font Mono = new("Consolas", 9.75f);
+
+    /// <summary>The font the box is actually drawn in - not the field it is meant to come from, which would
+    /// answer the same whatever the box had been given.</summary>
+    internal Font FontForTesting => _text.Font;
+
+    private readonly TextBox _text = new() { Dock = DockStyle.Fill, Font = Mono, MaxLength = MaxPatternLength };
     private readonly CheckBox _regex = new() { Text = "&Regular expression", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly CheckBox _caseSensitive = new() { Text = "&Case sensitive", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly CheckBox _excluding = new() { Text = "&Excluding filter (hides matching lines)", AutoSize = true, Margin = new Padding(0, 3, 0, 3) };

@@ -73,6 +73,8 @@ internal static class SelfTest
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
+            ok &= Timed("the menus", RunMenuActionChecks);
+            ok &= Timed("resources", RunResourceChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
             ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
@@ -2725,6 +2727,253 @@ internal static class SelfTest
     private static char? MnemonicOf(string text)    {
         int i = text.IndexOf('&');
         return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
+    }
+
+    /// <summary>Drawing handles have to be given back at a moment we choose, not whenever a collection
+    /// happens to run. A font handed to a control is not disposed with it, and a finalizer will get there
+    /// eventually - so counting handles proves nothing, and these ask the objects themselves instead.</summary>
+    private static bool RunResourceChecks()
+    {
+        Line("-- drawing handles are given back --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_gdi_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, string.Concat(Enumerable.Range(0, 200).Select(i => $"line {i}\n")),
+                          new UTF8Encoding(false));
+
+        static bool LetGo(Font font)
+        {
+            try { _ = font.Height; return false; }
+            catch (ArgumentException) { return true; }   // what a disposed Font answers
+        }
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form { ClientSize = new Size(600, 400), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            // Zooming rebuilds every font. There are four of them and a family behind them, and a user
+            // holding Ctrl and turning the wheel does this dozens of times a minute.
+            var wasRegular = grid.FontForTesting;
+            settings.ZoomPercent = 150;
+            grid.RebuildFonts();
+            // Only the faces are asked about. Disposing the family they were cut from is worth doing, but it
+            // cannot be checked this way: GDI+ keeps it alive behind any font still holding it, so it
+            // answers happily either way.
+            bool ok = Check("rebuilding the fonts lets go of the ones it replaces", LetGo(wasRegular));
+            ok &= Check("and makes a working one to draw with", grid.FontForTesting.Height > 0,
+                        grid.FontForTesting.Height.ToString());
+
+            // A log view is built per window, and closing one has to give its fonts back at that moment.
+            var spare = new LineGridControl();
+            spare.Attach(doc, settings);
+            var spareFont = spare.FontForTesting;
+            spare.Dispose();
+            ok &= Check("and closing a log view lets go of its fonts", LetGo(spareFont));
+
+            // The find bar is hidden rather than closed, so it lives as long as the window; the filter
+            // dialog is opened once per filter written. Neither may hand out a font it never takes back.
+            var find = new FindDialog((_, _) => { });
+            var findFont = find.FontForTesting;
+            find.Dispose();
+            ok &= Check("and closing the find bar lets go of its font", LetGo(findFont));
+
+            using var one = new FilterEditDialog(new Filter { Match = { Text = "x" } }, isNew: true, Array.Empty<Filter>());
+            using var two = new FilterEditDialog(new Filter { Match = { Text = "y" } }, isNew: true, Array.Empty<Filter>());
+            ok &= Check("and the filter dialog shares one font rather than making another each time",
+                        ReferenceEquals(one.FontForTesting, two.FontForTesting));
+            return ok;
+        }
+        finally
+        {
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { }
+        }
+    }
+
+    /// <summary>The menu items a user reaches for, clicked through a real window on a real file. Almost
+    /// everything else here builds a control directly; this is the only thing that exercises the wiring
+    /// between the menu, the settings and the three panes - which is where a command that quietly stopped
+    /// doing anything would hide.</summary>
+    private static bool RunMenuActionChecks()
+    {
+        Line("-- the menus --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_menus_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 400; i++)
+            sb.Append(i % 5 == 0 ? $"ERROR line {i}\n" : $"plain line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        string filters = Path.Combine(Path.GetTempPath(), "cascade_st_menus_" + Guid.NewGuid().ToString("N") + ".cascade");
+        File.WriteAllText(filters, """
+            { "filters": [ { "id": "f1", "enabled": true, "matchType": "Text", "text": "ERROR",
+                             "style": { "background": "#FFD0D0" } } ] }
+            """, new UTF8Encoding(false));
+
+        var settings = new AppSettings();
+        var state = new MachineState();
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(settings, state, new[] { path, "/Filters:" + filters })
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1000, 760),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 400; i++) { Thread.Sleep(20); Pump(); }
+
+            bool ok = Check("the file is open and indexed", doc.CompletedLineCount == 400,
+                            $"{doc.CompletedLineCount} lines");
+            ok &= Check("and its filters came with it", doc.Filters.EnumerateDepthFirst().Count() == 1,
+                        $"{doc.Filters.EnumerateDepthFirst().Count()} filters");
+            for (int i = 0; i < 80 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            ok &= Check("which match the lines they should", doc.MatchedLineCount == 80,
+                        $"{doc.MatchedLineCount} of 400 matched");
+
+            var grid = form.GridForTesting;
+
+            // View: each of these has to change what is on screen, not merely tick a box.
+            ok &= Check("View > Show Only Filtered Lines hides the rest",
+                        form.ClickMenuForTesting("View", "Show Only Filtered Lines") && doc.FilteredMode &&
+                        doc.RowCount == 80, $"filtered {doc.FilteredMode}, {doc.RowCount} rows");
+            ok &= Check("and again puts them back",
+                        form.ClickMenuForTesting("View", "Show Only Filtered Lines") && !doc.FilteredMode &&
+                        doc.RowCount == 400, $"filtered {doc.FilteredMode}, {doc.RowCount} rows");
+
+            int gutter = grid.GutterWidthForTesting;
+            ok &= Check("View > Show Line Numbers takes the numbers away",
+                        form.ClickMenuForTesting("View", "Show Line Numbers") &&
+                        !settings.ShowLineNumbers && grid.GutterWidthForTesting < gutter,
+                        $"gutter {gutter} -> {grid.GutterWidthForTesting}");
+            ok &= Check("and brings them back",
+                        form.ClickMenuForTesting("View", "Show Line Numbers") &&
+                        settings.ShowLineNumbers && grid.GutterWidthForTesting == gutter,
+                        $"gutter is {grid.GutterWidthForTesting}, was {gutter}");
+
+            ok &= Check("View > Show Match Map takes the map away",
+                        form.ClickMenuForTesting("View", "Show Match Map") &&
+                        !settings.ShowMatchMap && grid.MapWidthForTesting == 0,
+                        $"map {grid.MapWidthForTesting}px");
+            ok &= Check("and the scrollbar stays behind", grid.VerticalScrollBarVisibleForTesting);
+            ok &= Check("and it comes back",
+                        form.ClickMenuForTesting("View", "Show Match Map") &&
+                        settings.ShowMatchMap && grid.MapWidthForTesting > 0,
+                        $"map {grid.MapWidthForTesting}px");
+
+            ok &= Check("View > Word Wrap breaks the long lines up",
+                        form.ClickMenuForTesting("View", "Word Wrap") && settings.WordWrap && grid.Wrapping);
+            ok &= Check("and takes the sideways scrollbar away", !grid.HScrollBarForTesting.Visible);
+            ok &= Check("and the log still holds a whole number of lines",
+                        (form.SplitForTesting.SplitterDistance - grid.ChromeHeight) % grid.RowPitch == 0,
+                        $"{form.SplitForTesting.SplitterDistance - grid.ChromeHeight}px of text, " +
+                        $"a line is {grid.RowPitch}px");
+            ok &= Check("and turning it off puts the scrollbar back",
+                        form.ClickMenuForTesting("View", "Word Wrap") && !settings.WordWrap &&
+                        grid.HScrollBarForTesting.Visible);
+
+            int zoom = settings.ZoomPercent;
+            ok &= Check("View > Zoom In makes the text bigger",
+                        form.ClickMenuForTesting("View", "Zoom In") && settings.ZoomPercent > zoom,
+                        $"{zoom}% -> {settings.ZoomPercent}%");
+            ok &= Check("View > Reset Zoom puts it back",
+                        form.ClickMenuForTesting("View", "Reset Zoom") && settings.ZoomPercent == 100,
+                        $"{settings.ZoomPercent}%");
+
+            // Docking: every side, and the log still measures in whole lines wherever the list is.
+            foreach (string where in new[] { "Dock Left", "Dock Right", "Dock Top", "Dock Bottom" })
+            {
+                ok &= Check($"View > Filter List Location > {where}",
+                            form.ClickMenuForTesting("View", "Filter List Location", where));
+                Pump();
+                bool sideways = where is "Dock Left" or "Dock Right";
+                ok &= Check($"  turns the divider the right way for {where}",
+                            form.SplitForTesting.Orientation ==
+                            (sideways ? Orientation.Vertical : Orientation.Horizontal),
+                            form.SplitForTesting.Orientation.ToString());
+                if (!sideways)
+                    ok &= Check($"  and leaves the log on a whole line with the list {where[5..]}",
+                                (grid.Height - grid.ChromeHeight) % grid.RowPitch == 0,
+                                $"{grid.Height - grid.ChromeHeight}px of text, a line is {grid.RowPitch}px");
+                ok &= Check($"  and the log is still on screen with the list {where[5..]}",
+                            grid.Width > 50 && grid.Height > 50, $"{grid.Width}x{grid.Height}");
+            }
+            form.ClickMenuForTesting("View", "Filter List Location", "Dock Bottom");
+            Pump();
+
+            // Filters: the two that touch every filter at once.
+            ok &= Check("Filters > Disable All switches them all off",
+                        form.ClickMenuForTesting("Filters", "Disable All") &&
+                        doc.Filters.EnumerateDepthFirst().All(f => !f.Enabled));
+            for (int i = 0; i < 80 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            // With nothing to filter by, the view falls back to the whole file rather than to nothing -
+            // which is the difference between a log viewer and a blank window.
+            ok &= Check("and the whole file shows rather than none of it", doc.MatchedLineCount == 400,
+                        doc.MatchedLineCount.ToString());
+            ok &= Check("even with only matching lines on show",
+                        form.ClickMenuForTesting("View", "Show Only Filtered Lines") && doc.RowCount == 400,
+                        $"{doc.RowCount} rows");
+            form.ClickMenuForTesting("View", "Show Only Filtered Lines");
+            ok &= Check("Filters > Enable All switches them back on",
+                        form.ClickMenuForTesting("Filters", "Enable All") &&
+                        doc.Filters.EnumerateDepthFirst().All(f => f.Enabled));
+            for (int i = 0; i < 80 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            ok &= Check("and the matches are back", doc.MatchedLineCount == 80,
+                        doc.MatchedLineCount.ToString());
+
+            // Edit: copying takes what is selected, and the line numbers only when asked.
+            grid.SelectRowForAccessibility(5);
+            Pump();
+            form.ClickMenuForTesting("Edit", "Copy");
+            string plain = SafeClipboardText();
+            form.ClickMenuForTesting("Edit", "Copy with Line Numbers");
+            string numbered = SafeClipboardText();
+            ok &= Check("Edit > Copy takes the line", plain.Trim() == "ERROR line 5", $"'{plain.Trim()}'");
+            ok &= Check("Edit > Copy with Line Numbers puts the number in front of it",
+                        numbered.Trim() == "6\tERROR line 5", $"'{numbered.Trim()}'");
+
+            // File > Close Filters empties the list and stops it being loaded again next time.
+            ok &= Check("File > Close Filters empties the list",
+                        form.ClickMenuForTesting("File", "Close Filters") &&
+                        doc.Filters.EnumerateDepthFirst().Count() == 0,
+                        $"{doc.Filters.EnumerateDepthFirst().Count()} filters left");
+            ok &= Check("and forgets it for next time", state.LastFilterFile is null,
+                        state.LastFilterFile ?? "(null)");
+            ok &= Check("and the whole file is on show again", doc.RowCount == 400, doc.RowCount.ToString());
+
+            form.Close();
+            form = null;
+            return ok;
+        }
+        finally
+        {
+            form?.Dispose();
+            try { File.Delete(path); File.Delete(filters); } catch { }
+        }
+    }
+
+    /// <summary>The clipboard is shared with everything else running, so a read can simply fail.</summary>
+    private static string SafeClipboardText()
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            try { return Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
+            catch { Thread.Sleep(60); }
+        }
+        return "";
     }
 
     /// <summary>The divider between the log and the filter list has to land where the log holds a whole

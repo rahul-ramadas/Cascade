@@ -18,7 +18,18 @@ public sealed class FindDialog : Form
     private readonly Button _cancel = new() { Text = "Cancel", Visible = false };
     private readonly Action<FindQuery, bool> _search;
     private readonly System.Windows.Forms.Timer _preview = new() { Interval = 200 };
+    private readonly Font _mono = new("Consolas", 9.75f);
     private bool _searching;
+
+    protected override void Dispose(bool disposing)
+    {
+        // A font handed to a control is not disposed with it, and this dialog is hidden rather than closed -
+        // so it lives as long as the window does.
+        if (disposing) { _preview.Dispose(); _mono.Dispose(); }
+        base.Dispose(disposing);
+    }
+
+    internal Font FontForTesting => _mono;
 
     /// <summary>Raised when the user clicks Cancel while a search is running.</summary>
     public event Action? CancelRequested;
@@ -45,7 +56,7 @@ public sealed class FindDialog : Form
         Font = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
 
         int Dpi(int v) => LogicalToDeviceUnits(v);
-        _text.Font = new Font("Consolas", 9.75f);
+        _text.Font = _mono;
         _text.AccessibleName = "Find what";
 
         // Two columns: a label column that sizes itself, and a field column that takes the rest. Everything

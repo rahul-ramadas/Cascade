@@ -83,6 +83,28 @@ public sealed class MainForm : Form
 
     internal LineGridControl GridForTesting => _grid;
     internal SplitContainer SplitForTesting => _split;
+    internal CascadeDocument DocForTesting => _doc;
+    internal FilterTreeControl FilterTreeForTesting => _filterTree;
+    internal string StatusForTesting => string.Join(" | ", _status.Items.OfType<ToolStripStatusLabel>().Select(l => l.Text));
+
+    /// <summary>Clicks a menu item by the path a user would read, so a check drives the same wiring rather
+    /// than the method behind it.</summary>
+    internal bool ClickMenuForTesting(params string[] path)
+    {
+        ToolStripItemCollection? items = MainMenuStrip?.Items;
+        ToolStripMenuItem? found = null;
+        foreach (string want in path)
+        {
+            if (items is null) return false;
+            found = items.OfType<ToolStripMenuItem>()
+                         .FirstOrDefault(i => (i.Text ?? "").Replace("&", "").TrimEnd('.', '\u2026') == want);
+            if (found is null) return false;
+            items = found.DropDownItems;
+        }
+        if (found is null || !found.Enabled) return false;
+        found.PerformClick();
+        return true;
+    }
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
