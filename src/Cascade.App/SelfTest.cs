@@ -2387,6 +2387,27 @@ internal static class SelfTest
             ok &= Check("and ticks the regex box", live.RegexIsOnForTesting != wasRegex);
             ok &= Check("Alt+C is taken by the bar", AltKey(probe, 'C'));
             ok &= Check("and ticks the case box", live.CaseIsOnForTesting != wasCase);
+
+            // The options are reached mid-term, so ticking one must leave the box exactly as it was - it
+            // still has the keyboard, and the caret and selection have not moved. The stock check box
+            // selects itself when its Alt key is pressed, which loses all three.
+            probe.Activate();
+            live.FocusInput();
+            live.SetTermForTesting("order-service", 3, 2);
+            Pump();
+            var place = live.SelectionForTesting();
+            ok &= Check($"the term box has the keyboard to start with (it is on {live.FocusedForTesting})",
+                        live.TermBoxHasFocusForTesting);
+            ok &= Check("and a caret and selection worth keeping", place == (3, 2), place.ToString());
+
+            AltKey(probe, 'R');
+            AltKey(probe, 'C');
+            Pump();
+            ok &= Check($"ticking the options leaves the keyboard in the box (it is on {live.FocusedForTesting})",
+                        live.TermBoxHasFocusForTesting);
+            ok &= Check("and the term untouched", live.TermForTesting() == "order-service", live.TermForTesting());
+            ok &= Check("and the caret and selection where they were",
+                        live.SelectionForTesting() == place, $"{live.SelectionForTesting()} was {place}");
         }
         bar.Dispose();
 
