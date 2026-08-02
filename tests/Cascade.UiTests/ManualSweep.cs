@@ -132,10 +132,10 @@ public class ManualSweep : IDisposable
         Thread.Sleep(300);
         Chord(VirtualKeyShort.HOME);
         Thread.Sleep(600);
-        string at = _app.StatusText("Ln:");
+        string at = $"line {_app.CaretLine()}";
         Keyboard.Type(VirtualKeyShort.KEY_1);
         Thread.Sleep(900);
-        Check("pressing 1 walks to the marked line", _app.StatusText("Ln:") != at, $"{at} -> {_app.StatusText("Ln:")}");
+        Check("pressing 1 walks to the marked line", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         Chord(VirtualKeyShort.KEY_1);   // clear it again
         Thread.Sleep(800);
@@ -240,7 +240,7 @@ public class ManualSweep : IDisposable
 
     private long CaretLine()
     {
-        string s = _app.StatusText("Ln:");
+        string s = $"line {_app.CaretLine()}";
         int at = s.IndexOf(':') + 1, slash = s.IndexOf('/');
         return slash > at && long.TryParse(s[at..slash].Replace(",", "").Trim(), out long v) ? v : -1;
     }
@@ -500,18 +500,18 @@ public class ManualSweep : IDisposable
         Thread.Sleep(300);
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
-        string first = _app.StatusText("Ln:");
+        string first = $"line {_app.CaretLine()}";
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(1500);
-        string second = _app.StatusText("Ln:");
+        string second = $"line {_app.CaretLine()}";
         Check("Enter goes forwards", second != first, $"{first} -> {second}");
 
         Keyboard.Pressing(VirtualKeyShort.SHIFT);
         Keyboard.Type(VirtualKeyShort.RETURN);
         Keyboard.Release(VirtualKeyShort.SHIFT);
         Thread.Sleep(1500);
-        Check("Shift+Enter goes back", _app.StatusText("Ln:") == first,
-              $"{second} -> {_app.StatusText("Ln:")} (wanted {first})");
+        Check("Shift+Enter goes back", $"line {_app.CaretLine()}" == first,
+              $"{second} -> {$"line {_app.CaretLine()}"} (wanted {first})");
 
         var regex = dlg.FindFirstDescendant(cf => cf.ByName("Regex"))?.AsCheckBox();
         Check("there is a regex option", regex is not null);
@@ -753,9 +753,9 @@ public class ManualSweep : IDisposable
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
-        string at = _app.StatusText("Ln:");
+        string at = $"line {_app.CaretLine()}";
         for (int i = 0; i < 3; i++) { Keyboard.Press(VirtualKeyShort.DOWN); Thread.Sleep(150); }
-        Check("the caret still moves while wrapped", _app.StatusText("Ln:") != at, $"{at} -> {_app.StatusText("Ln:")}");
+        Check("the caret still moves while wrapped", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         // Clicking the lower half of a wrapped row must land on that row, not the one below.
         var rows = _app.Rows();
@@ -767,7 +767,8 @@ public class ManualSweep : IDisposable
             Mouse.Click(new Point(tr.Left + 200, tr.Bottom - 6));
             Thread.Sleep(500);
             Check("clicking low in a wrapped line selects that line",
-                  _app.StatusText("Ln:").StartsWith($"Ln: {want} ", StringComparison.Ordinal), $"wanted {want}, got {_app.StatusText("Ln:")}");
+                  _app.CaretLine().ToString(System.Globalization.CultureInfo.InvariantCulture) == want,
+                  $"wanted {want}, got line {_app.CaretLine()}");
         }
 
         _app.ClickMenuOrThrow("View", "Word Wrap");
@@ -1081,11 +1082,11 @@ public class ManualSweep : IDisposable
         Check("and say where we are", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
         Shot("find-found");
 
-        string at = _app.StatusText("Ln:");
+        string at = $"line {_app.CaretLine()}";
         for (int i = 0; i < 10; i++) { Keyboard.Press(VirtualKeyShort.RETURN); Thread.Sleep(70); }
         Thread.Sleep(1000);
-        Say($"after ten repeats: {_app.StatusText("Ln:")} (was {at}), {Tally()}");
-        Check("ten repeats moved the caret on", _app.StatusText("Ln:") != at, $"{at} -> {_app.StatusText("Ln:")}");
+        Say($"after ten repeats: {$"line {_app.CaretLine()}"} (was {at}), {Tally()}");
+        Check("ten repeats moved the caret on", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         // Ctrl+F while the box already has the keyboard: typing must replace the term.
         CtrlF();

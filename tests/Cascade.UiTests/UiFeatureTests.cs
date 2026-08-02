@@ -42,11 +42,11 @@ public class UiFeatureTests
 
         // The Ctrl variants still move the caret rather than the view.
         app.CtrlKey(grid, VirtualKeyShort.END);
-        Assert.True(app.WaitStatus("Ln:", $"Ln: {TestData.LineCount:N0} / {TestData.LineCount:N0}"),
-                    "Ctrl+End no longer goes to the last line: " + app.StatusText("Ln:"));
+        Assert.True(app.WaitCaretLine(TestData.LineCount),
+                    "Ctrl+End no longer goes to the last line: " + $"line {app.CaretLine()}");
         app.CtrlKey(grid, VirtualKeyShort.HOME);
-        Assert.True(app.WaitStatus("Ln:", $"Ln: 1 / {TestData.LineCount:N0}"),
-                    "Ctrl+Home no longer goes to the first line: " + app.StatusText("Ln:"));
+        Assert.True(app.WaitCaretLine(1),
+                    "Ctrl+Home no longer goes to the first line: " + $"line {app.CaretLine()}");
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class UiFeatureTests
         // "it was moved to the middle" the same measurement, and the check would prove nothing.
         app.ScrollVerticalTo(497);
         app.SelectLine(501);                     // 0-based 500, a MATCH line, a few rows down
-        Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+        Check("selects line 501", app.CaretLine() == 501, $"line {app.CaretLine()}");
         Check("one line selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
 
         int rows = app.Rows().Length;
@@ -81,7 +81,7 @@ public class UiFeatureTests
         // Hiding the non-matching lines must not move it: line 501 matches, so it stays exactly put.
         app.ToggleFilteredMode();
         int after = OffsetRows();
-        Check("filtered: line stays 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+        Check("filtered: line stays 501", app.CaretLine() == 501, $"line {app.CaretLine()}");
         Check("filtered: still one selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
         Check("filtered: matched count", app.StatusText("Fil:") == $"Fil: {TestData.MatchCount:N0}", app.StatusText("Fil:"));
         Check("filtered: the line did not move on screen", after == before, $"{before} -> {after}");
@@ -89,17 +89,17 @@ public class UiFeatureTests
         // And back again.
         app.ToggleFilteredMode();
         int back = OffsetRows();
-        Check("dim: line stays 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+        Check("dim: line stays 501", app.CaretLine() == 501, $"line {app.CaretLine()}");
         Check("dim: the line did not move on screen", back == before, $"{before} -> {back}");
 
         // A NON-matching line (1-based 503) has nowhere to stay, so the nearest match at or after it takes
         // its place - 1-based 506 - and that should appear about where 503 was, not in the middle.
         app.SelectLine(503);
         int wasAt = OffsetRows();
-        Check("select 503", app.StatusText("Ln:") == "Ln: 503 / 1,000", app.StatusText("Ln:"));
+        Check("select 503", app.CaretLine() == 503, $"line {app.CaretLine()}");
         app.ToggleFilteredMode();
         int snapped = OffsetRows();
-        Check("filtered-out line snaps to nearest match (506)", app.StatusText("Ln:") == "Ln: 506 / 1,000", app.StatusText("Ln:"));
+        Check("filtered-out line snaps to nearest match (506)", app.CaretLine() == 506, $"line {app.CaretLine()}");
         Check("nearest still selected", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
         Check("the replacement appears within a row of where the old line was",
               Math.Abs(snapped - wasAt) <= 1, $"{wasAt} -> {snapped}");
@@ -131,7 +131,7 @@ public class UiFeatureTests
 
         app.ScrollVerticalTo(497);
         app.SelectLine(501);
-        Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+        Check("selects line 501", app.CaretLine() == 501, $"line {app.CaretLine()}");
 
         int rows = app.Rows().Length;
         int top = rows / 4;
@@ -140,17 +140,17 @@ public class UiFeatureTests
 
         // Forwards to a line below the view: it should settle at the bottom of the band, not the last row.
         app.FindWith("line 520", forward: true);
-        bool wentDown = app.WaitStatus("Ln:", "Ln: 521 / 1,000");
+        bool wentDown = app.WaitCaretLine(521);
         int down = OffsetRows();
-        Check("found line 521", wentDown, app.StatusText("Ln:"));
+        Check("found line 521", wentDown, $"line {app.CaretLine()}");
         Check("a line found below arrives at the bottom of the middle half",
               down == bottom, $"offset {down}, band {top}..{bottom} of {rows}");
 
         // Backwards to a line above it: the top of the band this time.
         app.FindWith("line 500", forward: false);
-        bool wentUp = app.WaitStatus("Ln:", "Ln: 501 / 1,000");
+        bool wentUp = app.WaitCaretLine(501);
         int up = OffsetRows();
-        Check("found line 501 going back", wentUp, app.StatusText("Ln:"));
+        Check("found line 501 going back", wentUp, $"line {app.CaretLine()}");
         Check("a line found above arrives at the top of the middle half",
               up == top, $"offset {up}, band {top}..{bottom} of {rows}");
 
@@ -191,17 +191,17 @@ public class UiFeatureTests
 
         // ---- text find (dialog) ----
         app.FindText("other line 7");
-        Check("find selects line 8", app.WaitStatus("Ln:", "Ln: 8 / 1,000"), app.StatusText("Ln:"));
+        Check("find selects line 8", app.WaitCaretLine(8), $"line {app.CaretLine()}");
 
         // ---- per-filter find (Filters menu -> Find Next/Previous Match) ----
         app.SelectLine(1);
         app.FilterNode("MATCH")?.AsTreeItem().Select();
         app.FindNextForSelectedFilter();
-        Check("per-filter find next -> line 6", app.WaitStatus("Ln:", "Ln: 6 / 1,000"), app.StatusText("Ln:"));
+        Check("per-filter find next -> line 6", app.WaitCaretLine(6), $"line {app.CaretLine()}");
         app.FindNextForSelectedFilter();
-        Check("per-filter find next -> line 11", app.WaitStatus("Ln:", "Ln: 11 / 1,000"), app.StatusText("Ln:"));
+        Check("per-filter find next -> line 11", app.WaitCaretLine(11), $"line {app.CaretLine()}");
         app.FindPrevForSelectedFilter();
-        Check("per-filter find prev -> line 6", app.WaitStatus("Ln:", "Ln: 6 / 1,000"), app.StatusText("Ln:"));
+        Check("per-filter find prev -> line 6", app.WaitCaretLine(6), $"line {app.CaretLine()}");
 
         // ---- zoom (menu) ----
         app.ClickMenuOrThrow("View", "Reset Zoom");
@@ -558,32 +558,32 @@ public class UiFeatureTests
         // walking through matches never takes the arrow keys away.
         using var app = CascadeApp.Launch();
         var fails = new List<string>();
-        void Check(string name, string expected) { if (!app.WaitStatus("Ln:", expected)) fails.Add($"{name} :: {app.StatusText("Ln:")}"); }
+        void Check(string name, int expected) { if (!app.WaitCaretLine(expected)) fails.Add($"{name} :: line {app.CaretLine()}"); }
 
         app.SelectLine(1);
         app.OpenFind();
         app.FindWith("MATCH line", forward: true);   // MATCH is on 1-based lines 1, 6, 11, 16, ...
-        Check("find next from line 1", "Ln: 6 / 1,000");
+        Check("find next from line 1", 6);
 
         // From the term box.
         app.FocusFindInput();
         var edit = app.FindInput();
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3);
-        Check("F3 -> next", "Ln: 11 / 1,000");
+        Check("F3 -> next", 11);
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
-        Check("Shift+F3 -> previous", "Ln: 6 / 1,000");
+        Check("Shift+F3 -> previous", 6);
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
-        Check("Enter -> next", "Ln: 11 / 1,000");
+        Check("Enter -> next", 11);
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN, VirtualKeyShort.SHIFT);
-        Check("Shift+Enter -> previous", "Ln: 6 / 1,000");
+        Check("Shift+Enter -> previous", 6);
 
         // ...and from the log itself, which is where the keyboard is while reading results.
         app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
         app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
-        Check("F3 from the log -> next", "Ln: 11 / 1,000");
+        Check("F3 from the log -> next", 11);
         app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
-        Check("Shift+F3 from the log -> previous", "Ln: 6 / 1,000");
+        Check("Shift+F3 from the log -> previous", 6);
 
         Assert.True(fails.Count == 0, "Find key failures:\n  " + string.Join("\n  ", fails));
     }
@@ -607,12 +607,12 @@ public class UiFeatureTests
             var edit = app.FindInput();
             app.SetText(edit, "line");                      // every line matches, so each Enter moves one line
             app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
-            Check("the first search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
+            Check("the first search lands", app.WaitCaretLine(2), $"line {app.CaretLine()}");
 
             const int repeats = 12;
             for (int i = 0; i < repeats; i++) app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
             Check("every repeat moved the caret on one match",
-                  app.WaitStatus("Ln:", $"Ln: {2 + repeats} / 1,000"), app.StatusText("Ln:"));
+                  app.WaitCaretLine(2 + repeats), $"line {app.CaretLine()}");
 
             // Searching must not touch what was typed. Backspace is the giveaway: with the caret still at
             // the end it takes the last character, and from the start of the box it takes nothing - which is
@@ -648,7 +648,7 @@ public class UiFeatureTests
             var edit = app.FindInput();
             app.SetText(edit, "line");
             app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
-            Check("the search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
+            Check("the search lands", app.WaitCaretLine(2), $"line {app.CaretLine()}");
             Check("and the counts are up, in the bar", app.WaitFindBarMessage("Match "), app.FindBarMessage());
 
             // Escape from the text area. Through the message loop, because it is handled at form level.
@@ -661,16 +661,16 @@ public class UiFeatureTests
 
             // F3 must search again there and then: bar back, next match, counts with it.
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
-            Check("F3 goes straight to the next match", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
+            Check("F3 goes straight to the next match", app.WaitCaretLine(3), $"line {app.CaretLine()}");
             Check("and brings the bar back with it",
                   Retry.WhileFalse(() => app.FindBar() is not null, TimeSpan.FromSeconds(4)).Result);
             Check("counts and all", app.WaitFindBarMessage("Match 3"), app.FindBarMessage());
 
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
-            Check("and again", app.WaitStatus("Ln:", "Ln: 4 / 1,000"), app.StatusText("Ln:"));
+            Check("and again", app.WaitCaretLine(4), $"line {app.CaretLine()}");
 
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
-            Check("Shift+F3 goes back", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
+            Check("Shift+F3 goes back", app.WaitCaretLine(3), $"line {app.CaretLine()}");
 
             Assert.True(fails.Count == 0, "Escape/F3 failures:\n  " + string.Join("\n  ", fails));
         }
@@ -736,20 +736,20 @@ public class UiFeatureTests
         app.ScrollRowToMiddle(500);
         app.SelectLine(501);
         var grid = app.Grid();
-        string selected = app.StatusText("Ln:");
+        int selected = app.CaretLine();
         int top = app.FirstVisibleLine();
-        Check("a line is selected to begin with", selected == "Ln: 501 / 1,000", selected);
+        Check("a line is selected to begin with", selected == 501, $"line {selected}");
 
         for (int i = 0; i < 5; i++) app.CtrlKey(grid, VirtualKeyShort.DOWN);
         int afterDown = app.FirstVisibleLine();
         Check("ctrl+down scrolls the view", afterDown > top, $"top {top} -> {afterDown}");
-        Check("ctrl+down leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));
+        Check("ctrl+down leaves the selected line alone", app.CaretLine() == selected, $"line {app.CaretLine()}");
         Check("ctrl+down leaves the selection alone", app.StatusText("Sel:") == "Sel: 1", app.StatusText("Sel:"));
 
         for (int i = 0; i < 5; i++) app.CtrlKey(grid, VirtualKeyShort.UP);
         int afterUp = app.FirstVisibleLine();
         Check("ctrl+up scrolls back", afterUp == top, $"top {top} -> {afterDown} -> {afterUp}");
-        Check("ctrl+up leaves the selected line alone", app.StatusText("Ln:") == selected, app.StatusText("Ln:"));
+        Check("ctrl+up leaves the selected line alone", app.CaretLine() == selected, $"line {app.CaretLine()}");
 
         Assert.True(fails.Count == 0, "Scroll failures:\n  " + string.Join("\n  ", fails));
     }
@@ -794,28 +794,28 @@ public class UiFeatureTests
 
         // --- dim mode: the highlighted line must actually contain the query ---
         app.FindWith("other line 137", forward: true);
-        Check("dim forward -> Ln 138", app.WaitStatus("Ln:", "Ln: 138 / 1,000"), app.StatusText("Ln:"));
+        Check("dim forward -> Ln 138", app.WaitCaretLine(138), $"line {app.CaretLine()}");
         Check("dim forward: selected line contains query", app.WaitSelectedRowText("other line 137"), app.SelectedRowText());
 
         app.FindWith("other line 246", forward: true);
-        Check("dim forward2 -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
+        Check("dim forward2 -> Ln 247", app.WaitCaretLine(247), $"line {app.CaretLine()}");
         Check("dim forward2: selected line contains query", app.WaitSelectedRowText("other line 246"), app.SelectedRowText());
 
         app.FindWith("other line 89", forward: false);
-        Check("dim backward -> Ln 90", app.WaitStatus("Ln:", "Ln: 90 / 1,000"), app.StatusText("Ln:"));
+        Check("dim backward -> Ln 90", app.WaitCaretLine(90), $"line {app.CaretLine()}");
         Check("dim backward: selected line contains query", app.WaitSelectedRowText("other line 89"), app.SelectedRowText());
 
         // repeat the same unique query forward: it must NOT re-find the current line
         app.FindWith("other line 246", forward: true); // caret at 89 -> 246 is ahead
-        Check("dim re-find forward -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
+        Check("dim re-find forward -> Ln 247", app.WaitCaretLine(247), $"line {app.CaretLine()}");
         app.FindWith("other line 246", forward: true); // caret==246, unique -> not found, stay
         Check("dim no more matches -> says so", app.WaitForFindMessage("No more matches"), app.AllStatusText());
-        Check("dim no more matches -> selection unchanged", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
+        Check("dim no more matches -> selection unchanged", app.CaretLine() == 247, $"line {app.CaretLine()}");
 
         // --- filtered mode: the highlighted line must STILL contain the query ---
         app.SetFilteredMode(true);
         app.FindWith("MATCH line 500", forward: true);
-        Check("filtered: matched-line search -> Ln 501", app.WaitStatus("Ln:", "Ln: 501 / 1,000"), app.StatusText("Ln:"));
+        Check("filtered: matched-line search -> Ln 501", app.WaitCaretLine(501), $"line {app.CaretLine()}");
         Check("filtered: selected line contains query", app.WaitSelectedRowText("MATCH line 500"), app.SelectedRowText());
 
         // text that only exists on a HIDDEN (filtered-out) line, AHEAD of the caret, must NOT jump to a
@@ -826,7 +826,7 @@ public class UiFeatureTests
         Check("filtered: hidden-only text reports not found",
             app.WaitForFindMessage("No more matches"), app.AllStatusText());
         Check("filtered: hidden-only text leaves selection put (still 501)",
-            app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
+            app.CaretLine() == 501, $"line {app.CaretLine()}");
 
         Assert.True(fails.Count == 0, "Find failures:\n  " + string.Join("\n  ", fails));
     }

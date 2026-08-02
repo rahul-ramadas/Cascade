@@ -30,7 +30,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
-    private readonly ToolStripStatusLabel _lineLabel = new() { AutoSize = true };
+    private readonly ToolStripStatusLabel _showLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _zoomLabel = new() { AutoSize = true };
     // Hidden until a downloaded update is waiting, which happens at most once in a session.
     // Lives at the right end of the menu bar, which is otherwise empty, so announcing an update does not
@@ -542,28 +542,28 @@ public sealed class MainForm : Form
         // Each metric is a fixed box, so a value growing a digit never shifts its neighbours. The UI font is
         // kept: its digits are already all the same width, so a monospaced face would buy no extra stability
         // and would cost the paths ~140px of room.
-        foreach (var l in new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel })
+        foreach (var l in new[] { _selLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel })
         {
             l.AutoSize = false;
             l.TextAlign = ContentAlignment.MiddleLeft;
             l.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
         }
-        // Section dividers: counts, then position, then zoom.
+        // Section dividers: counts, then what is being shown, then zoom.
         _selLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
-        _lineLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+        _showLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
         _zoomLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
 
         _selLabel.Name = "stat.sel";
         _filLabel.Name = "stat.fil";
         _totalLabel.Name = "stat.total";
-        _lineLabel.Name = "stat.line";
+        _showLabel.Name = "stat.show";
         _zoomLabel.Name = "stat.zoom";
         _status.Items.AddRange(new ToolStripItem[]
         {
             // The label comes before the bar so the section's divider sits on an item whose left edge never
             // moves; with the bar first, hiding it dragged the divider left by the bar's width.
             _srcLabel, _filterLabel, _busyLabel, _progress,
-            _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel
+            _selLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel
         });
 
         EnsureMetricWidths();
@@ -611,13 +611,17 @@ public sealed class MainForm : Form
         return total;
     }
 
-    private ToolStripStatusLabel[] MetricLabels => new[] { _selLabel, _filLabel, _totalLabel, _lineLabel, _zoomLabel };
+    private ToolStripStatusLabel[] MetricLabels => new[] { _selLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel };
 
     private static string[] MetricSamples(long magnitude)
     {
         string n = magnitude.ToString("N0");
-        return new[] { $"Sel: {n}", $"Fil: {n}", $"Total: {n}", $"Ln: {n} / {n}", "Zoom: 400%" };
+        return new[] { $"Sel: {n}", $"Fil: {n}", $"Total: {n}", ShowingAllLines, "Zoom: 400%" };
     }
+
+    // The wider of the two, so the box does not change size when the mode does.
+    private const string ShowingAllLines = "Showing: all lines";
+    private const string ShowingMatchesOnly = "Showing: matches";
 
     private int TotalMetricWidth(long magnitude)
     {
@@ -1715,8 +1719,10 @@ public sealed class MainForm : Form
         _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
         _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";
         _totalLabel.Text = $"Total: {_doc.CompletedLineCount:N0}";
-        long caretLine = _grid.CaretLine;
-        _lineLabel.Text = caretLine >= 0 ? $"Ln: {caretLine + 1:N0} / {_doc.CompletedLineCount:N0}" : "Ln: \u2014";
+        _showLabel.Text = _doc.FilteredMode ? ShowingMatchesOnly : ShowingAllLines;
+        _showLabel.ToolTipText = _doc.FilteredMode
+            ? "Only lines a filter matched are shown (Ctrl+H shows them all)"
+            : "Every line is shown, with the matches coloured (Ctrl+H hides the rest)";
         _zoomLabel.Text = $"Zoom: {_settings.ZoomPercent}%";
 
         // A downloaded update is worth saying once, quietly, and leaving on show.
