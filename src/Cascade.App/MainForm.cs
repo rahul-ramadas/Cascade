@@ -79,6 +79,10 @@ public sealed class MainForm : Form
     private int _activitySlot, _progressSlot, _baseActivitySlot;
     private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
+    private bool _snapping;     // guards the divider being set from inside its own moved handler
+
+    internal LineGridControl GridForTesting => _grid;
+    internal SplitContainer SplitForTesting => _split;
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
@@ -119,6 +123,7 @@ public sealed class MainForm : Form
         Controls.Add(_split);
         Controls.Add(_status);
         _split.BringToFront();
+        _split.SplitterMoved += (_, _) => SnapSplitter();
 
         _grid.Attach(_doc, _settings);
         _filterTree.Attach(_doc);
@@ -127,7 +132,7 @@ public sealed class MainForm : Form
 
         _doc.Updated += () => _pendingRefresh = true;
         _grid.SelectionChanged += UpdateStatus;
-        _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); };
+        _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };
@@ -193,6 +198,7 @@ public sealed class MainForm : Form
         // Sized here, not in the constructor: asked any earlier the form has not scaled itself yet and
         // settles at MinimumSize, which squeezes the filter pane down to nothing.
         if (_offScreen) Size = new Size(1600, 1000);
+        // Seven tenths of the window to the log, which the divider then rounds up to a whole number of lines.
         try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
         LayoutPresetPane();
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
@@ -1096,9 +1102,39 @@ public sealed class MainForm : Form
         LayoutPresetPane();
     }
 
-    private void SetFilterDock(FilterDock dock)
+    /// <summary>Puts the divider where the log view holds a whole number of lines, so there is never a strip
+    /// of dead space under the last one. Only when the filter list is above or below - down one side the
+    /// divider sets a width, which has nothing to do with line height.
+    ///
+    /// Rounds towards more text, and takes the smaller number of lines only when the larger one will not
+    /// fit.</summary>
+    private void SnapSplitter()
     {
-        bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
+        if (_snapping || _split.Orientation != Orientation.Horizontal) return;
+        if (_split.Panel1Collapsed || _split.Panel2Collapsed) return;
+        int pitch = _grid.RowPitch, chrome = _grid.ChromeHeight;
+        int total = _split.Height - _split.SplitterWidth;
+        if (pitch <= 1 || total <= 0) return;
+
+        bool gridFirst = _treePanel != 1;
+        int gridHeight = gridFirst ? _split.SplitterDistance : total - _split.SplitterDistance;
+        int lines = Math.Max(1, (int)Math.Ceiling((gridHeight - chrome) / (double)pitch));
+        int low = _split.Panel1MinSize, high = Math.Max(low, total - _split.Panel2MinSize);
+
+        int Distance(int n) => gridFirst ? chrome + n * pitch : total - (chrome + n * pitch);
+        int wanted = Distance(lines);
+        if (wanted < low || wanted > high) wanted = Distance(Math.Max(1, lines - 1));
+        wanted = Math.Clamp(wanted, low, high);
+        if (wanted == _split.SplitterDistance) return;
+
+        _snapping = true;
+        try { _split.SplitterDistance = wanted; }
+        catch { /* sizes not ready */ }
+        finally { _snapping = false; }
+    }
+
+    private void SetFilterDock(FilterDock dock)
+    {        bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
         var orientation = dock is FilterDock.Left or FilterDock.Right ? Orientation.Vertical : Orientation.Horizontal;
         int wantedPanel = treeFirst ? 1 : 2;
 
