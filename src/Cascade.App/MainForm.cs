@@ -124,6 +124,7 @@ public sealed class MainForm : Form
         Controls.Add(_status);
         _split.BringToFront();
         _split.SplitterMoved += (_, _) => SnapSplitter();
+        _grid.ChromeChanged += SnapSplitter;
 
         _grid.Attach(_doc, _settings);
         _filterTree.Attach(_doc);
@@ -131,8 +132,10 @@ public sealed class MainForm : Form
         _filterTree.SetSettings(_settings);
 
         _doc.Updated += () => _pendingRefresh = true;
-        _grid.SelectionChanged += UpdateStatus;
-        _grid.ZoomChanged += () => { UpdateStatus(); SaveSettingsSoon(); SnapSplitter(); };
+        // A held drag or a held key never lets the message queue empty, and a repaint only arrives when it
+        // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
+        _grid.SelectionChanged += () => { UpdateStatus(); _status.Update(); };
+        _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };

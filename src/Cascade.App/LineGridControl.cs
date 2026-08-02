@@ -572,7 +572,9 @@ public sealed class LineGridControl : Control
     private void UpdateHScroll()
     {
         // Nothing runs off the side while wrapping, so the scrollbar has nothing to say.
+        bool wasShowing = _hbar.Visible;
         _hbar.Visible = !Wrapping;
+        if (_hbar.Visible != wasShowing) ChromeChanged?.Invoke();
         if (Wrapping) { _hScroll = 0; return; }
         // The paint keeps the widest line up to date as it draws, but the range has to be right before the
         // first paint too - a window that has not painted reports nothing to scroll, and then Home and End
@@ -644,6 +646,10 @@ public sealed class LineGridControl : Control
     /// what heights this control can be given without a strip of dead space at the bottom.</summary>
     internal int RowPitch => Math.Max(1, _rowHeight);
     internal int ChromeHeight => HeaderHeight + BottomInset;
+
+    /// <summary>Raised when <see cref="ChromeHeight"/> changes, which it does whenever the sideways
+    /// scrollbar comes or goes - so whoever sized this control can put it back on a whole line.</summary>
+    internal event Action? ChromeChanged;
 
     /// <summary>The most segments one line may take. A single enormous line would otherwise fill the window
     /// on its own, leaving no way to see what surrounds it.</summary>
@@ -1160,6 +1166,7 @@ public sealed class LineGridControl : Control
                     _caretRow = row;
                     _sel.SetSingle(row);
                     Invalidate();
+                    Update();
                     SelectionChanged?.Invoke();
                 }
             }
@@ -1171,6 +1178,7 @@ public sealed class LineGridControl : Control
                 _caretRow = row;
                 EnsureVisible(row);
                 Invalidate();
+                Update();
                 SelectionChanged?.Invoke();
             }
         }
@@ -1344,6 +1352,7 @@ public sealed class LineGridControl : Control
         else _sel.SetSingle(row);
         if (reveal) EnsureVisible(row);
         Invalidate();
+        Update();   // a held arrow key keeps the queue full, and a repaint waits for it to empty
         SelectionChanged?.Invoke();
     }
 
@@ -1372,6 +1381,7 @@ public sealed class LineGridControl : Control
         ClearViewAnchor();
         SetFirstRow(_firstRow + deltaRows);
         Invalidate();
+        Update();   // held Ctrl+arrow, or a wheel spun hard, would otherwise not draw until it stopped
     }
 
     /// <summary>Scrolls a row into view by the shortest move that gets it there.
