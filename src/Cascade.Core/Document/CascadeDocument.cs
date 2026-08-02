@@ -53,6 +53,18 @@ public sealed class CascadeDocument : IDisposable
 
     public bool IsIndexComplete => _indexer?.IsComplete ?? false;
 
+    /// <summary>How far indexing has got, as a fraction of the file. Measured in bytes because the number
+    /// of lines is only known once the scan finishes, whereas the file's size is known before it starts.</summary>
+    public double IndexedFraction
+    {
+        get
+        {
+            if (_indexer is null || FileLength <= 0) return 0;
+            if (IsIndexComplete) return 1;
+            return Math.Clamp(_indexer.ProcessedByteCount / (double)FileLength, 0, 1);
+        }
+    }
+
     /// <summary>Number of fully-known lines (all but the last while still streaming).</summary>
     public long CompletedLineCount
     {

@@ -24,6 +24,12 @@ public sealed class LineIndexer
     public LineIndex Index { get; }
     public bool IsComplete { get; private set; }
 
+    /// <summary>Bytes scanned so far. The line count is not knowable until the end, but the file's size is
+    /// known from the outset, so this is what makes indexing progress an actual fraction rather than a
+    /// barber's pole. Safe to read from any thread.</summary>
+    public long ProcessedByteCount => Volatile.Read(ref _processed);
+    private long _processed;
+
     public LineIndexer(MemoryMappedTextSource src, LineIndex index, int preamble, int unit, bool bigEndian)
     {
         _src = src;
@@ -41,6 +47,7 @@ public sealed class LineIndexer
         if (length <= _preamble)
         {
             IsComplete = true;
+            Volatile.Write(ref _processed, length);
             onProgress?.Invoke(new IndexProgress(0, true));
             return;
         }
@@ -51,6 +58,7 @@ public sealed class LineIndexer
         else ScanCodeUnits(length, onProgress, ct);
 
         IsComplete = true;
+        Volatile.Write(ref _processed, length);
         onProgress?.Invoke(new IndexProgress(Index.Count, true));
     }
 
@@ -75,6 +83,7 @@ public sealed class LineIndexer
             }
 
             pos += chunk;
+            Volatile.Write(ref _processed, pos);
             onProgress?.Invoke(new IndexProgress(Index.Count, false));
         }
     }
@@ -115,6 +124,7 @@ public sealed class LineIndexer
             }
 
             pos += chunk;
+            Volatile.Write(ref _processed, pos);
             onProgress?.Invoke(new IndexProgress(Index.Count, false));
         }
     }
