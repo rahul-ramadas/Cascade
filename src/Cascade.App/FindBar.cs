@@ -19,8 +19,8 @@ namespace Cascade.App;
 public sealed class FindBar : UserControl
 {
     private readonly ComboBox _text = new() { DropDownStyle = ComboBoxStyle.DropDown, AutoCompleteMode = AutoCompleteMode.None };
-    private readonly CheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly CheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly QuietCheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly QuietCheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly SteadyLabel _message = new() { AutoSize = false, AutoEllipsis = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _next = new() { Text = "Next" };
     private readonly Button _prev = new() { Text = "Previous" };
@@ -328,6 +328,19 @@ public sealed class FindBar : UserControl
         internal bool RedrawsInOneGo => GetStyle(ControlStyles.OptimizedDoubleBuffer);
     }
 
+    /// <summary>A check box whose Alt key ticks it without taking the keyboard. Alt+R and Alt+C are pressed
+    /// mid-term, so the caret and selection in the box have to survive them; the stock behaviour selects the
+    /// box being ticked, which throws both away.</summary>
+    private sealed class QuietCheckBox : CheckBox
+    {
+        protected override bool ProcessMnemonic(char charCode)
+        {
+            if (!UseMnemonic || !CanSelect || !IsMnemonic(charCode, Text)) return false;
+            Checked = !Checked;
+            return true;
+        }
+    }
+
     /// <summary>Enter searches for what is in the box. Handled here rather than left to the form because
     /// ProcessCmdKey runs on the focused control first, so this sees the key before anything else can.</summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -460,6 +473,10 @@ public sealed class FindBar : UserControl
     internal Color MessageColourForTesting => _message.ForeColor;
     internal bool RegexIsOnForTesting => _regex.Checked;
     internal bool CaseIsOnForTesting => _case.Checked;
+    internal bool TermBoxHasFocusForTesting => _text.Focused;
+    internal string FocusedForTesting =>
+        _text.Focused ? "term" : _regex.Focused ? "regex" : _case.Focused ? "case"
+        : _prev.Focused ? "previous" : _next.Focused ? "next" : _close.Focused ? "close" : "none";
     internal void SetRegexForTesting(bool on) => _regex.Checked = on;
     internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
     internal int BarPaintsForTesting => _barPaints;
