@@ -352,7 +352,7 @@ public class VisibleLineSetTests
     }
 
     [Fact]
-    public void Readers_stay_safe_while_the_writer_updates_in_place()
+    public async Task Readers_stay_safe_while_the_writer_updates_in_place()
     {
         const int n = 200_000;
         var set = new VisibleLineSet();
@@ -396,7 +396,7 @@ public class VisibleLineSetTests
             }
         });
 
-        Task.WaitAll(readers.Append(writer).ToArray());
+        await Task.WhenAll(readers.Append(writer).ToArray());
         Assert.Null(failure);
 
         // Once the writer is quiet, a full sweep still lands on exactly the right answer.

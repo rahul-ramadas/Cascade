@@ -193,7 +193,7 @@ internal sealed class SlimScrollBar : Control
         }
         // Trough: a page towards the pointer, as a scrollbar has always done. The minimap next door is
         // there for landing somewhere exactly.
-        Move(_value + (at < start ? -_visible : _visible));
+        ScrollTo(_value + (at < start ? -_visible : _visible));
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -202,7 +202,7 @@ internal sealed class SlimScrollBar : Control
         if (!_dragging) return;
         int span = Math.Max(1, TrackLength - ThumbLength);
         int origin = _vertical ? Track.Top : Track.Left;
-        Move((long)Math.Round((Along(e) - _grabOffset - origin) * (double)MaxValue / span));
+        ScrollTo((long)Math.Round((Along(e) - _grabOffset - origin) * (double)MaxValue / span));
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -222,7 +222,8 @@ internal sealed class SlimScrollBar : Control
         _grid.ScrollByWheel(e.Delta);
     }
 
-    private void Move(long to)
+    /// <summary>Scrolls because the reader asked, so it reports. Setting <see cref="Value"/> does not.</summary>
+    private void ScrollTo(long to)
     {
         long v = Math.Clamp(to, 0, MaxValue);
         if (v == _value) return;
@@ -261,7 +262,7 @@ internal sealed class SlimScrollBar : Control
         public override string? Value
         {
             get => _bar.Value.ToString();
-            set { if (long.TryParse(value, out long v)) _bar.Move(v); }
+            set { if (long.TryParse(value, out long v)) _bar.ScrollTo(v); }
         }
     }
 }

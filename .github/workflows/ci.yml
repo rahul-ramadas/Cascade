@@ -33,7 +33,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Installing an SDK costs ~45s, almost all of it extracting a 300MB archive. Delegate SDK
       # resolution to dotnet itself so the probe obeys global.json and its roll-forward rules.
@@ -60,7 +60,7 @@ jobs:
           "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           exit 0
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         if: steps.sdk.outputs.found != 'True'
         with:
           global-json-file: global.json
@@ -163,7 +163,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifacts/package | Out-Null
           Copy-Item artifacts/publish/Cascade.exe "artifacts/package/Cascade-$env:VERSION-win-x64.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cascade-win-x64
           path: artifacts/package/*.exe
@@ -171,7 +171,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: artifacts/test-results/*.trx
@@ -187,7 +187,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: cascade-win-x64
           path: dist
