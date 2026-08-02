@@ -39,10 +39,18 @@ internal static class SelfTest
     public static int Run(string[] args)
     {
         _log = new StreamWriter(LogPath, false) { AutoFlush = true };
+        // Several groups below build a real window, and a window writes preferences and the recent-file
+        // lists - on its refresh timer as well as on the way out. Pointed at the developer's own directory
+        // it would save the empty state it was constructed with, which wipes their recent files outright.
+        string configDir = Path.Combine(Path.GetTempPath(), "cascade_selftest_cfg_" + Guid.NewGuid().ToString("N"));
+        string? previousConfig = Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR");
+        Directory.CreateDirectory(configDir);
+        Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", configDir);
         try
         {
             Line("=== Cascade self-test ===");
             Line("Log: " + LogPath);
+            Line("Settings: " + configDir + " (throwaway)");
 
             string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--", StringComparison.Ordinal));
             string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
@@ -92,7 +100,12 @@ internal static class SelfTest
             Line("EXCEPTION: " + ex);
             return 2;
         }
-        finally { _log.Dispose(); }
+        finally
+        {
+            Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", previousConfig);
+            try { Directory.Delete(configDir, true); } catch { /* best-effort */ }
+            _log.Dispose();
+        }
     }
 
     /// <summary>
@@ -2862,6 +2875,15 @@ internal static class SelfTest
                             messagePaints > 0);
             ok &= Check($"but the row around it is left alone (bar repainted {barPaints} times while the " +
                         $"count changed, {idlePaints} while it did not)", barPaints <= idlePaints);
+
+            // Holding the key down never lets the message queue empty, and a paint only arrives when it
+            // does - so the count has to be pushed out rather than waited for, or it sits at whatever it
+            // read when the key went down until it is released. No Pump() here: that is the whole point.
+            bar.SetMessage("Match 99 of 348 lines", "On match 99 of 348");
+            int pushed = bar.MessagePaintsForTesting;
+            bar.PaintNow();
+            ok &= Check("the count can be painted without waiting for an idle moment",
+                        bar.MessagePaintsForTesting > pushed);
             return ok;
         }
         finally
