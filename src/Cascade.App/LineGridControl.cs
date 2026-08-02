@@ -1379,6 +1379,22 @@ public sealed class LineGridControl : Control
         return _firstRow + (y - HeaderHeight) / _rowHeight;
     }
 
+    /// <summary>Runs a change that takes rows off the top of the view (or hands them back) and scrolls by as
+    /// much, so every line still showing keeps its place on screen - the alternative is the whole log
+    /// appearing to slide down and lose its last lines rather than simply having its top ones covered.
+    /// The row to settle on is worked out BEFORE the change and applied after: at the end of the file the
+    /// resize already moves the view on its own, and a relative scroll would then count that twice.</summary>
+    internal void KeepTextStillAcross(int rowsTakenFromTop, Action change)
+    {
+        SyncFirstRowToAnchor();
+        long want = _firstRow + rowsTakenFromTop;
+        ClearViewAnchor();
+        change();
+        SetFirstRow(want);
+        Invalidate();
+        Update();
+    }
+
     private void ScrollBy(int deltaRows)
     {
         // Scroll relative to where the view actually is now, not to a row index captured a frame ago (which a

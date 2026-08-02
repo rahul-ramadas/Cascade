@@ -76,6 +76,7 @@ internal static class SelfTest
             ok &= Timed("find bar layout", RunFindBarLayoutChecks);
             ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
             ok &= Timed("find seed", RunFindSeedChecks);
+            ok &= Timed("find bar room", RunFindBarRoomChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -3066,6 +3067,115 @@ internal static class SelfTest
             host.Close();
             host.Dispose();
             Pump();
+        }
+    }
+
+    /// <summary>The bar appears above the log, so the room for it has to come off the TOP: the log is
+    /// scrolled on by as much as the bar takes, which leaves every line still showing exactly where it was
+    /// on screen. Keeping the top row instead slides the whole log down and drops its last lines, which
+    /// reads as the text moving rather than as the bar covering it.</summary>
+    private static bool RunFindBarRoomChecks()
+    {
+        Line("-- the bar takes its room off the top of the log --");
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_room_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(log, Enumerable.Range(1, 4000).Select(i => $"line {i:0000} some text to read"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), new[] { log })
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 800),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 4000; i++) { Thread.Sleep(20); Pump(); }
+
+            var grid = form.GridForTesting;
+            grid.GoToLine(2000);   // well away from either end, so nothing is clamped
+            Pump();
+
+            long firstBefore = grid.FirstRowForTesting;
+            int rowsBefore = grid.VisibleRowCountForTesting;
+            long lastBefore = firstBefore + rowsBefore - 1;
+            int pitch = grid.RowPitch;
+
+            // Where a line sits ON SCREEN is the thing that must not change - the grid's own coordinates
+            // move with it when it is made shorter from the top, so they cannot tell.
+            long watched = firstBefore + rowsBefore / 2;
+            int ScreenYOf(long row) => grid.PointToScreen(new Point(0, grid.RowMiddleForTesting(row))).Y;
+            int yBefore = ScreenYOf(watched);
+
+            form.ClickMenuForTesting("Edit", "Find");
+            Pump();
+            int taken = form.FindBarHeightForTesting / pitch;
+            long firstAfter = grid.FirstRowForTesting;
+            long lastAfter = firstAfter + grid.VisibleRowCountForTesting - 1;
+
+            bool ok = Check($"the bar stands {taken} lines tall", taken >= 1);
+            ok &= Check($"opening it takes those lines off the top ({firstBefore} -> {firstAfter})",
+                        firstAfter == firstBefore + taken);
+            ok &= Check($"and none off the bottom ({lastBefore} -> {lastAfter})", lastAfter == lastBefore);
+            ok &= Check($"so a line still showing has not moved on screen ({yBefore} -> {ScreenYOf(watched)})",
+                        ScreenYOf(watched) == yBefore);
+
+            // The map draws the window the log is showing, so it has to have noticed the top rows going.
+            var map = grid.MatchMapForTesting;
+            ok &= Check("the log has a minimap to check", map is not null);
+            if (map is not null)
+            {
+                var (top, height) = map.ViewportForTesting;
+                int px = Math.Max(1, map.RowPixelsForTesting);
+                int firstY = map.SlotOfForTesting(firstAfter) * px, lastY = map.SlotOfForTesting(lastAfter) * px;
+                Line($"   (map window {top}..{top + height}px, rows {firstAfter}..{lastAfter} at {firstY}..{lastY}px)");
+                ok &= Check("the map's window starts at the row the log now starts at",
+                            Math.Abs(firstY - top) <= px);
+                ok &= Check("and ends where the log ends", Math.Abs(lastY - (top + height)) <= 2 * px);
+                ok &= Check("so the rows the bar covered are outside it",
+                            map.SlotOfForTesting(firstBefore) * px < top);
+            }
+
+            // Putting it away hands the rows back at the top, so the log goes back with them.
+            form.CloseFindForTesting();
+            Pump();
+            ok &= Check($"closing it gives those lines back at the top ({grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == firstBefore);
+            ok &= Check($"and still nothing has moved on screen ({ScreenYOf(watched)})",
+                        ScreenYOf(watched) == yBefore);
+
+            // The ends of the file are where this could quietly fail: the scroll has nowhere to go unless
+            // the room the bar took has changed how far the view is allowed to move.
+            foreach (long line in new long[] { 1, 4000 })
+            {
+                grid.GoToLine(line);
+                Pump();
+                long was = grid.FirstRowForTesting;
+                int wasRows = grid.VisibleRowCountForTesting;
+                form.ClickMenuForTesting("Edit", "Find");
+                Pump();
+                long now = grid.FirstRowForTesting;
+                ok &= Check($"at line {line} the bar still takes its room off the top ({was} -> {now})",
+                            now == was + taken);
+                ok &= Check($"and the last line showing does not change ({was + wasRows - 1})",
+                            now + grid.VisibleRowCountForTesting - 1 == was + wasRows - 1);
+                form.CloseFindForTesting();
+                Pump();
+                ok &= Check($"and closing puts it back ({grid.FirstRowForTesting})",
+                            grid.FirstRowForTesting == was);
+            }
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { File.Delete(log); } catch { /* ignore */ }
         }
     }
 
