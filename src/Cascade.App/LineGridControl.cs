@@ -491,7 +491,7 @@ public sealed class LineGridControl : Control
         // While wrapping, the count from the last frame is only a hint - the last screenful may hold a very
         // different number of rows. Work the real limit out when it is about to matter, or the view either
         // stops short of the end or runs off it into empty space.
-        if (Wrapping && first > limit) limit = FirstRowShowing(rows - 1);
+        if (Wrapping && first > limit) limit = FirstRowShowing(rows - 1, fill: true);
         return Math.Clamp(first, 0, Math.Max(0, limit));
     }
 
@@ -605,7 +605,13 @@ public sealed class LineGridControl : Control
 
     private int ContentWidth => Math.Max(0, ClientSize.Width - RightGutterWidth - GutterWidth());
     private int HeaderHeight => (_doc?.Columns.Enabled ?? false) ? _rowHeight : 0;
-    private int VisibleRowCount => Math.Max(1, (ClientSize.Height - _hbar.Height - HeaderHeight) / Math.Max(1, _rowHeight));
+
+    /// <summary>Room the sideways scrollbar takes at the bottom. Nothing at all when it is hidden - a
+    /// hidden docked control gives its space back, so counting its height anyway left a strip of the view
+    /// unused, and since that strip is about a line tall it read as a line failing to draw.</summary>
+    private int BottomInset => _hbar.Visible ? _hbar.Height : 0;
+
+    private int VisibleRowCount => Math.Max(1, (ClientSize.Height - BottomInset - HeaderHeight) / Math.Max(1, _rowHeight));
 
     private bool MarkersVisible =>
         _doc is not null && _settings.MarkerVisibility switch
@@ -633,6 +639,11 @@ public sealed class LineGridControl : Control
     /// <summary>Whether lines are broken to fit the width. Not offered while they are split into columns:
     /// wrapping inside a cell is a different feature, and the menu says so by greying out.</summary>
     internal bool Wrapping => _settings.WordWrap && !(_doc?.Columns.Enabled ?? false);
+
+    /// <summary>How tall one line is drawn, and how much of the control is not text. Between them they say
+    /// what heights this control can be given without a strip of dead space at the bottom.</summary>
+    internal int RowPitch => Math.Max(1, _rowHeight);
+    internal int ChromeHeight => HeaderHeight + BottomInset;
 
     /// <summary>The most segments one line may take. A single enormous line would otherwise fill the window
     /// on its own, leaving no way to see what surrounds it.</summary>
@@ -720,6 +731,8 @@ public sealed class LineGridControl : Control
 
     internal int RowsPaintedForTesting => _layout.Count;
     internal long CharOriginForTesting => _charOriginRow;
+    internal int ViewportHeightForTesting => ViewportHeight;
+    internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
 
     /// <summary>Top of a row as painted, so a check can aim at a wrapped row's second segment.</summary>
     internal int RowTopForTesting(long row)
@@ -806,7 +819,7 @@ public sealed class LineGridControl : Control
     /// margin and does of course move when you scroll.
     /// </summary>
     internal Rectangle GutterAreaForTesting =>
-        new(0, HeaderHeight, GutterWidth(), Math.Max(0, ClientSize.Height - HeaderHeight - _hbar.Height));
+        new(0, HeaderHeight, GutterWidth(), Math.Max(0, ClientSize.Height - HeaderHeight - BottomInset));
 
     /// <summary>Scrolls the view horizontally, as dragging the horizontal scrollbar does.</summary>
     internal void ScrollHorizontallyTo(int x) => SetHScroll(x);
@@ -836,7 +849,9 @@ public sealed class LineGridControl : Control
         int contentW = ContentWidth;
         int headerH = HeaderHeight;
         long rows = _doc.RowCount;
-        int visible = VisibleRowCount;
+        // One more than the arithmetic answer while wrapping: the last row on screen may begin inside the
+        // view and run past the bottom, and a budget of whole rows would stop short of drawing it.
+        int visible = VisibleRowCount + (Wrapping ? 1 : 0);
 
         // Resolve this whole frame in one shot against a single snapshot of the visible set. While a filter
         // pass streams, lines before the viewport are being added and dropped continuously, so a first row
@@ -863,7 +878,7 @@ public sealed class LineGridControl : Control
 
         _layout.Clear();
         int atY = headerH;
-        int bottom = ClientSize.Height - _hbar.Height;
+        int bottom = ClientSize.Height - BottomInset;
         for (int i = 0; i < visible; i++)
         {
             long row = _firstRow + i;
@@ -1373,15 +1388,23 @@ public sealed class LineGridControl : Control
 
     /// <summary>Which row has to be at the top for <paramref name="last"/> to be the bottom one on screen.
     /// While wrapping this is measured rather than counted back: rows differ in height, so the number that
-    /// fitted at one place in the file says nothing about how many fit at another.</summary>
-    private long FirstRowShowing(long last)
+    /// fitted at one place in the file says nothing about how many fit at another.
+    ///
+    /// <paramref name="fill"/> asks a different question - how far the view may scroll - and settles for
+    /// <paramref name="last"/> merely starting on screen, so it takes every row above it that still leaves
+    /// room for it to begin. Requiring the whole of it to fit instead leaves the bottom of the view blank by
+    /// however much the row above would have overhung.</summary>
+    private long FirstRowShowing(long last, bool fill = false)
     {
         if (_doc is null || !Wrapping) return last - VisibleRowCount + 1;
-        long room = ViewportHeight, used = 0, row = last;
+        long room = ViewportHeight;
+        long used = fill ? 0 : RowHeightOf(last);
+        if (!fill && used > room) return last;
+        long row = last - 1;
         while (row >= 0)
         {
             long height = RowHeightOf(row);
-            if (used + height > room) break;
+            if (fill ? used + height >= room : used + height > room) break;
             used += height;
             row--;
         }
@@ -1404,7 +1427,7 @@ public sealed class LineGridControl : Control
         return Math.Max(1, fitted);
     }
 
-    private int ViewportHeight => Math.Max(1, ClientSize.Height - _hbar.Height - HeaderHeight);
+    private int ViewportHeight => Math.Max(1, ClientSize.Height - BottomInset - HeaderHeight);
 
     /// <summary>How tall a row is drawn, measured the way the paint measures it so the two agree.</summary>
     private int RowHeightOf(long row)
