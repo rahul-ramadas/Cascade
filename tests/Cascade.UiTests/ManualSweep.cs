@@ -883,7 +883,7 @@ public class ManualSweep : IDisposable
         using var bmp = Grab(map);
         var (skipTop, skipHeight) = ViewportRun(bmp);
         var seen = new List<Color>();
-        for (int y = 0; y < bmp.Height; y += 3)
+        for (int y = 2; y < bmp.Height - 2; y += 3)                                    // inside the frame
         {
             if (y >= skipTop && y < skipTop + skipHeight) continue;
             for (int x = 4; x < bmp.Width - 2; x++)                                    // past the rule down the left
@@ -905,7 +905,7 @@ public class ManualSweep : IDisposable
     {
         int x = bmp.Width - 3;
         var tally = new Dictionary<int, int>();
-        for (int y = 0; y < bmp.Height; y++)
+        for (int y = 2; y < bmp.Height - 2; y++)
         {
             int argb = bmp.GetPixel(x, y).ToArgb();
             tally[argb] = tally.TryGetValue(argb, out int n) ? n + 1 : 1;
@@ -913,7 +913,7 @@ public class ManualSweep : IDisposable
         var gutter = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
 
         int best = -1, bestRun = 0, run = 0;
-        for (int y = 0; y < bmp.Height; y++)
+        for (int y = 2; y < bmp.Height - 2; y++)
         {
             var p = bmp.GetPixel(x, y);
             bool painted = Math.Abs(p.R - gutter.R) + Math.Abs(p.G - gutter.G) + Math.Abs(p.B - gutter.B) > 24;
@@ -928,7 +928,7 @@ public class ManualSweep : IDisposable
     private static bool BottomIsDrawn(Bitmap bmp)
     {
         var tally = new Dictionary<int, int>();
-        for (int y = 0; y < bmp.Height; y++)
+        for (int y = 2; y < bmp.Height - 2; y++)
             for (int x = 4; x < bmp.Width - 2; x += 3)
             {
                 int argb = bmp.GetPixel(x, y).ToArgb();
@@ -936,7 +936,7 @@ public class ManualSweep : IDisposable
             }
         var gutter = Color.FromArgb(tally.OrderByDescending(kv => kv.Value).First().Key);
 
-        for (int y = bmp.Height * 7 / 8; y < bmp.Height; y++)
+        for (int y = bmp.Height * 7 / 8; y < bmp.Height - 2; y++)
             for (int x = 4; x < bmp.Width - 2; x++)
             {
                 var p = bmp.GetPixel(x, y);
