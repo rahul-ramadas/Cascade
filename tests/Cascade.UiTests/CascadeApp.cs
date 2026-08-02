@@ -450,14 +450,77 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Opens Find (via the Edit menu), searches forward for <paramref name="text"/>, then closes it.</summary>
     public void FindText(string text)
     {
+        OpenFind();
+        FindWith(text, forward: true);
+        CloseFind();
+    }
+
+    // ---- the find bar ----
+    // It lives in the main window above the log rather than in a dialog of its own, so everything here is
+    // looked up inside the main window.
+
+    /// <summary>The find bar itself, or null when it is not showing.</summary>
+    public AutomationElement? FindBar()
+        => Window.FindFirstDescendant(cf => cf.ByName("Find bar"));
+
+    /// <summary>Edit &gt; Find, then waits for the bar to appear.</summary>
+    public AutomationElement OpenFind()
+    {
         ClickMenuOrThrow("Edit", "Find");
-        var dlg = FindDialog("Find") ?? throw new InvalidOperationException("Find dialog did not open.");
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
+        var bar = Retry.WhileNull(FindBar, TimeSpan.FromSeconds(5), Poll).Result;
+        return bar ?? throw new InvalidOperationException("Find bar did not appear.");
+    }
+
+    /// <summary>Puts <paramref name="text"/> in the bar's box and clicks Next or Previous.</summary>
+    public void FindWith(string text, bool forward)
+    {
+        var bar = FindBar() ?? throw new InvalidOperationException("Find bar is not showing.");
+        var edit = bar.FindFirstDescendant(cf => cf.ByName("Find what"));
         var vp = edit?.Patterns.Value.PatternOrDefault;
         if (vp is not null && !vp.IsReadOnly.ValueOrDefault) vp.SetValue(text);
-        dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))?.AsButton().Invoke();
+        bar.FindFirstDescendant(cf => cf.ByName(forward ? "Find next" : "Find previous"))?.AsButton().Invoke();
         Settle();
-        try { dlg.Close(); } catch { /* modeless: hides */ }
+    }
+
+    /// <summary>Clicks the bar's close button, which puts the search away with it.</summary>
+    public void CloseFind()
+    {
+        FindBar()?.FindFirstDescendant(cf => cf.ByName("Close find"))?.AsButton().Invoke();
+        Settle();
+    }
+
+    /// <summary>What the bar says it found. Its label has no accessible name of its own, so that its text is
+    /// what UI Automation reports.</summary>
+    public string FindBarMessage()
+    {
+        var bar = FindBar();
+        if (bar is null) return "";
+        return string.Join(" | ", bar.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
+                                     .Select(t => t.Name ?? "")
+                                     .Where(n => n.Length > 0 && n != "Find:"));
+    }
+
+    /// <summary>Waits for the bar's message to contain <paramref name="substring"/> (the count is re-read on
+    /// a timer, and a search runs in the background).</summary>
+    public bool WaitFindBarMessage(string substring, int ms = 8000)
+        => Retry.WhileFalse(() => FindBarMessage().Contains(substring, StringComparison.OrdinalIgnoreCase),
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
+
+    /// <summary>The bar's term box. The combo carries the accessible name, but the window that takes
+    /// keystrokes is the edit inside it - posting to the combo itself leaves the text untouched.</summary>
+    public AutomationElement FindInput()
+    {
+        var combo = FindBar()?.FindFirstDescendant(cf => cf.ByName("Find what"))
+                    ?? throw new InvalidOperationException("Find box not found: " + DescribeTextElements());
+        return combo.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit)) ?? combo;
+    }
+
+    /// <summary>Gives the bar's term box the keyboard, without taking the desktop's foreground.</summary>
+    public void FocusFindInput()
+    {
+        IntPtr hwnd = FindInput().Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd != IntPtr.Zero) GiveKeyboardFocus(hwnd);
+        Settle();
     }
 
     public void ToggleFilteredMode()
@@ -485,24 +548,7 @@ internal sealed class CascadeApp : IDisposable
     public void FindNextForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Next Match");
     public void FindPrevForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Previous Match");
 
-    /// <summary>Opens the (modeless) Find dialog via the Edit menu and returns its window.</summary>
-    public Window OpenFindDialog()
-    {
-        ClickMenuOrThrow("Edit", "Find");
-        return FindDialog("Find") ?? throw new InvalidOperationException("Find dialog did not open.");
-    }
-
-    /// <summary>Types <paramref name="text"/> into an open Find dialog and clicks Find Next/Previous.</summary>
-    public void FindInDialog(Window dlg, string text, bool forward)
-    {
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
-        var vp = edit?.Patterns.Value.PatternOrDefault;
-        if (vp is not null && !vp.IsReadOnly.ValueOrDefault) vp.SetValue(text);
-        dlg.FindFirstDescendant(cf => cf.ByName(forward ? "Find Next" : "Find Previous"))?.AsButton().Invoke();
-        Settle();
-    }
-
-    /// <summary>The concatenated text labels in a dialog (used to read the Find status message).</summary>
+    /// <summary>The concatenated text labels in a dialog.</summary>
     public string DialogText(Window dlg)
         => string.Join(" | ", dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(t => t.Name ?? "").Where(n => n.Length > 0));
 

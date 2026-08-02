@@ -125,6 +125,10 @@ public class UiFeatureTests
         }
 
         // Deep enough into the file that neither end can clamp the result and hide a regression.
+        // Open the bar first: it takes a couple of rows off the top of the log, so anything measured before
+        // it appears is measuring a viewport that is about to change size.
+        app.OpenFind();
+
         app.ScrollVerticalTo(497);
         app.SelectLine(501);
         Check("selects line 501", app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
@@ -134,10 +138,8 @@ public class UiFeatureTests
         int bottom = Math.Max(top, rows * 3 / 4 - 1);
         Check("the view is tall enough for a middle half to mean anything", rows >= 9, $"{rows} rows");
 
-        var dlg = app.OpenFindDialog();
-
         // Forwards to a line below the view: it should settle at the bottom of the band, not the last row.
-        app.FindInDialog(dlg, "line 520", forward: true);
+        app.FindWith("line 520", forward: true);
         bool wentDown = app.WaitStatus("Ln:", "Ln: 521 / 1,000");
         int down = OffsetRows();
         Check("found line 521", wentDown, app.StatusText("Ln:"));
@@ -145,14 +147,13 @@ public class UiFeatureTests
               down == bottom, $"offset {down}, band {top}..{bottom} of {rows}");
 
         // Backwards to a line above it: the top of the band this time.
-        app.FindInDialog(dlg, "line 500", forward: false);
+        app.FindWith("line 500", forward: false);
         bool wentUp = app.WaitStatus("Ln:", "Ln: 501 / 1,000");
         int up = OffsetRows();
         Check("found line 501 going back", wentUp, app.StatusText("Ln:"));
         Check("a line found above arrives at the top of the middle half",
               up == top, $"offset {up}, band {top}..{bottom} of {rows}");
 
-        try { dlg.Close(); } catch { /* modeless: hides */ }
         Assert.True(fails.Count == 0,
                     $"Reveal failures (band {top}..{bottom} of {rows} rows):\n  " + string.Join("\n  ", fails));
     }
@@ -464,10 +465,11 @@ public class UiFeatureTests
             void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
             app.SelectLine(5);
+            app.OpenFind();
             int before = app.FirstVisibleLine();
 
-            var dlg = app.OpenFindDialog();
-            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))
+            var bar = app.FindBar() ?? throw new InvalidOperationException("Find bar not found: " + app.DescribeTextElements());
+            var edit = bar.FindFirstDescendant(cf => cf.ByName("Find what"))
                        ?? throw new InvalidOperationException("Find box not found: " + app.DescribeTextElements());
             edit.Patterns.Value.Pattern.SetValue("line 999");
             Thread.Sleep(700);   // longer than the preview's own pause
@@ -475,16 +477,19 @@ public class UiFeatureTests
             Check("typing does not move the view", app.FirstVisibleLine() == before,
                   $"{before} -> {app.FirstVisibleLine()}");
 
-            dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))?.AsButton().Invoke();
+            bar.FindFirstDescendant(cf => cf.ByName("Find next"))?.AsButton().Invoke();
             Check("asking for the search does move it",
                   Retry.WhileFalse(() => app.FirstVisibleLine() != before, TimeSpan.FromSeconds(6)).Result,
                   $"{before} -> {app.FirstVisibleLine()}");
             Check("and it lands on the match", app.WaitSelectedRowText("line 999"), app.SelectedRowText());
 
-            // The term outlives the dialog, so the status bar keeps reporting it.
-            try { dlg.Close(); } catch { /* modeless: hides */ }
-            Check("the tally survives the dialog closing",
-                  app.WaitForFindMessage("of 1", 4000), app.AllStatusText());
+            // The count belongs beside the term now, not at the far corner of the window.
+            Check("the bar says what it found", app.WaitFindBarMessage("of 1", 4000), app.FindBarMessage());
+
+            // Closing the bar ends the search: there is no longer a state where a term is still being
+            // looked for with nothing on screen to say so.
+            app.CloseFind();
+            Check("closing the bar puts it away", app.FindBar() is null);
 
             Assert.True(fails.Count == 0, "Find-as-you-type failures:\n  " + string.Join("\n  ", fails));
         }
@@ -545,24 +550,24 @@ public class UiFeatureTests
     }
 
     [Fact]
-    public void Find_dialog_navigates_with_enter_and_f3()
+    public void Find_keys_work_from_the_bar_and_from_the_log()
     {
-        // These keys have to work while the Find dialog itself has focus. Enter used to be the only one:
-        // Shift+Enter hit the form's default button (AcceptButton ignores Alt/Ctrl but not Shift) and so
-        // searched forwards, and F3 was only wired up on the main window.
+        // The bar sits in the main window now, so its keys travel through the form. Enter and Shift+Enter
+        // are handled by the bar itself (ProcessCmdKey runs on the focused control first); F3 and Shift+F3
+        // are menu shortcuts and have to keep working wherever the focus is - including in the log, so that
+        // walking through matches never takes the arrow keys away.
         using var app = CascadeApp.Launch();
         var fails = new List<string>();
         void Check(string name, string expected) { if (!app.WaitStatus("Ln:", expected)) fails.Add($"{name} :: {app.StatusText("Ln:")}"); }
 
         app.SelectLine(1);
-        var dlg = app.OpenFindDialog();
-        app.FindInDialog(dlg, "MATCH line", forward: true);   // MATCH is on 1-based lines 1, 6, 11, 16, ...
+        app.OpenFind();
+        app.FindWith("MATCH line", forward: true);   // MATCH is on 1-based lines 1, 6, 11, 16, ...
         Check("find next from line 1", "Ln: 6 / 1,000");
 
-        // From the text box. These are handled in the dialog's ProcessCmdKey, so they have to go through the
-        // message loop rather than straight to a control.
-        app.FocusInDialog(dlg);
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        // From the term box.
+        app.FocusFindInput();
+        var edit = app.FindInput();
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3);
         Check("F3 -> next", "Ln: 11 / 1,000");
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
@@ -572,15 +577,14 @@ public class UiFeatureTests
         app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN, VirtualKeyShort.SHIFT);
         Check("Shift+Enter -> previous", "Ln: 6 / 1,000");
 
-        // ...and with a button focused, which is exactly when Shift+Enter used to go the wrong way.
-        var nextButton = dlg.FindFirstDescendant(cf => cf.ByName("Find Next"))!;
-        app.FocusInDialog(dlg, "Find Next");
-        app.SendKeyAsDialogKey(nextButton, VirtualKeyShort.RETURN, VirtualKeyShort.SHIFT);
-        Check("Shift+Enter with a button focused -> previous", "Ln: 1 / 1,000");
-        app.SendKeyAsDialogKey(nextButton, VirtualKeyShort.F3);
-        Check("F3 with a button focused -> next", "Ln: 6 / 1,000");
+        // ...and from the log itself, which is where the keyboard is while reading results.
+        app.ClickMenuOrThrow("View", "Focus Text Area");
+        Thread.Sleep(300);
+        app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
+        Check("F3 from the log -> next", "Ln: 11 / 1,000");
+        app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
+        Check("Shift+F3 from the log -> previous", "Ln: 6 / 1,000");
 
-        try { dlg.Close(); } catch { /* modeless: hides */ }
         Assert.True(fails.Count == 0, "Find key failures:\n  " + string.Join("\n  ", fails));
     }
 
@@ -599,8 +603,8 @@ public class UiFeatureTests
             void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
             app.SelectLine(1);
-            var dlg = app.OpenFindDialog();
-            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+            app.OpenFind();
+            var edit = app.FindInput();
             app.SetText(edit, "line");                      // every line matches, so each Enter moves one line
             app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
             Check("the first search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
@@ -620,17 +624,17 @@ public class UiFeatureTests
                   Retry.WhileFalse(() => app.TextOf(edit) == "lin", TimeSpan.FromSeconds(3)).Result,
                   app.TextOf(edit));
 
-            try { dlg.Close(); } catch { /* modeless: hides */ }
             Assert.True(fails.Count == 0, "Find repeat failures:\n  " + string.Join("\n  ", fails));
         }
         finally { File.Delete(log); }
     }
 
     [Fact]
-    public void Escape_puts_the_search_away_but_F3_brings_it_straight_back()
+    public void Escape_closes_the_bar_and_the_search_with_it_but_F3_brings_both_back()
     {
-        // Escape is for taking the highlights off the text, not for forgetting what was being looked for.
-        // F3 used to reopen the bar with the old term sitting in it, waiting to be asked a second time.
+        // The whole point of the bar being in the layout: there is no state where a term is still being
+        // looked for with nothing on screen to say so. Escape ends it, and F3 starts it again from what the
+        // bar was last asked to look for.
         string log = TestData.WriteLogFile();
         try
         {
@@ -640,26 +644,27 @@ public class UiFeatureTests
             void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
             app.SelectLine(1);
-            var dlg = app.OpenFindDialog();
-            var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+            app.OpenFind();
+            var edit = app.FindInput();
             app.SetText(edit, "line");
             app.SendKeyAsDialogKey(edit, VirtualKeyShort.RETURN);
             Check("the search lands", app.WaitStatus("Ln:", "Ln: 2 / 1,000"), app.StatusText("Ln:"));
-            Check("and the counts are up", app.WaitForStatusContaining("Match "), app.AllStatusText());
+            Check("and the counts are up, in the bar", app.WaitFindBarMessage("Match "), app.FindBarMessage());
 
-            // Escape from the text area, which is where it clears the find rather than closing the bar.
-            // Through the message loop, because both keys are handled at form level, not in a KeyDown.
+            // Escape from the text area. Through the message loop, because it is handled at form level.
             app.ClickMenuOrThrow("View", "Focus Text Area");
             Thread.Sleep(300);
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.ESCAPE);
-            Check("escape takes the counts away",
-                  Retry.WhileTrue(() => app.AllStatusText().Contains("Match "), TimeSpan.FromSeconds(4)).Success,
-                  app.AllStatusText());
+            Check("escape puts the bar away",
+                  Retry.WhileFalse(() => app.FindBar() is null, TimeSpan.FromSeconds(4)).Result,
+                  app.FindBarMessage());
 
-            // F3 must search again there and then: next match, counts back, no dialog waiting on an Enter.
+            // F3 must search again there and then: bar back, next match, counts with it.
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
             Check("F3 goes straight to the next match", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
-            Check("and the counts come back with it", app.WaitForStatusContaining("Match 3"), app.AllStatusText());
+            Check("and brings the bar back with it",
+                  Retry.WhileFalse(() => app.FindBar() is not null, TimeSpan.FromSeconds(4)).Result);
+            Check("counts and all", app.WaitFindBarMessage("Match 3"), app.FindBarMessage());
 
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3);
             Check("and again", app.WaitStatus("Ln:", "Ln: 4 / 1,000"), app.StatusText("Ln:"));
@@ -667,7 +672,6 @@ public class UiFeatureTests
             app.SendKeyAsDialogKey(app.Grid(), VirtualKeyShort.F3, VirtualKeyShort.SHIFT);
             Check("Shift+F3 goes back", app.WaitStatus("Ln:", "Ln: 3 / 1,000"), app.StatusText("Ln:"));
 
-            try { dlg.Close(); } catch { /* modeless: hides */ }
             Assert.True(fails.Count == 0, "Escape/F3 failures:\n  " + string.Join("\n  ", fails));
         }
         finally { File.Delete(log); }
@@ -699,19 +703,18 @@ public class UiFeatureTests
             app.FindPrevForSelectedFilter();
             Check("per-filter find reports the end", app.WaitForFindMessage("No more matches"));
 
-            // 3. Text find: the dialog says so, and the status bar keeps its counts.
-            var dlg = app.OpenFindDialog();
-            app.FindInDialog(dlg, "line 137", forward: true);
-            Check("the search found something", app.WaitForStatusContaining("Match "));
-            app.FindInDialog(dlg, "line 137", forward: true);   // ...and there is only the one
-            Check("the dialog says it ran out",
-                  Retry.WhileFalse(() => app.DialogText(dlg).Contains("Not found"), TimeSpan.FromSeconds(4)).Result);
-            Check("the counts are still on show, not replaced by a message",
-                  app.AllStatusText().Contains("Match ") && !app.AllStatusText().Contains("No more matches"));
-            try { dlg.Close(); } catch { /* modeless: hides */ }
+            // 3. Text find. Now that its counts live in the bar rather than the status bar, it says so in
+            // the status bar like the other three instead of flashing silently.
+            app.OpenFind();
+            app.FindWith("line 137", forward: true);
+            Check("the search found something", app.WaitFindBarMessage("Match "));
+            app.FindWith("line 137", forward: true);   // ...and there is only the one
+            Check("text find reports the end", app.WaitForFindMessage("No more matches"));
+            Check("and the counts are still on show in the bar", app.FindBarMessage().Contains("Match "));
+            app.CloseFind();
 
-            // 4. Filter search for a filter that is not in the list. Deliberately after the Find bar, which
-            // has to hand the keyboard back when it hides.
+            // 4. Filter search for a filter that is not in the list. Deliberately after the find bar, which
+            // has to hand the keyboard back when it closes.
             var search = app.FilterSearchBox();
             app.SetText(search, "zzz-no-such-filter");
             app.Key(search, VirtualKeyShort.RETURN);
@@ -787,31 +790,31 @@ public class UiFeatureTests
         var fails = new List<string>();
         void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
-        var dlg = app.OpenFindDialog();
+        app.OpenFind();
 
         // --- dim mode: the highlighted line must actually contain the query ---
-        app.FindInDialog(dlg, "other line 137", forward: true);
+        app.FindWith("other line 137", forward: true);
         Check("dim forward -> Ln 138", app.WaitStatus("Ln:", "Ln: 138 / 1,000"), app.StatusText("Ln:"));
         Check("dim forward: selected line contains query", app.WaitSelectedRowText("other line 137"), app.SelectedRowText());
 
-        app.FindInDialog(dlg, "other line 246", forward: true);
+        app.FindWith("other line 246", forward: true);
         Check("dim forward2 -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
         Check("dim forward2: selected line contains query", app.WaitSelectedRowText("other line 246"), app.SelectedRowText());
 
-        app.FindInDialog(dlg, "other line 89", forward: false);
+        app.FindWith("other line 89", forward: false);
         Check("dim backward -> Ln 90", app.WaitStatus("Ln:", "Ln: 90 / 1,000"), app.StatusText("Ln:"));
         Check("dim backward: selected line contains query", app.WaitSelectedRowText("other line 89"), app.SelectedRowText());
 
         // repeat the same unique query forward: it must NOT re-find the current line
-        app.FindInDialog(dlg, "other line 246", forward: true); // caret at 89 -> 246 is ahead
+        app.FindWith("other line 246", forward: true); // caret at 89 -> 246 is ahead
         Check("dim re-find forward -> Ln 247", app.WaitStatus("Ln:", "Ln: 247 / 1,000"), app.StatusText("Ln:"));
-        app.FindInDialog(dlg, "other line 246", forward: true); // caret==246, unique -> not found, stay
-        Check("dim no more matches -> not found", app.WaitDialogText(dlg, "Not found"), app.DialogText(dlg));
+        app.FindWith("other line 246", forward: true); // caret==246, unique -> not found, stay
+        Check("dim no more matches -> says so", app.WaitForFindMessage("No more matches"), app.AllStatusText());
         Check("dim no more matches -> selection unchanged", app.StatusText("Ln:") == "Ln: 247 / 1,000", app.StatusText("Ln:"));
 
         // --- filtered mode: the highlighted line must STILL contain the query ---
         app.SetFilteredMode(true);
-        app.FindInDialog(dlg, "MATCH line 500", forward: true);
+        app.FindWith("MATCH line 500", forward: true);
         Check("filtered: matched-line search -> Ln 501", app.WaitStatus("Ln:", "Ln: 501 / 1,000"), app.StatusText("Ln:"));
         Check("filtered: selected line contains query", app.WaitSelectedRowText("MATCH line 500"), app.SelectedRowText());
 
@@ -819,9 +822,9 @@ public class UiFeatureTests
         // wrong (visible) line — the highlighted line must always contain the query.
         Check("filtered precondition: visible rows are MATCH rows before hidden-only search",
             app.VisibleRowsLookFiltered(), app.SelectedRowText());
-        app.FindInDialog(dlg, "other line 733", forward: true);
+        app.FindWith("other line 733", forward: true);
         Check("filtered: hidden-only text reports not found",
-            app.WaitDialogText(dlg, "Not found"), app.DialogText(dlg));
+            app.WaitForFindMessage("No more matches"), app.AllStatusText());
         Check("filtered: hidden-only text leaves selection put (still 501)",
             app.StatusText("Ln:") == "Ln: 501 / 1,000", app.StatusText("Ln:"));
 

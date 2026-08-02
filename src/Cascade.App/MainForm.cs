@@ -17,6 +17,9 @@ public sealed class MainForm : Form
     private readonly MachineState _state;
     private readonly CascadeDocument _doc = new();
     private readonly LineGridControl _grid = new() { Dock = DockStyle.Fill };
+    // Holds the find bar above the log. The grid keeps Dock.Fill, so the bar appearing takes its space out
+    // of the text rather than over it.
+    private readonly Panel _textPane = new() { Dock = DockStyle.Fill };
     private readonly FilterTreeControl _filterTree = new() { Dock = DockStyle.Fill };
     private readonly FilterPresetsControl _presets = new() { Dock = DockStyle.Fill };
     // The filter list and its presets share one pane, split the short way round: the presets sit beside the
@@ -51,13 +54,8 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
-    private FindDialog? _findDialog;
+    private FindBar _findBar = null!;
     private FindQuery? _lastQuery;
-
-    /// <summary>The term Esc put away. Clearing a find is meant to take the highlights off the text, not to
-    /// forget what was being looked for, so F3 picks this up and runs it again from wherever the caret now
-    /// is - highlights, counts and all - instead of opening the bar and waiting to be asked twice.</summary>
-    private FindQuery? _dormantQuery;
     private readonly FilterHistory _history = new();
     private ToolStripMenuItem _miUndo = null!, _miRedo = null!;
     private string? _filterFilePath;
@@ -110,6 +108,14 @@ public sealed class MainForm : Form
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
+    internal ProgressBar? StatusProgressForTesting => _progress.Control as ProgressBar;
+
+    internal void SetStatusProgressForTesting(double fraction)
+    {
+        _progress.Visible = true;
+        SetProgress(fraction);
+    }
+
     internal bool NoSavePrompt;
     private bool _offScreen;
 
@@ -139,8 +145,13 @@ public sealed class MainForm : Form
 
         BuildMenu();
         BuildStatusBar();
+        BuildFindBar();
 
-        _split.Panel1.Controls.Add(_grid);
+        // The bar sits above the log inside its own host, so opening it shortens the text area rather than
+        // covering it. The grid is untouched by this - the minimap it owns simply gets shorter with it.
+        _textPane.Controls.Add(_grid);
+        _textPane.Controls.Add(_findBar);
+        _split.Panel1.Controls.Add(_textPane);
         _filterPane.Panel1.Controls.Add(_filterTree);
         _filterPane.Panel2.Controls.Add(_presets);
         _split.Panel2.Controls.Add(_filterPane);
@@ -233,11 +244,18 @@ public sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Inside the bar, Tab walks its own controls - the term, the two buttons, the two options - rather
+        // than jumping straight out to another pane.
+        if (keyData is Keys.Tab or (Keys.Shift | Keys.Tab) && _findBar.ContainsFocus)
+            return base.ProcessCmdKey(ref msg, keyData);
         if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
         if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
         if (keyData == Keys.Escape && _findBusy) { _doc.CancelFind(); return true; }
-        // ...and once nothing is running, Esc puts the term away: highlights off and the counts with them.
-        if (keyData == Keys.Escape && _lastQuery is not null && !IsTextInputFocused()) { ClearFind(); return true; }
+        // ...and once nothing is running, Esc puts the whole thing away: bar closed, highlights off, counts
+        // with them. It has to work while typing the term too, which is why the general "not in a text box"
+        // guard (there to leave the filter search box's own Esc alone) only applies outside the bar.
+        if (keyData == Keys.Escape && (_findBar.Visible || _lastQuery is not null)
+            && (_findBar.ContainsFocus || !IsTextInputFocused())) { CloseFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (!IsTextInputFocused())
         {
@@ -581,28 +599,6 @@ public sealed class MainForm : Form
         if (_status.Width > 0 && _status.Width - TotalMetricWidth(magnitude) - _activitySlot < Dpi(300))
             magnitude = rounded;
         return magnitude;
-    }
-
-    /// <summary>Widens the activity slot to hold a search's counts, and only while there is a search: the
-    /// numbers are as long as the file is big, and "Match 1 of 18,020,848 lines · 20,017,440 hits" needs
-    /// twice the room that a slot sized for a small file reserves. The space comes from the two paths, which
-    /// spring - so nothing to the right of it moves. Capped so they always keep a readable share.</summary>
-    private bool EnsureActivitySlot()
-    {
-        int want = _baseActivitySlot;
-        if (_lastQuery is not null && _status.Width > 0)
-        {
-            string n = MetricMagnitude().ToString("N0");
-            string widest = $"Match {n} of {n} lines \u00b7 {n} hidden \u00b7 {n} of {n} hits";
-            int room = Math.Min(_status.Width * 45 / 100,
-                                _status.Width - CurrentMetricWidth() - Dpi(300));
-            int needed = TextRenderer.MeasureText(widest, _busyLabel.Font).Width + _progressSlot + Dpi(16);
-            want = Math.Max(want, Math.Min(needed, room));
-        }
-        if (want == _activitySlot) return false;
-        _activitySlot = want;
-        _busyLabel.Width = _activitySlot - (_progress.Visible ? _progressSlot : 0);
-        return true;
     }
 
     private int CurrentMetricWidth()
@@ -1140,7 +1136,9 @@ public sealed class MainForm : Form
     {
         if (_snapping || _split.Orientation != Orientation.Horizontal) return;
         if (_split.Panel1Collapsed || _split.Panel2Collapsed) return;
-        int pitch = _grid.RowPitch, chrome = _grid.ChromeHeight;
+        // The find bar is above the grid inside the same panel, so from the divider's point of view it is
+        // more chrome standing between the split and the first line of text.
+        int pitch = _grid.RowPitch, chrome = _grid.ChromeHeight + (_findBar.Visible ? _findBar.Height : 0);
         int total = _split.Height - _split.SplitterWidth;
         if (pitch <= 1 || total <= 0) return;
 
@@ -1334,27 +1332,43 @@ public sealed class MainForm : Form
 
     // ---- find / goto ----
 
-    private void ShowFind()
+    private void BuildFindBar()
     {
-        if (_findDialog is null)
+        _findBar = new FindBar(DoFind);
+        _findBar.History = () => _state.RecentFindTerms;
+        _findBar.CloseRequested += CloseFind;
+        // Typing marks the hits already on screen and nothing else: no sweep, and the view does not
+        // move until a search is actually asked for.
+        _findBar.PreviewChanged += q =>
         {
-            _findDialog = new FindDialog(DoFind);
-            _findDialog.CancelRequested += () => _doc.CancelFind();
-            // Typing marks the hits already on screen and nothing else: no sweep, and the view does not
-            // move until a search is actually asked for.
-            _findDialog.PreviewChanged += q =>
-            {
-                _grid.SetFindHighlight(q is null ? null : FindEngine.CompileQuery(q));
-                if (q is null && _lastQuery is not null) ClearFind();
-            };
+            _grid.SetFindHighlight(q is null ? null : FindEngine.CompileQuery(q));
+            if (q is null && _lastQuery is not null) ClearFind();
+        };
+    }
+
+    /// <summary>Brings the bar up. <paramref name="focus"/> is false for F3, which repeats a search without
+    /// taking the keyboard away from the log - the arrow keys have to keep working between matches.</summary>
+    private void ShowFind(bool focus = true)
+    {
+        if (!_findBar.Visible)
+        {
+            _findBar.SetHistory(_state.RecentFindTerms);
+            _findBar.Visible = true;
+            SnapSplitter();
         }
-        _findDialog.SetHistory(_state.RecentFindTerms);
-        _findDialog.History = () => _state.RecentFindTerms;
-        if (!_findDialog.Visible) _findDialog.Show(this);
-        // Already open but behind the window, Focus() on its text box would do nothing - Ctrl+F has to put
-        // the keyboard in the box wherever the bar happens to be.
-        _findDialog.Activate();
-        _findDialog.FocusInput();
+        if (focus) _findBar.FocusInput();
+    }
+
+    /// <summary>Puts the bar away and the term with it. One gesture, because a search that is running with
+    /// nothing on screen to say so is the state this bar exists to remove.</summary>
+    private void CloseFind()
+    {
+        if (!_findBar.Visible && _lastQuery is null) return;
+        ClearFind();
+        _findBar.Visible = false;
+        _findBar.SetMessage("");
+        SnapSplitter();
+        FocusTextArea();
     }
 
     private async void DoFind(FindQuery query, bool forward)
@@ -1381,7 +1395,7 @@ public sealed class MainForm : Form
             // F3 usually repeats the search with the dialog closed, so the progress has to reach the status
             // bar too - a search that is waiting on the sweep would otherwise look like a hang.
             SetFindBusy(true, "Searching", $"Searching for {Quote(query.Text)}", () => _doc.FindProgressFor(forward));
-            _findDialog?.SetSearching(true);
+            _findBar.SetSearching(true);
         }
         long found;
         try
@@ -1395,8 +1409,7 @@ public sealed class MainForm : Form
             if (!_doc.IsFindRunning)
             {
                 SetFindBusy(false);
-                _findDialog?.SetSearching(false);
-                _findDialog?.SetStatus("Canceled.");
+                _findBar.SetSearching(false);
             }
             return;
         }
@@ -1404,17 +1417,16 @@ public sealed class MainForm : Form
         {
             // The term was put away while this was still waiting - emptying the box does that.
             SetFindBusy(false);
-            _findDialog?.SetSearching(false);
+            _findBar.SetSearching(false);
             return;
         }
         // Unconditional: a slower search that this one superseded may have put the progress UI up, and both
         // of these do nothing when there is nothing to take down.
         SetFindBusy(false);
-        _findDialog?.SetSearching(false);
+        _findBar.SetSearching(false);
         if (found >= 0)
         {
             GoToLine(found + 1);
-            _findDialog?.SetStatus("");
             // Held down, the key repeats faster than an idle moment comes round: WM_PAINT and the refresh
             // timer both wait for one, so without this the view and the counts sit still until it is let go.
             UpdateStatus();
@@ -1423,25 +1435,27 @@ public sealed class MainForm : Form
         }
         else
         {
-            _findDialog?.SetStatus(_doc.IsIndexComplete ? "Not found." : "Not found yet \u2014 file still loading\u2026");
-            // No wording in the status bar: the tally already sitting there says how many matches there are
-            // and which one the caret is on, and a message would cover exactly that up for five seconds.
-            AppFlash.Flash(this);
-            System.Media.SystemSounds.Beep.Play();
+            // The same feedback as every other find command. It can say so in the status bar now that the
+            // tally has moved to the find bar and is no longer the thing being covered up.
+            NoMoreMatches(_doc.IsIndexComplete ? "No more matches" : "No more matches yet",
+                _doc.IsIndexComplete
+                    ? $"No more matches for {Quote(query.Text)}"
+                    : $"No more matches for {Quote(query.Text)} yet \u2014 the file is still loading");
         }
     }
 
     private void RepeatFind(bool forward)
     {
-        if ((_lastQuery ?? _dormantQuery) is { } q) DoFind(q, forward);
-        else ShowFind();
+        if (_lastQuery is { } q) { DoFind(q, forward); return; }
+        // Nothing active: bring the bar back with whatever was last typed in it and run that, so F3 still
+        // repeats a search that was closed - but now with the term visible instead of hidden in a field.
+        ShowFind(focus: !_findBar.HasTerm);
+        _findBar.Run(forward);
     }
 
-    /// <summary>Drops the find term: highlights off, counts gone, and the sweep behind it released. What was
-    /// being looked for is remembered - see <see cref="_dormantQuery"/>.</summary>
+    /// <summary>Drops the find term: highlights off, counts gone, and the sweep behind it released.</summary>
     private void ClearFind()
     {
-        _dormantQuery = _lastQuery ?? _dormantQuery;
         _lastQuery = null;
         // Release the sweep before repainting, not after. The minimap decides whether it has anything to
         // redraw by comparing the hit count it last drew against the document's - so repainting first asks
@@ -1452,7 +1466,7 @@ public sealed class MainForm : Form
         _findMsg = "";
         _tally = _tallyDetail = "";
         _tallyLine = -1;
-        _findDialog?.SetStatus("");
+        _findBar.SetMessage("");
         UpdateStatus();
     }
 
@@ -1611,7 +1625,6 @@ public sealed class MainForm : Form
         // Settle every fixed width BEFORE measuring the paths: the springs only get their real size after a
         // layout pass, and measuring against a stale width leaves a path needlessly truncated.
         bool structural = EnsureMetricWidths();
-        structural |= EnsureActivitySlot();
         structural |= EnsureFilterSlot();
         if (structural && !_inStatusLayout)
         {
@@ -1641,18 +1654,10 @@ public sealed class MainForm : Form
             double fraction = _findProgress?.Invoke() ?? _findFraction;
             SetActivity($"{_findWhat}\u2026 {fraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
             SetProgress(fraction);
-            // Fed from the same tick as the status bar so the two can never disagree. The dialog ignores
-            // this unless its own bar is showing, so a per-filter find does not drive it.
-            _findDialog?.SetProgress(fraction);
         }
         else if (_findMsg.Length > 0)
         {
             SetActivity(_findMsg, Color.Firebrick, _findMsgDetail);
-            if (showBar) SetProgress(Fraction(indexing, filtering));
-        }
-        else if (RefreshTally() is { Length: > 0 } tally)
-        {
-            SetActivity(tally, SystemColors.ControlText, _tallyDetail);
             if (showBar) SetProgress(Fraction(indexing, filtering));
         }
         else if (indexing)
@@ -1675,6 +1680,9 @@ public sealed class MainForm : Form
         {
             SetActivity("", SystemColors.ControlText);
         }
+
+        // The count of what the term matched belongs beside the term, not at the far corner of the window.
+        _findBar.SetMessage(RefreshTally(), _tallyDetail);
 
         double Fraction(bool ix, bool ft)
         {

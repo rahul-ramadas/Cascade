@@ -2337,7 +2337,14 @@ internal static class SelfTest
         var filter = new Filter { Match = { Text = "sample text" } };
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
                           "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
-        ok &= CheckDialog("find", new FindDialog((_, _) => { }), "&Find Next", "Find &Previous", "Fi&nd:");
+
+        // The find bar is the exception, and deliberately: it sits in a window that owns a menu bar, so an
+        // Alt key on it would fight with the menu's own.
+        var bar = new FindBar((_, _) => { });
+        var claimed = AllControls(bar).Select(c => c.Text).Where(t => MnemonicOf(t) is not null).ToList();
+        ok &= Check("the find bar claims no Alt keys, which belong to the menu" +
+                    (claimed.Count > 0 ? " [" + string.Join(", ", claimed) + "]" : ""), claimed.Count == 0);
+        bar.Dispose();
 
         // A message appearing must not shove the rest of the dialog sideways. A TableLayoutPanel hands out
         // its cells to the VISIBLE controls in order, so a control that appears can take a cell meant for
@@ -2384,13 +2391,13 @@ internal static class SelfTest
             return good;
         }
 
-        var findDlg = new FindDialog((_, _) => { });
-        ok &= NothingShifts("find", findDlg, () => findDlg.SetStatus("Not found."));
-
-        // Searching brings up the progress bar and turns the Cancel button on, which is the other thing that
-        // used to push the buttons about.
-        var busyDlg = new FindDialog((_, _) => { });
-        ok &= NothingShifts("find (searching)", busyDlg, () => { busyDlg.SetSearching(true); busyDlg.SetProgress(0.4); });
+        // The find bar's count arrives beside a term box and two checkboxes and must not shove any of them
+        // along. It is hosted in a form here only because that is what the check drives.
+        var findHost = new Form { ClientSize = new Size(900, 60) };
+        var findBar = new FindBar((_, _) => { }) { Visible = true };
+        findHost.Controls.Add(findBar);
+        ok &= NothingShifts("find bar", findHost,
+            () => findBar.SetMessage("Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits"));
 
         // The filter dialog's regex error line is the same shape of thing.
         var broken = new Filter { Match = { Text = "fine", Regex = true } };
@@ -2405,13 +2412,12 @@ internal static class SelfTest
     {
         Line("-- the find bar --");
         var searched = new List<(FindQuery Query, bool Forward)>();
-        var dlg = new FindDialog((q, f) => searched.Add((q, f)));
+        var dlg = new FindBar((q, f) => searched.Add((q, f))) { Visible = true };
+        var host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), Opacity = 0, ClientSize = new Size(900, 60) };
+        host.Controls.Add(dlg);
         try
         {
-            dlg.StartPosition = FormStartPosition.Manual;
-            dlg.Location = new Point(0, 0);
-            dlg.Opacity = 0;
-            dlg.Show();
+            host.Show();
             Pump();
 
             dlg.SetTermForTesting("order-service", 3, 2);
@@ -2492,44 +2498,53 @@ internal static class SelfTest
         }
         finally
         {
-            dlg.Close();
-            dlg.Dispose();
+            host.Close();
+            host.Dispose();
             Pump();
         }
     }
 
     /// <summary>Windows slides a progress bar's fill towards a rising value over a few hundred milliseconds,
-    /// so a job that finishes quickly is over long before the fill arrives - the find bar crawled to a
-    /// seventh full while the search itself was four fifths done. What is PAINTED is the only thing that
-    /// matters here, and WM_PRINT (what DrawToBitmap uses) reports the slid position, not the value.</summary>
+    /// so a job that finishes quickly is over long before the fill arrives - a bar crawled to a seventh full
+    /// while the search itself was four fifths done. What is PAINTED is the only thing that matters here,
+    /// and WM_PRINT (what DrawToBitmap uses) reports the slid position, not the value.
+    ///
+    /// The status bar's is now the only progress bar in the app, the find bar having taken its own to the
+    /// status bar's when it stopped being a dialog.</summary>
     private static bool RunProgressPaintChecks()
     {
         Line("-- progress bars paint what they are told --");
 
-        var dlg = new FindDialog((_, _) => { });
-        dlg.StartPosition = FormStartPosition.Manual;
-        dlg.Location = new Point(0, 0);
-        dlg.Opacity = 0;
-        dlg.Show();
-        Pump();
-        dlg.SetSearching(true);
-        Pump();
-
-        var bar = AllControls(dlg).OfType<ProgressBar>().FirstOrDefault();
-        bool ok = Check("find: the searching state has a progress bar", bar is not null);
-        if (bar is not null)
+        var form = new MainForm(new AppSettings(), new MachineState(), [])
         {
-            // Straight from empty to most of the way along - the jump the slide is slowest to follow.
-            dlg.SetProgress(0.8);
-            double painted = PaintedFraction(bar);
-            ok &= Check($"find: it paints the figure it was given at once, rather than crawling towards it " +
-                        $"(asked 80%, painted {painted:P0})", Math.Abs(painted - 0.8) <= 0.1);
-        }
+            NoSavePrompt = true,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        try
+        {
+            form.Show();
+            Pump();
 
-        dlg.Close();
-        dlg.Dispose();
-        Pump();
-        return ok;
+            var bar = form.StatusProgressForTesting;
+            bool ok = Check("the status bar has a progress bar", bar is not null);
+            if (bar is not null)
+            {
+                // Straight from empty to most of the way along - the jump the slide is slowest to follow.
+                form.SetStatusProgressForTesting(0.8);
+                double painted = PaintedFraction(bar);
+                ok &= Check($"it paints the figure it was given at once, rather than crawling towards it " +
+                            $"(asked 80%, painted {painted:P0})", Math.Abs(painted - 0.8) <= 0.1);
+            }
+            return ok;
+        }
+        finally
+        {
+            form.Close();
+            form.Dispose();
+            Pump();
+        }
     }
 
     /// <summary>A filter started from a log line has to arrive holding that line. It used to keep only the
@@ -2794,7 +2809,7 @@ internal static class SelfTest
 
             // The find bar is hidden rather than closed, so it lives as long as the window; the filter
             // dialog is opened once per filter written. Neither may hand out a font it never takes back.
-            var find = new FindDialog((_, _) => { });
+            var find = new FindBar((_, _) => { });
             var findFont = find.FontForTesting;
             find.Dispose();
             ok &= Check("and closing the find bar lets go of its font", LetGo(findFont));
