@@ -23,8 +23,13 @@ public class MapLook : IDisposable
     private readonly List<string> _log = new();
     private CascadeApp _app = null!;
 
+    /// <summary>Asked for by hand. Everything here - the trace, the filter set, the place it writes - lives on
+    /// one machine, so anywhere else this must do NOTHING AT ALL, tearing down included.</summary>
+    private static bool Asked => Environment.GetEnvironmentVariable("CASCADE_MAPLOOK") == "1";
+
     public void Dispose()
     {
+        if (!Asked) return;
         Directory.CreateDirectory(Out);
         File.WriteAllLines(Path.Combine(Out, "log.txt"), _log);
         try { _app?.Dispose(); } catch { }
@@ -35,7 +40,7 @@ public class MapLook : IDisposable
     [Fact]
     public void Look()
     {
-        if (Environment.GetEnvironmentVariable("CASCADE_MAPLOOK") != "1") return;
+        if (!Asked) return;
         SetProcessDpiAwarenessContext(-4);
         Directory.CreateDirectory(Out);
         File.Copy(RealFilters, Filters, overwrite: true);
