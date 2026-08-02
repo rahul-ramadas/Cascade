@@ -44,7 +44,7 @@ public sealed class MainForm : Form
         ForeColor = Color.SeaGreen,
         Overflow = ToolStripItemOverflow.Never
     };
-    private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Marquee, Visible = false, MarqueeAnimationSpeed = 30, AutoSize = false, Width = 120 };
+    private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Visible = false, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
@@ -508,7 +508,6 @@ public sealed class MainForm : Form
         // nothing to its right ever moves when work starts or stops.
         _progress.Width = Dpi(70);
         _progress.Margin = new Padding(0, Dpi(4), Dpi(4), Dpi(4));
-        _progress.Style = ProgressBarStyle.Continuous;
         _busyLabel.AutoSize = false;
         _busyLabel.TextAlign = ContentAlignment.MiddleLeft;
         _busyLabel.Margin = new Padding(Dpi(6), 0, Dpi(4), 0);
@@ -1527,10 +1526,8 @@ public sealed class MainForm : Form
         return lo == 0 ? "\u2026" : text[..lo] + "\u2026";
     }
 
-    private void SetProgress(ProgressBarStyle style, double fraction)
+    private void SetProgress(double fraction)
     {
-        if (_progress.Style != style) _progress.Style = style;
-        if (style != ProgressBarStyle.Continuous) return;
         _progress.Maximum = 1000;
         int v = (int)Math.Clamp(fraction * 1000, 0, 1000);
         // Set from just above: Windows slides the fill towards a rising value and lags badly behind a fast
@@ -1643,7 +1640,7 @@ public sealed class MainForm : Form
             // A find is what the user just asked for, so it wins the slot.
             double fraction = _findProgress?.Invoke() ?? _findFraction;
             SetActivity($"{_findWhat}\u2026 {fraction * 100:F0}%  (Esc)", SystemColors.ControlText, _findWhatDetail);
-            SetProgress(ProgressBarStyle.Continuous, fraction);
+            SetProgress(fraction);
             // Fed from the same tick as the status bar so the two can never disagree. The dialog ignores
             // this unless its own bar is showing, so a per-filter find does not drive it.
             _findDialog?.SetProgress(fraction);
@@ -1651,26 +1648,28 @@ public sealed class MainForm : Form
         else if (_findMsg.Length > 0)
         {
             SetActivity(_findMsg, Color.Firebrick, _findMsgDetail);
-            if (showBar) SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
+            if (showBar) SetProgress(Fraction(indexing, filtering));
         }
         else if (RefreshTally() is { Length: > 0 } tally)
         {
             SetActivity(tally, SystemColors.ControlText, _tallyDetail);
-            if (showBar) SetProgress(ProgressBarStyle.Continuous, Fraction(indexing, filtering));
+            if (showBar) SetProgress(Fraction(indexing, filtering));
         }
         else if (indexing)
         {
-            // The line count is already in the Total field, and the total is unknown until indexing ends,
-            // so there is nothing useful to add here beyond the fact that it is running.
-            SetActivity("Indexing\u2026", SystemColors.ControlText, $"Indexing\u2026 {_doc.CompletedLineCount:N0} lines so far");
-            SetProgress(ProgressBarStyle.Marquee, 0);
+            // Lines cannot be counted before the scan ends, but bytes can: the file's size is known up
+            // front, so this is a real fraction rather than a barber's pole.
+            double done = Fraction(indexing, filtering);
+            SetActivity($"Indexing\u2026 {done * 100:F0}%", SystemColors.ControlText,
+                $"Indexing\u2026 {_doc.CompletedLineCount:N0} lines so far");
+            SetProgress(done);
         }
         else if (filtering)
         {
             double done = Fraction(indexing, filtering);
             SetActivity($"Filtering\u2026 {done * 100:F0}%", SystemColors.ControlText,
                 $"Filtering\u2026 {_doc.FilterProcessedLineCount:N0} of {_doc.CompletedLineCount:N0} lines");
-            SetProgress(ProgressBarStyle.Continuous, done);
+            SetProgress(done);
         }
         else
         {
@@ -1679,6 +1678,7 @@ public sealed class MainForm : Form
 
         double Fraction(bool ix, bool ft)
         {
+            if (ix) return _doc.IndexedFraction;
             if (!ft) return 0;
             long total = Math.Max(1, _doc.CompletedLineCount);
             return Math.Clamp(_doc.FilterProcessedLineCount / (double)total, 0, 1);
