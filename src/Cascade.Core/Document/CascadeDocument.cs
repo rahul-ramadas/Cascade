@@ -255,7 +255,7 @@ public sealed class CascadeDocument : IDisposable
         if (line < 0 || line >= _index.Count) return false;
         long s = _index.Get(line);
         long e = (line + 1 < _index.Count) ? _index.Get(line + 1) : _src.Length;
-        return _uiReader.IsTruncated(s, e);
+        return LineReader.IsTruncated(s, e);
     }
 
     /// <summary>Evaluates a decoded line against the current filters (for coloring visible rows).</summary>

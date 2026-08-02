@@ -255,7 +255,7 @@ public class ManualSweep : IDisposable
             Thread.Sleep(300);
             // Make one from the pane instead.
             var hint = _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
-                           .FirstOrDefault(t => (t.Name ?? "").StartsWith("No presets yet"));
+                           .FirstOrDefault(t => (t.Name ?? "").StartsWith("No presets yet", StringComparison.Ordinal));
             if (hint is null) { Check("somewhere to make a preset", false); return; }
             var hr = hint.BoundingRectangle;
             Mouse.MoveTo(new Point(hr.Left + hr.Width / 2, hr.Top + 40));
@@ -386,7 +386,7 @@ public class ManualSweep : IDisposable
         Thread.Sleep(2000);
 
         var edit = OpenMenu("Edit");
-        string undo = edit?.FirstOrDefault(m => (m.Name ?? "").StartsWith("Undo"))?.Name ?? "";
+        string undo = edit?.FirstOrDefault(m => (m.Name ?? "").StartsWith("Undo", StringComparison.Ordinal))?.Name ?? "";
         Say($"Edit menu undo item: '{undo}'");
         Check("the undo item names what it will take back", undo.Length > "Undo".Length, undo);
         Keyboard.Press(VirtualKeyShort.ESCAPE);
@@ -767,7 +767,7 @@ public class ManualSweep : IDisposable
             Mouse.Click(new Point(tr.Left + 200, tr.Bottom - 6));
             Thread.Sleep(500);
             Check("clicking low in a wrapped line selects that line",
-                  _app.StatusText("Ln:").StartsWith($"Ln: {want} "), $"wanted {want}, got {_app.StatusText("Ln:")}");
+                  _app.StatusText("Ln:").StartsWith($"Ln: {want} ", StringComparison.Ordinal), $"wanted {want}, got {_app.StatusText("Ln:")}");
         }
 
         _app.ClickMenuOrThrow("View", "Word Wrap");
@@ -1078,7 +1078,7 @@ public class ManualSweep : IDisposable
             Thread.Sleep(100);
         Say($"first search + full sweep: {sw.ElapsedMilliseconds} ms -> {Tally()}");
         Check("the counts settle without a plus", !Tally().Contains('+'), Tally());
-        Check("and say where we are", Tally().StartsWith("Match "), Tally());
+        Check("and say where we are", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
         Shot("find-found");
 
         string at = _app.StatusText("Ln:");
@@ -1205,7 +1205,7 @@ public class ManualSweep : IDisposable
         // exactly where the first preset has to be reachable from.
         var pane = _app.Window.FindFirstDescendant(cf => cf.ByName("Filter presets"))
                    ?? _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
-                          .FirstOrDefault(t => (t.Name ?? "").StartsWith("No presets yet"));
+                          .FirstOrDefault(t => (t.Name ?? "").StartsWith("No presets yet", StringComparison.Ordinal));
         Check("the presets pane is there", pane is not null, DescribePanes());
         if (pane is null) return;
 
@@ -1294,7 +1294,7 @@ public class ManualSweep : IDisposable
         foreach (var t in _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)))
         {
             string n = t.Name ?? "";
-            if (n.StartsWith("Match ") || n.EndsWith(" matches") || n.EndsWith(" lines") ||
+            if (n.StartsWith("Match ", StringComparison.Ordinal) || n.EndsWith(" matches", StringComparison.Ordinal) || n.EndsWith(" lines", StringComparison.Ordinal) ||
                 n.Contains(" hidden") || n == "No matches" || n == "Searching\u2026") return n;
         }
         return "";

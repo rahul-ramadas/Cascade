@@ -161,7 +161,7 @@ public sealed class LineGridControl : Control
     /// <summary>Tabs as the spaces they are drawn as, so a character index means the same thing to the hit
     /// test, the painting and the clipboard.</summary>
     private string Expand(string text)
-        => _settings.TabSize > 0 && text.IndexOf('\t') >= 0
+        => _settings.TabSize > 0 && text.Contains('\t')
             ? text.Replace("\t", new string(' ', _settings.TabSize))
             : text;
 

@@ -44,7 +44,7 @@ internal static class SelfTest
             Line("=== Cascade self-test ===");
             Line("Log: " + LogPath);
 
-            string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--"));
+            string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--", StringComparison.Ordinal));
             string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
             _only = args.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.OrdinalIgnoreCase))?["--only=".Length..].Trim('"');
             _skipped = 0;
@@ -1374,7 +1374,7 @@ internal static class SelfTest
             many.Add(new Filter { Enabled = true, Match = { Text = "f" + i } });
         tip = FilterTipText.Build(many);
         ok &= Check("a long list is cut short and says by how much",
-                    tip.Split('\n').Length == FilterTipText.MaxListed + 1 && tip.EndsWith("and 5 more"), tip);
+                    tip.Split('\n').Length == FilterTipText.MaxListed + 1 && tip.EndsWith("and 5 more", StringComparison.Ordinal), tip);
 
         // ...and end to end: the tip for a real line in a real grid.
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_tip_" + Guid.NewGuid().ToString("N") + ".log");
@@ -2407,7 +2407,7 @@ internal static class SelfTest
                             $"{dlg.TermForTesting()} at {before}");
 
             // Filling the drop-down used to reset the box, and it ran after every single search.
-            dlg.SetHistory(new[] { "order-service", "earlier", "older still" });
+            dlg.SetHistory(["order-service", "earlier", "older still"]);
             Pump();
             ok &= Check("recalling the history leaves the term alone", dlg.TermForTesting() == "order-service",
                         dlg.TermForTesting());
@@ -2957,7 +2957,7 @@ internal static class SelfTest
             // File > Close Filters empties the list and stops it being loaded again next time.
             ok &= Check("File > Close Filters empties the list",
                         form.ClickMenuForTesting("File", "Close Filters") &&
-                        doc.Filters.EnumerateDepthFirst().Count() == 0,
+                        !doc.Filters.EnumerateDepthFirst().Any(),
                         $"{doc.Filters.EnumerateDepthFirst().Count()} filters left");
             ok &= Check("and forgets it for next time", state.LastFilterFile is null,
                         state.LastFilterFile ?? "(null)");

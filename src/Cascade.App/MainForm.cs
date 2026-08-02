@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Drawing;
 using System.Text;
 using System.Windows.Forms;
@@ -77,7 +78,8 @@ public sealed class MainForm : Form
     private int _tallyGeneration = -1;
     private bool _tallyHiding, _tallySwept, _tallySettled;
     private int _activitySlot, _progressSlot, _baseActivitySlot;
-    private bool _inStatusLayout;    private (string Path, int Width) _shownSrc, _shownFilter;
+    private bool _inStatusLayout;
+    private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
     private bool _snapping;     // guards the divider being set from inside its own moved handler
 
@@ -653,13 +655,15 @@ public sealed class MainForm : Form
         label.Text = Shorten(full, width, label.Font);
     }
 
+    private static readonly SearchValues<char> PathSeparators = SearchValues.Create(['\\', '/']);
+
     /// <summary>Trims a path to fit, keeping the file name and as much of the head as there is room for.</summary>
     private static string Shorten(string text, int maxWidth, Font font)
     {
         if (maxWidth <= 0) return "";
         if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
 
-        int cut = text.LastIndexOfAny(new[] { '\\', '/' });
+        int cut = text.AsSpan().LastIndexOfAny(PathSeparators);
         string tail = cut > 0 ? text[cut..] : text;
         // Binary search the longest head that still leaves room for "head…tail".
         int lo = 0, hi = Math.Max(0, cut);
@@ -691,7 +695,7 @@ public sealed class MainForm : Form
         {
             if (a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase)) filterFile = a["/Filters:".Length..].Trim('"');
             else if (a.Equals("/demo", StringComparison.OrdinalIgnoreCase)) demo = true;
-            else if (!a.StartsWith('/') && !a.StartsWith("--")) file = a;
+            else if (!a.StartsWith('/') && !a.StartsWith("--", StringComparison.Ordinal)) file = a;
         }
         if (file is not null && File.Exists(file)) OpenFile(file, null);
 

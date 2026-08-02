@@ -167,8 +167,8 @@ public class FilterSemanticsTests
         // Chain already occupies all 8 depths (0..7). Moving a new node under the deepest must fail.
         var extra = Make("x", true);
         c.Add(extra);
-        Assert.False(c.CanMove(extra, nodes[^1]));
-        Assert.True(c.CanMove(extra, nodes[0]));
+        Assert.False(FilterCollection.CanMove(extra, nodes[^1]));
+        Assert.True(FilterCollection.CanMove(extra, nodes[0]));
     }
 
     [Fact]

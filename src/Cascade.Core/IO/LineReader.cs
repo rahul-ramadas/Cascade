@@ -49,5 +49,5 @@ public sealed class LineReader
 
     public string GetString(long start, long endExclusive) => new string(GetChars(start, endExclusive));
 
-    public bool IsTruncated(long start, long endExclusive) => (endExclusive - start) > MaxLineBytes;
+    public static bool IsTruncated(long start, long endExclusive) => (endExclusive - start) > MaxLineBytes;
 }

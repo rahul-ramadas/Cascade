@@ -386,7 +386,7 @@ public class UpdateTests : IDisposable
                 try { ctx = await _listener.GetContextAsync(); } catch { return; }
 
                 string path = ctx.Request.Url!.AbsolutePath;
-                if (path.StartsWith("/repos/") && path.EndsWith("/releases/latest"))
+                if (path.StartsWith("/repos/", StringComparison.Ordinal) && path.EndsWith("/releases/latest", StringComparison.Ordinal))
                 {
                     SeenAuthorization = ctx.Request.Headers["Authorization"];
                     SeenUserAgent = ctx.Request.Headers["User-Agent"];
@@ -394,7 +394,7 @@ public class UpdateTests : IDisposable
                     ctx.Response.ContentType = "application/json";
                     ctx.Response.OutputStream.Write(body);
                 }
-                else if (path.StartsWith("/repos/") && path.Contains("/releases/assets/"))
+                else if (path.StartsWith("/repos/", StringComparison.Ordinal) && path.Contains("/releases/assets/"))
                 {
                     SeenAssetAccept = ctx.Request.Headers["Accept"];
                     ctx.Response.ContentType = "application/octet-stream";
