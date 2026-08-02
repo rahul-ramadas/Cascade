@@ -295,6 +295,11 @@ public sealed class FindBar : UserControl
         if (_tip.GetToolTip(_message) != want) _tip.SetToolTip(_message, want);
     }
 
+    /// <summary>Paints the count now rather than when the message queue next empties. Holding Enter down to
+    /// walk the matches never lets it empty, so without this the count sits at whatever it read when the key
+    /// went down and only catches up on release.</summary>
+    public void PaintNow() => _message.Update();
+
     /// <summary>Blocks the find buttons while a background search runs.</summary>
     public void SetSearching(bool searching)
     {

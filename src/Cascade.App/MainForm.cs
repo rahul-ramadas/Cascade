@@ -1440,6 +1440,7 @@ public sealed class MainForm : Form
             UpdateStatus();
             _grid.Update();
             _status.Update();
+            _findBar.PaintNow();
         }
         else
         {

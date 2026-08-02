@@ -17,6 +17,7 @@ public class ScreenshotHarnessTests
         string outDir = Path.Combine(Path.GetTempPath(), "cascade_screens_test_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(outDir); // the harness only accepts an output path that already exists
         var psi = new ProcessStartInfo(TestData.AppExe(), $"--screens \"{outDir}\"") { UseShellExecute = false };
+        string cfg = ThrowawayConfig(psi);
         using var app = Process.Start(psi) ?? throw new InvalidOperationException("Could not start Cascade.exe.");
         try
         {
@@ -29,7 +30,19 @@ public class ScreenshotHarnessTests
         {
             try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ }
             try { Directory.Delete(outDir, recursive: true); } catch { /* ignore */ }
+            try { Directory.Delete(cfg, recursive: true); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Points a child at a settings directory of its own. Both of these build real windows, and a
+    /// window saves preferences and the recent-file lists as it goes - the app guards against this too, but
+    /// a test must not depend on the thing it is testing to protect the developer's own configuration.</summary>
+    private static string ThrowawayConfig(ProcessStartInfo psi)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_cfg_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        psi.EnvironmentVariables["CASCADE_SETTINGS_DIR"] = dir;
+        return dir;
     }
 
     /// <summary>
@@ -41,6 +54,7 @@ public class ScreenshotHarnessTests
     public void Self_test_passes()
     {
         var psi = new ProcessStartInfo(TestData.AppExe(), "--selftest") { UseShellExecute = false };
+        string cfg = ThrowawayConfig(psi);
         using var app = Process.Start(psi) ?? throw new InvalidOperationException("Could not start Cascade.exe.");
         try
         {
@@ -49,7 +63,11 @@ public class ScreenshotHarnessTests
             string detail = File.Exists(log) ? "\n\n" + File.ReadAllText(log) : "";
             Assert.True(app.ExitCode == 0, $"--selftest failed (exit {app.ExitCode}){detail}");
         }
-        finally { try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ } }
+        finally
+        {
+            try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            try { Directory.Delete(cfg, recursive: true); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>
