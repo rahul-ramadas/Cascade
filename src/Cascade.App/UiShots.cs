@@ -47,16 +47,8 @@ internal static class UiShots
         filterError.SetTextForTesting(@"\[OrderService\].+(Disk");
         ShotDialog(filterError, outDir, "filter-edit-error");
 
-        ShotDialog(new FindDialog((_, _) => { }), outDir, "find");
-
-        var findMissed = new FindDialog((_, _) => { });
-        findMissed.SetStatus("Not found.");
-        ShotDialog(findMissed, outDir, "find-notfound");
-
-        var findSearching = new FindDialog((_, _) => { });
-        findSearching.SetSearching(true);
-        findSearching.SetProgress(0.45);
-        ShotDialog(findSearching, outDir, "find-searching");
+        ShotFindBar(outDir, "find", "");
+        ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
 
         var cols = new ColumnSpec();
         ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
@@ -308,6 +300,33 @@ internal static class UiShots
         }
         bmp.Save(Path.Combine(dir, "lucky-colours.png"), ImageFormat.Png);
         Console.WriteLine($"lucky-colours: {shown} of {LuckyColors.Count}");
+    }
+
+    /// <summary>The find bar is a strip in the main window rather than a dialog, so it is rendered in a host
+    /// of roughly the width it really gets - a shot of it at its own natural size would say nothing about
+    /// how the term, the options and the count share a full-width row.</summary>
+    private static void ShotFindBar(string dir, string name, string message)
+    {
+        var bar = new FindBar((_, _) => { }) { Visible = true };
+        bar.SetMessage(message);
+        using var host = new Form
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(60, 60),
+            FormBorderStyle = FormBorderStyle.None,
+            ClientSize = new Size(1500, 40),
+            Opacity = 0
+        };
+        host.Controls.Add(bar);
+        host.Show();
+        Settle();
+        host.ClientSize = new Size(1500, bar.Height);
+        Settle();
+        using var bmp = new Bitmap(host.ClientSize.Width, Math.Max(1, host.ClientSize.Height));
+        host.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        bmp.Save(Path.Combine(dir, name + ".png"), ImageFormat.Png);
+        Console.WriteLine($"{name}: {bmp.Width}x{bmp.Height}");
+        host.Close();
     }
 
     private static void ShotDialog(Form form, string dir, string name)
