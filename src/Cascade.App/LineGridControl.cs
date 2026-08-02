@@ -1388,8 +1388,11 @@ public sealed class LineGridControl : Control
     {
         SyncFirstRowToAnchor();
         long want = _firstRow + rowsTakenFromTop;
-        ClearViewAnchor();
         change();
+        // Dropped AFTER the change, not before: laying out again re-arms the streaming anchor at the row the
+        // view was showing, and while the file is still being read that would pull it straight back. The
+        // next paint re-arms it at wherever this leaves the view.
+        ClearViewAnchor();
         SetFirstRow(want);
         Invalidate();
         Update();
