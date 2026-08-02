@@ -10,6 +10,7 @@ public sealed class PreferencesDialog : DialogBase
     private readonly ComboBox _font = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly NumericUpDown _size = new() { Minimum = 6, Maximum = 48, DecimalPlaces = 1, Increment = 0.5m };
     private readonly NumericUpDown _tab = new() { Minimum = 1, Maximum = 16 };
+    private readonly NumericUpDown _lineSpacing = new() { Minimum = 0, Maximum = 12 };
     private readonly CheckBox _lineNumbers = new() { Text = "Show line numbers", AutoSize = true };
     private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
     private readonly ComboBox _markers = new() { DropDownStyle = ComboBoxStyle.DropDownList };
@@ -29,6 +30,7 @@ public sealed class PreferencesDialog : DialogBase
         _markers.Width = Dpi(150);
         _size.Width = Dpi(70);
         _tab.Width = Dpi(70);
+        _lineSpacing.Width = Dpi(70);
         foreach (var b in new[] { _fg, _bg, _selBg, _dim }) b.Size = new Size(Dpi(70), Dpi(23));
 
         var root = new TableLayoutPanel
@@ -55,6 +57,11 @@ public sealed class PreferencesDialog : DialogBase
         fontRow.Controls.Add(new Label { Text = "Size:", AutoSize = true, Margin = new Padding(Dpi(12), 6, 6, 3) });
         fontRow.Controls.Add(_size);
         Row("Font:", fontRow);
+
+        var spacingRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Dock = DockStyle.Fill, Margin = new Padding(0) };
+        spacingRow.Controls.Add(_lineSpacing);
+        spacingRow.Controls.Add(new Label { Text = "pixels added to each line; 0 uses the font's own spacing", AutoSize = true, Margin = new Padding(Dpi(8), 6, 0, 3) });
+        Row("Line spacing:", spacingRow);
 
         Row("Foreground:", _fg);
         Row("Background:", _bg);
@@ -97,6 +104,7 @@ public sealed class PreferencesDialog : DialogBase
         if (_font.SelectedIndex < 0) _font.Text = _s.FontFamily;
         _size.Value = (decimal)Math.Clamp(_s.FontSize, 6f, 48f);
         _tab.Value = Math.Clamp(_s.TabSize, 1, 16);
+        _lineSpacing.Value = Math.Clamp(_s.ExtraLineSpacing, 0, 12);
         _lineNumbers.Checked = _s.ShowLineNumbers;
         _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
         _markers.SelectedIndex = (int)_s.MarkerVisibility;
@@ -107,6 +115,7 @@ public sealed class PreferencesDialog : DialogBase
         if (_font.SelectedItem is string f) _s.FontFamily = f;
         _s.FontSize = (float)_size.Value;
         _s.TabSize = (int)_tab.Value;
+        _s.ExtraLineSpacing = (int)_lineSpacing.Value;
         _s.ShowLineNumbers = _lineNumbers.Checked;
         _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
         _s.MarkerVisibility = (MarkerVisibilityMode)_markers.SelectedIndex;

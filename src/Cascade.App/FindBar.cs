@@ -216,8 +216,10 @@ public sealed class FindBar : UserControl
 
     /// <summary>The bar is a fixed height rather than auto-sized around its contents. An auto-sizing
     /// container hands a percentage column only as much width as its content asks for, which left the count
-    /// squeezed into a couple of characters at the end of a very wide row.</summary>
-    private int NaturalHeight => _text.PreferredHeight + LogicalToDeviceUnits(12);
+    /// squeezed into a couple of characters at the end of a very wide row.
+    /// The air added here is deliberately small: the height is then rounded UP to whole log lines, so
+    /// padding it generously first only risks tipping the bar into an extra line it does not need.</summary>
+    private int NaturalHeight => _text.PreferredHeight + LogicalToDeviceUnits(4);
 
     /// <summary>Rounds the bar up to a whole number of log lines. Opening it then takes an exact number of
     /// lines off the view, so the divider below it never has to move to keep the remaining ones whole - and
@@ -465,6 +467,7 @@ public sealed class FindBar : UserControl
     }
 
     internal int TermBoxWidthForTesting => _text.Width;
+    internal int RowHeightForTesting => _rowHeight;
     internal int MessageWidthForTesting => _message.Width;
     internal int CountWidthForTesting => CountWidth;
     internal int CountStartsAtForTesting => CountStartsAt;
