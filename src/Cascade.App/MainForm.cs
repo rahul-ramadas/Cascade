@@ -1379,8 +1379,12 @@ public sealed class MainForm : Form
     {
         _dormantQuery = _lastQuery ?? _dormantQuery;
         _lastQuery = null;
-        _grid.SetFindHighlight(null);
+        // Release the sweep before repainting, not after. The minimap decides whether it has anything to
+        // redraw by comparing the hit count it last drew against the document's - so repainting first asks
+        // it that question while the hits are all still there, and it sits on them until something else
+        // happens to invalidate the view.
         _doc.DropSearch();
+        _grid.SetFindHighlight(null);
         _findMsg = "";
         _tally = _tallyDetail = "";
         _tallyLine = -1;

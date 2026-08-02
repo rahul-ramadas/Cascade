@@ -485,10 +485,25 @@ public class ManualSweep : IDisposable
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
+        var map = MapElement();
+        using var withHits = map is null ? null : Grab(map);
         Keyboard.Press(VirtualKeyShort.ESCAPE);   // drop the term
         Thread.Sleep(800);
         int cleared = MarkedPixels();
         Check("and Esc takes them away", cleared < 200, $"{cleared} marked pixels");
+
+        // The map has to let go of them on the same keypress. It decides whether it has anything to redraw
+        // by comparing the hit count it last drew against the document's, so being repainted before the
+        // sweep was released left it holding the marks until something else happened to invalidate the
+        // view - a click, a scroll, anything. Nothing is touched between these two grabs.
+        if (map is not null && withHits is not null)
+        {
+            using var afterEsc = Grab(map);
+            double moved = PictureDiff(withHits, afterEsc);
+            Say($"minimap on dropping the term: {moved:P1} of its pixels changed");
+            Check("and the minimap lets go of them on the same keypress", moved > 0.01,
+                  $"{moved:P1} of the map's pixels changed");
+        }
         Shot("highlight-cleared");
     }
 
