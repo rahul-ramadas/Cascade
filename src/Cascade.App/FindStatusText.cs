@@ -31,10 +31,12 @@ internal static class FindStatusText
         if (t.HiddenLines > 0) text += $" \u00b7 {t.HiddenLines:N0}{more} hidden";
         if (t.Occurrences > t.VisibleLines + t.HiddenLines)
         {
+            // The floor belongs to the shown count: the file-wide total is always exact, and it is working
+            // out how many of those fall on shown lines that a capped record can leave short.
             string floor = t.Approximate ? "\u2265" : "";
             text += t.HiddenLines > 0
-                ? $" \u00b7 {t.VisibleOccurrences:N0}{more} of {floor}{t.Occurrences:N0}{more} hits"
-                : $" \u00b7 {floor}{t.Occurrences:N0}{more} hits";
+                ? $" \u00b7 {floor}{t.VisibleOccurrences:N0}{more} of {t.Occurrences:N0}{more} hits"
+                : $" \u00b7 {t.Occurrences:N0}{more} hits";
         }
         return text;
     }
@@ -50,7 +52,7 @@ internal static class FindStatusText
             ? $", {t.HiddenLines:N0} more on lines the filters are hiding"
             : "";
         string occurrences = t.Occurrences > t.VisibleLines + t.HiddenLines
-            ? $"; {t.VisibleOccurrences:N0} occurrences shown of {(t.Approximate ? "at least " : "")}{t.Occurrences:N0} in the file"
+            ? $"; {(t.Approximate ? "at least " : "")}{t.VisibleOccurrences:N0} occurrences shown of {t.Occurrences:N0} in the file"
             : "";
         string position = t.Position > 0 ? $"On match {t.Position:N0} of them. " : "";
         return $"{position}\u201c{term}\u201d matches {t.VisibleLines:N0} shown lines{hidden}{occurrences}{state}";

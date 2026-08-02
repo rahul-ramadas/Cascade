@@ -16,8 +16,9 @@ public delegate void VisibleWordReader(long fromWord, Span<ulong> words);
 
 /// <summary>How much a term matches, split by what the view is currently showing.</summary>
 /// <param name="Position">Which visible match the caret is on, 1-based, or 0 when it is not on one.</param>
-/// <param name="Approximate">Occurrence counts are a floor: too many lines matched more than once to keep
-/// track of every one.</param>
+/// <param name="Approximate"><see cref="VisibleOccurrences"/> is a floor. <see cref="Occurrences"/> is
+/// always exact - what a cap can cost is the record of WHICH lines matched more than once, and that is
+/// only needed to split the total between shown and hidden lines.</param>
 public readonly record struct FindTally(long Position, long VisibleLines, long HiddenLines,
                                         long VisibleOccurrences, long Occurrences, bool Complete, bool Approximate);
 
@@ -119,7 +120,7 @@ public sealed class FindSearch : IDisposable
             if (visible is null)
             {
                 long at = _hits.Contains(currentLine) ? _hits.CountUpTo(currentLine) : 0;
-                return new FindTally(at, _found, 0, _occurrences, _occurrences, complete, _extrasCapped);
+                return new FindTally(at, _found, 0, _occurrences, _occurrences, complete, false);
             }
 
             long visibleLines = 0, hiddenLines = 0, position = 0;
@@ -153,7 +154,9 @@ public sealed class FindSearch : IDisposable
 
             return new FindTally(onVisibleHit ? position : 0, visibleLines, hiddenLines,
                                  VisibleOccurrences(visible, visibleLines, hiddenLines), _occurrences,
-                                 complete, _extrasCapped);
+                                 // With nothing hidden every occurrence is shown, so the split is exact
+                                 // however little of the per-line record survived the cap.
+                                 complete, _extrasCapped && hiddenLines > 0);
         }
     }
 
