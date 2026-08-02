@@ -53,7 +53,6 @@ public sealed class LineGridControl : Control
     private int _anchorOffset;
     private long _anchorCaretLine = -1;
     private bool _anchorSelect;
-    private bool _syncingScroll;     // true while pushing _firstRow into the scrollbar (ignore its echo)
     private long[] _window = new long[64];   // file lines resolved for the current frame
 
     // Where each row was actually painted this frame. With word wrap a row is as tall as the number of
@@ -504,13 +503,9 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>Pushes <see cref="_firstRow"/> into the scrollbar. It clamps to its own range, which keeps
-    /// growing as rows stream in, so this must not be echoed back into the view.</summary>
-    private void SyncVScrollValue()
-    {
-        _syncingScroll = true;
-        try { _vbar.Value = _firstRow; }
-        finally { _syncingScroll = false; }
-    }
+    /// growing as rows stream in - harmless here because setting Value reports nothing back, unlike a
+    /// gesture on the bar.</summary>
+    private void SyncVScrollValue() => _vbar.Value = _firstRow;
 
     public void Attach(CascadeDocument doc, AppSettings settings)
     {

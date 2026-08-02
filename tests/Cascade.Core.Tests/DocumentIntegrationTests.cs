@@ -308,7 +308,7 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
-    public void Opening_a_new_file_while_a_find_runs_does_not_read_the_freed_mmap()
+    public async Task Opening_a_new_file_while_a_find_runs_does_not_read_the_freed_mmap()
     {
         // A long scan on file A must be cancelled and joined before A's memory-mapped file is freed by
         // opening file B — otherwise the background find would read freed memory (AccessViolation crash).
@@ -328,7 +328,8 @@ public class DocumentIntegrationTests
             doc.WaitForIndex();
 
             Assert.Equal(2, doc.CompletedLineCount);
-            try { find.Wait(3000); } catch (AggregateException) { /* OperationCanceledException is fine */ }
+            // Cancelled by the second Open, which is the point; a timeout here means it was never joined.
+            try { await find.WaitAsync(TimeSpan.FromSeconds(3)); } catch (OperationCanceledException) { }
             Assert.True(find.IsCompleted);
         }
         finally { doc.Dispose(); File.Delete(a); File.Delete(b); }
