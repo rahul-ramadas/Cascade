@@ -25,8 +25,13 @@ public class ManualSweep : IDisposable
     private CascadeApp _app = null!;
     private int _shot;
 
+    /// <summary>Asked for by hand. Everything here - the trace, the filter set, the place it writes - lives on
+    /// one machine, so anywhere else the rig must do NOTHING AT ALL, tearing down included.</summary>
+    private static bool Asked => Environment.GetEnvironmentVariable("CASCADE_MANUAL") == "1";
+
     public void Dispose()
     {
+        if (!Asked) return;
         Directory.CreateDirectory(Out);
         File.WriteAllLines(Path.Combine(Out, "log.txt"), _log);
         File.WriteAllLines(Path.Combine(Out, "bugs.txt"), _bugs.Count == 0 ? new[] { "none" } : _bugs.ToArray());
@@ -44,7 +49,7 @@ public class ManualSweep : IDisposable
     [Fact]
     public void Sweep()
     {
-        if (Environment.GetEnvironmentVariable("CASCADE_MANUAL") != "1") return;
+        if (!Asked) return;
         SetProcessDpiAwarenessContext(-4);
         Directory.CreateDirectory(Out);
         // A copy, so saving can be exercised without touching the real thing.
