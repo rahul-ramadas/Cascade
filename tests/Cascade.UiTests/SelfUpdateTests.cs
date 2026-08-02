@@ -419,7 +419,7 @@ public class SelfUpdateTests
             try
             {
                 string path = ctx.Request.Url!.AbsolutePath;
-                if (path.EndsWith("/releases/latest"))
+                if (path.EndsWith("/releases/latest", StringComparison.Ordinal))
                 {
                     Interlocked.Increment(ref _releaseRequests);
                     string json = $$"""

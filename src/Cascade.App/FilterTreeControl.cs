@@ -402,7 +402,7 @@ public sealed class FilterTreeControl : UserControl
 
     private int Inset => LogicalToDeviceUnits(4);
 
-    private int Measure(string text, Font font) => TextRenderer.MeasureText(text, font, Unbounded, MeasureFlags).Width;
+    private static int Measure(string text, Font font) => TextRenderer.MeasureText(text, font, Unbounded, MeasureFlags).Width;
 
     /// <summary>Test seam: where the columns ended up, in tree client coordinates.</summary>
     internal FilterColumns ColumnsForTesting => _columns;
@@ -637,7 +637,7 @@ public sealed class FilterTreeControl : UserControl
 
     /// <summary>Trims text to fit, ending in an ellipsis. Binary search rather than a walk from the end -
     /// this runs for every visible row on every repaint.</summary>
-    private string Ellipsize(string text, Font font, int maxWidth)
+    private static string Ellipsize(string text, Font font, int maxWidth)
     {
         if (maxWidth <= 0) return "";
         if (Measure(text, font) <= maxWidth) return text;

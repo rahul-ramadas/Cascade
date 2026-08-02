@@ -85,7 +85,7 @@ internal sealed class CascadeApp : IDisposable
     /// that the launch was not going to take anyway.</summary>
     private void EnsureForegroundIfLost()
     {
-        GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
+        _ = GetWindowThreadProcessId(GetForegroundWindow(), out uint foregroundPid);
         if (foregroundPid != (uint)_app.ProcessId) Activate();
     }
 

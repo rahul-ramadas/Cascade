@@ -60,12 +60,14 @@ public sealed class MachineState
         return null;
     }
 
+    private static readonly JsonSerializerOptions Layout = new() { WriteIndented = true };
+
     public void Save()
     {
         try
         {
             Directory.CreateDirectory(SettingsFolder.Dir);
-            AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            AtomicFile.WriteAllText(FilePath, JsonSerializer.Serialize(this, Layout));
         }
         catch { /* best-effort */ }
     }

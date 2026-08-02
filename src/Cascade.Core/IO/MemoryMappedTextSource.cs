@@ -58,7 +58,7 @@ public sealed unsafe class MemoryMappedTextSource : IDisposable
     public ReadOnlySpan<byte> Slice(long offset, int length)
     {
         if (length == 0) return ReadOnlySpan<byte>.Empty;
-        if (_disposed) throw new ObjectDisposedException(nameof(MemoryMappedTextSource));
+        ObjectDisposedException.ThrowIf(_disposed, this);
         if (offset < 0 || length < 0 || offset + length > Length)
             throw new ArgumentOutOfRangeException(nameof(offset), "Requested slice is outside the file.");
         return new ReadOnlySpan<byte>(_ptr + offset, length);

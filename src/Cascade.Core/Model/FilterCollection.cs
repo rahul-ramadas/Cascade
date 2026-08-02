@@ -68,7 +68,7 @@ public sealed class FilterCollection
 
     /// <summary>True if <paramref name="filter"/> may be moved under <paramref name="newParent"/>
     /// without creating a cycle or exceeding <see cref="MaxDepth"/>.</summary>
-    public bool CanMove(Filter filter, Filter? newParent)
+    public static bool CanMove(Filter filter, Filter? newParent)
     {
         if (newParent is null) return true;
         if (ReferenceEquals(filter, newParent)) return false;

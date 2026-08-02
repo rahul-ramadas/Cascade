@@ -185,7 +185,7 @@ public sealed class FilterSnapshot
         foreach (var root in _roots) DfsAll(root, line, lineNumber, markers, context, deepMatches);
     }
 
-    private void DfsAll(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,
+    private static void DfsAll(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,
         MatchContext context, Span<ulong> deepMatches)
     {
         if (!Matches(node, line, lineNumber, markers, context)) return;   // descendants require this match
@@ -395,7 +395,7 @@ public sealed class FilterSnapshot
         return new LineEval(shown, shown ? best : null);
     }
 
-    private void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
+    private static void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
         MatchContext context, Span<ulong> deepMatches, ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
     {
         if (!node.SubtreeHasEnabled) return;          // prune: nothing enabled at/below

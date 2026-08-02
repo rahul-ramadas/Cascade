@@ -1,0 +1,51 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+indent_style = space
+trim_trailing_whitespace = true
+
+[*.{yml,yaml,json,props,targets,csproj,slnx}]
+indent_size = 2
+
+[*.cs]
+indent_size = 4
+
+# ---- rules turned off on purpose, with the reason ----
+# Each of these is a rule that is right in general and wrong here. Anything not listed is on.
+
+# CA1707: identifiers should not contain underscores. Every test and every self-test check is named as a
+# sentence - Every_range_agrees_with_counting_the_lines_one_at_a_time - because the name IS the report when
+# it fails. 239 of them.
+dotnet_diagnostic.CA1707.severity = none
+
+# CA1305: pass an IFormatProvider. These are line numbers and counts being drawn on screen, and a reader in
+# Germany should see 1.234.567. Where the culture genuinely must not matter - parsing, comparing, matching -
+# CA1310 and CA2101 still apply and are on.
+dotnet_diagnostic.CA1305.severity = none
+
+# CA1051: do not declare visible instance fields. The WinForms analyzer (WFO1000) says the opposite for
+# anything deriving from Control - a public or internal PROPERTY there is the thing it flags - so one of the
+# two has to give, and it cannot be the one that ships in the SDK.
+dotnet_diagnostic.CA1051.severity = none
+
+# CA1711: do not end a type name in 'Collection'. FilterCollection is what the thing is called throughout
+# the design and the file format; the rule is about not implying an interface it does not implement.
+dotnet_diagnostic.CA1711.severity = none
+
+[tests/**.cs]
+# CA1861: hoist a literal array argument into a static readonly field. That is worth it on a path that runs
+# per line; in a test the array IS the case being described, and moving it away from the assertion to save
+# one allocation in a run that happens once makes the test harder to read. Still on for src.
+dotnet_diagnostic.CA1861.severity = none
+
+# CA1822: this member could be static. Worth having where a call happens per line per repaint, which is why
+# it is on for src. A harness method is grouped with the harness because that is where you look for it, and
+# half of these grow a use of _app later anyway.
+dotnet_diagnostic.CA1822.severity = none
+
+# CA1816: call GC.SuppressFinalize in Dispose. It guards against a derived type adding a finalizer; a test
+# fixture is created and disposed by the runner and is never derived from.
+dotnet_diagnostic.CA1816.severity = none
