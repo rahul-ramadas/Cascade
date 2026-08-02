@@ -3169,6 +3169,21 @@ internal static class SelfTest
                 ok &= Check($"and closing puts it back ({grid.FirstRowForTesting})",
                             grid.FirstRowForTesting == was);
             }
+
+            // Reported straight after this was first built: opening the bar on a file that was still being
+            // read pushed the log down after all. While a file streams the view is pinned to a LINE, and
+            // laying the window out again re-arms that pin at the row the view was showing - which pulls it
+            // straight back. Reproduced here by arming the pin from inside the change, which is exactly
+            // where it happens; on a file this size nothing is ever busy long enough to catch it live.
+            grid.GoToLine(2000);
+            Pump();
+            long settled = grid.FirstRowForTesting;
+            grid.KeepTextStillAcross(2, () =>
+                grid.SetViewAnchor(new ViewAnchor(doc.RowToLine(settled), 0, -1), false));
+            Pump();
+            ok &= Check($"a pin armed while the view is resized does not pull it back " +
+                        $"({settled} -> {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == settled + 2);
             return ok;
         }
         finally
