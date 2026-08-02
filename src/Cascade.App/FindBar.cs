@@ -30,6 +30,8 @@ public sealed class FindBar : UserControl
     private readonly System.Windows.Forms.Timer _preview = new() { Interval = 200 };
     private readonly Font _mono = new("Consolas", 9.75f);
     private bool _searching;
+    private TableLayoutPanel _root = null!;
+    private int _rowHeight;
 
     protected override void Dispose(bool disposing)
     {
@@ -63,39 +65,40 @@ public sealed class FindBar : UserControl
         // The message deliberately has no AccessibleName: setting one REPLACES the name UI Automation
         // reports, and this label's text is the thing worth reading.
 
-        // The left-hand group sizes to its contents, the close button takes the right edge, and the message
-        // fills whatever is between them. Docking rather than a percentage column because an auto-sizing
-        // table hands a percentage only what its content asks for, which left the count two characters wide.
-        // Order matters: the last control added is docked first, so the filling one goes in first.
-        var left = new TableLayoutPanel
+        // One row, one table. The row is exactly one control tall and everything is anchored to its TOP, so
+        // they all start on the same line by construction. Left to centre themselves in a tall cell they do
+        // not: the leftover space is halved and rounded down, and a ComboBox keeps its own height whatever
+        // it is given - which put it a pixel above the rest.
+        _root = new TableLayoutPanel
         {
-            Dock = DockStyle.Left,
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            ColumnCount = 5,
+            Dock = DockStyle.Fill,
+            ColumnCount = 7,
             RowCount = 1,
-            Padding = new Padding(Dpi(6), 0, 0, 0)
+            Padding = new Padding(Dpi(6), 0, Dpi(4), 0)
         };
-        for (int i = 0; i < left.ColumnCount; i++) left.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        left.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        foreach (var w in new[] { SizeType.AutoSize, SizeType.AutoSize, SizeType.AutoSize,
+                                  SizeType.AutoSize, SizeType.AutoSize })
+            _root.ColumnStyles.Add(new ColumnStyle(w));
+        _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // the count takes what is left
+        _root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var findLabel = new Label
         {
             Text = "Find:",
             AutoSize = true,
-            Anchor = AnchorStyles.Left,     // left only, so the cell centres it vertically
+            Anchor = AnchorStyles.Top | AnchorStyles.Left,
+            TextAlign = ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 0, Dpi(6), 0)
         };
         _text.Margin = new Padding(0, 0, Dpi(8), 0);
-        _text.Width = Dpi(220);
-        _text.Anchor = AnchorStyles.Left;
+        _text.Anchor = AnchorStyles.Top | AnchorStyles.Left;
 
         foreach (var b in new[] { _prev, _next })
         {
             b.AutoSize = true;
             b.MinimumSize = new Size(Dpi(64), Dpi(23));
             b.Margin = new Padding(0, 0, Dpi(4), 0);
-            b.Anchor = AnchorStyles.Left;
+            b.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         }
         _next.Margin = new Padding(0, 0, Dpi(10), 0);
         _regex.Margin = new Padding(0, 0, Dpi(10), 0);
@@ -103,12 +106,15 @@ public sealed class FindBar : UserControl
 
         _message.ForeColor = SystemColors.GrayText;
         _message.BackColor = SystemColors.Control;
-        _message.Padding = new Padding(0, 0, Dpi(8), 0);
+        _message.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;   // stretches across
+        _message.Height = Dpi(23);
+        _message.Margin = new Padding(0, 0, Dpi(8), 0);
 
         _close.AutoSize = false;
         _close.Size = new Size(Dpi(22), Dpi(22));
         _close.FlatAppearance.BorderSize = 0;
-        _close.Dock = DockStyle.Right;
+        _close.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        _close.Margin = new Padding(0);
         _close.TabStop = false;
         _tip.SetToolTip(_close, "Close find (Esc)");
 
@@ -118,20 +124,38 @@ public sealed class FindBar : UserControl
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             WrapContents = false,     // or two checkboxes stack up one per line in an auto-sized column
             Margin = new Padding(0),
-            Anchor = AnchorStyles.Left
+            Anchor = AnchorStyles.Top | AnchorStyles.Left
         };
         options.Controls.Add(_regex);
         options.Controls.Add(_case);
 
-        left.Controls.Add(findLabel, 0, 0);
-        left.Controls.Add(_text, 1, 0);
-        left.Controls.Add(_prev, 2, 0);
-        left.Controls.Add(_next, 3, 0);
-        left.Controls.Add(options, 4, 0);
+        _root.Controls.Add(findLabel, 0, 0);
+        _root.Controls.Add(_text, 1, 0);
+        _root.Controls.Add(_prev, 2, 0);
+        _root.Controls.Add(_next, 3, 0);
+        _root.Controls.Add(options, 4, 0);
+        _root.Controls.Add(_message, 5, 0);
+        _root.Controls.Add(_close, 6, 0);
+        Controls.Add(_root);
 
-        Controls.Add(_message);
-        Controls.Add(left);
-        Controls.Add(_close);
+        // Every control on the row is given the SAME height, and the row is made exactly that tall, so the
+        // table has no leftover space to divide up and they cannot land on different lines.
+        _rowHeight = _text.PreferredHeight;
+        _root.RowStyles.Add(new RowStyle(SizeType.Absolute, _rowHeight));
+        SameHeight(findLabel, _rowHeight);
+        SameHeight(_regex, _rowHeight);
+        SameHeight(_case, _rowHeight);
+        _prev.MinimumSize = _next.MinimumSize = new Size(Dpi(64), _rowHeight);
+        _prev.MaximumSize = _next.MaximumSize = new Size(0, _rowHeight);
+        _message.Height = _rowHeight;
+        _close.Size = new Size(_rowHeight, _rowHeight);
+
+        static void SameHeight(Control c, int height)
+        {
+            int width = c.PreferredSize.Width;   // read while it still sizes itself
+            c.AutoSize = false;
+            c.Size = new Size(width, height);
+        }
 
         _prev.Click += (_, _) => Run(false);
         _next.Click += (_, _) => Run(true);
@@ -186,7 +210,49 @@ public sealed class FindBar : UserControl
     private int _rowPitch;
 
     private void ApplyHeight()
-        => Height = _rowPitch <= 0 ? NaturalHeight : (NaturalHeight + _rowPitch - 1) / _rowPitch * _rowPitch;
+    {
+        Height = _rowPitch <= 0 ? NaturalHeight : (NaturalHeight + _rowPitch - 1) / _rowPitch * _rowPitch;
+        CentreRow();
+    }
+
+    /// <summary>Puts the row of controls in the middle of the bar. The bar is stretched to a whole number of
+    /// log lines, so whatever is left over goes above and below the row rather than inside the table, where
+    /// each cell would divide it up for itself.</summary>
+    private void CentreRow()
+    {
+        int lead = Math.Max(0, (Height - _rowHeight) / 2);
+        var p = _root.Padding;
+        if (p.Top == lead) return;
+        _root.Padding = new Padding(p.Left, lead, p.Right, Math.Max(0, Height - _rowHeight - lead));
+    }
+
+    /// <summary>The term box takes whatever is left once the rest of the row and a readable count have had
+    /// their share, between a width that always fits a useful term and one past which a search box just
+    /// looks odd. The count's share is a fixed measurement of a representative tally, not of the one it is
+    /// showing, so the row cannot shuffle about as the numbers change.</summary>
+    private void SizeTermBox()
+    {
+        if (_root.Controls.Count == 0) return;
+        int others = _root.Padding.Horizontal;
+        foreach (Control c in _root.Controls)
+            if (!ReferenceEquals(c, _text) && !ReferenceEquals(c, _message))
+                others += c.Width + c.Margin.Horizontal;
+
+        int spare = Math.Max(0, Width - others - _text.Margin.Horizontal - _message.Margin.Horizontal);
+        int want = Math.Clamp(spare - CountWidth, LogicalToDeviceUnits(220), LogicalToDeviceUnits(620));
+        if (_text.Width != want) _text.Width = want;
+    }
+
+    /// <summary>Room set aside for the count: a tally long enough to be worth reading whole.</summary>
+    private int CountWidth =>
+        TextRenderer.MeasureText("Match 999,999 of 999,999 lines \u00b7 999,999 hidden", Font).Width;
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        CentreRow();
+        SizeTermBox();
+    }
 
     protected override void OnHandleCreated(EventArgs e)
     {
@@ -276,6 +342,13 @@ public sealed class FindBar : UserControl
         _text.SelectionLength = length;
     }
 
+    /// <summary>Puts a term in the box, as Ctrl+F does with whatever is picked out in the log.</summary>
+    public void SetTerm(string term)
+    {
+        if (_text.Text == term) return;
+        _text.Text = term;
+    }
+
     private FindQuery Query() => new(_text.Text, _regex.Checked, _case.Checked);
 
     /// <summary>Searches for what is in the box. Does nothing while a search is already running, so holding
@@ -333,6 +406,9 @@ public sealed class FindBar : UserControl
     }
 
     internal Font FontForTesting => _mono;
+    internal int TermBoxWidthForTesting => _text.Width;
+    internal int MessageWidthForTesting => _message.Width;
+    internal int CountWidthForTesting => CountWidth;
     internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
     internal int BarPaintsForTesting => _barPaints;
     internal int MessagePaintsForTesting => _message.Paints;

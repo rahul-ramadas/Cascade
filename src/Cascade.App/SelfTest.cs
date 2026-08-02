@@ -75,6 +75,7 @@ internal static class SelfTest
             ok &= Timed("find bar", RunFindBarChecks);
             ok &= Timed("find bar layout", RunFindBarLayoutChecks);
             ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
+            ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -2816,6 +2817,29 @@ internal static class SelfTest
 
             ok &= Check("the count redraws in one go, rather than clearing itself first",
                         form.FindBarRedrawsInOneGoForTesting);
+
+            // Everything on the row reads as one line of controls, so they have to share a centre line -
+            // measured in a real window, where the bar has been stretched to a whole number of log lines.
+            var findBar = form.FindBarForTesting;
+            int middle = findBar.Height / 2;
+            var strayed = new List<string>();
+            foreach (var c in AllControls(findBar))
+            {
+                if (c is not (ComboBox or Button or CheckBox or Label)) continue;
+                Rectangle inBar = findBar.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                int centre = inBar.Top + inBar.Height / 2;
+                string what = c is Label l && l.Text.Length > 0 ? l.Text : c.AccessibleName ?? c.GetType().Name;
+                strayed.Add($"{what} top={inBar.Top} h={inBar.Height} mid={centre}");
+            }
+            Line("   (centres: " + string.Join(", ", strayed) + ")");
+            ok &= Check($"every control on the row shares the bar's centre line ({middle}px)",
+                        strayed.Count > 0 && AllControls(findBar)
+                            .Where(c => c is ComboBox or Button or CheckBox or Label)
+                            .All(c =>
+                            {
+                                Rectangle r = findBar.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                                return Math.Abs(r.Top + r.Height / 2 - middle) <= 1;
+                            }));
             return ok;
         }
         finally
@@ -2884,6 +2908,24 @@ internal static class SelfTest
             bar.PaintNow();
             ok &= Check("the count can be painted without waiting for an idle moment",
                         bar.MessagePaintsForTesting > pushed);
+
+            // The box grows with the window rather than staying the size a small one needed, but stops well
+            // short of filling the row - a search field the width of a screen is no easier to read.
+            var widths = new List<int>();
+            var counts = new List<int>();
+            foreach (int w in new[] { 700, 1400, 3200 })
+            {
+                host.ClientSize = new Size(w, host.ClientSize.Height);
+                Pump();
+                widths.Add(bar.TermBoxWidthForTesting);
+                counts.Add(bar.MessageWidthForTesting);
+            }
+            Line($"   (term box: {string.Join(", ", widths)} / count: {string.Join(", ", counts)}"
+                 + $" across 700, 1400 and 3200px)");
+            ok &= Check("the term box grows with the window", widths[1] > widths[0]);
+            ok &= Check("and stops before it takes over the row", widths[2] < 3200 / 2);
+            ok &= Check("and never shrinks below something usable", widths[0] >= 200);
+            ok &= Check("the count keeps room for a tally worth reading", counts[1] >= bar.CountWidthForTesting);
             return ok;
         }
         finally
@@ -2891,6 +2933,72 @@ internal static class SelfTest
             host.Close();
             host.Dispose();
             Pump();
+        }
+    }
+
+    /// <summary>Asking to find something with part of a line picked out means "find that". Whole lines do
+    /// not: selecting them is how you copy or mark them, and a line's worth of log is no kind of term.</summary>
+    private static bool RunFindSeedChecks()
+    {
+        Line("-- the find box takes what is picked out --");
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_seed_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 40; i++) sb.Append($"line {i:00} req-abc123 GET /v1/orders/99 -> 200 in 41ms\n");
+        File.WriteAllText(log, sb.ToString(), new UTF8Encoding(false));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), new[] { log })
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 40; i++) { Thread.Sleep(20); Pump(); }
+            bool ok = Check("the file is open", doc.CompletedLineCount >= 40, doc.CompletedLineCount.ToString());
+            if (!ok) return false;
+
+            var grid = form.GridForTesting;
+            var bar = form.FindBarForTesting;
+            string text = doc.GetLineText(2);
+            int reqAt = text.IndexOf("req-abc123", StringComparison.Ordinal);
+
+            grid.DragForTesting(2, grid.XForCharForTesting(2, reqAt), grid.XForCharForTesting(2, reqAt + 10));
+            Pump();
+            ok &= Check("a part of a line is picked out", grid.SelectedText == "req-abc123",
+                        grid.SelectedText ?? "(none)");
+
+            form.ClickMenuForTesting("Edit", "Find");
+            Pump();
+            ok &= Check("and asking to find takes it as the term", bar.TermForTesting() == "req-abc123",
+                        bar.TermForTesting());
+
+            // A whole line, on the other hand, must leave the box alone - not replace a perfectly good term
+            // with fifty characters of log.
+            form.CloseFindForTesting();
+            Pump();
+            grid.ClickForTesting(3, grid.XForCharForTesting(3, reqAt));
+            Pump();
+            ok &= Check("clicking selects the whole line instead", !grid.HasCharSelection);
+
+            form.ClickMenuForTesting("Edit", "Find");
+            Pump();
+            ok &= Check("and asking to find leaves the term as it was", bar.TermForTesting() == "req-abc123",
+                        bar.TermForTesting());
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { File.Delete(log); } catch { /* ignore */ }
         }
     }
 

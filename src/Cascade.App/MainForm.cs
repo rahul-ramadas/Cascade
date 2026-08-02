@@ -115,6 +115,7 @@ public sealed class MainForm : Form
     internal int FindBarHeightForTesting => _findBar.Height;
     internal bool FindBarIsOpenForTesting => _findBar.Visible;
     internal bool FindBarRedrawsInOneGoForTesting => _findBar.MessageRedrawsInOneGoForTesting;
+    internal FindBar FindBarForTesting => _findBar;
     internal void CloseFindForTesting() => CloseFind();
     internal void SetStatusProgressForTesting(double fraction)
     {
@@ -1365,6 +1366,10 @@ public sealed class MainForm : Form
             // scrollbar is about to be, and the scrollbar would then cover it - a flash along the bottom.
             WithoutRedraw(() => { _findBar.Visible = true; SnapSplitter(); });
         }
+        // A part of a line picked out in the log is almost always what the search is about to be for.
+        // Whole lines are not: selecting them is how you copy or mark them, and a line's worth of text is
+        // no kind of search term - so only a selection WITHIN a line seeds the box.
+        if (focus && _grid.SelectedText is { Length: > 0 } picked) _findBar.SetTerm(picked);
         if (focus) _findBar.FocusInput();
     }
 
