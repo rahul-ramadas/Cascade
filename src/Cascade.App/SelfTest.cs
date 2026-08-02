@@ -73,6 +73,7 @@ internal static class SelfTest
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
+            ok &= Timed("closing", RunClosingChecks);
             ok &= Timed("the menus", RunMenuActionChecks);
             ok &= Timed("resources", RunResourceChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
@@ -3043,6 +3044,55 @@ internal static class SelfTest
                     $"{Lines(split.SplitterDistance)}px of text at window height {form.Height}");
 
         form.Close();
+        return ok;
+    }
+
+    /// <summary>Letting go of a very large log costs the kernel two thirds of a second - it has to hand back
+    /// every resident page of the mapping - and it happens on the thread that draws. So the window has to be
+    /// down BEFORE that starts, or the reader sits looking at an app that will not close. WinForms disposes
+    /// a top-level form while its window is still up, which is why closing hides it first.</summary>
+    private static bool RunClosingChecks()
+    {
+        Line("-- the window goes before the file is let go --");
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_closing_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(log, Enumerable.Range(1, 200).Select(i => $"line {i}"));
+
+        bool ok;
+        try
+        {
+            using var form = new MainForm(new AppSettings(), new MachineState(), new[] { log })
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 700),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+            Pump();
+
+            var doc = form.DocForTesting;
+            ok = Check("the file is open", doc.CompletedLineCount > 0, doc.CompletedLineCount.ToString());
+            ok &= Check("and not let go while it is being read", !doc.IsDisposed);
+
+            // Subscribed after the form's own handler, so it runs after it: this is the state the reader is
+            // left in for however long the release takes.
+            bool windowStillUp = true, alreadyLetGo = true;
+            form.FormClosing += (_, _) => { windowStillUp = form.Visible; alreadyLetGo = doc.IsDisposed; };
+
+            form.Close();
+            Pump();
+
+            ok &= Check("the window is down by the time closing finishes", !windowStillUp);
+            ok &= Check("and the file has not been let go yet, which is the slow part", !alreadyLetGo);
+            ok &= Check("but it is let go by the time the window is disposed", doc.IsDisposed);
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { /* best effort */ }
+        }
+
         return ok;
     }
 

@@ -1560,7 +1560,18 @@ public sealed class MainForm : Form
         _refreshTimer.Stop();
         _settingsDirty = _stateDirty = true;   // a clean exit rewrites both, as it always has
         FlushConfig(force: true);
-        _doc.Dispose();
+        Hide();
+    }
+
+    // Releasing the mapping of a very large log means the kernel has to give back every page of it that is
+    // resident - two thirds of a second for a seven gigabyte trace, on the thread that draws. WinForms
+    // disposes a top-level form while its window is still up, so the window is taken down first (above) and
+    // the reader sees the app go at once. The work itself is unavoidable: the address space has to be torn
+    // down either way, whether we ask or the process simply ends.
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _doc.Dispose();
+        base.Dispose(disposing);
     }
 
     // Preferences and recent files are written as they change, coalesced onto the refresh timer, because
