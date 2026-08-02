@@ -110,6 +110,12 @@ public sealed class MainForm : Form
     /// no user present to answer, so the modal prompt would block the render indefinitely.</summary>
     internal ProgressBar? StatusProgressForTesting => _progress.Control as ProgressBar;
 
+    internal int SplitterDistanceForTesting => _split.SplitterDistance;
+    internal int RowPitchForTesting => _grid.RowPitch;
+    internal int FindBarHeightForTesting => _findBar.Height;
+    internal bool FindBarIsOpenForTesting => _findBar.Visible;
+    internal bool FindBarRedrawsInOneGoForTesting => _findBar.MessageRedrawsInOneGoForTesting;
+    internal void CloseFindForTesting() => CloseFind();
     internal void SetStatusProgressForTesting(double fraction)
     {
         _progress.Visible = true;
@@ -170,7 +176,7 @@ public sealed class MainForm : Form
         // A held drag or a held key never lets the message queue empty, and a repaint only arrives when it
         // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
         _grid.SelectionChanged += () => { UpdateStatus(); _status.Update(); };
-        _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); SnapSplitter(); };
+        _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); _findBar.SnapHeightTo(_grid.RowPitch); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };
@@ -1353,6 +1359,8 @@ public sealed class MainForm : Form
         if (!_findBar.Visible)
         {
             _findBar.SetHistory(_state.RecentFindTerms);
+            // A whole number of lines, so the divider below never has to move to make the rest fit.
+            _findBar.SnapHeightTo(_grid.RowPitch);
             _findBar.Visible = true;
             SnapSplitter();
         }

@@ -65,6 +65,7 @@ internal static class SelfTest
             ok &= Timed("word wrap", RunWordWrapChecks);
             ok &= Timed("filter tips", RunFilterTipChecks);
             ok &= Timed("find bar", RunFindBarChecks);
+            ok &= Timed("find bar layout", RunFindBarLayoutChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -2749,6 +2750,65 @@ internal static class SelfTest
             try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Where the find bar sits in the window. Opening it has to come out of the text area and
+    /// nothing else: the filter pane keeps the size the user gave it, and the lines left in the log stay
+    /// whole - which only works if the bar itself is a whole number of them.</summary>
+    private static bool RunFindBarLayoutChecks()
+    {
+        Line("-- the find bar's place in the window --");
+
+        var form = new MainForm(new AppSettings(), new MachineState(), [])
+        {
+            NoSavePrompt = true,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        try
+        {
+            form.Show();
+            Pump();
+
+            int pitch = form.RowPitchForTesting;
+            int settled = form.SplitterDistanceForTesting;
+            bool ok = Check($"the window is laid out to start with (divider {settled}px, line {pitch}px)",
+                            pitch > 1 && settled > 0);
+            if (!ok) return false;
+
+            if (!form.ClickMenuForTesting("Edit", "Find")) return Check("Edit > Find is there", false);
+            Pump();
+            int barHeight = form.FindBarHeightForTesting;
+            ok &= Check($"the bar is open", form.FindBarIsOpenForTesting);
+            ok &= Check($"and stands a whole number of lines tall ({barHeight}px of {pitch}px lines)",
+                        barHeight % pitch == 0);
+
+            // The report was that the filter pane shrank a little on every trip. It did: the bar was not a
+            // whole number of lines, so the divider moved to make the remaining ones fit, and never moved back.
+            var seen = new List<int> { form.SplitterDistanceForTesting };
+            for (int i = 0; i < 4; i++)
+            {
+                form.CloseFindForTesting();
+                Pump();
+                seen.Add(form.SplitterDistanceForTesting);
+                form.ClickMenuForTesting("Edit", "Find");
+                Pump();
+                seen.Add(form.SplitterDistanceForTesting);
+            }
+            ok &= Check($"opening and closing the bar never moves the divider [{string.Join(" ", seen)}]",
+                        seen.All(d => d == settled));
+
+            ok &= Check("the count redraws in one go, rather than clearing itself first",
+                        form.FindBarRedrawsInOneGoForTesting);
+            return ok;
+        }
+        finally
+        {
+            form.Close();
+            form.Dispose();
+            Pump();
         }
     }
 
