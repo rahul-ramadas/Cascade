@@ -21,7 +21,7 @@ public sealed class FindBar : UserControl
     private readonly ComboBox _text = new() { DropDownStyle = ComboBoxStyle.DropDown, AutoCompleteMode = AutoCompleteMode.None };
     private readonly CheckBox _regex = new() { Text = "Regex", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _case = new() { Text = "Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly SteadyLabel _message = new() { AutoSize = false, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly SteadyLabel _message = new() { AutoSize = false, AutoEllipsis = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _next = new() { Text = "Next" };
     private readonly Button _prev = new() { Text = "Previous" };
     private readonly Button _close = new() { Text = "\u2715", FlatStyle = FlatStyle.Flat };
@@ -102,6 +102,7 @@ public sealed class FindBar : UserControl
         _case.Margin = new Padding(0, 0, Dpi(10), 0);
 
         _message.ForeColor = SystemColors.GrayText;
+        _message.BackColor = SystemColors.Control;
         _message.Padding = new Padding(0, 0, Dpi(8), 0);
 
         _close.AutoSize = false;
@@ -160,10 +161,13 @@ public sealed class FindBar : UserControl
     /// that happens to start lower down.</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
+        _barPaints++;
         base.OnPaint(e);
         using var pen = new Pen(SystemColors.ControlDark);
         e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
     }
+
+    private int _barPaints;
 
     /// <summary>The bar is a fixed height rather than auto-sized around its contents. An auto-sizing
     /// container hands a percentage column only as much width as its content asks for, which left the count
@@ -200,7 +204,38 @@ public sealed class FindBar : UserControl
     /// match, and a plain label clears itself before drawing, which on a strip this wide reads as a flash.</summary>
     private sealed class SteadyLabel : Label
     {
+        private string _message = "";
+
         public SteadyLabel() => DoubleBuffered = true;
+
+        /// <summary>The text to show. Deliberately not <see cref="Control.Text"/>: assigning that sends
+        /// WM_SETTEXT, which was measured to repaint the whole bar behind this label - so the term box, the
+        /// options and the buttons were all being cleared and redrawn on every keypress that walked to the
+        /// next match. Invalidating this label alone costs the bar nothing.</summary>
+        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+        internal string Message
+        {
+            get => _message;
+            set
+            {
+                if (_message == value) return;
+                _message = value;
+                AccessibleName = value;   // so it still reads out, Text being left empty
+                Invalidate();
+            }
+        }
+
+        internal int Paints;
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Paints++;
+            base.OnPaint(e);
+            TextRenderer.DrawText(e.Graphics, _message, Font, ClientRectangle, ForeColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
+        }
+
         internal bool RedrawsInOneGo => GetStyle(ControlStyles.OptimizedDoubleBuffer);
     }
 
@@ -255,7 +290,7 @@ public sealed class FindBar : UserControl
     /// has no tally to show, and a search that found something has nothing to complain about.</summary>
     public void SetMessage(string text, string? detail = null)
     {
-        if (_message.Text != text) _message.Text = text;
+        _message.Message = text;
         string want = detail ?? text;
         if (_tip.GetToolTip(_message) != want) _tip.SetToolTip(_message, want);
     }
@@ -294,10 +329,13 @@ public sealed class FindBar : UserControl
 
     internal Font FontForTesting => _mono;
     internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
+    internal int BarPaintsForTesting => _barPaints;
+    internal int MessagePaintsForTesting => _message.Paints;
+    internal void RepaintMessageForTesting() { _message.Invalidate(); _message.Update(); }
     internal void StepHistoryForTesting(int delta) => StepHistory(delta);
     internal bool HistoryIsOpenForTesting() => _text.DroppedDown;
     internal string TermForTesting() => _text.Text;
-    internal string MessageForTesting() => _message.Text;
+    internal string MessageForTesting() => _message.Message;
     internal (int Start, int Length) SelectionForTesting() => (_text.SelectionStart, _text.SelectionLength);
     internal bool SearchingForTesting() => _searching;
     internal void EnterForTesting() => Run(true);

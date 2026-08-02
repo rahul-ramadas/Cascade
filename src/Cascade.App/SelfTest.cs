@@ -66,6 +66,7 @@ internal static class SelfTest
             ok &= Timed("filter tips", RunFilterTipChecks);
             ok &= Timed("find bar", RunFindBarChecks);
             ok &= Timed("find bar layout", RunFindBarLayoutChecks);
+            ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -2808,6 +2809,65 @@ internal static class SelfTest
         {
             form.Close();
             form.Dispose();
+            Pump();
+        }
+    }
+
+    /// <summary>Walking matches with the Enter key held down changes the count about thirty times a second.
+    /// Only the count itself may be redrawn for that: repainting the row it sits in would erase the term,
+    /// the options and the buttons and put them straight back, which is what a flicker is.</summary>
+    private static bool RunFindBarRepaintChecks()
+    {
+        Line("-- the count changing does not disturb the bar --");
+
+        var bar = new FindBar((_, _) => { }) { Visible = true };
+        var host = new Form
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0,
+            ClientSize = new Size(1200, 80)
+        };
+        host.Controls.Add(bar);
+        try
+        {
+            host.Show();
+            Pump();
+
+            const int steps = 30;
+
+            // A control run first: pump exactly as often without touching the message, so what follows is
+            // measuring the count changing rather than whatever the message loop does anyway.
+            int idleBar = bar.BarPaintsForTesting;
+            for (int i = 0; i < steps; i++) Pump();
+            int idlePaints = bar.BarPaintsForTesting - idleBar;
+
+            // ...and a run that redraws the count without changing a character of it, which separates "the
+            // label was repainted" from "the text changed".
+            int redrawBar = bar.BarPaintsForTesting;
+            for (int i = 0; i < steps; i++) { bar.RepaintMessageForTesting(); Pump(); }
+            int redrawPaints = bar.BarPaintsForTesting - redrawBar;
+            Line($"   (bar repaints: {idlePaints} idle, {redrawPaints} redrawing the count unchanged)");
+
+            int barBefore = bar.BarPaintsForTesting, messageBefore = bar.MessagePaintsForTesting;
+            for (int i = 1; i <= steps; i++)
+            {
+                bar.SetMessage($"Match {i:N0} of 348 lines", $"On match {i:N0} of 348");
+                Pump();
+            }
+            int barPaints = bar.BarPaintsForTesting - barBefore;
+            int messagePaints = bar.MessagePaintsForTesting - messageBefore;
+
+            bool ok = Check($"the count itself redraws as it changes ({messagePaints} times over {steps})",
+                            messagePaints > 0);
+            ok &= Check($"but the row around it is left alone (bar repainted {barPaints} times while the " +
+                        $"count changed, {idlePaints} while it did not)", barPaints <= idlePaints);
+            return ok;
+        }
+        finally
+        {
+            host.Close();
+            host.Dispose();
             Pump();
         }
     }
