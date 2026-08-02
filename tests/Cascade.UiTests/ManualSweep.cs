@@ -98,6 +98,7 @@ public class ManualSweep : IDisposable
         Stage("presetedit", PresetEditing);
         Stage("markers", MarkersAndMap);
         Stage("roundtrip", PresetRoundTrip);
+        Stage("goto", GoToAndZoom);
 
         Say($"bugs found: {_bugs.Count}");
         Assert.True(true);
@@ -152,8 +153,94 @@ public class ManualSweep : IDisposable
     }
 
     /// <summary>A preset has to survive being written to the filter file and read back.</summary>
-    private void PresetRoundTrip()
+    /// <summary>Going to a line by number, on a file where the numbers are in the tens of millions, and
+    /// zooming - both of which a user reaches for constantly and neither of which anything else drives.</summary>
+    private void GoToAndZoom()
     {
+        _app.ClickMenuOrThrow("View", "Focus Text Area");
+        Thread.Sleep(300);
+
+        void OpenGoTo()
+        {
+            Keyboard.Pressing(VirtualKeyShort.CONTROL);
+            Keyboard.Type(VirtualKeyShort.KEY_G);
+            Keyboard.Release(VirtualKeyShort.CONTROL);
+            Thread.Sleep(900);
+        }
+
+        long Go(string typed)
+        {
+            OpenGoTo();
+            var dlg = _app.FindDialog("Go To Line");
+            if (dlg is null) return -1;
+            var box = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
+            if (box is null) { Keyboard.Press(VirtualKeyShort.ESCAPE); return -1; }
+            box.Focus();
+            Keyboard.Pressing(VirtualKeyShort.CONTROL);
+            Keyboard.Type(VirtualKeyShort.KEY_A);
+            Keyboard.Release(VirtualKeyShort.CONTROL);
+            Keyboard.Type(typed);
+            Thread.Sleep(200);
+            Keyboard.Press(VirtualKeyShort.RETURN);
+            Thread.Sleep(1500);
+            return CaretLine();
+        }
+
+        long deep = Go("20000000");
+        Say($"Go To 20,000,000 landed on {deep}");
+        Check("Go To Line reaches a line twenty million down", deep == 20_000_000, deep.ToString());
+        Check("and it is on screen, not merely selected",
+              deep >= _app.FirstVisibleLine() && deep < _app.FirstVisibleLine() + 200,
+              $"caret {deep}, top of view {_app.FirstVisibleLine()}");
+        Shot("goto-deep");
+
+        // A number past the end of the file must land at the end rather than nowhere.
+        long past = Go("99999999");
+        Say($"Go To 99,999,999 landed on {past}");
+        Check("a line number past the end stops at the last line", past is > 33_000_000 and <= 33_180_857,
+              past.ToString());
+
+        // With only matching lines on show, a hidden number cannot be gone to - it lands on the nearest
+        // line that is shown, which for line 1 is whatever the top of the file has become.
+        _app.ClickMenuOrThrow("View", "Focus Text Area");
+        Thread.Sleep(300);
+        Keyboard.Pressing(VirtualKeyShort.CONTROL);
+        Keyboard.Type(VirtualKeyShort.HOME);
+        Keyboard.Release(VirtualKeyShort.CONTROL);
+        Thread.Sleep(1200);
+        long top = CaretLine();
+        long firstShown = Go("1");
+        Say($"Go To 1 landed on {firstShown}; the first shown line is {top}");
+        Check("a number below the first line on show lands on that line", firstShown == top,
+              $"went to {firstShown}, first shown is {top}");
+
+        // Zoom: the text changes size, the status says so, and it comes back.
+        string zoom = _app.StatusText("Zoom:");
+        _app.ClickMenuOrThrow("View", "Zoom In");
+        Thread.Sleep(600);
+        _app.ClickMenuOrThrow("View", "Zoom In");
+        Thread.Sleep(600);
+        string bigger = _app.StatusText("Zoom:");
+        Say($"zoom {zoom} -> {bigger}");
+        Check("zooming in says so in the status bar", bigger != zoom, $"{zoom} -> {bigger}");
+        int rows = _app.Rows().Length;
+        _app.ClickMenuOrThrow("View", "Reset Zoom");
+        Thread.Sleep(800);
+        Check("and resetting puts it back", _app.StatusText("Zoom:") == zoom,
+              $"{_app.StatusText("Zoom:")}, was {zoom}");
+        Check("and fewer lines fitted while it was bigger", rows < _app.Rows().Length,
+              $"{rows} rows zoomed in, {_app.Rows().Length} at normal size");
+        Shot("zoom-reset");
+    }
+
+    private long CaretLine()
+    {
+        string s = _app.StatusText("Ln:");
+        int at = s.IndexOf(':') + 1, slash = s.IndexOf('/');
+        return slash > at && long.TryParse(s[at..slash].Replace(",", "").Trim(), out long v) ? v : -1;
+    }
+
+    private void PresetRoundTrip()    {
         var names = SafePresetNames();
         if (names.Length == 0)
         {

@@ -75,15 +75,23 @@ public class FindHitRangeTests
         {
             var w = System.Diagnostics.Stopwatch.StartNew();
             long sink = 0;
-            for (int i = 0; i < 200; i++) sink += search.HitsInRange(from, from + band);
+            for (int i = 0; i < 2_000; i++) sink += search.HitsInRange(from, from + band);
             w.Stop();
             Assert.True(sink > 0);
             return Math.Max(1, w.ElapsedTicks);
         }
 
+        // The other thing running on the machine can only ever make a measurement slower, so the fastest of
+        // several runs is the honest cost and a scheduler hiccup cannot fail the check. The two are
+        // measured turn about, so a slow patch of the machine lands on both alike.
         Time(0);                                   // warm up the JIT before either measurement counts
-        long atStart = Time(0);
-        long atEnd = Time(lines - band);
+        long atStart = long.MaxValue, atEnd = long.MaxValue;
+        for (int rep = 0; rep < 5; rep++)
+        {
+            atStart = Math.Min(atStart, Time(0));
+            atEnd = Math.Min(atEnd, Time(lines - band));
+        }
+
         Assert.True(atEnd < atStart * 10, $"a band at the end cost {(double)atEnd / atStart:0.0}x one at the start");
     }
 }
