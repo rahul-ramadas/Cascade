@@ -17,9 +17,6 @@ public sealed class MainForm : Form
     private readonly MachineState _state;
     private readonly CascadeDocument _doc = new();
     private readonly LineGridControl _grid = new() { Dock = DockStyle.Fill };
-    // Holds the find bar above the log. The grid keeps Dock.Fill, so the bar appearing takes its space out
-    // of the text rather than over it.
-    private readonly Panel _textPane = new() { Dock = DockStyle.Fill };
     private readonly FilterTreeControl _filterTree = new() { Dock = DockStyle.Fill };
     private readonly FilterPresetsControl _presets = new() { Dock = DockStyle.Fill };
     // The filter list and its presets share one pane, split the short way round: the presets sit beside the
@@ -154,11 +151,10 @@ public sealed class MainForm : Form
         BuildStatusBar();
         BuildFindBar();
 
-        // The bar sits above the log inside its own host, so opening it shortens the text area rather than
-        // covering it. The grid is untouched by this - the minimap it owns simply gets shorter with it.
-        _textPane.Controls.Add(_grid);
-        _textPane.Controls.Add(_findBar);
-        _split.Panel1.Controls.Add(_textPane);
+        // The bar goes INSIDE the log view, above its text but inside its scrollbar and minimap, so opening
+        // it shortens the text and leaves those two standing their full height instead of shoving them down.
+        _grid.HostAtTop(_findBar);
+        _split.Panel1.Controls.Add(_grid);
         _filterPane.Panel1.Controls.Add(_filterTree);
         _filterPane.Panel2.Controls.Add(_presets);
         _split.Panel2.Controls.Add(_filterPane);
@@ -1143,9 +1139,9 @@ public sealed class MainForm : Form
     {
         if (_snapping || _split.Orientation != Orientation.Horizontal) return;
         if (_split.Panel1Collapsed || _split.Panel2Collapsed) return;
-        // The find bar is above the grid inside the same panel, so from the divider's point of view it is
-        // more chrome standing between the split and the first line of text.
-        int pitch = _grid.RowPitch, chrome = _grid.ChromeHeight + (_findBar.Visible ? _findBar.Height : 0);
+        // ChromeHeight already counts the find bar: it is hosted inside the log view, so from the divider's
+        // point of view it is more chrome standing between the split and the first line of text.
+        int pitch = _grid.RowPitch, chrome = _grid.ChromeHeight;
         int total = _split.Height - _split.SplitterWidth;
         if (pitch <= 1 || total <= 0) return;
 

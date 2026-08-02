@@ -198,7 +198,7 @@ public sealed class LineGridControl : Control
     private (int From, int To) SegmentAt(long row, string text, Font font, int y)
     {
         if (!Wrapping) return (0, text.Length);
-        int top = HeaderHeight;
+        int top = TextTop;
         foreach (var (r, rowTop, height, _) in _layout)
             if (r == row) { top = rowTop; break; }
         int index = Math.Max(0, (y - top) / Math.Max(1, _rowHeight));
@@ -605,6 +605,28 @@ public sealed class LineGridControl : Control
     }
 
     private int ContentWidth => Math.Max(0, ClientSize.Width - RightGutterWidth - GutterWidth());
+    /// <summary>Puts a bar above the text, INSIDE this view - so it stops short of the map and the
+    /// scrollbar rather than pushing them down, which is what docking it above the whole view did. It is
+    /// placed at the front of the child list because docking runs from the back of that list forwards, so
+    /// the front-most is laid out last and gets what the full-height strips have left.</summary>
+    internal void HostAtTop(Control bar)
+    {
+        _topBar = bar;
+        bar.Dock = DockStyle.Top;
+        Controls.Add(bar);
+        Controls.SetChildIndex(bar, 0);
+        bar.VisibleChanged += (_, _) => { ChromeChanged?.Invoke(); RefreshView(); };
+        bar.SizeChanged += (_, _) => { ChromeChanged?.Invoke(); RefreshView(); };
+    }
+
+    private Control? _topBar;
+
+    /// <summary>Room taken above the text by a hosted bar.</summary>
+    private int TopInset => _topBar is { Visible: true } ? _topBar.Height : 0;
+
+    /// <summary>Where the text starts: below anything sitting above it and below the column header.</summary>
+    private int TextTop => TopInset + HeaderHeight;
+
     private int HeaderHeight => (_doc?.Columns.Enabled ?? false) ? _rowHeight : 0;
 
     /// <summary>Room the sideways scrollbar takes at the bottom. Nothing at all when it is hidden - a
@@ -612,7 +634,7 @@ public sealed class LineGridControl : Control
     /// unused, and since that strip is about a line tall it read as a line failing to draw.</summary>
     private int BottomInset => _hbar.Visible ? _hbar.Height : 0;
 
-    private int VisibleRowCount => Math.Max(1, (ClientSize.Height - BottomInset - HeaderHeight) / Math.Max(1, _rowHeight));
+    private int VisibleRowCount => Math.Max(1, (ClientSize.Height - BottomInset - TextTop) / Math.Max(1, _rowHeight));
 
     private bool MarkersVisible =>
         _doc is not null && _settings.MarkerVisibility switch
@@ -644,7 +666,7 @@ public sealed class LineGridControl : Control
     /// <summary>How tall one line is drawn, and how much of the control is not text. Between them they say
     /// what heights this control can be given without a strip of dead space at the bottom.</summary>
     internal int RowPitch => Math.Max(1, _rowHeight);
-    internal int ChromeHeight => HeaderHeight + BottomInset;
+    internal int ChromeHeight => TextTop + BottomInset;
 
     /// <summary>Raised when <see cref="ChromeHeight"/> changes, which it does whenever the sideways
     /// scrollbar comes or goes - so whoever sized this control can put it back on a whole line.</summary>
@@ -723,7 +745,7 @@ public sealed class LineGridControl : Control
     {
         foreach (var (r, top, height, _) in _layout)
             if (r == row) return top + Math.Min(height, _rowHeight) / 2;
-        return HeaderHeight + (int)(row - _firstRow) * _rowHeight + _rowHeight / 2;
+        return TextTop + (int)(row - _firstRow) * _rowHeight + _rowHeight / 2;
     }
 
     /// <summary>How many segments a row was drawn as. 1 unless it wrapped.</summary>
@@ -746,7 +768,7 @@ public sealed class LineGridControl : Control
     {
         foreach (var (r, top, _, _) in _layout)
             if (r == row) return top;
-        return HeaderHeight;
+        return TextTop;
     }
 
     internal int RowHeightForTesting => _rowHeight;
@@ -826,7 +848,7 @@ public sealed class LineGridControl : Control
     /// margin and does of course move when you scroll.
     /// </summary>
     internal Rectangle GutterAreaForTesting =>
-        new(0, HeaderHeight, GutterWidth(), Math.Max(0, ClientSize.Height - HeaderHeight - BottomInset));
+        new(0, TextTop, GutterWidth(), Math.Max(0, ClientSize.Height - TextTop - BottomInset));
 
     /// <summary>Scrolls the view horizontally, as dragging the horizontal scrollbar does.</summary>
     internal void ScrollHorizontallyTo(int x) => SetHScroll(x);
@@ -884,7 +906,7 @@ public sealed class LineGridControl : Control
         if (columns) DrawColumnHeader(g, gutter, contentW);
 
         _layout.Clear();
-        int atY = headerH;
+        int atY = TextTop;
         int bottom = ClientSize.Height - BottomInset;
         for (int i = 0; i < visible; i++)
         {
@@ -977,17 +999,18 @@ public sealed class LineGridControl : Control
 
     private void DrawColumnHeader(Graphics g, int gutter, int contentW)
     {
-        var rect = new Rectangle(0, 0, ClientSize.Width - RightGutterWidth, _rowHeight);
+        int top = TopInset;
+        var rect = new Rectangle(0, top, ClientSize.Width - RightGutterWidth, _rowHeight);
         using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, rect);
-        using (var pen = new Pen(Color.FromArgb(210, 210, 210))) g.DrawLine(pen, 0, _rowHeight - 1, rect.Width, _rowHeight - 1);
+        using (var pen = new Pen(Color.FromArgb(210, 210, 210))) g.DrawLine(pen, 0, rect.Bottom - 1, rect.Width, rect.Bottom - 1);
         int x = gutter - _hScroll;
         var clip = g.Clip;
-        g.SetClip(new Rectangle(gutter, 0, contentW, _rowHeight));
+        g.SetClip(new Rectangle(gutter, top, contentW, _rowHeight));
         foreach (var def in _doc!.Columns.Columns)
         {
             if (!def.Visible) continue;
             int w = def.Width > 0 ? def.Width : DefaultColumnWidth;
-            TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, 1, w - 6, _rowHeight - 2),
+            TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
                 Color.FromArgb(80, 80, 80), TextFlags | TextFormatFlags.EndEllipsis);
             x += w;
         }
@@ -1220,7 +1243,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null || !_settings.ShowFilterTooltips || _dragging) { HideTip(); return; }
         long row = RowAtY(at.Y);
-        if (at.Y < HeaderHeight || row < 0 || row >= _doc.RowCount) { HideTip(); return; }
+        if (at.Y < TextTop || row < 0 || row >= _doc.RowCount) { HideTip(); return; }
         if (row == _tipRow) return;
 
         HideTip();
@@ -1364,7 +1387,7 @@ public sealed class LineGridControl : Control
 
     private long RowAtY(int y)
     {
-        if (y < HeaderHeight) return -1;
+        if (y < TextTop) return -1;
         // A running pass shifts every row index between paints, so re-derive the top row from its anchored
         // line first: otherwise a click maps to whatever was under the cursor a frame (thousands of rows) ago.
         SyncFirstRowToAnchor();
@@ -1376,7 +1399,7 @@ public sealed class LineGridControl : Control
                 if (y >= top && y < top + height) return row;
             return _layout[^1].Row + 1;   // below the last painted row
         }
-        return _firstRow + (y - HeaderHeight) / _rowHeight;
+        return _firstRow + (y - TextTop) / _rowHeight;
     }
 
     /// <summary>Runs a change that takes rows off the top of the view (or hands them back) and scrolls by as
@@ -1462,7 +1485,7 @@ public sealed class LineGridControl : Control
         return Math.Max(1, fitted);
     }
 
-    private int ViewportHeight => Math.Max(1, ClientSize.Height - BottomInset - HeaderHeight);
+    private int ViewportHeight => Math.Max(1, ClientSize.Height - BottomInset - TextTop);
 
     /// <summary>How tall a row is drawn, measured the way the paint measures it so the two agree.</summary>
     private int RowHeightOf(long row)
@@ -1621,7 +1644,7 @@ public sealed class LineGridControl : Control
         public override AccessibleObject? HitTest(int x, int y)
         {
             Point client = _g.PointToClient(new Point(x, y));
-            int i = (client.Y - _g.HeaderHeight) / Math.Max(1, _g._rowHeight);
+            int i = (client.Y - _g.TextTop) / Math.Max(1, _g._rowHeight);
             return i >= 0 && i < _g.VisibleRowSpan() ? GetChild(i) : this;
         }
     }
@@ -1678,7 +1701,7 @@ public sealed class LineGridControl : Control
                     var (_, top, height, _) = _g._layout[_visibleIndex];
                     return _g.RectangleToScreen(new Rectangle(0, top, w, height));
                 }
-                int y = _g.HeaderHeight + _visibleIndex * _g._rowHeight;
+                int y = _g.TextTop + _visibleIndex * _g._rowHeight;
                 return _g.RectangleToScreen(new Rectangle(0, y, w, _g._rowHeight));
             }
         }
