@@ -56,8 +56,7 @@ public static class FindEngine
 
     private static ReadOnlySpan<char> LineSpan(LineReader reader, LineIndex index, long fileLength, long line)
     {
-        long s = index.Get(line);
-        long e = (line + 1 < index.Count) ? index.Get(line + 1) : fileLength;
+        index.GetRange(line, fileLength, out long s, out long e);
         return reader.GetChars(s, e);
     }
 
