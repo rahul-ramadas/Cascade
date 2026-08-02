@@ -2354,12 +2354,40 @@ internal static class SelfTest
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
                           "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
 
-        // The find bar is the exception, and deliberately: it sits in a window that owns a menu bar, so an
-        // Alt key on it would fight with the menu's own.
+        // The find bar claims exactly two Alt keys, for its two options. It lives in a window that owns a
+        // menu bar, so the letters it takes must be ones no top-level menu wants - otherwise Alt+R would
+        // cycle between the two instead of ticking the box.
         var bar = new FindBar((_, _) => { });
-        var claimed = AllControls(bar).Select(c => c.Text).Where(t => MnemonicOf(t) is not null).ToList();
-        ok &= Check("the find bar claims no Alt keys, which belong to the menu" +
-                    (claimed.Count > 0 ? " [" + string.Join(", ", claimed) + "]" : ""), claimed.Count == 0);
+        var claimed = AllControls(bar).Select(c => c.Text).Select(MnemonicOf).OfType<char>()
+                                      .Select(char.ToUpperInvariant).OrderBy(c => c).ToList();
+        ok &= Check("the find bar claims Alt+R and Alt+C, and nothing else [" + string.Join(", ", claimed) + "]",
+                    string.Concat(claimed) == "CR");
+
+        using (var probe = new MainForm(new AppSettings(), new MachineState(), []))
+        {
+            var menuKeys = (probe.MainMenuStrip?.Items.OfType<ToolStripMenuItem>() ?? [])
+                .Select(i => MnemonicOf(i.Text ?? "")).OfType<char>()
+                .Select(char.ToUpperInvariant).ToList();
+            ok &= Check("and none of them is a menu's [" + string.Join(", ", menuKeys) + "]",
+                        !claimed.Intersect(menuKeys).Any());
+
+            // ...and they really work, through the same call WinForms makes for Alt+letter. The bar has to
+            // be up for it: a hidden control takes no mnemonic, which is exactly the wanted behaviour.
+            probe.StartPosition = FormStartPosition.Manual;
+            probe.Location = new Point(0, 0);
+            probe.Opacity = 0;
+            probe.NoSavePrompt = true;
+            probe.Show();
+            Pump();
+            probe.ClickMenuForTesting("Edit", "Find");
+            Pump();
+            var live = probe.FindBarForTesting;
+            bool wasRegex = live.RegexIsOnForTesting, wasCase = live.CaseIsOnForTesting;
+            ok &= Check("Alt+R is taken by the bar", AltKey(probe, 'R'));
+            ok &= Check("and ticks the regex box", live.RegexIsOnForTesting != wasRegex);
+            ok &= Check("Alt+C is taken by the bar", AltKey(probe, 'C'));
+            ok &= Check("and ticks the case box", live.CaseIsOnForTesting != wasCase);
+        }
         bar.Dispose();
 
         // A message appearing must not shove the rest of the dialog sideways. A TableLayoutPanel hands out
@@ -2456,6 +2484,26 @@ internal static class SelfTest
                         string.Join(",", searched.Select(s => s.Query.Text)));
             ok &= Check("and does not disturb it", dlg.TermForTesting() == "order-service" && dlg.SelectionForTesting() == before,
                         $"{dlg.TermForTesting()} at {dlg.SelectionForTesting()}");
+
+            // A pattern that will not compile is not worth searching for: it would sweep the whole file to
+            // report that nothing matched, and the bar already says what is wrong with it.
+            dlg.SetRegexForTesting(true);
+            dlg.SetTermForTesting("bth(port", 0, 0);
+            Pump();
+            int asked = searched.Count;
+            dlg.EnterForTesting();
+            Pump();
+            ok &= Check("Enter does not search for a pattern that will not compile", searched.Count == asked,
+                        string.Join(",", searched.Select(s => s.Query.Text)));
+            dlg.SetTermForTesting("bth(port)", 0, 0);
+            Pump();
+            dlg.EnterForTesting();
+            Pump();
+            ok &= Check("and searches again once it will", searched.Count == asked + 1);
+            dlg.SetRegexForTesting(false);
+            dlg.SetTermForTesting("order-service", 3, 2);
+            Pump();
+            searched.RemoveRange(1, searched.Count - 1);
 
             dlg.SetSearching(true);
             Pump();
@@ -2818,28 +2866,74 @@ internal static class SelfTest
             ok &= Check("the count redraws in one go, rather than clearing itself first",
                         form.FindBarRedrawsInOneGoForTesting);
 
-            // Everything on the row reads as one line of controls, so they have to share a centre line -
-            // measured in a real window, where the bar has been stretched to a whole number of log lines.
+            // Everything on the row reads as one line of controls, so they have to be one line of controls:
+            // the same height, starting at the same y. Comparing centres alone is too forgiving - a control
+            // that sizes itself grows the row without moving its centre far enough to notice.
             var findBar = form.FindBarForTesting;
             int middle = findBar.Height / 2;
-            var strayed = new List<string>();
+            var boxes = new List<(string What, Rectangle R)>();
             foreach (var c in AllControls(findBar))
             {
                 if (c is not (ComboBox or Button or CheckBox or Label)) continue;
                 Rectangle inBar = findBar.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
-                int centre = inBar.Top + inBar.Height / 2;
                 string what = c is Label l && l.Text.Length > 0 ? l.Text : c.AccessibleName ?? c.GetType().Name;
-                strayed.Add($"{what} top={inBar.Top} h={inBar.Height} mid={centre}");
+                boxes.Add((what, inBar));
             }
-            Line("   (centres: " + string.Join(", ", strayed) + ")");
-            ok &= Check($"every control on the row shares the bar's centre line ({middle}px)",
-                        strayed.Count > 0 && AllControls(findBar)
-                            .Where(c => c is ComboBox or Button or CheckBox or Label)
-                            .All(c =>
-                            {
-                                Rectangle r = findBar.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
-                                return Math.Abs(r.Top + r.Height / 2 - middle) <= 1;
-                            }));
+            Line("   (boxes: " + string.Join(", ",
+                boxes.Select(b => $"{b.What} top={b.R.Top} h={b.R.Height}")) + ")");
+            ok &= Check("every control on the row is the same height",
+                        boxes.Count > 0 && boxes.Select(b => b.R.Height).Distinct().Count() == 1);
+            ok &= Check("and starts on the same line",
+                        boxes.Select(b => b.R.Top).Distinct().Count() == 1);
+            ok &= Check($"which is the middle of the bar ({middle}px)",
+                        boxes.Count > 0 && Math.Abs(boxes[0].R.Top + boxes[0].R.Height / 2 - middle) <= 1);
+
+            // Boxes of the same height can still hold their text at different heights, and the text is what
+            // the eye reads as a line. So measure the INK, off a render of the real bar. Comparing the TOP
+            // of it works whatever the caption says: every one starts with a capital or a digit, so the top
+            // is the cap line, and a descender in one of them cannot skew it.
+            findBar.SetTermForTesting("Sample 123", 0, 0);
+            findBar.SetMessage("Match 5 of 8");
+            Pump();
+            var ink = TextInk(findBar);
+            Line("   (ink: " + string.Join(", ", ink.Select(i => $"{i.What} {i.Top}..{i.Bottom} {i.Font}")) + ")");
+
+            // Two of them are not captions on the bar's surface and are left out on purpose: the term sits
+            // inside its own framed box, and the close button is a symbol with no cap height to share.
+            var captions = ink.Where(i => i.What is not ("Close find" or "Find what")).ToList();
+            int highest = captions.Count > 0 ? captions.Min(i => i.Top) : 0;
+            int lowest = captions.Count > 0 ? captions.Max(i => i.Top) : 0;
+            ok &= Check($"every caption on the row sits on one line (tops {highest}-{lowest})",
+                        captions.Count >= 6 && lowest - highest <= 1);
+            ok &= Check("and every one of them is written at one size",
+                        ink.Select(i => i.Font).Distinct().Count() == 1,
+                        string.Join("/", ink.Select(i => i.Font).Distinct()));
+
+            // A rule where the count starts, so the row reads as what is being looked for on one side and
+            // what was found on the other.
+            int rule = findBar.CountStartsAtForTesting;
+            ok &= Check($"a separator marks where the count begins ({rule}px of {findBar.Width})",
+                        rule > 0 && rule < findBar.Width);
+            ok &= Check("and it is really drawn there", RuleIsDrawnAt(findBar, rule));
+
+            // A pattern that will not compile says so where the count goes. The two can never both apply,
+            // which is why they share the space.
+            findBar.SetMessage("Match 5 of 8");
+            findBar.SetTermForTesting("foo[", 0, 0);
+            findBar.SetRegexForTesting(true);
+            Pump();
+            ok &= Check("a broken pattern is complained about where the count goes",
+                        findBar.MessageForTesting().StartsWith("Invalid regex", StringComparison.Ordinal),
+                        findBar.MessageForTesting());
+            ok &= Check("and it is coloured as a problem rather than as a count",
+                        findBar.MessageColourForTesting != SystemColors.GrayText);
+
+            // ...and mending it hands the space straight back to the count.
+            findBar.SetTermForTesting("foo", 0, 0);
+            Pump();
+            ok &= Check("mending the pattern gives the count its place back",
+                        findBar.MessageForTesting() == "Match 5 of 8", findBar.MessageForTesting());
+            findBar.SetRegexForTesting(false);
             return ok;
         }
         finally
@@ -3057,12 +3151,15 @@ internal static class SelfTest
             spare.Dispose();
             ok &= Check("and closing a log view lets go of its fonts", LetGo(spareFont));
 
-            // The find bar is hidden rather than closed, so it lives as long as the window; the filter
-            // dialog is opened once per filter written. Neither may hand out a font it never takes back.
+            // The find bar used to cut a font of its own for the term box, at a different size from the rest
+            // of the row. It draws everything in the ambient font now, so there is nothing for it to give
+            // back - and nothing on the row may quietly go back to one of its own.
             var find = new FindBar((_, _) => { });
-            var findFont = find.FontForTesting;
+            var privately = AllControls(find).Where(c => !ReferenceEquals(c.Font, find.Font)).ToList();
+            ok &= Check("the find bar draws its whole row in one font, which it does not own",
+                        privately.Count == 0,
+                        string.Join(", ", privately.Select(c => $"{c.GetType().Name} {c.Font.Name} {c.Font.SizeInPoints}pt")));
             find.Dispose();
-            ok &= Check("and closing the find bar lets go of its font", LetGo(findFont));
 
             using var one = new FilterEditDialog(new Filter { Match = { Text = "x" } }, isNew: true, Array.Empty<Filter>());
             using var two = new FilterEditDialog(new Filter { Match = { Text = "y" } }, isNew: true, Array.Empty<Filter>());
@@ -3417,6 +3514,65 @@ internal static class SelfTest
             yield return c;
             foreach (var d in AllControls(c)) yield return d;
         }
+    }
+
+    /// <summary>Whether a vertical rule really was painted at <paramref name="x"/> - the position alone
+    /// only says where it was meant to go. Reads a row through the middle of the bar and requires the
+    /// column to be darker than the bar around it.</summary>
+    private static bool RuleIsDrawnAt(Control bar, int x)
+    {
+        if (x <= 1 || x >= bar.Width - 1) return false;
+        using var bmp = new Bitmap(bar.Width, bar.Height);
+        bar.DrawToBitmap(bmp, new Rectangle(0, 0, bar.Width, bar.Height));
+        int y = bar.Height / 2;
+        static int Grey(Color c) => (c.R + c.G + c.B) / 3;
+        int here = Grey(bmp.GetPixel(x, y));
+        int left = Grey(bmp.GetPixel(x - 2, y)), right = Grey(bmp.GetPixel(x + 2, y));
+        return here < left - 10 && here < right - 10;
+    }
+
+    /// <summary>Where each caption's ink really sits, read off a render of the row. A control's box says
+    /// nothing about where it draws its text - a combo box's edit puts it where the native control wants it,
+    /// a button centres its caption - so the pixels are the only honest measure of "these line up".
+    /// The area scanned skips each control's border and the check box's glyph, leaving only the caption.</summary>
+    private static List<(string What, int Top, int Bottom, string Font)> TextInk(Control bar)
+    {
+        using var bmp = new Bitmap(bar.Width, bar.Height);
+        bar.DrawToBitmap(bmp, new Rectangle(0, 0, bar.Width, bar.Height));
+
+        var found = new List<(string, int, int, string)>();
+        foreach (var c in AllControls(bar))
+        {
+            if (c is not (ComboBox or Button or CheckBox or Label)) continue;
+            int Dp(int v) => v * c.DeviceDpi / 96;
+            Rectangle r = bar.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+            Rectangle area = c switch
+            {
+                ComboBox => new Rectangle(r.Left + Dp(4), r.Top + Dp(3), r.Width - Dp(26), r.Height - Dp(6)),
+                CheckBox => new Rectangle(r.Left + Dp(17), r.Top, r.Width - Dp(17), r.Height),
+                Button { FlatStyle: FlatStyle.Standard } => Rectangle.Inflate(r, -Dp(5), -Dp(5)),
+                _ => r
+            };
+            area.Intersect(new Rectangle(0, 0, bmp.Width, bmp.Height));
+            if (area.Width <= 0 || area.Height <= 0) continue;
+
+            int top = -1, bottom = -1;
+            for (int y = area.Top; y < area.Bottom; y++)
+                for (int x = area.Left; x < area.Right; x++)
+                {
+                    var p = bmp.GetPixel(x, y);
+                    if ((p.R + p.G + p.B) / 3 >= 170) continue;   // anything darker than the backgrounds
+                    if (top < 0) top = y;
+                    bottom = y;
+                    break;
+                }
+            if (top < 0) continue;
+
+            string what = c is Label l && l.Text.Length > 0 ? l.Text
+                        : c.AccessibleName ?? c.GetType().Name;
+            found.Add((what, top, bottom, $"{c.Font.Name} {c.Font.SizeInPoints:0.##}pt"));
+        }
+        return found;
     }
 
     /// <summary>How much of a progress bar's width is actually coloured in, 0..1.</summary>

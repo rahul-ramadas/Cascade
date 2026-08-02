@@ -13,30 +13,30 @@ namespace Cascade.App;
 /// running with nothing on screen to say so. Sitting in the layout it costs two rows and never has to be
 /// dismissed, so a term is being looked for exactly when the bar is up.
 ///
-/// No mnemonics anywhere on it: the bar lives in a window that owns a menu bar, and an Alt key here would
-/// fight with the menu's. Ctrl+F, Enter, F3 and Esc reach it wherever the focus is - see MainForm.
+/// The only Alt keys on it are the two options, R and C, which the menu bar does not claim. Ctrl+F, Enter,
+/// F3 and Esc reach it wherever the focus is - see MainForm.
 /// </summary>
 public sealed class FindBar : UserControl
 {
     private readonly ComboBox _text = new() { DropDownStyle = ComboBoxStyle.DropDown, AutoCompleteMode = AutoCompleteMode.None };
-    private readonly CheckBox _regex = new() { Text = "Regex", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly CheckBox _case = new() { Text = "Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox _regex = new() { Text = "&Regex", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly CheckBox _case = new() { Text = "&Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly SteadyLabel _message = new() { AutoSize = false, AutoEllipsis = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _next = new() { Text = "Next" };
     private readonly Button _prev = new() { Text = "Previous" };
     private readonly Button _close = new() { Text = "\u2715", FlatStyle = FlatStyle.Flat };
+    private readonly Panel _rule = new();
     private readonly ToolTip _tip = new();
     private readonly Action<FindQuery, bool> _search;
     private readonly System.Windows.Forms.Timer _preview = new() { Interval = 200 };
-    private readonly Font _mono = new("Consolas", 9.75f);
     private bool _searching;
     private TableLayoutPanel _root = null!;
     private int _rowHeight;
+    private string _tally = "", _tallyDetail = "", _regexError = "";
 
     protected override void Dispose(bool disposing)
     {
-        // A font handed to a control is not disposed with it, and this bar is hidden rather than destroyed.
-        if (disposing) { _preview.Dispose(); _mono.Dispose(); _tip.Dispose(); }
+        if (disposing) { _preview.Dispose(); _tip.Dispose(); }
         base.Dispose(disposing);
     }
 
@@ -53,11 +53,11 @@ public sealed class FindBar : UserControl
         Dock = DockStyle.Top;
         Visible = false;
         BackColor = SystemColors.Control;
+        Padding = new Padding(0, 0, 0, 1);   // the row must not cover the hairline along the bottom
         Font = SystemFonts.MessageBoxFont ?? SystemFonts.DefaultFont;
         AccessibleName = "Find bar";
 
         int Dpi(int v) => LogicalToDeviceUnits(v);
-        _text.Font = _mono;
         _text.AccessibleName = "Find what";
         _next.AccessibleName = "Find next";
         _prev.AccessibleName = "Find previous";
@@ -72,12 +72,12 @@ public sealed class FindBar : UserControl
         _root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 7,
+            ColumnCount = 8,
             RowCount = 1,
             Padding = new Padding(Dpi(6), 0, Dpi(4), 0)
         };
         foreach (var w in new[] { SizeType.AutoSize, SizeType.AutoSize, SizeType.AutoSize,
-                                  SizeType.AutoSize, SizeType.AutoSize })
+                                  SizeType.AutoSize, SizeType.AutoSize, SizeType.AutoSize })
             _root.ColumnStyles.Add(new ColumnStyle(w));
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // the count takes what is left
         _root.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -95,8 +95,11 @@ public sealed class FindBar : UserControl
 
         foreach (var b in new[] { _prev, _next })
         {
-            b.AutoSize = true;
-            b.MinimumSize = new Size(Dpi(64), Dpi(23));
+            // Sized rather than auto-sized: an auto-sizing button draws its caption a pixel lower still.
+            // A pixel below the labels is as close as it gets - a themed button pins its caption to a fixed
+            // offset from its top, and MEASURING showed neither height nor Padding moves it (padding just
+            // clips the text). The caption-ink check in the self-test records where they all land.
+            b.AutoSize = false;
             b.Margin = new Padding(0, 0, Dpi(4), 0);
             b.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         }
@@ -129,30 +132,41 @@ public sealed class FindBar : UserControl
         options.Controls.Add(_regex);
         options.Controls.Add(_case);
 
+        // A rule where the count begins: the row then reads as what is being looked for on one side and
+        // what was found on the other. A control rather than something painted on, so the table keeps it in
+        // step with the box beside it as that grows.
+        _rule.BackColor = Blend(SystemColors.ControlDark, SystemColors.Control, 0.45);
+        _rule.Margin = new Padding(0, 0, Dpi(9), 0);
+        _rule.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
         _root.Controls.Add(findLabel, 0, 0);
         _root.Controls.Add(_text, 1, 0);
         _root.Controls.Add(_prev, 2, 0);
         _root.Controls.Add(_next, 3, 0);
         _root.Controls.Add(options, 4, 0);
-        _root.Controls.Add(_message, 5, 0);
-        _root.Controls.Add(_close, 6, 0);
+        _root.Controls.Add(_rule, 5, 0);
+        _root.Controls.Add(_message, 6, 0);
+        _root.Controls.Add(_close, 7, 0);
         Controls.Add(_root);
 
-        // Every control on the row is given the SAME height, and the row is made exactly that tall, so the
-        // table has no leftover space to divide up and they cannot land on different lines.
+        // Every control on the row is given the SAME height and sized explicitly, and the row is made
+        // exactly that tall. The table then has no leftover space to divide up, so nothing can land on a
+        // different line - and an AUTO-SIZED control must not be left on the row at all: a button that sizes
+        // itself draws its caption a pixel below one of the same height that was given its size.
         _rowHeight = _text.PreferredHeight;
         _root.RowStyles.Add(new RowStyle(SizeType.Absolute, _rowHeight));
         SameHeight(findLabel, _rowHeight);
         SameHeight(_regex, _rowHeight);
         SameHeight(_case, _rowHeight);
-        _prev.MinimumSize = _next.MinimumSize = new Size(Dpi(64), _rowHeight);
-        _prev.MaximumSize = _next.MaximumSize = new Size(0, _rowHeight);
+        SameHeight(_prev, _rowHeight, Dpi(64));
+        SameHeight(_next, _rowHeight, Dpi(64));
         _message.Height = _rowHeight;
         _close.Size = new Size(_rowHeight, _rowHeight);
+        _rule.Size = new Size(1, _rowHeight);
 
-        static void SameHeight(Control c, int height)
+        static void SameHeight(Control c, int height, int least = 0)
         {
-            int width = c.PreferredSize.Width;   // read while it still sizes itself
+            int width = Math.Max(least, c.PreferredSize.Width);   // read while it still sizes itself
             c.AutoSize = false;
             c.Size = new Size(width, height);
         }
@@ -162,7 +176,7 @@ public sealed class FindBar : UserControl
         _close.Click += (_, _) => CloseRequested?.Invoke();
 
         // Typing marks the hits already on screen, after a pause so a burst of keystrokes costs one pass.
-        _text.TextChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _text.TextChanged += (_, _) => { ValidateRegex(); _preview.Stop(); _preview.Start(); };
         _text.DropDown += (_, _) => { if (History is { } h) SetHistory(h()); };
         _text.KeyDown += (_, e) =>
         {
@@ -172,7 +186,7 @@ public sealed class FindBar : UserControl
             StepHistory(e.KeyCode == Keys.Down ? 1 : -1);
             e.Handled = e.SuppressKeyPress = true;
         };
-        _regex.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
+        _regex.CheckedChanged += (_, _) => { ValidateRegex(); _preview.Stop(); _preview.Start(); };
         _case.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
         _preview.Tick += (_, _) =>
         {
@@ -182,7 +196,8 @@ public sealed class FindBar : UserControl
     }
 
     /// <summary>A hairline under the bar, so the log below reads as a separate surface rather than as text
-    /// that happens to start lower down.</summary>
+    /// that happens to start lower down. The bar keeps a pixel of padding for it, or the table filling the
+    /// bar would cover it.</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
         _barPaints++;
@@ -190,6 +205,14 @@ public sealed class FindBar : UserControl
         using var pen = new Pen(SystemColors.ControlDark);
         e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
     }
+
+    /// <summary>Where the count begins, in the bar's own coordinates.</summary>
+    private int CountStartsAt => _rule.Width > 0 ? _root.Left + _rule.Left : 0;
+
+    private static Color Blend(Color a, Color b, double towardsB) => Color.FromArgb(
+        (int)(a.R + (b.R - a.R) * towardsB),
+        (int)(a.G + (b.G - a.G) * towardsB),
+        (int)(a.B + (b.B - a.B) * towardsB));
 
     private int _barPaints;
 
@@ -352,10 +375,11 @@ public sealed class FindBar : UserControl
     private FindQuery Query() => new(_text.Text, _regex.Checked, _case.Checked);
 
     /// <summary>Searches for what is in the box. Does nothing while a search is already running, so holding
-    /// the key down cannot stack them up.</summary>
+    /// the key down cannot stack them up, and nothing while the pattern will not compile - the message
+    /// already says why, and searching for it would only report that nothing was found.</summary>
     public void Run(bool forward)
     {
-        if (_searching || _text.Text.Length == 0) return;
+        if (_searching || _text.Text.Length == 0 || _regexError.Length > 0) return;
         _search(Query(), forward);
     }
 
@@ -363,8 +387,32 @@ public sealed class FindBar : UserControl
     /// has no tally to show, and a search that found something has nothing to complain about.</summary>
     public void SetMessage(string text, string? detail = null)
     {
-        _message.Message = text;
-        string want = detail ?? text;
+        _tally = text;
+        _tallyDetail = detail ?? text;
+        ShowMessage();
+    }
+
+    /// <summary>Complains about a pattern that will not compile. It goes where the count goes because the
+    /// two can never both apply - a term that cannot be parsed has not matched anything to count.</summary>
+    private void ValidateRegex()
+    {
+        string problem = "";
+        if (_regex.Checked && _text.Text.Length > 0)
+        {
+            try { _ = System.Text.RegularExpressions.Regex.Match("", _text.Text); }
+            catch (ArgumentException ex) { problem = "Invalid regex: " + ex.Message; }
+        }
+        if (_regexError == problem) return;
+        _regexError = problem;
+        ShowMessage();
+    }
+
+    private void ShowMessage()
+    {
+        bool bad = _regexError.Length > 0;
+        _message.ForeColor = bad ? Color.Firebrick : SystemColors.GrayText;
+        _message.Message = bad ? _regexError : _tally;
+        string want = bad ? _regexError : _tallyDetail;
         if (_tip.GetToolTip(_message) != want) _tip.SetToolTip(_message, want);
     }
 
@@ -405,10 +453,14 @@ public sealed class FindBar : UserControl
         if (next != _text.SelectedIndex) _text.SelectedIndex = next;
     }
 
-    internal Font FontForTesting => _mono;
     internal int TermBoxWidthForTesting => _text.Width;
     internal int MessageWidthForTesting => _message.Width;
     internal int CountWidthForTesting => CountWidth;
+    internal int CountStartsAtForTesting => CountStartsAt;
+    internal Color MessageColourForTesting => _message.ForeColor;
+    internal bool RegexIsOnForTesting => _regex.Checked;
+    internal bool CaseIsOnForTesting => _case.Checked;
+    internal void SetRegexForTesting(bool on) => _regex.Checked = on;
     internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
     internal int BarPaintsForTesting => _barPaints;
     internal int MessagePaintsForTesting => _message.Paints;

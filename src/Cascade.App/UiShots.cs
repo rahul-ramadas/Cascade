@@ -49,6 +49,7 @@ internal static class UiShots
 
         ShotFindBar(outDir, "find", "");
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
+        ShotFindBar(outDir, "find-badregex", "", badPattern: "bth(port");
 
         var cols = new ColumnSpec();
         ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
@@ -305,7 +306,7 @@ internal static class UiShots
     /// <summary>The find bar is a strip in the main window rather than a dialog, so it is rendered in a host
     /// of roughly the width it really gets - a shot of it at its own natural size would say nothing about
     /// how the term, the options and the count share a full-width row.</summary>
-    private static void ShotFindBar(string dir, string name, string message)
+    private static void ShotFindBar(string dir, string name, string message, string? badPattern = null)
     {
         var bar = new FindBar((_, _) => { }) { Visible = true };
         bar.SetMessage(message);
@@ -322,6 +323,11 @@ internal static class UiShots
         Settle();
         bar.SnapHeightTo(26);   // as the app does: a whole number of log lines
         host.ClientSize = new Size(1500, bar.Height);
+        if (badPattern is not null)
+        {
+            bar.SetTermForTesting(badPattern, badPattern.Length, 0);
+            bar.SetRegexForTesting(true);
+        }
         Settle();
         using var bmp = new Bitmap(host.ClientSize.Width, Math.Max(1, host.ClientSize.Height));
         host.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
