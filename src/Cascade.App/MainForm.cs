@@ -1362,9 +1362,14 @@ public sealed class MainForm : Form
             _findBar.SetHistory(_state.RecentFindTerms);
             // A whole number of lines, so the divider below never has to move to make the rest fit.
             _findBar.SnapHeightTo(_grid.RowPitch);
+            int taken = _findBar.Height / _grid.RowPitch;
             // Painting off while the log resizes: it would otherwise draw a row where the horizontal
             // scrollbar is about to be, and the scrollbar would then cover it - a flash along the bottom.
-            WithoutRedraw(() => { _findBar.Visible = true; SnapSplitter(); });
+            WithoutRedraw(() => _grid.KeepTextStillAcross(taken, () =>
+            {
+                _findBar.Visible = true;
+                SnapSplitter();
+            }));
         }
         // A part of a line picked out in the log is almost always what the search is about to be for.
         // Whole lines are not: selecting them is how you copy or mark them, and a line's worth of text is
@@ -1379,7 +1384,12 @@ public sealed class MainForm : Form
     {
         if (!_findBar.Visible && _lastQuery is null) return;
         ClearFind();
-        WithoutRedraw(() => { _findBar.Visible = false; SnapSplitter(); });
+        int given = _findBar.Visible ? _findBar.Height / _grid.RowPitch : 0;
+        WithoutRedraw(() => _grid.KeepTextStillAcross(-given, () =>
+        {
+            _findBar.Visible = false;
+            SnapSplitter();
+        }));
         _findBar.SetMessage("");
         FocusTextArea();
     }
