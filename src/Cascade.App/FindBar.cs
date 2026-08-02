@@ -21,7 +21,7 @@ public sealed class FindBar : UserControl
     private readonly ComboBox _text = new() { DropDownStyle = ComboBoxStyle.DropDown, AutoCompleteMode = AutoCompleteMode.None };
     private readonly CheckBox _regex = new() { Text = "Regex", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly CheckBox _case = new() { Text = "Case sensitive", AutoSize = true, Anchor = AnchorStyles.Left };
-    private readonly Label _message = new() { AutoSize = false, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly SteadyLabel _message = new() { AutoSize = false, AutoEllipsis = true, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _next = new() { Text = "Next" };
     private readonly Button _prev = new() { Text = "Previous" };
     private readonly Button _close = new() { Text = "\u2715", FlatStyle = FlatStyle.Flat };
@@ -165,21 +165,43 @@ public sealed class FindBar : UserControl
         e.Graphics.DrawLine(pen, 0, Height - 1, Width, Height - 1);
     }
 
-    /// <summary>The bar is a fixed height taken from the term box rather than auto-sized around its
-    /// contents. An auto-sizing container hands a percentage column only as much width as its content asks
-    /// for, which left the count squeezed into a couple of characters at the end of a very wide row.</summary>
-    private void SizeToContent() => Height = _text.Height + LogicalToDeviceUnits(12);
+    /// <summary>The bar is a fixed height rather than auto-sized around its contents. An auto-sizing
+    /// container hands a percentage column only as much width as its content asks for, which left the count
+    /// squeezed into a couple of characters at the end of a very wide row.</summary>
+    private int NaturalHeight => _text.PreferredHeight + LogicalToDeviceUnits(12);
+
+    /// <summary>Rounds the bar up to a whole number of log lines. Opening it then takes an exact number of
+    /// lines off the view, so the divider below it never has to move to keep the remaining ones whole - and
+    /// the filter pane keeps the size the user gave it.</summary>
+    internal void SnapHeightTo(int rowPitch)
+    {
+        _rowPitch = rowPitch;
+        ApplyHeight();
+    }
+
+    private int _rowPitch;
+
+    private void ApplyHeight()
+        => Height = _rowPitch <= 0 ? NaturalHeight : (NaturalHeight + _rowPitch - 1) / _rowPitch * _rowPitch;
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        SizeToContent();
+        ApplyHeight();
     }
 
     protected override void OnFontChanged(EventArgs e)
     {
         base.OnFontChanged(e);
-        if (IsHandleCreated) SizeToContent();
+        ApplyHeight();
+    }
+
+    /// <summary>A label that redraws in one go. The count changes with every keypress that walks to the next
+    /// match, and a plain label clears itself before drawing, which on a strip this wide reads as a flash.</summary>
+    private sealed class SteadyLabel : Label
+    {
+        public SteadyLabel() => DoubleBuffered = true;
+        internal bool RedrawsInOneGo => GetStyle(ControlStyles.OptimizedDoubleBuffer);
     }
 
     /// <summary>Enter searches for what is in the box. Handled here rather than left to the form because
@@ -271,6 +293,7 @@ public sealed class FindBar : UserControl
     }
 
     internal Font FontForTesting => _mono;
+    internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
     internal void StepHistoryForTesting(int delta) => StepHistory(delta);
     internal bool HistoryIsOpenForTesting() => _text.DroppedDown;
     internal string TermForTesting() => _text.Text;
