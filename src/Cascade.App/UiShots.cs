@@ -68,6 +68,7 @@ internal static class UiShots
         ShotGridStates(outDir);
         ShotMatchMap(outDir);
         ShotFilterSearch(outDir);
+        ShotLuckyColors(outDir);
 
         try { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); } catch { /* ignore */ }
 
@@ -282,6 +283,31 @@ internal static class UiShots
         host.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
         bmp.Save(Path.Combine(dir, name + ".png"), ImageFormat.Png);
         Console.WriteLine($"{name}: {bmp.Width}x{bmp.Height}");
+    }
+
+    /// <summary>The first stretch of the suggested-colour ring, in the order the button offers them. Whether
+    /// a palette is easy on the eyes is not something a number answers, so it has to be looked at.</summary>
+    private static void ShotLuckyColors(string dir)
+    {
+        const int shown = 96, cols = 8, cellW = 190, cellH = 34;
+        using var bmp = new Bitmap(cols * cellW, shown / cols * cellH);
+        using (var g = Graphics.FromImage(bmp))
+        using (var font = new Font("Segoe UI", 9f))
+        {
+            g.Clear(Color.White);
+            for (int i = 0; i < shown; i++)
+            {
+                var pair = LuckyColors.At(i);
+                var back = Color.FromArgb(pair.Back.R, pair.Back.G, pair.Back.B);
+                var fore = Color.FromArgb(pair.Fore.R, pair.Fore.G, pair.Fore.B);
+                var cell = new Rectangle(i % cols * cellW, i / cols * cellH, cellW - 2, cellH - 2);
+                using (var b = new SolidBrush(back)) g.FillRectangle(b, cell);
+                TextRenderer.DrawText(g, $"{i + 1}  {back.R:X2}{back.G:X2}{back.B:X2}  press me", font,
+                    cell, fore, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPadding);
+            }
+        }
+        bmp.Save(Path.Combine(dir, "lucky-colours.png"), ImageFormat.Png);
+        Console.WriteLine($"lucky-colours: {shown} of {LuckyColors.Count}");
     }
 
     private static void ShotDialog(Form form, string dir, string name)

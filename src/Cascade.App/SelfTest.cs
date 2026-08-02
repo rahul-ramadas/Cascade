@@ -608,6 +608,14 @@ internal static class SelfTest
                 ok &= Check("and the scrollbar's trough is not the map's background",
                             trough.ToArgb() != settings.GutterBack.ToArgb() && trough.ToArgb() != mapSide.ToArgb(),
                             $"map background {settings.GutterBack}, row here {mapSide}, trough {trough}");
+                // ...and it is closed off at the ends, as the scrollbar is, rather than running into
+                // whatever is above and below it.
+                int x = mapBounds.Left + mapBounds.Width / 2;
+                var mapTop = picture.GetPixel(x, mapBounds.Top);
+                var mapBottom = picture.GetPixel(x, mapBounds.Bottom - 1);
+                ok &= Check("and the map is closed off at the top and bottom too",
+                            mapTop.ToArgb() == rule.ToArgb() && mapBottom.ToArgb() == rule.ToArgb(),
+                            $"rule {rule}, top {mapTop}, bottom {mapBottom}");
             }
 
             // The scrollbar is framed on every side, not just the one facing the map, and its thumb has
@@ -653,6 +661,15 @@ internal static class SelfTest
                             $"trough {inside}, above {above}, below {below}, beside {beside}");
                 ok &= Check("and is as thick as the vertical one",
                             bar is null || hbar.Height == bar.Width, $"{hbar.Height}px vs {bar?.Width}px");
+                // It stops before them rather than running underneath, so switching wrapping on and off -
+                // which takes it away and brings it back - does not shift them up and down by its height.
+                ok &= Check("and stops before the map and the scrollbar",
+                            hbar.Right <= grid.MapBoundsForTesting.Left,
+                            $"sideways bar ends {hbar.Right}, map starts {grid.MapBoundsForTesting.Left}");
+                ok &= Check("so they run the full height of the view",
+                            grid.MapBoundsForTesting.Bottom >= hbar.Bottom &&
+                            grid.ScrollBarBoundsForTesting.Bottom >= hbar.Bottom,
+                            $"map ends {grid.MapBoundsForTesting.Bottom}, bar ends {hbar.Bottom}");
             }
 
             // Both bars have to answer for where they are: assistive technology reads a scrollbar's value,
@@ -1500,6 +1517,53 @@ internal static class SelfTest
                         $"caret {grid.CaretRowForTesting}, showing {grid.FirstRowForTesting}.." +
                         $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
 
+            // ...and it lands on the row at the bottom, not the one above it. A page was counted from where
+            // the caret came from, and the rows it was going to are shorter, so more of them fit than were
+            // counted for and the caret stopped short.
+            grid.ScrollToRow(0);
+            grid.RefreshView();
+            Pump();
+            grid.PressKeyForTesting(Keys.PageDown);
+            Pump();
+            ok &= Check("page down leaves the caret on the last row on screen",
+                        grid.CaretRowForTesting == grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1,
+                        $"caret {grid.CaretRowForTesting}, last on screen " +
+                        $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
+
+            // The gutter is the neutral margin all the way down a wrapped row. It used to be filled for one
+            // line only, so every segment below the first kept the row's own colour - or, worse, the
+            // selection colour, which made the selection look like it ran into the line numbers.
+            grid.SelectRowForAccessibility(tall);
+            grid.ScrollToRow(tall);
+            grid.RefreshView();
+            Pump();
+            using (var picture = Capture(host))
+            {
+                int gutterX = grid.GutterWidthForTesting - 4;
+                int firstY = grid.RowTopForTesting(tall) + 2;
+                int secondY = grid.RowTopForTesting(tall) + grid.RowHeightForTesting + 2;
+                var first = picture.GetPixel(gutterX, firstY);
+                var second = picture.GetPixel(gutterX, secondY);
+                ok &= Check("the line-number margin is the same colour all the way down a wrapped row",
+                            first.ToArgb() == second.ToArgb(), $"first segment {first}, second {second}");
+                ok &= Check("and the selection does not reach into it",
+                            second.ToArgb() != settings.SelectionBack.ToArgb(),
+                            $"{second} against a selection of {settings.SelectionBack}");
+            }
+            grid.SelectRowForAccessibility(0);
+
+            // Scrolling has to stop with the last row against the bottom. Letting it go further leaves a
+            // screenful of nothing below the end of the file.
+            grid.ScrollToRow(doc.RowCount);
+            grid.RefreshView();
+            Pump();
+            ok &= Check("scrolling to the end stops with the last row on screen, not past it",
+                        grid.FirstRowForTesting + grid.RowsPaintedForTesting == doc.RowCount,
+                        $"showing {grid.FirstRowForTesting}..{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1} " +
+                        $"of {doc.RowCount}");
+            ok &= Check("and more than one row is still on screen there", grid.RowsPaintedForTesting > 1,
+                        $"{grid.RowsPaintedForTesting} rows");
+
             // A pathological line must not be allowed to fill the window on its own.
             grid.ScrollToRow(60);
             grid.RefreshView();
@@ -1900,7 +1964,7 @@ internal static class SelfTest
     {
         Line("-- suggested filter colours --");
 
-        bool ok = Check("there are enough of them to be worth cycling", LuckyColors.Count >= 12,
+        bool ok = Check("there are enough of them for a filter file of hundreds", LuckyColors.Count >= 800,
                         LuckyColors.Count.ToString());
 
         double worstContrast = double.MaxValue;
@@ -1914,11 +1978,11 @@ internal static class SelfTest
         ok &= Check("every pair is readable, by the ratio and not by eye", worstContrast >= 4.5,
                     $"worst is {worstContrast:0.0}:1 at {worstAt}");
 
-        double closest = double.MaxValue;
-        for (int i = 0; i < LuckyColors.Count; i++)
-            for (int j = i + 1; j < LuckyColors.Count; j++)
-                closest = Math.Min(closest, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(j).Back));
-        ok &= Check("and no two of them look the same", closest > 55, $"closest pair is {closest:0} apart");
+        // No two identical entries: a ring that repeats itself would hand back a colour it had already
+        // offered while claiming to have moved on.
+        int duplicates = LuckyColors.Count -
+                         Enumerable.Range(0, LuckyColors.Count).Select(i => LuckyColors.At(i).Back).Distinct().Count();
+        ok &= Check("and no two entries are the same colour", duplicates == 0, $"{duplicates} repeats");
 
         double neighbours = double.MaxValue;
         for (int i = 0; i < LuckyColors.Count; i++)
@@ -1926,14 +1990,12 @@ internal static class SelfTest
         ok &= Check("consecutive presses give visibly different colours", neighbours > 120,
                     $"nearest neighbours are {neighbours:0} apart");
 
-        // Every other offer is the same lightness as the one before it, so those are the pair that has to be
-        // pulled apart by hue - it is no good alternating pale and deep if the two pales are next-door
-        // shades of the same colour.
-        double sameLightness = double.MaxValue;
+        // Two presses apart matters as much: the button is pressed until something is liked, so a run of
+        // three must not go there and back.
+        double twoApart = double.MaxValue;
         for (int i = 0; i < LuckyColors.Count; i++)
-            sameLightness = Math.Min(sameLightness, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 2).Back));
-        ok &= Check("and two of the same lightness in a row are well apart on the wheel", sameLightness > 110,
-                    $"nearest are {sameLightness:0} apart");
+            twoApart = Math.Min(twoApart, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 2).Back));
+        ok &= Check("and so do the ones two presses apart", twoApart > 100, $"nearest are {twoApart:0} apart");
 
         // Colours already in use are skipped.
         var mine = new Filter();
@@ -1953,6 +2015,20 @@ internal static class SelfTest
         ok &= Check("and every press offers something new", seen.Distinct().Count() == seen.Count,
                     string.Join(" ", seen));
 
+        // A filter list the size of a real one, none of it enabled, and every press still has to find
+        // something none of them is wearing. Disabled filters keep their colours and will be switched back
+        // on, so they count exactly as much as enabled ones.
+        var many = new List<Filter>();
+        for (int i = 0; i < 160; i++)
+            many.Add(new Filter { Enabled = false, Style = { Background = LuckyColors.At(i * 5).Back } });
+        var offered = new List<RgbColor>();
+        int walk = -1;
+        for (int i = 0; i < 20; i++) { walk = LuckyColors.Next(walk, many, mine); offered.Add(LuckyColors.At(walk).Back); }
+        double nearestTaken = offered.Min(o => many.Min(f => LuckyColors.Distance(f.Style.Background!.Value, o)));
+        ok &= Check("with a hundred and sixty filters coloured it still finds room",
+                    nearestTaken > 40 && offered.Distinct().Count() == offered.Count,
+                    $"nearest offered is {nearestTaken:0} from one in use, {offered.Distinct().Count()} of 20 distinct");
+
         // Down to almost nothing acceptable it still has to keep moving, not stick on one colour.
         var crowded = new List<Filter>();
         for (int i = 0; i < LuckyColors.Count - 2; i++)
@@ -1963,11 +2039,16 @@ internal static class SelfTest
                     LuckyColors.At(a).Back != LuckyColors.At(b).Back,
                     $"{LuckyColors.At(a).Back} then {LuckyColors.At(b).Back}");
 
-        // With every colour spoken for it still has to answer.
+        // With every colour but one spoken for it must offer that one - not simply the next along, which
+        // would be a plain duplicate of a colour already on screen.
+        const int roomy = 500;
         var all = new List<Filter>();
-        for (int i = 0; i < LuckyColors.Count; i++) all.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
-        int fallback = LuckyColors.Next(3, all, mine);
-        ok &= Check("with nothing left it still moves on rather than stopping", fallback == 4, fallback.ToString());
+        for (int i = 0; i < LuckyColors.Count; i++)
+            if (i != roomy) all.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
+        int fallback = ((LuckyColors.Next(3, all, mine) % LuckyColors.Count) + LuckyColors.Count) % LuckyColors.Count;
+        ok &= Check("with almost nothing left it finds the one colour nobody is wearing",
+                    fallback == roomy,
+                    $"offered {fallback} ({LuckyColors.At(fallback).Back}), the free one is {roomy}");
 
         // Every colour but the one on offer taken - the case a long filter list actually produces. That one
         // always looks free, because the filter being edited is not counted as using anything, so a full
