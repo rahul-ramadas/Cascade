@@ -1361,8 +1361,9 @@ public sealed class MainForm : Form
             _findBar.SetHistory(_state.RecentFindTerms);
             // A whole number of lines, so the divider below never has to move to make the rest fit.
             _findBar.SnapHeightTo(_grid.RowPitch);
-            _findBar.Visible = true;
-            SnapSplitter();
+            // Painting off while the log resizes: it would otherwise draw a row where the horizontal
+            // scrollbar is about to be, and the scrollbar would then cover it - a flash along the bottom.
+            WithoutRedraw(() => { _findBar.Visible = true; SnapSplitter(); });
         }
         if (focus) _findBar.FocusInput();
     }
@@ -1373,9 +1374,8 @@ public sealed class MainForm : Form
     {
         if (!_findBar.Visible && _lastQuery is null) return;
         ClearFind();
-        _findBar.Visible = false;
+        WithoutRedraw(() => { _findBar.Visible = false; SnapSplitter(); });
         _findBar.SetMessage("");
-        SnapSplitter();
         FocusTextArea();
     }
 
