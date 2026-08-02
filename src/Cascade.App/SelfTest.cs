@@ -72,6 +72,7 @@ internal static class SelfTest
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
+            ok &= Timed("divider", RunSplitterChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
             ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
@@ -1430,7 +1431,9 @@ internal static class SelfTest
         for (int i = 0; i < 60; i++)
             sb.Append(i % 3 == 0 ? $"line {i:00} short\n" : $"line {i:00} " + string.Join(' ', Enumerable.Repeat("wordy", 40)) + "\n");
         sb.Append("runaway " + string.Join(' ', Enumerable.Repeat("endless", 600)) + "\n");
-        for (int i = 0; i < 10; i++) sb.Append($"tail {i}\n");
+        // Enough plain lines after it to fill a screen, or the runaway row is what the end of the file
+        // butts up against and no scrolling rule can be told apart from any other there.
+        for (int i = 0; i < 40; i++) sb.Append($"tail {i}\n");
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
 
         var doc = new CascadeDocument();
@@ -1563,6 +1566,39 @@ internal static class SelfTest
                         $"of {doc.RowCount}");
             ok &= Check("and more than one row is still on screen there", grid.RowsPaintedForTesting > 1,
                         $"{grid.RowsPaintedForTesting} rows");
+
+            // ...and it has taken every row it could. Requiring the whole of the last row to fit leaves the
+            // bottom blank by however much the row above would have overhung, which on a wrapped row is
+            // most of a screenful.
+            long endFirst = grid.FirstRowForTesting;
+            long above = 0;
+            for (long r = endFirst; r < doc.RowCount - 1; r++) above += grid.RowHeightOfForTesting(r);
+            ok &= Check("and one row further up would have pushed the last one off",
+                        endFirst == 0 ||
+                        above + grid.RowHeightOfForTesting(endFirst - 1) >= grid.ViewportHeightForTesting,
+                        $"rows above the last take {above}px, one more is " +
+                        $"{grid.RowHeightOfForTesting(Math.Max(0, endFirst - 1))}px, view is " +
+                        $"{grid.ViewportHeightForTesting}px");
+
+            // Nowhere in the middle of the file may the view leave room for a line it did not draw. It used
+            // to keep the sideways scrollbar's height back even when wrapping had hidden it, and a hidden
+            // docked control takes no space - so about a line of the view went unused.
+            ok &= Check("no room is kept for a scrollbar that is not showing", grid.ChromeHeight == 0,
+                        $"{grid.ChromeHeight}px reserved with the sideways bar " +
+                        (grid.HScrollBarForTesting.Visible ? "showing" : "hidden"));
+            foreach (long at in new long[] { 0, 5, 12, 30 })
+            {
+                grid.ScrollToRow(at);
+                grid.RefreshView();
+                Pump();
+                long last = grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1;
+                int bottom = grid.RowTopForTesting(last) + grid.SegmentsForTesting(last) * grid.RowHeightForTesting;
+                var hbar = grid.HScrollBarForTesting;
+                int room = grid.ClientSize.Height - (hbar.Visible ? hbar.Height : 0);
+                ok &= Check($"the view is filled to the bottom from row {at}",
+                            last == doc.RowCount - 1 || room - bottom < grid.RowHeightForTesting,
+                            $"{room - bottom}px spare under row {last}, a line is {grid.RowHeightForTesting}px");
+            }
 
             // A pathological line must not be allowed to fill the window on its own.
             grid.ScrollToRow(60);
@@ -2689,6 +2725,68 @@ internal static class SelfTest
     private static char? MnemonicOf(string text)    {
         int i = text.IndexOf('&');
         return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
+    }
+
+    /// <summary>The divider between the log and the filter list has to land where the log holds a whole
+    /// number of lines. Anywhere else leaves a strip of dead space under the last one, which reads as a line
+    /// that failed to draw rather than as a gap.</summary>
+    private static bool RunSplitterChecks()
+    {
+        Line("-- the divider snaps to whole lines --");
+
+        using var form = new MainForm(new AppSettings(), new MachineState(), Array.Empty<string>())
+        {
+            Opacity = 0,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Size = new Size(900, 700),
+        };
+        form.NoSavePrompt = true;
+        form.Show();
+        Pump();
+
+        var grid = form.GridForTesting;
+        var split = form.SplitForTesting;
+        int pitch = grid.RowPitch, chrome = grid.ChromeHeight;
+        int total = split.Height - split.SplitterWidth;
+
+        bool ok = Check("the log is in the first panel, with the filter list under it",
+                        split.Orientation == Orientation.Horizontal && !split.Panel1Collapsed,
+                        $"{split.Orientation}, panel1 collapsed {split.Panel1Collapsed}");
+        ok &= Check("a line has a height to snap to", pitch > 1, pitch.ToString());
+
+        int Lines(int distance) => distance - chrome;
+        ok &= Check("it opens holding a whole number of lines", Lines(split.SplitterDistance) % pitch == 0,
+                    $"{Lines(split.SplitterDistance)}px of text, a line is {pitch}px");
+        ok &= Check("and about seven tenths of the window, as it always has",
+                    split.SplitterDistance > total * 0.6 && split.SplitterDistance < total * 0.85,
+                    $"{split.SplitterDistance} of {total}");
+
+        // Dragging lands wherever the pointer is; the divider has to settle on the nearest line boundary,
+        // and upwards, so a drag never quietly costs a line of text.
+        int start = split.SplitterDistance;
+        foreach (int nudge in new[] { 3, 7, -5, -11, 1 })
+        {
+            int asked = start + nudge;
+            try { split.SplitterDistance = asked; } catch { continue; }
+            Pump();
+            int got = split.SplitterDistance;
+            ok &= Check($"a drag to {nudge:+#;-#;0} settles on a line boundary", Lines(got) % pitch == 0,
+                        $"asked {asked}, settled at {got}, which is {Lines(got)}px of text");
+            ok &= Check($"and within a line of where it was let go", Math.Abs(got - asked) < pitch,
+                        $"asked {asked}, settled at {got}, a line is {pitch}px");
+            ok &= Check($"and never below it", got >= asked, $"asked {asked}, settled at {got}");
+        }
+
+        // Growing the window must not leave the log holding part of a line either.
+        form.Size = new Size(900, 743);
+        Pump();
+        ok &= Check("resizing the window leaves it on a line boundary too",
+                    Lines(split.SplitterDistance) % pitch == 0,
+                    $"{Lines(split.SplitterDistance)}px of text at window height {form.Height}");
+
+        form.Close();
+        return ok;
     }
 
     /// <summary>An Alt key has to be unique within its own menu. Where two items claim the same letter
