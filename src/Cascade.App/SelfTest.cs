@@ -2551,6 +2551,24 @@ internal static class SelfTest
             ok &= Check("which stops at the most recent rather than emptying the box",
                         dlg.TermForTesting() == "newest", dlg.TermForTesting());
 
+            // Marking the hits looks only at the rows on screen, so it happens as the term is typed rather
+            // than after a pause. No Pump() anywhere here: waiting for a timer is the thing that must not
+            // be needed.
+            var previews = new List<FindQuery?>();
+            dlg.PreviewChanged += q => previews.Add(q);
+            FindQuery? Latest() => previews.Count > 0 ? previews[^1] : null;
+            dlg.SetTermForTesting("bth", 0, 0);
+            ok &= Check("typing marks the hits without waiting", previews.Count == 1, previews.Count.ToString());
+            dlg.SetTermForTesting("bthp", 0, 0);
+            dlg.SetTermForTesting("bthpo", 0, 0);
+            ok &= Check("and again on every keystroke", previews.Count == 3, previews.Count.ToString());
+            ok &= Check("with the term as it stands", Latest()?.Text == "bthpo", Latest()?.Text ?? "(none)");
+            dlg.SetRegexForTesting(true);
+            ok &= Check("turning an option on re-marks too", previews.Count == 4 && Latest() is { Regex: true });
+            dlg.SetRegexForTesting(false);
+            dlg.SetTermForTesting("", 0, 0);
+            ok &= Check("and emptying the box takes the marks away", previews.Count > 0 && Latest() is null);
+
             int RunsAnother()
             {
                 int was = searched.Count;

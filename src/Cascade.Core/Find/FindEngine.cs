@@ -88,9 +88,11 @@ public static class FindEngine
 
             if (_rx is not null)
             {
-                foreach (var m in _rx.EnumerateMatches(line[start..]))
+                // Searched from `start`, but the pattern still sees the whole line: handing it only the tail
+                // would let ^ match in the middle of a line and cut any lookbehind off from what precedes it.
+                foreach (var m in _rx.EnumerateMatches(line, start))
                 {
-                    at = start + m.Index;
+                    at = m.Index;
                     length = Math.Max(1, m.Length);
                     return true;
                 }

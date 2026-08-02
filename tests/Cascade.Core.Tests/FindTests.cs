@@ -88,4 +88,36 @@ public class FindTests
         }
         finally { src.Dispose(); }
     }
+
+    /// <summary>Highlighting walks a line one match at a time rather than asking the engine for all of them
+    /// at once, so the walk has to land on exactly the matches the engine would report - lazy quantifiers
+    /// included, since a shortest match is the whole reason to write one.</summary>
+    [Theory]
+    [InlineData(@"\[.+?\]")]     // lazy: one bracketed field at a time
+    [InlineData(@"\[.+\]")]      // greedy: the first bracket to the last
+    [InlineData(@"\[[^\]]+\]")]
+    [InlineData(@"\d+")]
+    [InlineData("^.")]           // anchored: must match once, not once per step
+    [InlineData(@"\bdevice\b")]
+    [InlineData("(?<=T)[0-9:]+")]
+    public void Walking_a_line_finds_exactly_what_the_regex_engine_finds(string pattern)
+    {
+        const string line = "[2026-07-16T18:06:56][Kernel-PnP][2][0004] processing device 12";
+        var matcher = FindEngine.CompileQuery(new FindQuery(pattern, Regex: true, CaseSensitive: true));
+        Assert.NotNull(matcher);
+
+        var walked = new List<string>();
+        int from = 0;
+        while (matcher!.NextMatch(line, from, out int at, out int len))
+        {
+            walked.Add($"{at}:{len}");
+            from = at + Math.Max(1, len);
+        }
+
+        var expected = new System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.CultureInvariant)
+            .Matches(line).Select(m => $"{m.Index}:{Math.Max(1, m.Length)}").ToList();
+
+        Assert.Equal(expected, walked);
+        Assert.Equal(expected.Count, matcher.CountIn(line));
+    }
 }

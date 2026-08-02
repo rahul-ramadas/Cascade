@@ -28,7 +28,6 @@ public sealed class FindBar : UserControl
     private readonly Panel _rule = new();
     private readonly ToolTip _tip = new();
     private readonly Action<FindQuery, bool> _search;
-    private readonly System.Windows.Forms.Timer _preview = new() { Interval = 200 };
     private bool _searching;
     private TableLayoutPanel _root = null!;
     private int _rowHeight;
@@ -36,15 +35,16 @@ public sealed class FindBar : UserControl
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _preview.Dispose(); _tip.Dispose(); }
+        if (disposing) { _tip.Dispose(); }
         base.Dispose(disposing);
     }
 
     /// <summary>Raised when the user asks to put the bar away (the close button; Esc is handled by the form).</summary>
     public event Action? CloseRequested;
 
-    /// <summary>Raised shortly after the term changes, with null for an empty one. Only marks what is
-    /// already on screen - it deliberately does not search, so typing never moves the view.</summary>
+    /// <summary>Raised as the term changes, with null for an empty one. Only marks what is already on
+    /// screen - it deliberately does not search, so typing never moves the view. That is also why it is not
+    /// held back for a moment first: marking costs one pass over the handful of lines being displayed.</summary>
     public event Action<FindQuery?>? PreviewChanged;
 
     public FindBar(Action<FindQuery, bool> search)
@@ -175,8 +175,9 @@ public sealed class FindBar : UserControl
         _next.Click += (_, _) => Run(true);
         _close.Click += (_, _) => CloseRequested?.Invoke();
 
-        // Typing marks the hits already on screen, after a pause so a burst of keystrokes costs one pass.
-        _text.TextChanged += (_, _) => { ValidateRegex(); _preview.Stop(); _preview.Start(); };
+        // Typing marks the hits already on screen, as it is typed: only the rows being displayed are looked
+        // at, so there is nothing to save by waiting for a pause in the keystrokes.
+        _text.TextChanged += (_, _) => { ValidateRegex(); Preview(); };
         _text.DropDown += (_, _) => { if (History is { } h) SetHistory(h()); };
         _text.KeyDown += (_, e) =>
         {
@@ -186,14 +187,11 @@ public sealed class FindBar : UserControl
             StepHistory(e.KeyCode == Keys.Down ? 1 : -1);
             e.Handled = e.SuppressKeyPress = true;
         };
-        _regex.CheckedChanged += (_, _) => { ValidateRegex(); _preview.Stop(); _preview.Start(); };
-        _case.CheckedChanged += (_, _) => { _preview.Stop(); _preview.Start(); };
-        _preview.Tick += (_, _) =>
-        {
-            _preview.Stop();
-            PreviewChanged?.Invoke(_text.Text.Length == 0 ? null : Query());
-        };
+        _regex.CheckedChanged += (_, _) => { ValidateRegex(); Preview(); };
+        _case.CheckedChanged += (_, _) => Preview();
     }
+
+    private void Preview() => PreviewChanged?.Invoke(_text.Text.Length == 0 ? null : Query());
 
     /// <summary>A hairline under the bar, so the log below reads as a separate surface rather than as text
     /// that happens to start lower down. The bar keeps a pixel of padding for it, or the table filling the
