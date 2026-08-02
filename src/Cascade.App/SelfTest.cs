@@ -3111,6 +3111,7 @@ internal static class SelfTest
             long watched = firstBefore + rowsBefore / 2;
             int ScreenYOf(long row) => grid.PointToScreen(new Point(0, grid.RowMiddleForTesting(row))).Y;
             int yBefore = ScreenYOf(watched);
+            Rectangle mapAbove = grid.MapBoundsForTesting, barAbove = grid.ScrollBarBoundsForTesting;
 
             form.ClickMenuForTesting("Edit", "Find");
             Pump();
@@ -3124,6 +3125,21 @@ internal static class SelfTest
             ok &= Check($"and none off the bottom ({lastBefore} -> {lastAfter})", lastAfter == lastBefore);
             ok &= Check($"so a line still showing has not moved on screen ({yBefore} -> {ScreenYOf(watched)})",
                         ScreenYOf(watched) == yBefore);
+
+            // The bar sits inside the log view, so it stops short of the map and the scrollbar instead of
+            // shoving them down - those two stand their full height whether it is open or not.
+            var bar = form.FindBarForTesting;
+            Rectangle mapNow = grid.MapBoundsForTesting, barNow = bar.Bounds;
+            Line($"   (bar {barNow}, map {mapNow}, scrollbar {grid.ScrollBarBoundsForTesting}, grid {grid.Height} tall)");
+            ok &= Check($"the bar stops short of the map and the scrollbar ({barNow.Right} of {grid.Width})",
+                        mapNow.Width > 0 && barNow.Right <= mapNow.Left);
+            ok &= Check("and the map still runs the whole height of the log view",
+                        mapNow.Top == mapAbove.Top && mapNow.Height == mapAbove.Height,
+                        $"{mapNow} was {mapAbove}");
+            ok &= Check("and so does the scrollbar",
+                        grid.ScrollBarBoundsForTesting.Top == barAbove.Top &&
+                        grid.ScrollBarBoundsForTesting.Height == barAbove.Height,
+                        $"{grid.ScrollBarBoundsForTesting} was {barAbove}");
 
             // The map draws the window the log is showing, so it has to have noticed the top rows going.
             var map = grid.MatchMapForTesting;
