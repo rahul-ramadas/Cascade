@@ -216,6 +216,15 @@ internal sealed class CascadeApp : IDisposable
         return null;
     }
 
+    /// <summary>The 1-based file line the caret is on, or -1 when no selected row is on screen. Read from the
+    /// grid itself rather than from a status field: the grid is where the caret actually is, and the status
+    /// bar no longer repeats a line number the gutter already shows.</summary>
+    public int CaretLine() => SelectedRow()?.line ?? -1;
+
+    public bool WaitCaretLine(int line, int ms = 8000)
+        => Retry.WhileFalse(() => CaretLine() == line, TimeSpan.FromMilliseconds(ms),
+               TimeSpan.FromMilliseconds(50), ignoreException: true).Success;
+
     // ---- filter tree ----
 
     public AutomationElement Tree()

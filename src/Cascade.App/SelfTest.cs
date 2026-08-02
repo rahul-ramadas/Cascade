@@ -77,6 +77,7 @@ internal static class SelfTest
             ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
             ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("find bar room", RunFindBarRoomChecks);
+            ok &= Timed("status bar", RunStatusBarChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
@@ -3067,6 +3068,65 @@ internal static class SelfTest
             host.Close();
             host.Dispose();
             Pump();
+        }
+    }
+
+    /// <summary>The status bar used to repeat the caret's line number and the total beside it. The gutter
+    /// already gives the first and the field beside it the second, and neither means much with several lines
+    /// selected - so the space says which lines are being shown instead, which nothing else on screen does.
+    /// </summary>
+    private static bool RunStatusBarChecks()
+    {
+        Line("-- what the status bar says --");
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_status_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(log, Enumerable.Range(1, 200).Select(i => $"line {i} of the log"));
+
+        MainForm? form = null;
+        try
+        {
+            string[] args = [log];
+            form = new MainForm(new AppSettings(), new MachineState(), args)
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            for (int i = 0; i < 60 && form.DocForTesting.CompletedLineCount < 200; i++) { Thread.Sleep(20); Pump(); }
+
+            form.GridForTesting.GoToLine(42);
+            Pump();
+            string status = form.StatusForTesting;
+            Line($"   ({status})");
+
+            bool ok = Check("the caret's line number is not repeated in the status bar",
+                            !status.Contains("Ln:", StringComparison.Ordinal), status);
+            ok &= Check("the line count is still there", status.Contains("Total: 200", StringComparison.Ordinal));
+            ok &= Check("and so is the matched count", status.Contains("Fil:", StringComparison.Ordinal));
+            ok &= Check("it says every line is being shown",
+                        status.Contains("Showing: all lines", StringComparison.Ordinal), status);
+
+            form.ClickMenuForTesting("View", "Show Only Filtered Lines");
+            Pump();
+            ok &= Check("and says so when only the matches are",
+                        form.StatusForTesting.Contains("Showing: matches", StringComparison.Ordinal),
+                        form.StatusForTesting);
+
+            form.ClickMenuForTesting("View", "Show Only Filtered Lines");
+            Pump();
+            ok &= Check("and back again", form.StatusForTesting.Contains("Showing: all lines", StringComparison.Ordinal),
+                        form.StatusForTesting);
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { File.Delete(log); } catch { /* ignore */ }
         }
     }
 
