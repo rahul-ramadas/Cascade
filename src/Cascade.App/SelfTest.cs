@@ -1320,8 +1320,21 @@ internal static class SelfTest
                     !long.TryParse(offMatch.Replace(",", ""), out _) &&
                     !long.TryParse(plain.Replace(",", ""), out _), $"{offMatch} / {plain}");
 
-        string approx = FindStatusText.Short(T(1, 10, 0, 99, 99, approx: true));
-        ok &= Check("a floored occurrence count says it is a floor", approx.Contains('\u2265'), approx);
+        // The record of which lines matched more than once is capped, and losing it costs only the split
+        // between shown and hidden - so the floor goes on the shown count, never on the file-wide total.
+        string approx = FindStatusText.Short(T(12, 252, 96, 891, 1204, approx: true));
+        ok &= Check("a floored occurrence count says it is a floor",
+                    approx == "Match 12 of 252 lines \u00b7 96 hidden \u00b7 \u2265891 of 1,204 hits", approx);
+
+        string approxLong = FindStatusText.Long(T(12, 252, 96, 891, 1204, approx: true), "disk");
+        ok &= Check("and says so in the long form too, about the shown count",
+                    approxLong.Contains("at least 891 occurrences shown of 1,204"), approxLong);
+
+        // The reported bug: with nothing hidden every occurrence is on a shown line, so the count is exact
+        // whatever the cap did, and marking it as a floor was simply wrong.
+        string nothingHidden = FindStatusText.Short(T(12, 252, 0, 1204, 1204, approx: true));
+        ok &= Check("with nothing hidden the count is exact and is not marked as a floor",
+                    !nothingHidden.Contains('\u2265'), nothingHidden);
 
         string detail = FindStatusText.Long(T(12, 252, 96, 891, 1204), "disk");
         ok &= Check("the long form names the term and holds every number",

@@ -164,4 +164,35 @@ public class FindTallyTests
         double each = sw.Elapsed.TotalMilliseconds / 20;
         Assert.True(each < 5, $"a tally over two million matches took {each:F1} ms");
     }
+
+    [Fact]
+    public void Capping_the_per_line_record_never_makes_the_file_wide_total_a_guess()
+    {
+        // Only lines matching MORE than once are recorded, and that record is capped so a pathological term
+        // cannot eat memory. What the cap costs is knowing WHICH lines those were, which is needed solely to
+        // split the total between shown and hidden. The total itself is added up as the sweep runs and stays
+        // exact - so with nothing hidden there is nothing to approximate.
+        const long lines = 2_100_000;   // past the cap, so the record really does overflow
+        using var search = Search(lines, 0, _ => 2);
+
+        var noReader = search.Count(null, -1);
+        Assert.Equal(lines, noReader.VisibleLines);
+        Assert.Equal(lines * 2, noReader.Occurrences);
+        Assert.False(noReader.Approximate);
+
+        var allShown = search.Count(Shown(_ => true), -1);
+        Assert.Equal(0, allShown.HiddenLines);
+        Assert.Equal(lines * 2, allShown.Occurrences);
+        Assert.Equal(lines * 2, allShown.VisibleOccurrences);
+        Assert.False(allShown.Approximate);
+
+        // Hide half of them and the shown-side count really is a floor, because the record that says which
+        // shown lines matched twice is the part that was lost.
+        var halfHidden = search.Count(Shown(l => l % 2 == 0), -1);
+        Assert.True(halfHidden.HiddenLines > 0);
+        Assert.True(halfHidden.Approximate);
+        Assert.Equal(lines * 2, halfHidden.Occurrences);                              // still exact
+        Assert.InRange(halfHidden.VisibleOccurrences, halfHidden.VisibleLines,
+                       halfHidden.VisibleLines * 2 - 1);                              // short, being a floor
+    }
 }
