@@ -1783,8 +1783,14 @@ internal static class SelfTest
             ok &= Check("nor does one to the left of the checkbox",
                         !tree.PressArmsDragForTesting(new Point(0, mid)));
 
-            // Grab the tall subtree, which sits last, and walk the pointer up a row at a time.
-            tree.StartDragForTesting(carried, new Point(20, viewport - rowH));
+            // Grab the tall subtree, which sits last, and walk the pointer up a row at a time. Every stop
+            // is the MIDDLE of a row: where a drop lands turns on which half of a row the pointer is in, so
+            // stops measured from the pane's height instead land at a different place within a row whenever
+            // that height is not a whole number of them - and one row of travel then reads as two places.
+            int MiddleOfRow(int index) => index * rowH + rowH / 2;
+            int lastWholeRow = viewport / rowH - 1;
+
+            tree.StartDragForTesting(carried, new Point(20, MiddleOfRow(lastWholeRow - 1)));
             ok &= Check("a subtree is carried collapsed, so it cannot fill the pane it moves through",
                         !tree.IsExpandedForTesting(carried));
 
@@ -1793,7 +1799,7 @@ internal static class SelfTest
             // Stay clear of the edges: the auto-scroll zone is a row deep at each end, and scrolling is
             // meant to move the list, which would confuse a check about the pointer alone.
             var stops = new List<int>();
-            for (int y = viewport - rowH * 2; y >= rowH * 2; y -= rowH) stops.Add(y);
+            for (int r = lastWholeRow - 2; r >= 2; r--) stops.Add(MiddleOfRow(r));
             foreach (int y in stops)
             {
                 tree.DragToForTesting(new Point(20, y));
