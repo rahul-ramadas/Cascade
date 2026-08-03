@@ -3941,8 +3941,9 @@ internal static class SelfTest
         // The palette is the lucky button's offers laid out at once, so the two must agree about what is
         // still going spare.
         var free = dlg.PaletteForTesting;
-        ok &= Check("the palette leaves out what is already worn", free.Count is > 100 && free.Count < LuckyColors.Count,
-                    $"{free.Count} of {LuckyColors.Count}");
+        ok &= Check("the palette leaves out what is already worn",
+                    free.Count is > 20 && free.Count < LuckyColors.Palette.Count,
+                    $"{free.Count} of {LuckyColors.Palette.Count} ({LuckyColors.Count} in the ring)");
         RgbColor[] inUse = [navy, yellow, LuckyColors.At(0).Back];
         double nearest = free.Count == 0 ? 0 : free.Min(f => inUse.Min(u => LuckyColors.Distance(f.Back, u)));
         ok &= Check("and offers nothing close to a colour in use", nearest > 42, $"{nearest:F0} away at the closest");
@@ -3954,16 +3955,31 @@ internal static class SelfTest
         // button that steps a long way each press and useless in a grid, where a screenful of near-identical
         // swatches is no choice at all.
         double closest = double.MaxValue;
-        var worst = (a: 0, b: 0);
+        var worstPair = (a: 0, b: 0);
         for (int i = 0; i < free.Count; i++)
             for (int j = i + 1; j < free.Count; j++)
             {
                 double d = LuckyColors.Distance(free[i].Back, free[j].Back);
-                if (d < closest) { closest = d; worst = (i, j); }
+                if (d < closest) { closest = d; worstPair = (i, j); }
             }
         ok &= Check("and no two colours in it look alike", free.Count < 2 || closest > 42,
                     free.Count < 2 ? "too few to say"
-                                   : $"#{free[worst.a].Back.ToHex()} and #{free[worst.b].Back.ToHex()} are {closest:F0} apart");
+                                   : $"#{free[worstPair.a].Back.ToHex()} and #{free[worstPair.b].Back.ToHex()} are {closest:F0} apart");
+
+        // Worked out once, so wearing a colour can only ever take an entry away. Thinning per call instead
+        // would let an excluded colour promote a neighbour and shuffle everything after it. Measured
+        // against the precomputed palette itself, not against another call - two calls agree with each
+        // other however the answer is arrived at.
+        var whole = LuckyColors.Palette;
+        ok &= Check("and is the whole palette when nothing is worn",
+                    LuckyColors.Free(Array.Empty<Filter>(), child).Count == whole.Count,
+                    $"{LuckyColors.Free(Array.Empty<Filter>(), child).Count} of {whole.Count}");
+
+        var places = free.Select(f => IndexOfPair(whole, f)).ToList();
+        ok &= Check("with what is worn subtracted rather than reshuffled",
+                    places.TrueForAll(i => i >= 0) && IsInOrder(places),
+                    places.Contains(-1) ? "offered a colour that is not in the palette"
+                                        : $"{free.Count} of {whole.Count} kept, in order");
 
         // Clicking must not move the grid under the pointer. A scrolling panel chases whatever takes focus,
         // and with the whole grid one tall control that means a jump on every click.
@@ -4018,6 +4034,20 @@ internal static class SelfTest
         dlg.Close();
         Pump();
         return ok;
+    }
+
+    private static int IndexOfPair(IReadOnlyList<LuckyColors.Pair> list, LuckyColors.Pair want)
+    {
+        for (int i = 0; i < list.Count; i++)
+            if (list[i] == want) return i;
+        return -1;
+    }
+
+    private static bool IsInOrder(List<int> values)
+    {
+        for (int i = 1; i < values.Count; i++)
+            if (values[i] <= values[i - 1]) return false;
+        return true;
     }
 
     private static bool RunMenuMnemonicChecks()

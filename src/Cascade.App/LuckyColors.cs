@@ -91,32 +91,46 @@ internal static class LuckyColors
         return best;
     }
 
-    /// <summary>Every pair the button would be willing to offer - the same room-to-spare rule, applied to
-    /// the whole ring at once so they can be shown together.
+    /// <summary>The ring thinned to colours that can genuinely be told apart, worked out once.
     ///
-    /// Thinned against ITSELF as well as against what is worn. The ring is a fine sweep - 143 hues, so
-    /// neighbours are under three degrees apart - which is right for a button that steps a long way each
-    /// press and wrong for a grid, where a screenful of near-identical colours is no choice at all. Sorted
-    /// by hue rather than left in ring order, because the ring's whole point is that consecutive entries
-    /// are far apart, and that reads as noise when they are all on screen at once.</summary>
-    public static List<Pair> Free(IEnumerable<Filter> others, Filter self)
-    {
-        var used = InUse(others, self);
-        var free = new List<Pair>();
-        for (int i = 0; i < Count; i++)
-        {
-            var candidate = At(i);
-            if (Room(candidate, used) <= TooClose) continue;
-            if (free.Exists(kept => Distance(kept.Back, candidate.Back) <= TooClose)) continue;
-            free.Add(candidate);
-        }
+    /// The ring is a fine sweep - 143 hues, so neighbours in it are under three degrees apart. That is what
+    /// the button wants, stepping most of the way round the wheel each press, and it is useless laid out
+    /// flat: a screenful of the same green is no choice at all. Thinning is done HERE rather than while
+    /// answering, so the palette is a fixed set - subtracting what is in use can only ever take entries
+    /// away, and a colour stays where it was in the grid as filters come and go. Thinning per call instead
+    /// would let an excluded colour promote its neighbour and reshuffle everything after it.
+    ///
+    /// Sorted by hue, because the ring's whole point is that consecutive entries are unalike and that reads
+    /// as noise when they are all on screen together.</summary>
+    private static readonly Pair[] Distinct = Thin();
 
-        free.Sort((a, b) =>
+    public static IReadOnlyList<Pair> Palette => Distinct;
+
+    private static Pair[] Thin()
+    {
+        var kept = new List<Pair>();
+        foreach (var candidate in Ring)
+            if (!kept.Exists(k => Distance(k.Back, candidate.Back) <= TooClose))
+                kept.Add(candidate);
+
+        kept.Sort((a, b) =>
         {
             var (ha, la) = HueLight(a.Back);
             var (hb, lb) = HueLight(b.Back);
             return ha != hb ? ha.CompareTo(hb) : lb.CompareTo(la);
         });
+        return kept.ToArray();
+    }
+
+    /// <summary>The palette less every colour a filter is already wearing, near enough that the two would be
+    /// mistaken for each other. Disabled filters count: they are still in the list, still coloured, and will
+    /// be switched on again.</summary>
+    public static List<Pair> Free(IEnumerable<Filter> others, Filter self)
+    {
+        var used = InUse(others, self);
+        var free = new List<Pair>();
+        foreach (var pair in Distinct)
+            if (Room(pair, used) > TooClose) free.Add(pair);
         return free;
     }
 
