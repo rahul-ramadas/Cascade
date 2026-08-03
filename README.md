@@ -129,8 +129,9 @@ You can also:
 
 - **Work on several filters at once.** `Ctrl`-click to add one, `Shift`-click or `Shift+↑ ↓` to take a
   run of them, `Ctrl+A` for all of them. Enabling, disabling, deleting, duplicating, moving and setting
-  colours then apply to the whole group — one re-evaluation, and one step to undo. The header says how
-  many are selected, so a group scrolled out of sight cannot surprise you.
+  colours then apply to the whole group — one re-evaluation, and one step to undo. The strip left of each
+  filter's text is shaded to show it is in the group, and shaded harder on the row the keyboard is
+  standing on; the header says how many are selected, so a group scrolled out of sight cannot surprise you.
 - **Set one appearance across a group.** Colours and styles they already share are offered back;
   anything they disagree on says *varies* and is left alone unless you change it.
 - **Undo and redo** filter edits with `Ctrl+Z` / `Ctrl+Y` — adding, editing, removing, duplicating,

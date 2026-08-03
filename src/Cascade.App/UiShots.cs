@@ -123,6 +123,20 @@ internal static class UiShots
         Settle();
         CapControl(host, dir, "filter-search");
 
+        // Several filters selected, two of them nested: the strip left of the text is shaded to show which
+        // are in the group, and shaded harder on the row the keyboard is standing on. Nesting is in the
+        // picture because it is what makes that strip wider or narrower.
+        tree.HideSearch();
+        var info = doc.Filters.Roots[2];
+        doc.Filters.Move(doc.Filters.Roots[3], info, 0);
+        doc.Filters.Move(doc.Filters.Roots[3], info, 1);
+        tree.Rebuild();
+        Settle();
+        tree.ClickFilterForTesting(doc.Filters.Roots[1]);
+        tree.ClickFilterForTesting(info.Children[1], Keys.Shift);
+        Settle();
+        CapControl(host, dir, "filter-list-selected");
+
         host.Close();
         host.Dispose();
         doc.Dispose();
