@@ -840,7 +840,8 @@ public sealed class MainForm : Form
             return;
         }
         var filter = new Filter { Enabled = true };
-        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList());
+        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList(),
+                                             parent, ViewDefaults);
         _history.Begin("Add Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -853,7 +854,8 @@ public sealed class MainForm : Form
 
     private void EditFilter(Filter filter)
     {
-        using var dlg = new FilterEditDialog(filter, isNew: false, _doc.Filters.EnumerateDepthFirst().ToList());
+        using var dlg = new FilterEditDialog(filter, isNew: false, _doc.Filters.EnumerateDepthFirst().ToList(),
+                                             filter.Parent, ViewDefaults);
         _history.Begin("Edit Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -862,6 +864,12 @@ public sealed class MainForm : Form
         }
         else _history.Abandon();
     }
+
+    /// <summary>What the log view draws with when no filter says otherwise - the bottom of the inheritance
+    /// chain, so the filter dialog can show what an unset colour will actually look like.</summary>
+    private ResolvedStyle ViewDefaults =>
+        new(new RgbColor(_settings.Foreground.R, _settings.Foreground.G, _settings.Foreground.B),
+            new RgbColor(_settings.Background.R, _settings.Background.G, _settings.Background.B), false, false);
 
     /// <summary>What a filter made from a log line starts out matching: the line itself, less the space
     /// around it. Only the first 200 characters used to be kept, which threw away most of exactly the long
@@ -904,7 +912,8 @@ public sealed class MainForm : Form
     private void CreateFilterFrom(string pattern)
     {
         var filter = new Filter { Enabled = true, Match = { Text = pattern } };
-        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList());
+        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList(),
+                                             parent: null, ViewDefaults);
         _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -919,7 +928,6 @@ public sealed class MainForm : Form
     {
         if (_filterTree.SelectedFilter is { } f) FindFilterMatch(f, forward);
     }
-
     private async void FindFilterMatch(Filter filter, bool forward)
     {
         if (string.IsNullOrEmpty(_doc.FilePath)) return;

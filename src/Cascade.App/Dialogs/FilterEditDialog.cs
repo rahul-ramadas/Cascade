@@ -18,7 +18,15 @@ public sealed class FilterEditDialog : DialogBase
     /// anything past its MaxLength, so the limit is stated here rather than left to the default.</summary>
     internal const int MaxPatternLength = 32_000;
 
-    private static readonly Font Mono = new("Consolas", 9.75f);
+    private static readonly Font[] MonoFaces =
+    [
+        new("Consolas", 9.75f),
+        new("Consolas", 9.75f, FontStyle.Bold),
+        new("Consolas", 9.75f, FontStyle.Italic),
+        new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Italic),
+    ];
+
+    private static Font Mono => MonoFaces[0];
 
     /// <summary>The font the box is actually drawn in - not the field it is meant to come from, which would
     /// answer the same whatever the box had been given.</summary>
@@ -43,10 +51,15 @@ public sealed class FilterEditDialog : DialogBase
     private readonly QuietCheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(24, 6, 6, 3) };
     private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 3, 0, 3) };
     private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(16, 3, 0, 3) };
+    private readonly Button _chipsBtn = new() { Text = "&Paint chips\u2026", AutoSize = true, Margin = new Padding(6, 3, 0, 3) };
     private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(32, 6, 24, 3) };
     private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 0, 3) };
 
     private readonly IReadOnlyList<Filter> _siblings;
+    /// <summary>Where this filter will hang, which decides what it inherits. A filter being added is not in
+    /// the tree yet, so its own Parent is still null and the caller has to say.</summary>
+    private readonly Filter? _parent;
+    private readonly ResolvedStyle _defaults;
     private int _lucky = -1;
 
     private RgbColor _fore = new(0, 0, 0);
@@ -55,11 +68,15 @@ public sealed class FilterEditDialog : DialogBase
     public FilterEditDialog(Filter filter, bool isNew) : this(filter, isNew, Array.Empty<Filter>()) { }
 
     /// <summary><paramref name="siblings"/> is every filter in the set, so a suggested colour can avoid the
-    /// ones already in use.</summary>
-    public FilterEditDialog(Filter filter, bool isNew, IReadOnlyList<Filter> siblings)
+    /// ones already in use. <paramref name="parent"/> and <paramref name="defaults"/> are what the preview
+    /// falls back to for anything this filter does not set itself.</summary>
+    public FilterEditDialog(Filter filter, bool isNew, IReadOnlyList<Filter> siblings,
+                            Filter? parent = null, ResolvedStyle? defaults = null)
     {
         _filter = filter;
         _siblings = siblings;
+        _parent = parent ?? filter.Parent;
+        _defaults = defaults ?? new ResolvedStyle(ToRgb(SystemColors.WindowText), ToRgb(SystemColors.Window), false, false);
         Text = isNew ? "Add Filter" : "Edit Filter";
 
         // Accessible names so screen readers announce these fields (the visual labels aren't linked).
@@ -111,8 +128,8 @@ public sealed class FilterEditDialog : DialogBase
         // read as though it belonged to nothing.
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
         // Colour and style are one idea - what a matching line looks like - and the note below covers both.
-        // "Lucky" offers a colour, so it belongs with the swatches rather than after the style ticks.
-        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _bold, _italic));
+        // Both buttons offer a colour, so they belong with the swatches rather than after the style ticks.
+        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _chipsBtn, _bold, _italic));
 
         // The error shares the button row rather than having one of its own: that row is as tall as the
         // buttons whatever else is in it, so a bad pattern cannot push them down the dialog.
@@ -148,8 +165,11 @@ public sealed class FilterEditDialog : DialogBase
         _foreBtn.Click += (_, _) => PickColor(ref _fore, _setFore);
         _backBtn.Click += (_, _) => PickColor(ref _back, _setBack);
         _luckyBtn.Click += (_, _) => FeelLucky();
+        _chipsBtn.Click += (_, _) => ShowPalette();
         _setFore.CheckedChanged += (_, _) => UpdateColorButtons();
         _setBack.CheckedChanged += (_, _) => UpdateColorButtons();
+        _bold.CheckStateChanged += (_, _) => UpdatePreview();
+        _italic.CheckStateChanged += (_, _) => UpdatePreview();
         _typeText.CheckedChanged += (_, _) => UpdateTypeEnabled();
         _typeMarker.CheckedChanged += (_, _) => UpdateTypeEnabled();
         _text.TextChanged += (_, _) => ValidateRegex();
@@ -172,12 +192,11 @@ public sealed class FilterEditDialog : DialogBase
         _text.SelectionLength = length;
     }
 
-    protected override void OnLoad(EventArgs e)    {
+    protected override void OnLoad(EventArgs e)
+    {
         base.OnLoad(e);                    // DialogBase AutoSize has fit the form to its content
         Size naturalClient = ClientSize;   // content size, independent of the border style
-        AutoSize = false;                  // allow a manual width and free resizing
-        FormBorderStyle = FormBorderStyle.Sizable;
-        MaximizeBox = true;
+        AutoSize = false;                  // AutoSize would pull the width straight back to the content
 
         // Wide by default: a filter is often started from a whole log line, and the point is to see all of
         // it at once. Never wider than the screen it opens on, though.
@@ -186,7 +205,6 @@ public sealed class FilterEditDialog : DialogBase
         clientW = Math.Min(clientW, Screen.FromControl(this).WorkingArea.Width - Dpi(64));
         ClientSize = new Size(clientW, naturalClient.Height);
 
-        MinimumSize = new Size(Dpi(560), Height); // keep content from being clipped vertically
         if (Owner is { } owner)
             Location = new Point(owner.Left + Math.Max(0, (owner.Width - Width) / 2),
                                  owner.Top + Math.Max(0, (owner.Height - Height) / 2));
@@ -230,7 +248,28 @@ public sealed class FilterEditDialog : DialogBase
         _backBtn.Enabled = _setBack.Checked;
         _foreBtn.BackColor = _setFore.Checked ? Color.FromArgb(_fore.R, _fore.G, _fore.B) : SystemColors.Control;
         _backBtn.BackColor = _setBack.Checked ? Color.FromArgb(_back.R, _back.G, _back.B) : SystemColors.Control;
+        UpdatePreview();
     }
+
+    /// <summary>Draws the pattern in the colours a line matching it would take, inheritance and all - which
+    /// is the only place the effect of leaving a box unticked can actually be seen.</summary>
+    private void UpdatePreview()
+    {
+        var inherited = _parent is null ? _defaults : StyleResolver.Resolve(_parent, _defaults);
+        var fore = _setFore.Checked ? _fore : inherited.Foreground;
+        var back = _setBack.Checked ? _back : inherited.Background;
+        bool bold = _bold.CheckState is CheckState.Indeterminate ? inherited.Bold : _bold.Checked;
+        bool italic = _italic.CheckState is CheckState.Indeterminate ? inherited.Italic : _italic.Checked;
+
+        _text.ForeColor = Color.FromArgb(fore.R, fore.G, fore.B);
+        _text.BackColor = Color.FromArgb(back.R, back.G, back.B);
+        _text.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0)];
+    }
+
+    private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
+
+    internal (Color Fore, Color Back, bool Bold, bool Italic) PreviewForTesting =>
+        (_text.ForeColor, _text.BackColor, _text.Font.Bold, _text.Font.Italic);
 
     private void PickColor(ref RgbColor target, CheckBox set)
     {
@@ -257,6 +296,38 @@ public sealed class FilterEditDialog : DialogBase
 
     internal void FeelLuckyForTesting() => FeelLucky();
     internal (RgbColor Fore, RgbColor Back) ColorsForTesting => (_fore, _back);
+    internal void SetStyleForTesting(bool? bold, bool? italic)
+    {
+        _bold.CheckState = ToState(bold);
+        _italic.CheckState = ToState(italic);
+    }
+    internal void SetColorsForTesting(RgbColor? fore, RgbColor? back)
+    {
+        if (fore is { } f) _fore = f;
+        if (back is { } b) _back = b;
+        _setFore.Checked = fore is not null;
+        _setBack.Checked = back is not null;
+        UpdateColorButtons();
+    }
+    internal IReadOnlyList<LuckyColors.Pair> PaletteForTesting => LuckyColors.Free(_siblings, _filter);
+
+    /// <summary>The whole ring of colours still going spare, shown as the filter's own text would look in
+    /// each - the same offers the lucky button walks, but all at once and in any order.</summary>
+    private void ShowPalette()
+    {
+        var free = LuckyColors.Free(_siblings, _filter);
+        string pattern = _text.Text.Trim();
+        var current = _setBack.Checked || _setFore.Checked ? new LuckyColors.Pair(_back, _fore) : (LuckyColors.Pair?)null;
+
+        using var dlg = new PaletteDialog(free, pattern.Length > 0 ? pattern : "Sample text", current);
+        if (dlg.ShowDialog(this) != DialogResult.OK || free.Count == 0) return;
+
+        _back = dlg.Picked.Back;
+        _fore = dlg.Picked.Fore;
+        _setBack.Checked = true;
+        _setFore.Checked = true;
+        UpdateColorButtons();
+    }
 
     private void ValidateRegex()
     {

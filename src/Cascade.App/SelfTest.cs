@@ -83,6 +83,7 @@ internal static class SelfTest
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
             ok &= Timed("lucky colours", RunLuckyColorChecks);
+            ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
@@ -3875,6 +3876,90 @@ internal static class SelfTest
     /// <summary>An Alt key has to be unique within its own menu. Where two items claim the same letter
     /// Windows cycles between them rather than running either, so the key must be pressed twice and then
     /// Enter - and nothing complains, which is how five of these had quietly accumulated.</summary>
+    /// <summary>The pattern box is drawn in the colours a matching line would take. That is the only place
+    /// the effect of leaving a box unticked - inherit - can be seen, so it is worth pinning down.</summary>
+    private static bool RunColorPreviewChecks()
+    {
+        Line("-- the filter dialog's colours --");
+
+        var defaults = new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false);
+        RgbColor yellow = new(0xFF, 0xFF, 0x00), navy = new(0x00, 0x00, 0x80), moss = new(0x20, 0x60, 0x20);
+        var parent = new Filter
+        {
+            Match = { Text = "ERROR" },
+            Style = { Foreground = yellow, Background = navy, Bold = true }
+        };
+        var child = new Filter { Match = { Text = "disk" } };
+        // Wearing a colour the ring actually offers, so there is something for the palette to leave out. The
+        // parent's own colours are picked for the inheritance checks and need not be in the ring at all.
+        var worn = new Filter { Match = { Text = "net" }, Style = { Background = LuckyColors.At(0).Back } };
+
+        using var dlg = new FilterEditDialog(child, isNew: true, new[] { parent, worn }, parent, defaults)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        dlg.Show();
+        Pump();
+
+        static string Say((Color Fore, Color Back, bool Bold, bool Italic) p) =>
+            $"#{p.Fore.R:x2}{p.Fore.G:x2}{p.Fore.B:x2} on #{p.Back.R:x2}{p.Back.G:x2}{p.Back.B:x2}" +
+            $"{(p.Bold ? " bold" : "")}{(p.Italic ? " italic" : "")}";
+        static bool Is(Color c, RgbColor want) => c.R == want.R && c.G == want.G && c.B == want.B;
+
+        var p = dlg.PreviewForTesting;
+        bool ok = Check("a filter that sets no colour of its own previews its parent's",
+                        Is(p.Fore, yellow) && Is(p.Back, navy), Say(p));
+        ok &= Check("and its parent's bold", p.Bold && !p.Italic, Say(p));
+
+        dlg.SetColorsForTesting(fore: null, back: moss);
+        Pump();
+        p = dlg.PreviewForTesting;
+        ok &= Check("setting one colour leaves the other coming down from above",
+                    Is(p.Back, moss) && Is(p.Fore, yellow), Say(p));
+
+        dlg.SetStyleForTesting(bold: false, italic: true);
+        Pump();
+        p = dlg.PreviewForTesting;
+        ok &= Check("and a style turned off beats the parent having it on", !p.Bold && p.Italic, Say(p));
+
+        // With nothing above it there is nothing to inherit, so the view's own colours show through.
+        using var orphan = new FilterEditDialog(new Filter { Match = { Text = "disk" } }, isNew: true,
+                                                Array.Empty<Filter>(), null, defaults)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        orphan.Show();
+        Pump();
+        var q = orphan.PreviewForTesting;
+        ok &= Check("a filter with no parent previews the view's own colours",
+                    Is(q.Fore, defaults.Foreground) && Is(q.Back, defaults.Background), Say(q));
+
+        // The palette is the lucky button's offers laid out at once, so the two must agree about what is
+        // still going spare.
+        var free = dlg.PaletteForTesting;
+        ok &= Check("the palette leaves out what is already worn", free.Count is > 100 && free.Count < LuckyColors.Count,
+                    $"{free.Count} of {LuckyColors.Count}");
+        RgbColor[] inUse = [navy, yellow, LuckyColors.At(0).Back];
+        double nearest = free.Count == 0 ? 0 : free.Min(f => inUse.Min(u => LuckyColors.Distance(f.Back, u)));
+        ok &= Check("and offers nothing close to a colour in use", nearest > 42, $"{nearest:F0} away at the closest");
+        var lucky = LuckyColors.At(LuckyColors.Next(-1, new[] { parent, worn }, child));
+        ok &= Check("and includes what the lucky button would hand out next",
+                    free.Any(f => f.Back == lucky.Back), $"#{lucky.Back.ToHex()}");
+
+        ok &= Check("the dialog is a fixed size",
+                    dlg.FormBorderStyle == FormBorderStyle.FixedDialog && !dlg.MaximizeBox,
+                    $"{dlg.FormBorderStyle}, maximise {dlg.MaximizeBox}");
+
+        orphan.Close();
+        dlg.Close();
+        Pump();
+        return ok;
+    }
+
     private static bool RunMenuMnemonicChecks()
     {
         Line("-- menu keyboard access --");
