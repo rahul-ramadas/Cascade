@@ -2416,6 +2416,23 @@ internal static class SelfTest
                 .DefaultIfEmpty(0).Max();
             ok &= Check("no row of the filter dialog reserves space it never draws", spare <= 0, $"{spare}px over");
 
+            // A tick and the swatch it owns must read as one thing, and the next pair as another: with the
+            // gaps the other way round the eye binds a swatch to whatever follows it.
+            var appearance = AllControls(opts).OfType<FlowLayoutPanel>()
+                             .OrderByDescending(s => s.Controls.Count).First();
+            var strip = appearance.Controls.Cast<Control>().OrderBy(c => c.Left).ToList();
+            int[] gaps = [.. strip.Zip(strip.Skip(1), (a, b) => b.Left - a.Right)];
+            ok &= Check("a swatch sits closer to its own tick than to what comes next",
+                        gaps.Length >= 4 && gaps[0] < gaps[1] && gaps[2] < gaps[3],
+                        string.Join(", ", gaps));
+
+            // The swatch buttons are taller than the captions beside them, so the row's alignment is a
+            // question of centres, not of tops.
+            int mid = appearance.Height / 2;
+            int worst = strip.Max(c => Math.Abs(c.Top + c.Height / 2 - mid));
+            ok &= Check("and every caption is centred against them", worst <= 1,
+                        $"{worst}px off centre in a {appearance.Height}px row");
+
             // The pattern box holds a whole log line copied in from the text, so it gets what is left after
             // the labels - not a share of it.
             ok &= Check("the pattern box runs the width of the dialog",
@@ -3764,8 +3781,7 @@ internal static class SelfTest
                     split.SplitterDistance > total * 0.6 && split.SplitterDistance < total * 0.85,
                     $"{split.SplitterDistance} of {total}");
 
-        // Dragging lands wherever the pointer is; the divider has to settle on the nearest line boundary,
-        // and upwards, so a drag never quietly costs a line of text.
+        // Dragging lands wherever the pointer is; the divider has to settle on the nearest line boundary.
         int start = split.SplitterDistance;
         foreach (int nudge in new[] { 3, 7, -5, -11, 1 })
         {
@@ -3775,10 +3791,26 @@ internal static class SelfTest
             int got = split.SplitterDistance;
             ok &= Check($"a drag to {nudge:+#;-#;0} settles on a line boundary", Lines(got) % pitch == 0,
                         $"asked {asked}, settled at {got}, which is {Lines(got)}px of text");
-            ok &= Check($"and within a line of where it was let go", Math.Abs(got - asked) < pitch,
+            ok &= Check($"and on the nearest one", Math.Abs(got - asked) <= pitch / 2 + 1,
                         $"asked {asked}, settled at {got}, a line is {pitch}px");
-            ok &= Check($"and never below it", got >= asked, $"asked {asked}, settled at {got}");
         }
+
+        // Wrapping hides the sideways scrollbar, so the chrome the divider measures from changes under it.
+        // Rounding the same way every time then hands the log a line on each toggle and never gives one
+        // back, and the filter list is eaten a line at a time.
+        int before = split.SplitterDistance;
+        var walked = new List<int>();
+        for (int i = 0; i < 6; i++)
+        {
+            form.ClickMenuForTesting("View", "Word Wrap");
+            Pump();
+            walked.Add(split.SplitterDistance);
+        }
+        ok &= Check("toggling word wrap does not walk the divider",
+                    walked.TrueForAll(d => Math.Abs(d - before) <= pitch),
+                    $"started at {before}, went {string.Join(" -> ", walked)}");
+        ok &= Check("and leaves it where it started", split.SplitterDistance == before,
+                    $"{before} -> {split.SplitterDistance}");
 
         // Growing the window must not leave the log holding part of a line either.
         form.Size = new Size(900, 743);
@@ -3873,7 +3905,32 @@ internal static class SelfTest
             return good;
         }
 
-        return Walk("menu", bar.Items);
+        bool ok = Walk("menu", bar.Items);
+
+        // A command with a key must say so where it is offered. These two run the same thing from different
+        // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
+        string[] shortcuts = ["Find Filter\tCtrl+E", "Focus Filter Search\tCtrl+E"];
+        var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
+        var advertised = AllMenuItems(bar.Items)
+            .Select(m => (m.Text ?? "").Replace("&", "") + "\t" +
+                         (m.ShortcutKeyDisplayString ??
+                          (m.ShortcutKeys == Keys.None ? "" : keys.ConvertToString(m.ShortcutKeys))))
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (string want in shortcuts)
+            ok &= Check($"the menu offers \"{want.Replace('\t', ' ')}\"", advertised.Contains(want),
+                        string.Join(" | ", advertised.Where(a => a.StartsWith(want.Split('\t')[0], StringComparison.Ordinal))));
+
+        return ok;
+    }
+
+    private static IEnumerable<ToolStripMenuItem> AllMenuItems(ToolStripItemCollection items)
+    {
+        foreach (ToolStripItem item in items)
+            if (item is ToolStripMenuItem m)
+            {
+                yield return m;
+                foreach (var d in AllMenuItems(m.DropDownItems)) yield return d;
+            }
     }
 
     private static IEnumerable<Control> AllControls(Control root)

@@ -430,7 +430,7 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(BuildPresetsMenu());
         filters.DropDownItems.Add(new ToolStripSeparator());
-        filters.DropDownItems.Add(Mi("&Find Filter", (_, _) => _filterTree.FocusSearch()));
+        filters.DropDownItems.Add(Hint("&Find Filter", "Ctrl+E", () => _filterTree.FocusSearch()));
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add(Mi("&About Cascade", (_, _) => ShowAbout()));
@@ -1151,8 +1151,10 @@ public sealed class MainForm : Form
     /// of dead space under the last one. Only when the filter list is above or below - down one side the
     /// divider sets a width, which has nothing to do with line height.
     ///
-    /// Rounds towards more text, and takes the smaller number of lines only when the larger one will not
-    /// fit.</summary>
+    /// Snaps to the NEAREST such position, and takes the smaller number of lines only when the larger one
+    /// will not fit. Nearest rather than rounding up because the chrome this measures from can change under
+    /// it - hiding the sideways scrollbar to wrap moves the lattice - and always rounding up then hands the
+    /// log another line on every change and never gives one back.</summary>
     private void SnapSplitter()
     {
         if (_snapping || _split.Orientation != Orientation.Horizontal) return;
@@ -1165,7 +1167,7 @@ public sealed class MainForm : Form
 
         bool gridFirst = _treePanel != 1;
         int gridHeight = gridFirst ? _split.SplitterDistance : total - _split.SplitterDistance;
-        int lines = Math.Max(1, (int)Math.Ceiling((gridHeight - chrome) / (double)pitch));
+        int lines = Math.Max(1, (int)Math.Round((gridHeight - chrome) / (double)pitch, MidpointRounding.AwayFromZero));
         int low = _split.Panel1MinSize, high = Math.Max(low, total - _split.Panel2MinSize);
 
         int Distance(int n) => gridFirst ? chrome + n * pitch : total - (chrome + n * pitch);
