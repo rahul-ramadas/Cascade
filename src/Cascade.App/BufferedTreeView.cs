@@ -47,6 +47,29 @@ internal sealed class BufferedTreeView : TreeView
         SendMessage(Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER);
     }
 
+    /// <summary>Expanding a row does not move the list.
+    ///
+    /// Left to itself the native tree scrolls on every expansion, to fit as much of the newly revealed
+    /// subtree on screen as it can - which yanks the row the user was looking at somewhere else, and can
+    /// fire in the middle of a drag when a drop nests into a folded filter. Recording the first visible
+    /// row before the expansion and putting it back afterwards costs nothing visible: the restore happens
+    /// inside the same message, so no repaint is delivered in between.</summary>
+    private TreeNode? _topBeforeExpand;
+
+    protected override void OnBeforeExpand(TreeViewCancelEventArgs e)
+    {
+        base.OnBeforeExpand(e);
+        _topBeforeExpand = e.Cancel ? null : TopNode;
+    }
+
+    protected override void OnAfterExpand(TreeViewEventArgs e)
+    {
+        var top = _topBeforeExpand;
+        _topBeforeExpand = null;
+        base.OnAfterExpand(e);
+        if (top is not null && ReferenceEquals(top.TreeView, this) && !ReferenceEquals(top, TopNode)) TopNode = top;
+    }
+
     /// <summary>True while a double-click on a row's own content is being handled. The tree's default answer
     /// to that is to expand or collapse the row, which is not what double-clicking a filter means - see the
     /// cancel in FilterTreeControl. The expander keeps its job, so it is excluded here.</summary>
