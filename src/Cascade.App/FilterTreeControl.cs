@@ -18,10 +18,17 @@ public sealed class FilterTreeControl : UserControl
     // whereas the OS cue banner is painted by the edit control itself and never flickers.
     private readonly CueTextBox _search = new()
     {
-        Dock = DockStyle.Top,
+        Dock = DockStyle.Fill,
         AccessibleName = "Filter search",
-        Cue = "Find filter (Enter = next, Shift+Enter = previous)\u2026"
+        Cue = "Enter = next, Shift+Enter = previous\u2026"
     };
+
+    /// <summary>The search box and its trimmings, along the BOTTOM of the pane. Below rather than above so
+    /// that opening it leaves the column header and the top of the list exactly where they were - the list
+    /// simply gets shorter from the end, which is the edge nothing is anchored to.</summary>
+    private readonly Panel _searchBar = new() { Dock = DockStyle.Bottom, Visible = false, BackColor = SystemColors.Control };
+    private readonly Label _searchLabel = new() { Text = "Find filter:", AutoSize = false, Dock = DockStyle.Left, TextAlign = ContentAlignment.MiddleLeft };
+    private readonly Button _searchClose = new() { Text = "\u2715", Dock = DockStyle.Right, FlatStyle = FlatStyle.Flat, TabStop = false, AccessibleName = "Close filter search" };
     private readonly BufferedTreeView _tree = new()
     {
         Dock = DockStyle.Fill,
@@ -79,7 +86,14 @@ public sealed class FilterTreeControl : UserControl
 
         Controls.Add(_tree);
         Controls.Add(_header);
-        Controls.Add(_search);
+        Controls.Add(_searchBar);
+
+        // Docking runs from the back of the child list forwards, so the filling box has to be added first
+        // to be laid out last and take whatever the label and the button leave.
+        _searchBar.Controls.Add(_search);
+        _searchBar.Controls.Add(_searchLabel);
+        _searchBar.Controls.Add(_searchClose);
+        _searchClose.Click += (_, _) => HideSearch();
 
         // The columns are sized from the rows' content, and the tree's client width shrinks when a vertical
         // scrollbar appears, so any size change means measuring again.
@@ -120,6 +134,22 @@ public sealed class FilterTreeControl : UserControl
         _search.LostFocus += (_, _) => Invalidate();
         _tree.GotFocus += (_, _) => Invalidate();
         _tree.LostFocus += (_, _) => Invalidate();
+        SizeSearchBar();
+    }
+
+    private void SizeSearchBar()
+    {
+        int pad = LogicalToDeviceUnits(4);
+        _searchBar.Height = _search.PreferredHeight + pad * 2;
+        _searchBar.Padding = new Padding(pad, pad, pad, pad);
+        _searchLabel.Width = TextRenderer.MeasureText(_searchLabel.Text, Font).Width + LogicalToDeviceUnits(6);
+        _searchClose.Size = new Size(_search.PreferredHeight, _search.PreferredHeight);
+    }
+
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        SizeSearchBar();
     }
 
     private const int FocusBarWidth = 3;
@@ -131,7 +161,7 @@ public sealed class FilterTreeControl : UserControl
         int w = Padding.Left;
         if (w <= 0) return;
         Rectangle r;
-        if (_search.Focused) r = new Rectangle(0, _search.Top, w, _search.Height);
+        if (_search.Focused) r = new Rectangle(0, _searchBar.Top, w, _searchBar.Height);
         else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height);
         else return;
         using var b = new SolidBrush(_settings.SelectionBack);
@@ -321,7 +351,7 @@ public sealed class FilterTreeControl : UserControl
     private void OnSearchKeyDown(object? sender, KeyEventArgs e)
     {
         if (e.KeyCode == Keys.Enter) { JumpToMatch(fromSelection: true, forward: !e.Shift, announce: true); e.Handled = e.SuppressKeyPress = true; }
-        else if (e.KeyCode == Keys.Escape) { _search.Clear(); _tree.Focus(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.Escape) { HideSearch(); e.Handled = e.SuppressKeyPress = true; }
     }
 
     private void OnTreeKeyDown(object? sender, KeyEventArgs e)
@@ -354,8 +384,8 @@ public sealed class FilterTreeControl : UserControl
                 BeginInvoke(() => { try { EditRequested?.Invoke(f); } finally { _editPending = false; } });
             }
         }
-        else if (e.Control && e.KeyCode == Keys.F) { _search.Focus(); _search.SelectAll(); e.Handled = e.SuppressKeyPress = true; }
-        else if (e.KeyCode == Keys.Escape && _search.TextLength > 0) { _search.Clear(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.Control && e.KeyCode == Keys.F) { ShowSearch(); e.Handled = e.SuppressKeyPress = true; }
+        else if (e.KeyCode == Keys.Escape && _searchBar.Visible) { HideSearch(); e.Handled = e.SuppressKeyPress = true; }
     }
 
     private void JumpToMatch(bool fromSelection, bool forward, bool announce)
@@ -716,6 +746,23 @@ public sealed class FilterTreeControl : UserControl
     internal bool IsCheckedForTesting(Filter f) => NodeFor(f)?.Checked ?? false;
     internal void SelectForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.SelectedNode = n; }
     internal void PressKeyForTesting(Keys key) => OnTreeKeyDown(_tree, new KeyEventArgs(key));
+
+    internal Rectangle SearchBarBoundsForTesting => _searchBar.Bounds;
+    internal string SearchTermForTesting => _search.Text;
+    internal bool SearchBoxHasFocusForTesting => _search.Focused;
+    /// <summary>Types into the box the way a user does, so TextChanged runs - unlike SetSearchText, which
+    /// is for the screenshot harness and opens the bar itself.</summary>
+    internal void TypeSearchForTesting(string text) => _search.Text = text;
+    internal void PressSearchKeyForTesting(Keys key) => OnSearchKeyDown(_search, new KeyEventArgs(key));
+    internal void ClickSearchCloseForTesting() => _searchClose.PerformClick();
+    /// <summary>What the header paints, so a check can see the hint appear and go.</summary>
+    internal Bitmap HeaderPictureForTesting()
+    {
+        var bmp = new Bitmap(Math.Max(1, _header.Width), Math.Max(1, _header.Height));
+        _header.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        return bmp;
+    }
+
     internal void ToggleCheckboxForTesting(Filter f) { if (NodeFor(f) is { } n) n.Checked = !n.Checked; }
 
     /// <summary>Whether pressing here would pick the filter up, by way of the real handler.</summary>
@@ -1183,7 +1230,36 @@ public sealed class FilterTreeControl : UserControl
         FiltersChanged?.Invoke();
     }
 
-    public void FocusSearch() { _search.Focus(); _search.SelectAll(); }
+    /// <summary>Brings the search bar up and puts the caret in it. Opening it again while it is already up
+    /// selects what is there, so Ctrl+E twice replaces the term rather than appending to it.</summary>
+    public void ShowSearch()
+    {
+        if (!_searchBar.Visible)
+        {
+            _searchBar.Visible = true;
+            _header.SetSearchHint(false);
+        }
+        _search.Focus();
+        _search.SelectAll();
+    }
+
+    /// <summary>Puts the bar away and the term with it - leaving the list dimmed by a search with no box on
+    /// screen to explain it is the state this bar exists to avoid. Focus goes back to the list, which is
+    /// where the user was heading.</summary>
+    public void HideSearch()
+    {
+        if (!_searchBar.Visible) return;
+        _search.Clear();               // also undims the list, through TextChanged
+        _searchBar.Visible = false;
+        _header.SetSearchHint(true);
+        FocusList();
+    }
+
+    /// <summary>True while the search bar is on screen.</summary>
+    public bool SearchOpen => _searchBar.Visible;
+
+    /// <summary>True when anything in the search bar has the keyboard - the box or its close button.</summary>
+    public bool SearchBarHasFocus => _searchBar.Visible && _searchBar.ContainsFocus;
 
     /// <summary>Moves keyboard focus into the filter list (selecting the first filter if none is selected).</summary>
     public void FocusList()
@@ -1196,7 +1272,7 @@ public sealed class FilterTreeControl : UserControl
     public void SelectFirst() { if (_flat.Count > 0) _tree.SelectedNode = _flat[0]; }
 
     /// <summary>Sets the filter-search text (used by the screenshot/demo harness).</summary>
-    internal void SetSearchText(string text) => _search.Text = text;
+    internal void SetSearchText(string text) { ShowSearch(); _search.Text = text; }
 
     /// <summary>True when the filter search box currently has keyboard focus.</summary>
     public bool SearchHasFocus => _search.Focused;
