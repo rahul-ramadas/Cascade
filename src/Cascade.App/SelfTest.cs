@@ -3947,8 +3947,68 @@ internal static class SelfTest
         double nearest = free.Count == 0 ? 0 : free.Min(f => inUse.Min(u => LuckyColors.Distance(f.Back, u)));
         ok &= Check("and offers nothing close to a colour in use", nearest > 42, $"{nearest:F0} away at the closest");
         var lucky = LuckyColors.At(LuckyColors.Next(-1, new[] { parent, worn }, child));
-        ok &= Check("and includes what the lucky button would hand out next",
-                    free.Any(f => f.Back == lucky.Back), $"#{lucky.Back.ToHex()}");
+        ok &= Check("and covers what the lucky button would hand out next",
+                    free.Any(f => LuckyColors.Distance(f.Back, lucky.Back) <= 42), $"#{lucky.Back.ToHex()}");
+
+        // The ring sweeps 143 hues, so neighbours in it are all but the same colour. That is right for a
+        // button that steps a long way each press and useless in a grid, where a screenful of near-identical
+        // swatches is no choice at all.
+        double closest = double.MaxValue;
+        var worst = (a: 0, b: 0);
+        for (int i = 0; i < free.Count; i++)
+            for (int j = i + 1; j < free.Count; j++)
+            {
+                double d = LuckyColors.Distance(free[i].Back, free[j].Back);
+                if (d < closest) { closest = d; worst = (i, j); }
+            }
+        ok &= Check("and no two colours in it look alike", free.Count < 2 || closest > 42,
+                    free.Count < 2 ? "too few to say"
+                                   : $"#{free[worst.a].Back.ToHex()} and #{free[worst.b].Back.ToHex()} are {closest:F0} apart");
+
+        // Clicking must not move the grid under the pointer. A scrolling panel chases whatever takes focus,
+        // and with the whole grid one tall control that means a jump on every click.
+        using (var pal = new PaletteDialog(free, "sample text", null, visibleRows: 4)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        })
+        {
+            pal.Show();
+            Pump();
+            ok &= Check("the palette has more colours than it can show at once", pal.ScrollsForTesting);
+
+            // Deliberately off a row boundary, so the bottom row is cut by the edge - which is the row a
+            // click lands on when you click the last colour you can see.
+            int cellH = pal.CellForTesting(0).Height;
+            pal.ScrollToForTesting(cellH * 3 + cellH / 2);
+            Pump();
+            int before = pal.ScrollForTesting;
+            ok &= Check("and can be scrolled down it", before > 0, before.ToString());
+
+            int straddling = (before + pal.ViewportForTesting) / cellH * 5;
+            ok &= Check("and the bottom row of it really is cut off",
+                        pal.CellForTesting(straddling).Bottom > before + pal.ViewportForTesting,
+                        $"row bottom {pal.CellForTesting(straddling).Bottom}, edge {before + pal.ViewportForTesting}");
+
+            pal.ClickForTesting(straddling);
+            Pump();
+            ok &= Check("clicking a colour does not scroll the palette under the pointer",
+                        pal.ScrollForTesting == before, $"{before} -> {pal.ScrollForTesting}");
+
+            pal.CycleFocusForTesting();
+            Pump();
+            ok &= Check("nor does the keyboard leaving the grid and coming back",
+                        pal.ScrollForTesting == before, $"{before} -> {pal.ScrollForTesting}");
+
+            // Walking off the bottom edge, on the other hand, has to follow - there is nowhere else for the
+            // selection to go.
+            for (int i = 0; i < 8; i++) { pal.MoveForTesting(Keys.Down); Pump(); }
+            ok &= Check("but arrowing off the bottom does scroll it", pal.ScrollForTesting > before,
+                        $"{before} -> {pal.ScrollForTesting}");
+            pal.Close();
+            Pump();
+        }
 
         ok &= Check("the dialog is a fixed size",
                     dlg.FormBorderStyle == FormBorderStyle.FixedDialog && !dlg.MaximizeBox,

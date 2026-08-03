@@ -92,16 +92,44 @@ internal static class LuckyColors
     }
 
     /// <summary>Every pair the button would be willing to offer - the same room-to-spare rule, applied to
-    /// the whole ring at once so they can be shown together. In ring order, which is the order repeated
-    /// presses walk, so what is on offer here is what patience with the button would eventually turn up.
-    /// </summary>
+    /// the whole ring at once so they can be shown together.
+    ///
+    /// Thinned against ITSELF as well as against what is worn. The ring is a fine sweep - 143 hues, so
+    /// neighbours are under three degrees apart - which is right for a button that steps a long way each
+    /// press and wrong for a grid, where a screenful of near-identical colours is no choice at all. Sorted
+    /// by hue rather than left in ring order, because the ring's whole point is that consecutive entries
+    /// are far apart, and that reads as noise when they are all on screen at once.</summary>
     public static List<Pair> Free(IEnumerable<Filter> others, Filter self)
     {
         var used = InUse(others, self);
         var free = new List<Pair>();
         for (int i = 0; i < Count; i++)
-            if (Room(At(i), used) > TooClose) free.Add(At(i));
+        {
+            var candidate = At(i);
+            if (Room(candidate, used) <= TooClose) continue;
+            if (free.Exists(kept => Distance(kept.Back, candidate.Back) <= TooClose)) continue;
+            free.Add(candidate);
+        }
+
+        free.Sort((a, b) =>
+        {
+            var (ha, la) = HueLight(a.Back);
+            var (hb, lb) = HueLight(b.Back);
+            return ha != hb ? ha.CompareTo(hb) : lb.CompareTo(la);
+        });
         return free;
+    }
+
+    private static (double Hue, double Light) HueLight(RgbColor c)
+    {
+        double r = c.R / 255.0, g = c.G / 255.0, b = c.B / 255.0;
+        double max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b));
+        double light = (max + min) / 2, span = max - min;
+        if (span < 1e-9) return (0, light);
+        double hue = max == r ? (g - b) / span + (g < b ? 6 : 0)
+                   : max == g ? (b - r) / span + 2
+                   : (r - g) / span + 4;
+        return (hue / 6, light);
     }
 
     private static List<RgbColor> InUse(IEnumerable<Filter> others, Filter self)
