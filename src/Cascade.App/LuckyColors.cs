@@ -98,9 +98,13 @@ internal static class LuckyColors
     ///
     /// When everything is close to something, it settles for whichever pair is furthest from anything in
     /// use rather than handing back a duplicate.</summary>
-    public static int Next(int from, IEnumerable<Filter> others, Filter self)
+    public static int Next(int from, IEnumerable<Filter> others, Filter self) => Next(from, others, [self]);
+
+    /// <summary>As above, ignoring every filter being changed - several of them are being given one colour,
+    /// so what they wear now must not count against it.</summary>
+    public static int Next(int from, IEnumerable<Filter> others, IReadOnlyCollection<Filter> selves)
     {
-        var used = InUse(others, self);
+        var used = InUse(others, selves);
 
         int best = from + Stride;
         double bestRoom = -1;
@@ -117,21 +121,23 @@ internal static class LuckyColors
     /// <summary>The palette less every colour a filter already wears, near enough that the two would be
     /// mistaken for each other. The set itself is fixed, so this only ever takes entries away and a colour
     /// keeps its place however the filters change.</summary>
-    public static List<Pair> Free(IEnumerable<Filter> others, Filter self)
+    public static List<Pair> Free(IEnumerable<Filter> others, Filter self) => Free(others, [self]);
+
+    public static List<Pair> Free(IEnumerable<Filter> others, IReadOnlyCollection<Filter> selves)
     {
-        var used = InUse(others, self);
+        var used = InUse(others, selves);
         var free = new List<Pair>();
         for (int i = 0; i < All.Length; i++)
             if (Room(AllLab[i], used) > TooClose) free.Add(All[i]);
         return free;
     }
 
-    private static List<Lab> InUse(IEnumerable<Filter> others, Filter self)
+    private static List<Lab> InUse(IEnumerable<Filter> others, IReadOnlyCollection<Filter> selves)
     {
         var used = new List<Lab>();
         foreach (var f in others)
         {
-            if (ReferenceEquals(f, self)) continue;
+            if (selves.Any(s => ReferenceEquals(f, s))) continue;
             if (f.Style.Background is { } b) used.Add(ToLab(b));
             if (f.Style.Foreground is { } g) used.Add(ToLab(g));
         }

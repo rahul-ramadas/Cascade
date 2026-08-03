@@ -127,12 +127,18 @@ were looking at doesn't move.
 
 You can also:
 
+- **Work on several filters at once.** `Ctrl`-click to add one, `Shift`-click or `Shift+↑ ↓` to take a
+  run of them, `Ctrl+A` for all of them. Enabling, disabling, deleting, duplicating, moving and setting
+  colours then apply to the whole group — one re-evaluation, and one step to undo. The header says how
+  many are selected, so a group scrolled out of sight cannot surprise you.
+- **Set one appearance across a group.** Colours and styles they already share are offered back;
+  anything they disagree on says *varies* and is left alone unless you change it.
 - **Undo and redo** filter edits with `Ctrl+Z` / `Ctrl+Y` — adding, editing, removing, duplicating,
   reordering, nesting and appending a file, a hundred steps deep. The menu names what it will take back
-  ("Undo Remove Filter"). Ticking a filter is not an edit and is not undone.
+  ("Undo Remove 3 Filters"). Ticking a filter is not an edit and is not undone.
 - **Duplicate a filter and its subtree** with `Ctrl+D`.
-- **Reorder and nest** with `Ctrl+↑ ↓ ← →`, or by dragging — the filter and its subtree move live to
-  where they would land, so you can see the result before you drop.
+- **Reorder and nest** with `Alt+↑ ↓ ← →`, or by dragging — the filter and its subtree move live to
+  where they would land, so you can see the result before you drop. A group is carried as one row.
 - **Jump to matches of one filter** with `F4` / `Shift+F4`, without changing what's shown.
 - **Create a filter from the current line** with `Ctrl+N`, prefilled with the line's text — or with just
   the part of the line you selected.
@@ -301,14 +307,18 @@ line**, so turning columns on can't change what you see.
 
 | Key | Action |
 |---|---|
-| `Space` | Enable / disable the selected filter |
-| `Shift+Space` | Enable / disable it and everything under it |
-| `Enter` | Edit the selected filter |
-| `Delete` | Remove it |
-| `Ctrl+D` | Duplicate it and its subtree |
-| `Ctrl+↑` / `Ctrl+↓` | Move it up / down |
-| `Ctrl+→` / `Ctrl+←` | Nest it under the filter above / un-nest it |
-| `F4` / `Shift+F4` | Next / previous line matching it |
+| `Space` | Enable / disable the selected filters |
+| `Shift+Space` | Enable / disable them and everything under them |
+| `Enter` | Edit the selection — appearance only when there is more than one |
+| `Delete` | Remove them |
+| `Ctrl+D` | Duplicate them and their subtrees |
+| `Shift+↑` / `Shift+↓` | Extend the selection |
+| `Ctrl+↑` / `Ctrl+↓` | Move between filters without changing the selection |
+| `Ctrl+Space` | Add / remove the filter you are standing on |
+| `Ctrl+A` | Select every filter |
+| `Alt+↑` / `Alt+↓` | Move them up / down |
+| `Alt+→` / `Alt+←` | Nest them under the filter above / un-nest them |
+| `F4` / `Shift+F4` | Next / previous line matching the current filter |
 | `Ctrl+F` | Focus the search box |
 | `F3` / `Shift+F3` | Next / previous filter matching the search box |
 | `Esc` | Clear the search box |

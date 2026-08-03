@@ -20,6 +20,7 @@ internal readonly record struct FilterColumns(int DescX, int CountX, int Descrip
 internal sealed class FilterListHeader : Control
 {
     private FilterColumns _columns;
+    private int _selectedCount;
 
     public FilterListHeader()
     {
@@ -27,6 +28,7 @@ internal sealed class FilterListHeader : Control
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         Height = TextRenderer.MeasureText("Xg", Font).Height + 8;
         BackColor = SystemColors.Control;
+        AccessibleName = "Filter list";
     }
 
     internal int Inset => LogicalToDeviceUnits(4);
@@ -35,6 +37,17 @@ internal sealed class FilterListHeader : Control
     {
         if (columns == _columns) return;
         _columns = columns;
+        Invalidate();
+    }
+
+    /// <summary>How many filters are selected, so a group that has been scrolled out of sight still says so
+    /// before Delete is pressed. It takes the search hint's place: the hint is an advertisement, this is
+    /// live state.</summary>
+    internal void SetSelectionCount(int count)
+    {
+        if (count == _selectedCount) return;
+        _selectedCount = count;
+        AccessibleName = count > 1 ? $"Filter list: {count} selected" : "Filter list";
         Invalidate();
     }
 
@@ -64,10 +77,10 @@ internal sealed class FilterListHeader : Control
         var unbounded = new Size(int.MaxValue, int.MaxValue);
         const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
         int used = TextRenderer.MeasureText(g, "Filter", Font, unbounded, measure).Width;
-        const string Hint = "  (Ctrl+E to search)";
-        int wants = TextRenderer.MeasureText(g, Hint, Font, unbounded, measure).Width;
+        string note = _selectedCount > 1 ? $"  ({_selectedCount} selected)" : "  (Ctrl+E to search)";
+        int wants = TextRenderer.MeasureText(g, note, Font, unbounded, measure).Width;
         if (used + wants <= filterRoom)
-            TextRenderer.DrawText(g, Hint, Font, new Rectangle(inset + used, 0, wants, Height),
+            TextRenderer.DrawText(g, note, Font, new Rectangle(inset + used, 0, wants, Height),
                                   SystemColors.GrayText, flags);
         if (_columns.HasDescription)
             TextRenderer.DrawText(g, "Description", Font,

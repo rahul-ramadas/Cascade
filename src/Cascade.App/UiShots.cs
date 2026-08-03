@@ -50,6 +50,18 @@ internal static class UiShots
         var free = LuckyColors.Free(new[] { demoFilter }, badFilter);
         ShotDialog(new PaletteDialog(free, @"\[OrderService\].+Disk", null), outDir, "palette");
 
+        // Three filters that agree on a background and disagree on everything else, which is the state the
+        // dialog exists to show: one shared colour offered back, the rest saying so.
+        var group = new List<Filter>
+        {
+            demoFilter,
+            new() { Description = "timeouts", Match = { Text = "Timeout" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0), Bold = true } },
+            new() { Description = "resets", Match = { Text = "HardReset" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0) } },
+        };
+        ShotDialog(new AppearanceDialog(group, group,
+                       new ResolvedStyle(new RgbColor(0x1F, 0x1F, 0x1F), new RgbColor(0xFF, 0xFF, 0xFF), false, false)),
+                   outDir, "appearance");
+
         ShotFindBar(outDir, "find", "");
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
         ShotFindBar(outDir, "find-badregex", "", badPattern: "bth(port");

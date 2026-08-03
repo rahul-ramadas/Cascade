@@ -82,6 +82,8 @@ internal static class SelfTest
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
+            ok &= Timed("filter selection", RunFilterSelectionChecks);
+            ok &= Timed("appearance", RunAppearanceChecks);
             ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
@@ -1886,6 +1888,9 @@ internal static class SelfTest
             ok &= Check($"and slides steadily back up [{string.Join(" ", up.Distinct())}]",
                         up.Count > 2 && up.SequenceEqual(up.OrderByDescending(v => v)));
             tree.DropForTesting();
+            Pump();
+
+            ok &= RunGroupDragChecks(doc, tree, rowH);
             return ok;
         }
         finally
@@ -1894,6 +1899,61 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Several filters are carried as one placeholder row and placed once, on the drop. Carrying
+    /// the real rows would make the block taller than the pane it is being dragged through, which is the
+    /// same reason a subtree is carried collapsed.</summary>
+    private static bool RunGroupDragChecks(CascadeDocument doc, FilterTreeControl tree, int rowH)
+    {
+        var roots = doc.Filters.Roots;
+        var one = roots[3];
+        var two = roots[5];
+        var three = roots[7];
+        string Order(int n) => string.Join(" ", roots.Take(n).Select(f => f.Match.Text));
+        string before = Order(12);
+
+        tree.ClickFilterForTesting(one);
+        tree.ClickFilterForTesting(two, Keys.Control);
+        tree.ClickFilterForTesting(three, Keys.Control);
+        var row = tree.RowBoundsForTesting(one);
+        tree.StartDragForTesting(one, new Point(row.Left + 2, row.Top + row.Height / 2));
+        Pump();
+
+        bool ok = Check($"a group is carried as one row, which says how many [{tree.GhostTextForTesting}]",
+                        tree.GhostTextForTesting == "3 filters");
+        ok &= Check($"the filters themselves have not moved yet [{Order(12)}]", Order(12) == before);
+        ok &= Check($"and their rows are out of the list while it is carried " +
+                    $"[{string.Join(" ", tree.VisibleRowNamesForTesting.Take(10))}]",
+                    !tree.VisibleRowNamesForTesting.Take(10).Contains(two.Match.Text));
+
+        // Escape puts everything back, and the model was never touched, so this has to be exact.
+        tree.CancelDragForTesting();
+        Pump();
+        ok &= Check($"escaping a group drag leaves the list exactly as it was [{Order(12)}]", Order(12) == before);
+        ok &= Check("and the rows are back", tree.VisibleRowNamesForTesting.Contains(two.Match.Text));
+
+        // Now really drop it, at the very top.
+        tree.ClickFilterForTesting(one);
+        tree.ClickFilterForTesting(two, Keys.Control);
+        tree.ClickFilterForTesting(three, Keys.Control);
+        row = tree.RowBoundsForTesting(one);
+        tree.StartDragForTesting(one, new Point(row.Left + 2, row.Top + row.Height / 2));
+        tree.DragToForTesting(new Point(row.Left + 2, rowH / 4));
+        Pump();
+        tree.DropGroupForTesting();
+        Pump();
+
+        string landed = string.Join(" ", roots.Take(3).Select(f => f.Match.Text));
+        ok &= Check($"dropping lands all three together, in the order they were in [{landed}]",
+                    landed == $"{one.Match.Text} {two.Match.Text} {three.Match.Text}");
+        ok &= Check($"the group it dropped is what stays selected [{string.Join(" ", tree.SelectedNamesForTesting)}]",
+                    string.Join(" ", tree.SelectedNamesForTesting) == landed);
+        ok &= Check($"and there is no placeholder left behind [{tree.GhostTextForTesting ?? "none"}]",
+                    tree.GhostTextForTesting is null);
+        ok &= Check($"the list shows what the model says [{string.Join(" ", tree.VisibleRowNamesForTesting.Take(3))}]",
+                    string.Join(" ", tree.VisibleRowNamesForTesting.Take(3)) == landed);
+        return ok;
     }
 
     /// <summary>A filter's checkbox has to keep meaning that filter and nothing else: a parent's pattern is
@@ -2330,6 +2390,300 @@ internal static class SelfTest
         }
     }
 
+    /// <summary>Selecting several filters and acting on all of them at once.
+    ///
+    /// The fixture keeps one filter's children folded away on purpose: a range between two clicks has to
+    /// mean the rows you can see, and a list flattened without regard to that would quietly take filters
+    /// nobody pointed at.</summary>
+    private static bool RunFilterSelectionChecks()
+    {
+        Line("-- selecting several filters --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_sel_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(360, 520),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            // a  b[b1 b2]  c  d  e, with b folded shut.
+            var filters = new FilterCollection();
+            Filter New(string text, Filter? parent = null)
+            {
+                var f = new Filter { Match = new FilterMatch { Text = text } };
+                filters.Add(f, parent);
+                return f;
+            }
+            var a = New("a");
+            var b = New("b");
+            var b1 = New("b1", b);
+            var b2 = New("b2", b);
+            var c = New("c");
+            var d = New("d");
+            var e = New("e");
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+            tree.CollapseForTesting(b);
+            Pump();
+
+            string Selected() => string.Join(" ", tree.SelectedNamesForTesting);
+            string Current() => tree.CurrentFilterForTesting?.Match.Text ?? "-";
+
+            bool ok = Check($"the fixture folds one filter away, so a range can prove it skips what is " +
+                            $"hidden (rows: {string.Join(" ", tree.VisibleRowNamesForTesting)})",
+                            !tree.IsExpandedForTesting(b) && tree.VisibleRowNamesForTesting.Length == 5);
+
+            // ---- the mouse ----
+            tree.ClickFilterForTesting(a);
+            ok &= Check($"a plain click selects one filter [{Selected()}]", Selected() == "a");
+
+            tree.ClickFilterForTesting(c, Keys.Control);
+            ok &= Check($"ctrl+click adds to the selection [{Selected()}]", Selected() == "a c");
+            tree.ClickFilterForTesting(c, Keys.Control);
+            ok &= Check($"and ctrl+click again takes it back out [{Selected()}]", Selected() == "a");
+
+            tree.ClickFilterForTesting(a);
+            tree.ClickFilterForTesting(d, Keys.Shift);
+            ok &= Check($"shift+click takes everything between, and nothing folded away inside it " +
+                        $"[{Selected()}]", Selected() == "a b c d");
+            tree.ClickFilterForTesting(c, Keys.Shift);
+            ok &= Check($"a second shift+click measures from the same anchor, so the range shrinks " +
+                        $"[{Selected()}]", Selected() == "a b c");
+
+            tree.ClickFilterForTesting(e, Keys.Control);
+            tree.ClickFilterForTesting(a, Keys.Control);
+            ok &= Check($"ctrl+click moves the anchor, so a range after it starts there [{Selected()}]",
+                        Selected() == "b c e");
+            tree.ClickFilterForTesting(c, Keys.Shift);
+            ok &= Check($"...like this [{Selected()}]", Selected() == "a b c");
+
+            // A press inside the group must not throw the group away - that press may be the start of a
+            // drag carrying all of it. It only means "just this one" once the button comes up.
+            var row = tree.RowBoundsForTesting(b);
+            tree.MouseDownForTesting(new Point(row.Left + 2, row.Top + row.Height / 2));
+            ok &= Check($"pressing inside the group keeps it, so the whole group can be dragged " +
+                        $"[{Selected()}]", Selected() == "a b c" && Current() == "b");
+            tree.MouseUpForTesting();
+            ok &= Check($"and releasing without dragging collapses it to that one [{Selected()}]",
+                        Selected() == "b");
+
+            // ---- the keyboard ----
+            tree.ClickFilterForTesting(a);
+            tree.PressKeyForTesting(Keys.Down | Keys.Shift);
+            tree.PressKeyForTesting(Keys.Down | Keys.Shift);
+            ok &= Check($"shift+down grows the selection down the list [{Selected()}]", Selected() == "a b c");
+            tree.PressKeyForTesting(Keys.Up | Keys.Shift);
+            ok &= Check($"shift+up shrinks it again [{Selected()}]", Selected() == "a b");
+
+            tree.PressKeyForTesting(Keys.Down | Keys.Control);
+            ok &= Check($"ctrl+down walks the current row and leaves the group alone " +
+                        $"[{Selected()}], current {Current()}", Selected() == "a b" && Current() == "c");
+            tree.PressKeyForTesting(Keys.Space | Keys.Control);
+            ok &= Check($"ctrl+space adds the row it is standing on [{Selected()}]", Selected() == "a b c");
+
+            tree.SelectForTesting(e);
+            ok &= Check($"anything that moves the selection by itself collapses the group [{Selected()}]",
+                        Selected() == "e");
+
+            tree.PressCmdKeyForTesting(Keys.Control | Keys.A);
+            ok &= Check($"ctrl+a takes every row you can see [{Selected()}]", Selected() == "a b c d e");
+
+            // ---- enabling ----
+            tree.ClickFilterForTesting(a);
+            tree.ClickFilterForTesting(c, Keys.Control);
+            tree.ClickFilterForTesting(e, Keys.Control);
+            int changes = 0;
+            tree.FiltersChanged += () => changes++;
+            tree.ToggleCheckboxForTesting(c);
+            ok &= Check($"ticking one of the group ticks all of it " +
+                        $"[{string.Join(" ", filters.EnumerateDepthFirst().Where(f => f.Enabled).Select(f => f.Match.Text))}]",
+                        a.Enabled && c.Enabled && e.Enabled && !b.Enabled && !d.Enabled && !b1.Enabled);
+            ok &= Check($"and reports it once, not once per filter (raised {changes})", changes == 1);
+            ok &= Check("the boxes show what is stored",
+                        tree.IsCheckedForTesting(a) && tree.IsCheckedForTesting(e) && !tree.IsCheckedForTesting(d));
+
+            changes = 0;
+            tree.ClickFilterForTesting(d, onCheckbox: true);
+            tree.ToggleCheckboxForTesting(d);
+            ok &= Check($"ticking a filter outside the group is only ever itself " +
+                        $"({(d.Enabled ? "on" : "off")}, group still {(a.Enabled ? "on" : "off")})",
+                        d.Enabled && a.Enabled && changes == 1);
+            ok &= Check($"...and it becomes the whole selection [{Selected()}]", Selected() == "d");
+
+            // Shift on the checkbox still means the subtree, and must not be read as extending a range.
+            tree.SetAllEnabled(false);
+            tree.ClickFilterForTesting(a);
+            tree.ClickFilterForTesting(b, Keys.Control);
+            tree.ToggleCheckboxForTesting(b, shift: true);
+            ok &= Check($"shift on a checkbox takes the subtrees of the whole group, and does not extend it " +
+                        $"[{Selected()}]",
+                        Selected() == "a b" && a.Enabled && b.Enabled && b1.Enabled && b2.Enabled && !c.Enabled);
+
+            // ---- removing ----
+            tree.ClickFilterForTesting(a);
+            tree.ClickFilterForTesting(b, Keys.Control);
+            tree.ClickFilterForTesting(c, Keys.Control);
+            var labels = new List<string>();
+            void Watch(string label) => labels.Add(label);
+            tree.BeforeFiltersEdited += Watch;
+            changes = 0;
+            tree.PressKeyForTesting(Keys.Delete);
+            tree.BeforeFiltersEdited -= Watch;
+            string left = string.Join(" ", filters.EnumerateDepthFirst().Select(f => f.Match.Text));
+            ok &= Check($"delete takes the whole group, children and all [{left}]", left == "d e");
+            ok &= Check($"as one thing to undo, named for what it did [{string.Join(", ", labels)}]",
+                        labels.Count == 1 && labels[0] == "Remove 3 Filters");
+            ok &= Check($"and reports one change (raised {changes})", changes == 1);
+            ok &= Check($"whatever moved up into its place is selected, so Delete can be pressed again " +
+                        $"[{Selected()}]", Selected() == "d");
+
+            // ---- the search must never leave a group selected out of sight ----
+            tree.ClickFilterForTesting(d);
+            tree.ClickFilterForTesting(e, Keys.Control);
+            tree.SetSearchText("e");
+            tree.PressSearchKeyForTesting(Keys.Enter);
+            ok &= Check($"jumping to a searched-for filter selects just that one [{Selected()}]",
+                        Selected() == "e");
+            tree.HideSearch();
+            Pump();
+
+            // ---- what it looks like ----
+            var painted = new FilterCollection();
+            Filter Add(string text) { var f = new Filter { Match = new FilterMatch { Text = text } }; painted.Add(f); return f; }
+            var p1 = Add("p1"); var p2 = Add("p2"); var p3 = Add("p3"); var p4 = Add("p4");
+            doc.SetFilters(painted);
+            tree.Rebuild();
+            Pump();
+            tree.ClickFilterForTesting(p1);
+            tree.ClickFilterForTesting(p3, Keys.Shift);
+            Pump();
+
+            var area = tree.TreeAreaForTesting;
+            using var shot = Capture(host);
+            int Rule(int y)
+            {
+                int n = 0;
+                for (int x = 0; x < tree.TreeWidthForTesting; x++)
+                {
+                    int hx = area.Left + x, hy = area.Top + y;
+                    if (hx < 0 || hy < 0 || hx >= shot.Width || hy >= shot.Height) continue;
+                    var px = shot.GetPixel(hx, hy);
+                    if (px.R == SystemColors.Highlight.R && px.G == SystemColors.Highlight.G &&
+                        px.B == SystemColors.Highlight.B) n++;
+                }
+                return n;
+            }
+            var r1 = tree.RowBoundsForTesting(p1);
+            var r2 = tree.RowBoundsForTesting(p2);
+            var r4 = tree.RowBoundsForTesting(p4);
+            int wide = tree.TreeWidthForTesting / 2;
+            int top = Rule(r1.Top), inside = Rule(r2.Top), below = Rule(r4.Top);
+            ok &= Check($"a run of selected filters is drawn as one box: a line across the top ({top}px)",
+                        top > wide);
+            ok &= Check($"...none between the rows inside it ({inside}px)", inside <= 4);
+            ok &= Check($"...and none below the last of them ({below}px)", below <= 4);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Changing the appearance of several filters at once. The claim that matters most is the
+    /// negative one: pressing OK must not write a pattern, a description or a kind onto anything, since one
+    /// box cannot stand for what several filters match.</summary>
+    private static bool RunAppearanceChecks()
+    {
+        Line("-- appearance of several filters --");
+        var red = new RgbColor(255, 0, 0);
+        var blue = new RgbColor(0, 0, 255);
+        var green = new RgbColor(0, 128, 0);
+
+        Filter Make(string text, RgbColor? fore, RgbColor? back, bool? bold) => new()
+        {
+            Description = text + " description",
+            Kind = FilterKind.Exclude,
+            Match = { Type = FilterMatchType.Text, Text = text, Regex = true, CaseSensitive = true },
+            Style = { Foreground = fore, Background = back, Bold = bold }
+        };
+
+        // Two agree on everything; the third has a different text colour and is not bold.
+        var f1 = Make("alpha", red, blue, true);
+        var f2 = Make("beta", red, blue, true);
+        var f3 = Make("gamma", green, blue, false);
+        var all = new List<Filter> { f1, f2, f3 };
+        var defaults = new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false);
+
+        using var dlg = new AppearanceDialog(all, all, defaults);
+        dlg.StartPosition = FormStartPosition.Manual;
+        dlg.Location = new Point(0, 0);
+        dlg.Opacity = 0;
+        dlg.Show();
+        Pump();
+
+        var state = dlg.StateForTesting;
+        var swatch = dlg.SwatchTextForTesting;
+        bool ok = Check($"a colour they all share is offered back (background {state.Back})",
+                        state.Back == CheckState.Checked);
+        ok &= Check($"one they do not agree on says so instead [{swatch.Fore}]",
+                    state.Fore == CheckState.Indeterminate && swatch.Fore == "varies");
+        ok &= Check($"and the shared one shows its colour rather than a word [\"{swatch.Back}\"]",
+                    swatch.Back.Length == 0);
+        ok &= Check($"a style they disagree on starts on \"leave unchanged\" (bold choice {state.Bold})",
+                    state.Bold == 0);
+        ok &= Check($"and one none of them sets starts on \"inherit\" (italic choice {state.Italic})",
+                    state.Italic == 3);
+
+        var untouched = dlg.ReadForTesting();
+        ok &= Check("opening it and pressing OK changes nothing at all",
+                    !untouched.ApplyTo(f1) && !untouched.ApplyTo(f3));
+
+        // Now ask for one text colour across all three, and turn bold off everywhere.
+        dlg.SetColorStateForTesting(foreground: true, CheckState.Checked, green);
+        dlg.SetFlagForTesting(bold: true, StyleEdit.Set, false);
+        dlg.ApplyForTesting();
+        Pump();
+        var change = dlg.Change;
+        foreach (var f in all) change.ApplyTo(f);
+
+        ok &= Check($"the colour that was set lands on every one of them " +
+                    $"[{string.Join(" ", all.Select(f => f.Style.Foreground?.ToString() ?? "-"))}]",
+                    all.All(f => f.Style.Foreground == green));
+        ok &= Check("so does the style", all.All(f => f.Style.Bold == false));
+        ok &= Check($"what was left alone is still each filter's own " +
+                    $"[{string.Join(" ", all.Select(f => f.Style.Background?.ToString() ?? "-"))}]",
+                    all.All(f => f.Style.Background == blue) && all.All(f => f.Style.Italic is null));
+        string patterns = string.Join(" ", all.Select(f => f.Match.Text));
+        ok &= Check($"and nothing that is not a style was touched [{patterns}]",
+                    patterns == "alpha beta gamma"
+                    && all.All(f => f.Description.EndsWith(" description", StringComparison.Ordinal))
+                    && all.All(f => f.Kind == FilterKind.Exclude && f.Match.Regex && f.Match.CaseSensitive));
+
+        dlg.Close();
+        Pump();
+        return ok;
+    }
+
     /// <summary>Every option in a dialog should be reachable with Alt+letter, and no two may claim the same
     /// letter - a duplicate silently makes one of them unreachable, which is invisible on screen because
     /// Windows only underlines the letters while Alt is held.</summary>
@@ -2414,6 +2768,11 @@ internal static class SelfTest
         var filter = new Filter { Match = { Text = "sample text" } };
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
                           "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
+
+        var group = new List<Filter> { new() { Match = { Text = "one" } }, new() { Match = { Text = "two" } } };
+        ok &= CheckDialog("appearance", new AppearanceDialog(group, group,
+                              new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false)),
+                          "Text col&or", "&Background", "Bo&ld", "&Italic");
 
         // Those keys are pressed while writing the pattern, so they must not take the keyboard out of the
         // box - the same rule the find bar's two options follow.

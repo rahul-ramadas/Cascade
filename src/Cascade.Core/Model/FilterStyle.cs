@@ -47,3 +47,80 @@ public static class StyleResolver
         return new ResolvedStyle(fg, bg, bold, italic);
     }
 }
+
+/// <summary>What to do with one attribute of a style. <see cref="Leave"/> is the state that only means
+/// anything when several filters are being changed together: each keeps whatever it already had.</summary>
+public enum StyleEdit
+{
+    Leave,
+    Inherit,
+    Set
+}
+
+/// <summary>A change to make to the appearance of one or more filters, attribute by attribute.
+///
+/// Separate from <see cref="FilterStyle"/> because a style says what a filter looks like, while this says
+/// what to <i>do</i> - and "leave it alone" is not a look. Reading it back off a set of filters
+/// (<see cref="Describe"/>) and writing it to them (<see cref="ApplyTo"/>) are the whole of the
+/// several-filters editing rule, so they live here where they can be tested without a dialog.</summary>
+public readonly record struct StyleChange(
+    StyleEdit Foreground, RgbColor ForegroundValue,
+    StyleEdit Background, RgbColor BackgroundValue,
+    StyleEdit Bold, bool BoldValue,
+    StyleEdit Italic, bool ItalicValue)
+{
+    /// <summary>Touches nothing.</summary>
+    public static StyleChange Nothing =>
+        new(StyleEdit.Leave, default, StyleEdit.Leave, default, StyleEdit.Leave, false, StyleEdit.Leave, false);
+
+    /// <summary>What these filters already agree on. An attribute they do not agree on comes back as
+    /// <see cref="StyleEdit.Leave"/>, which is both "they vary" and the right thing to do about it.</summary>
+    public static StyleChange Describe(IEnumerable<Filter> filters)
+    {
+        var all = filters as IReadOnlyCollection<Filter> ?? filters.ToList();
+        if (all.Count == 0) return Nothing;
+
+        var (fore, foreValue) = Common(all.Select(f => f.Style.Foreground));
+        var (back, backValue) = Common(all.Select(f => f.Style.Background));
+        var (bold, boldValue) = Common(all.Select(f => f.Style.Bold));
+        var (italic, italicValue) = Common(all.Select(f => f.Style.Italic));
+        return new StyleChange(fore, foreValue ?? default, back, backValue ?? default,
+                               bold, boldValue ?? false, italic, italicValue ?? false);
+    }
+
+    private static (StyleEdit Edit, T? Value) Common<T>(IEnumerable<T?> values) where T : struct
+    {
+        bool first = true;
+        T? agreed = null;
+        foreach (var v in values)
+        {
+            if (first) { agreed = v; first = false; continue; }
+            if (!Nullable.Equals(agreed, v)) return (StyleEdit.Leave, null);
+        }
+        return agreed is { } set ? (StyleEdit.Set, set) : (StyleEdit.Inherit, null);
+    }
+
+    /// <summary>Writes just the attributes this change speaks for. Returns whether anything moved, so a
+    /// dialog that was opened and dismissed with OK unchanged costs no re-filtering.</summary>
+    public bool ApplyTo(Filter filter)
+    {
+        var style = filter.Style;
+        bool changed = false;
+        if (Wanted(Foreground, ForegroundValue, style.Foreground) is var fg && !Nullable.Equals(style.Foreground, fg))
+        { style.Foreground = fg; changed = true; }
+        if (Wanted(Background, BackgroundValue, style.Background) is var bg && !Nullable.Equals(style.Background, bg))
+        { style.Background = bg; changed = true; }
+        if (Wanted(Bold, BoldValue, style.Bold) is var bold && !Nullable.Equals(style.Bold, bold))
+        { style.Bold = bold; changed = true; }
+        if (Wanted(Italic, ItalicValue, style.Italic) is var italic && !Nullable.Equals(style.Italic, italic))
+        { style.Italic = italic; changed = true; }
+        return changed;
+    }
+
+    private static T? Wanted<T>(StyleEdit edit, T value, T? current) where T : struct => edit switch
+    {
+        StyleEdit.Set => value,
+        StyleEdit.Inherit => null,
+        _ => current
+    };
+}

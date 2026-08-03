@@ -54,8 +54,18 @@ public sealed class FilterTreeControl : UserControl
     private readonly List<TreeNode> _flat = new();
     private readonly HashSet<string> _collapsed = new(); // filter ids the user has collapsed
 
+    // Which filters are selected, held as ids rather than nodes: a rebuild replaces every TreeNode and an
+    // undo replaces every Filter, but both keep the ids, so this is the only handle that survives them.
+    private readonly HashSet<string> _selected = new(StringComparer.Ordinal);
+    private string? _anchorId;          // where a shift-range measures from
+    private bool _selecting;            // this code is moving the current row, so don't collapse the group
+    private TreeNode? _collapseOnUp;    // a plain click inside the group, held until it turns out not to be a drag
+
     private TreeNode? _dragNode;
     private (Filter? Parent, int Index)? _dragOrigin;
+    private List<Filter>? _dragGroup;   // several filters carried at once; _dragNode is then the placeholder
+    private TreeNode? _ghost;
+    private (Filter? Parent, int Index)? _dropAt;
     private int _dragGrabX;
     private int _dragGrabLevel;
     private Point _dragPoint;
@@ -101,6 +111,11 @@ public sealed class FilterTreeControl : UserControl
         _tree.HandleCreated += (_, _) => QueueTooltipUpdate();
 
         _tree.AfterCheck += OnAfterCheck;
+        // The one place a selection made anywhere else collapses back to a single filter: arrow keys, the
+        // tree's own type-ahead, a search jump, a move, a delete's pick of a survivor. Anything that sets
+        // SelectedNode without saying so goes through here, so a group can never be left selected and
+        // scrolled out of sight while the user believes they are working on one filter.
+        _tree.AfterSelect += (_, e) => { if (!_selecting && !_building) SetSingleSelection(e.Node); };
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
         _tree.AfterCollapse += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Add(f.Id); };
         _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node is not null) HandleDoubleClick(e.Node, e.X); };
@@ -109,7 +124,7 @@ public sealed class FilterTreeControl : UserControl
         _tree.BeforeCollapse += (_, e) => { if (_tree.InContentDoubleClick) e.Cancel = true; };
         _tree.MouseDown += OnTreeMouseDown;
         _tree.MouseMove += OnTreeMouseMove;
-        _tree.MouseUp += (_, _) => _pressed = null;
+        _tree.MouseUp += OnTreeMouseUp;
         _tree.KeyDown += OnTreeKeyDown;
         _tree.DrawNode += OnDrawNode;
         _tree.DragEnter += (_, e) => e.Effect = DragDropEffects.Move;
@@ -202,15 +217,155 @@ public sealed class FilterTreeControl : UserControl
     }
 
     private void OnTreeMouseDown(object? sender, MouseEventArgs e)
+        => HandleMouseDown(_tree.GetNodeAt(0, e.Y), e.Location, e.Button, ModifierKeys);
+
+    /// <summary>The whole of what a press means, with the modifier keys passed in rather than read from the
+    /// keyboard - injected keys do not set real key state, so a check could not otherwise reach any of it.</summary>
+    private void HandleMouseDown(TreeNode? node, Point at, MouseButtons button, Keys mods)
     {
         // FullRowSelect is off, so make the whole colored row clickable for selection.
-        var node = _tree.GetNodeAt(0, e.Y);
-        if (node is not null && !ReferenceEquals(_tree.SelectedNode, node)) _tree.SelectedNode = node;
+        _collapseOnUp = null;
+        if (node is not null)
+        {
+            bool onContent = at.X >= ContentLeft(node);
+            bool ctrl = (mods & Keys.Control) == Keys.Control;
+            bool shift = (mods & Keys.Shift) == Keys.Shift;
+
+            // Left of the content is the checkbox and the expander, where Shift already means "and
+            // everything under it" - so extending a selection is offered on the row's own content only, and
+            // the two gestures never have to be told apart by anything but where the pointer is.
+            if (button == MouseButtons.Left && onContent && shift)
+            {
+                SetCurrent(node);
+                SelectRange(node, add: ctrl);
+            }
+            else if (button == MouseButtons.Left && onContent && ctrl)
+            {
+                SetCurrent(node);
+                ToggleSelected(node);
+            }
+            else if (IsSelected(node) && _selected.Count > 1)
+            {
+                // Already part of the group: keep it. A left click on the content may be the start of a
+                // drag carrying the whole group, so collapsing to this one row waits for the button to come
+                // up somewhere it did not turn into a drag; a right click is opening the menu on the group;
+                // a tick applies to all of it.
+                SetCurrent(node);
+                if (button == MouseButtons.Left && onContent) _collapseOnUp = node;
+            }
+            else if (!ReferenceEquals(_tree.SelectedNode, node)) _tree.SelectedNode = node;
+            else SetSingleSelection(node);
+        }
 
         // Anywhere in the row's content can pick the filter up, blank space included. Left of that is the
         // checkbox and the expander, where a press has to keep meaning tick and unfold.
-        _pressed = e.Button == MouseButtons.Left && node is not null && e.X >= ContentLeft(node) ? node : null;
-        _pressedAt = e.Location;
+        _pressed = button == MouseButtons.Left && node is not null && at.X >= ContentLeft(node) ? node : null;
+        _pressedAt = at;
+    }
+
+    private void OnTreeMouseUp(object? sender, MouseEventArgs e)
+    {
+        _pressed = null;
+        // The click did not become a drag, so it meant what a plain click always means.
+        if (_collapseOnUp is { } node) { SetSingleSelection(node); _collapseOnUp = null; }
+    }
+
+    // ---- which filters are selected ----
+
+    /// <summary>The selected filters in list order. Never empty while a row is current: collapsing the
+    /// selection leaves exactly the current row in it, so callers never have to special-case "none".</summary>
+    public IReadOnlyList<Filter> SelectedFilters
+    {
+        get
+        {
+            var list = new List<Filter>();
+            foreach (var n in _flat)
+                if (n.Tag is Filter f && _selected.Contains(f.Id)) list.Add(f);
+            if (list.Count == 0 && SelectedFilter is { } current) list.Add(current);
+            return list;
+        }
+    }
+
+    /// <summary>How many filters are selected, for menu wording and the header's count.</summary>
+    public int SelectedCount => Math.Max(_selected.Count, _tree.SelectedNode is null ? 0 : 1);
+
+    private bool IsSelected(TreeNode? n) => n?.Tag is Filter f && _selected.Contains(f.Id);
+
+    /// <summary>Moves the current row without touching the group - the one path that is allowed to.</summary>
+    private void SetCurrent(TreeNode node)
+    {
+        if (ReferenceEquals(_tree.SelectedNode, node)) return;
+        _selecting = true;
+        try { _tree.SelectedNode = node; }
+        finally { _selecting = false; }
+    }
+
+    private void SetSingleSelection(TreeNode? node)
+    {
+        _selected.Clear();
+        _anchorId = null;
+        if (node?.Tag is Filter f) { _selected.Add(f.Id); _anchorId = f.Id; }
+        SelectionChanged();
+    }
+
+    private void ToggleSelected(TreeNode node)
+    {
+        if (node.Tag is not Filter f) return;
+        if (!_selected.Remove(f.Id)) _selected.Add(f.Id);
+        _anchorId = f.Id;
+        SelectionChanged();
+    }
+
+    /// <summary>Rows in the order they appear, skipping anything folded away inside a collapsed filter -
+    /// which is what a range between two clicks has to mean, the same as in any other list.</summary>
+    private List<TreeNode> VisibleRows()
+    {
+        var rows = new List<TreeNode>();
+        for (var n = _tree.Nodes.Count > 0 ? _tree.Nodes[0] : null; n is not null; n = n.NextVisibleNode) rows.Add(n);
+        return rows;
+    }
+
+    private void SelectRange(TreeNode target, bool add)
+    {
+        var rows = VisibleRows();
+        int to = rows.IndexOf(target);
+        if (to < 0) return;
+        int from = _anchorId is null ? to : rows.FindIndex(n => (n.Tag as Filter)?.Id == _anchorId);
+        if (from < 0) from = to;
+
+        if (!add) _selected.Clear();
+        for (int i = Math.Min(from, to); i <= Math.Max(from, to); i++)
+            if (rows[i].Tag is Filter f) _selected.Add(f.Id);
+        // The anchor stays put, so dragging the range back the other way shrinks it rather than growing it.
+        if (_anchorId is null && target.Tag is Filter t) _anchorId = t.Id;
+        SelectionChanged();
+    }
+
+    public void SelectAllFilters()
+    {
+        _selected.Clear();
+        foreach (var n in VisibleRows())
+            if (n.Tag is Filter f) _selected.Add(f.Id);
+        if (_tree.SelectedNode is null && _flat.Count > 0) SetCurrent(_flat[0]);
+        _anchorId = (_tree.SelectedNode?.Tag as Filter)?.Id;
+        SelectionChanged();
+    }
+
+    /// <summary>Drops ids for filters that are no longer there, and makes sure the current row is in the
+    /// group. Called after anything that rebuilds or re-syncs the tree.</summary>
+    private void ReconcileSelection()
+    {
+        var live = new HashSet<string>(_flat.Select(n => (n.Tag as Filter)?.Id ?? ""), StringComparer.Ordinal);
+        _selected.IntersectWith(live);
+        if (_anchorId is not null && !live.Contains(_anchorId)) _anchorId = null;
+        if (_selected.Count == 0 && _tree.SelectedNode?.Tag is Filter f) { _selected.Add(f.Id); _anchorId ??= f.Id; }
+        SelectionChanged();
+    }
+
+    private void SelectionChanged()
+    {
+        _header.SetSelectionCount(_selected.Count);
+        _tree.Invalidate();
     }
 
     /// <summary>Where the row's own content starts: just right of the checkbox, never over it. The paint
@@ -267,6 +422,7 @@ public sealed class FilterTreeControl : UserControl
             if (top is not null) _tree.TopNode = top;
         }
 
+        ReconcileSelection();
         MeasureDescriptions();
         MeasureCounts();
     }
@@ -298,6 +454,7 @@ public sealed class FilterTreeControl : UserControl
         _flat.Clear();
         FlattenInto(_tree.Nodes);
         if (_collapsed.Count > 0) _collapsed.IntersectWith(_flat.Select(n => (n.Tag as Filter)?.Id ?? ""));
+        ReconcileSelection();
         MeasureDescriptions();
         MeasureCounts();
     }
@@ -370,12 +527,43 @@ public sealed class FilterTreeControl : UserControl
 
     private void OnAfterCheck(object? sender, TreeViewEventArgs e)
     {
-        if (_building || e.Node?.Tag is not Filter f) return;
+        if (_building || e.Node is null) return;
+        HandleCheck(e.Node, (ModifierKeys & Keys.Shift) == Keys.Shift);
+    }
+
+    private void HandleCheck(TreeNode node, bool shift)
+    {
+        if (node.Tag is not Filter f) return;
         // Shift takes everything below along with it. On its own the checkbox stays strictly per filter:
         // a disabled parent still scopes its children (its pattern is required of them either way), so
         // "off here, on underneath" is a real thing to want and cascading by default would destroy it.
-        if ((ModifierKeys & Keys.Shift) == Keys.Shift) { SetSubtreeEnabled(e.Node, e.Node.Checked); return; }
-        f.Enabled = e.Node.Checked;
+        // Ticking one of a group ticks the group; a filter outside it is only ever itself.
+        var targets = IsSelected(node) ? SelectedFilters : new[] { f };
+        SetEnabled(targets, node.Checked, shift);
+    }
+
+    /// <summary>Sets these filters - and optionally everything nested under them - to one state, in place
+    /// and as a single change.
+    ///
+    /// Set, never flip: flipping each node scrambles a subtree that is already in a mix of states and is
+    /// not idempotent. In place, never <see cref="Rebuild"/>: recreating every node blanks the list and
+    /// repopulates it, which is a flash on every tick.</summary>
+    private void SetEnabled(IReadOnlyList<Filter> filters, bool enabled, bool subtree)
+    {
+        if (_doc is null || filters.Count == 0) return;
+        _building = true;
+        _tree.BeginUpdate();
+        try
+        {
+            foreach (var f in filters)
+            {
+                if (NodeFor(f) is not { } node) continue;
+                if (subtree) ApplyEnabled(node, enabled);
+                else { f.Enabled = enabled; node.Checked = enabled; }
+            }
+        }
+        finally { _tree.EndUpdate(); _building = false; }
+        _tree.Invalidate();
         FiltersChanged?.Invoke();
     }
 
@@ -395,12 +583,19 @@ public sealed class FilterTreeControl : UserControl
         {
             // Handled here rather than left to the tree's own Space, so the gesture does not depend on
             // what the native control makes of a modified Space.
-            SetSubtreeEnabled(sel, !sel.Checked);
+            SetSelectedSubtreeEnabled(!sel.Checked);
             e.Handled = e.SuppressKeyPress = true;
         }
-        else if (e.Control && !e.Shift && !e.Alt && e.KeyCode is Keys.Up or Keys.Down or Keys.Left or Keys.Right)
+        else if (e.KeyCode == Keys.Space && e.Control && !e.Shift && !e.Alt && _tree.SelectedNode is { } toggle)
         {
-            MoveSelected(e.KeyCode);
+            ToggleSelected(toggle);
+            e.Handled = e.SuppressKeyPress = true;
+        }
+        else if (!e.Alt && e.KeyCode is Keys.Up or Keys.Down && (e.Control ^ e.Shift))
+        {
+            // Ctrl walks the current row and leaves the group alone; Shift drags the range along with it.
+            // Both are the standard list idiom, which is why filter reordering had to move off Ctrl+arrow.
+            StepCurrent(e.KeyCode == Keys.Down ? 1 : -1, extend: e.Shift);
             e.Handled = e.SuppressKeyPress = true;
         }
         else if (e.KeyCode == Keys.Enter)
@@ -411,14 +606,64 @@ public sealed class FilterTreeControl : UserControl
             // has no use for. SuppressKeyPress cannot help: the discard happens after this returns. Letting
             // the key finish first is what actually silences it. The guard is for a held Enter, which would
             // otherwise queue a second dialog on top of the first.
-            if (!_editPending && SelectedFilter is { } f)
+            if (!_editPending && SelectedFilter is not null)
             {
                 _editPending = true;
-                BeginInvoke(() => { try { EditRequested?.Invoke(f); } finally { _editPending = false; } });
+                BeginInvoke(() => { try { RaiseEditRequest(); } finally { _editPending = false; } });
             }
         }
         else if (e.Control && e.KeyCode == Keys.F) { ShowSearch(); e.Handled = e.SuppressKeyPress = true; }
         else if (e.KeyCode == Keys.Escape && _searchBar.Visible) { HideSearch(); e.Handled = e.SuppressKeyPress = true; }
+    }
+
+    /// <summary>Moves the current row one visible row, either carrying the group's far end with it
+    /// (<paramref name="extend"/>) or leaving the group exactly as it is.</summary>
+    private void StepCurrent(int delta, bool extend)
+    {
+        var rows = VisibleRows();
+        int at = _tree.SelectedNode is null ? -1 : rows.IndexOf(_tree.SelectedNode);
+        int to = at < 0 ? (delta > 0 ? 0 : rows.Count - 1) : at + delta;
+        if (to < 0 || to >= rows.Count) return;
+
+        var target = rows[to];
+        SetCurrent(target);
+        target.EnsureVisible();
+        if (extend) SelectRange(target, add: false);
+        else SelectionChanged();   // the accent has moved even though the group has not
+    }
+
+    /// <summary>Alt+arrow (move/indent/outdent) and Ctrl+A cannot be handled in KeyDown: an Alt keystroke is
+    /// never an input key, so it is answered before the tree is ever asked, and Ctrl+A would otherwise be
+    /// taken by Edit &gt; Select All, which is registered on the menu and fires wherever focus is. Command
+    /// keys are offered to the focused control's ancestors first, so claiming them here beats both.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (_tree.Focused)
+        {
+            switch (keyData)
+            {
+                case Keys.Alt | Keys.Up: MoveSelected(Keys.Up); return true;
+                case Keys.Alt | Keys.Down: MoveSelected(Keys.Down); return true;
+                case Keys.Alt | Keys.Left: MoveSelected(Keys.Left); return true;
+                case Keys.Alt | Keys.Right: MoveSelected(Keys.Right); return true;
+                case Keys.Control | Keys.A: SelectAllFilters(); return true;
+            }
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Test seam for the keys that never reach KeyDown.</summary>
+    internal bool PressCmdKeyForTesting(Keys keys)
+    {
+        var msg = new Message();
+        return ProcessCmdKey(ref msg, keys);
+    }
+
+    /// <summary>Opening the editor is "edit what is selected", which for several filters is their
+    /// appearance and nothing else - the host decides which dialog that is.</summary>
+    private void RaiseEditRequest()
+    {
+        if (SelectedFilter is { } f) EditRequested?.Invoke(f);
     }
 
     private void JumpToMatch(bool fromSelection, bool forward, bool announce)
@@ -440,6 +685,9 @@ public sealed class FilterTreeControl : UserControl
         {
             if (!Matches(_flat[idx], q)) continue;
             _tree.SelectedNode = _flat[idx];
+            // Said outright, not left to the selection changing: landing on the row that was already
+            // current raises nothing, and a group left selected behind a jump is a group Delete would take.
+            SetSingleSelection(_flat[idx]);
             RevealNode(_flat[idx]);
             _tree.Invalidate();
             return;
@@ -571,11 +819,12 @@ public sealed class FilterTreeControl : UserControl
 
     private void OnDrawNode(object? sender, DrawTreeNodeEventArgs e)
     {
+        if (ReferenceEquals(e.Node, _ghost) && e.Node is not null) { DrawGhost(e); return; }
         if (e.Node?.Tag is not Filter f) { e.DrawDefault = true; return; }
         EnsureFonts();
         var g = e.Graphics;
         Rectangle bounds = e.Bounds;
-        bool selected = (e.State & TreeNodeStates.Selected) != 0;
+        bool selected = _selected.Contains(f.Id);
         int h = bounds.Height;
         int contentLeft = ContentLeft(e.Node);
 
@@ -650,13 +899,51 @@ public sealed class FilterTreeControl : UserControl
 
         if (selected)
         {
+            // One outline around a run of selected rows, not a box around each: the shared edges are drawn
+            // only where the run actually ends, so a range reads as one thing.
             using var selPen = new Pen(SystemColors.Highlight);
-            g.DrawRectangle(selPen, 0, bounds.Top, Math.Max(1, rightEdge - 1), h - 1);
+            int right = Math.Max(1, rightEdge - 1);
+            int bottom = bounds.Top + h - 1;
+            g.DrawLine(selPen, 0, bounds.Top, 0, bottom);
+            g.DrawLine(selPen, right, bounds.Top, right, bottom);
+            if (!IsSelected(e.Node.PrevVisibleNode)) g.DrawLine(selPen, 0, bounds.Top, right, bounds.Top);
+            if (!IsSelected(e.Node.NextVisibleNode)) g.DrawLine(selPen, 0, bottom, right, bottom);
+        }
+
+        // Which row the keyboard is standing on. Worth showing only when it is not simply the one selected
+        // filter - and it has to be shown when Ctrl has walked it off the group entirely.
+        if (ReferenceEquals(e.Node, _tree.SelectedNode) && (_selected.Count > 1 || !selected))
+        {
+            using var focusPen = new Pen(SystemColors.Highlight) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
+            int inset = selected ? 2 : 0;
+            g.DrawRectangle(focusPen, inset, bounds.Top + inset,
+                            Math.Max(1, rightEdge - 1 - inset * 2), Math.Max(1, h - 1 - inset * 2));
         }
     }
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
     private static Color ToColor(RgbColor c) => Color.FromArgb(c.R, c.G, c.B);
+
+    /// <summary>The row that stands for a group being carried: faded and italic, so it reads as a thing in
+    /// transit rather than as a filter that has appeared from nowhere.</summary>
+    private void DrawGhost(DrawTreeNodeEventArgs e)
+    {
+        EnsureFonts();
+        var g = e.Graphics;
+        var bounds = e.Bounds;
+        var bg = _settings.Background;
+        using (var b = new SolidBrush(bg))
+            g.FillRectangle(b, e.Node!.Bounds.Left, bounds.Top,
+                            Math.Max(0, _tree.ClientSize.Width - e.Node.Bounds.Left), bounds.Height);
+
+        int textHeight = TextRenderer.MeasureText(g, "Xg", _fItalic, new Size(int.MaxValue, bounds.Height), TextFormatFlags.NoPadding).Height;
+        TextRenderer.DrawText(g, e.Node.Text, _fItalic,
+            new Point(ContentLeft(e.Node), bounds.Top + Math.Max(0, (bounds.Height - textHeight) / 2)),
+            Fade(_settings.Foreground, bg), TextFlags);
+
+        using var pen = new Pen(SystemColors.Highlight) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
+        g.DrawRectangle(pen, 0, bounds.Top, Math.Max(1, _tree.ClientSize.Width - 1), bounds.Height - 1);
+    }
 
     private void EnsureFonts()
     {
@@ -734,6 +1021,7 @@ public sealed class FilterTreeControl : UserControl
 
         var node = _pressed;
         _pressed = null;
+        _collapseOnUp = null;   // it turned into a drag, so the press did not mean "just this one"
         if (_doc is null || node.Tag is not Filter f) return;
 
         BeginDrag(node, f, _pressedAt.X);
@@ -743,13 +1031,48 @@ public sealed class FilterTreeControl : UserControl
 
     private void BeginDrag(TreeNode n, Filter f, int grabX)
     {
-        BeforeFiltersEdited?.Invoke("Move Filter");
-        _dragNode = n;
-        _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc!.Filters.Roots).IndexOf(f));
+        var group = IsSelected(n) && _selected.Count > 1
+            ? FilterCollection.SelectionRoots(SelectedFilters)
+            : new List<Filter> { f };
+
+        BeforeFiltersEdited?.Invoke(Label("Move", group.Count));
         _dragGrabX = grabX;
         _dragGrabLevel = n.Level;
-        _tree.SelectedNode = n;
+
+        if (group.Count > 1) { BeginGroupDrag(group, n); return; }
+
+        _dragNode = n;
+        _dragOrigin = (f.Parent, (f.Parent?.Children ?? _doc!.Filters.Roots).IndexOf(f));
+        SetCurrent(n);
         SetDragSubtreeCollapsed(true);
+        _tree.Invalidate();
+    }
+
+    /// <summary>Several filters are carried as one placeholder row, the way a subtree is carried collapsed:
+    /// a block as tall as the pane leaves almost no rows to aim between, so the filter sits still and then
+    /// leaps several places at once. The real rows come out of the tree for the duration and the model is
+    /// not touched until the drop, so cancelling is just a re-sync of a tree that was never wrong.</summary>
+    private void BeginGroupDrag(List<Filter> group, TreeNode grabbed)
+    {
+        _dragGroup = group;
+        _ghost = new TreeNode($"{group.Count} filters");
+        var nodes = group.Select(NodeFor).OfType<TreeNode>().ToList();
+        if (nodes.Count != group.Count) { _dragGroup = null; _ghost = null; _dragNode = grabbed; return; }
+
+        _building = true;
+        _tree.BeginUpdate();
+        try
+        {
+            var host = grabbed.Parent?.Nodes ?? _tree.Nodes;
+            int at = grabbed.Index;
+            foreach (var n in nodes) n.Remove();
+            host.Insert(Math.Clamp(at, 0, host.Count), _ghost);
+        }
+        finally { _tree.EndUpdate(); _building = false; }
+
+        _dragNode = _ghost;
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
         _tree.Invalidate();
     }
 
@@ -804,12 +1127,57 @@ public sealed class FilterTreeControl : UserControl
 
     internal void ToggleCheckboxForTesting(Filter f) { if (NodeFor(f) is { } n) n.Checked = !n.Checked; }
 
+    /// <summary>Ticks a filter's box with Shift held. The real gesture reads live keyboard state, which
+    /// injected keys do not set, so the modifier is handed to the same handler the event calls.</summary>
+    internal void ToggleCheckboxForTesting(Filter f, bool shift)
+    {
+        if (NodeFor(f) is not { } n) return;
+        _building = true;
+        try { n.Checked = !n.Checked; } finally { _building = false; }
+        HandleCheck(n, shift);
+    }
+
+    // ---- selection seams ----
+
+    /// <summary>The selected filters' patterns, in list order.</summary>
+    internal string[] SelectedNamesForTesting => SelectedFilters.Select(f => f.Match.ToDisplayString()).ToArray();
+
+    internal Filter? CurrentFilterForTesting => SelectedFilter;
+
+    /// <summary>The rows you can actually see, top first - what a range between two clicks means.</summary>
+    internal string[] VisibleRowNamesForTesting => VisibleRows().Select(n => n.Text).ToArray();
+
+    internal void CollapseForTesting(Filter f) { if (NodeFor(f) is { } n) n.Collapse(); }
+
+    /// <summary>A press at this point with these modifiers, through the real handler.</summary>
+    internal void MouseDownForTesting(Point at, Keys mods = Keys.None, MouseButtons button = MouseButtons.Left)
+        => HandleMouseDown(_tree.GetNodeAt(0, at.Y), at, button, mods);
+
+    internal void MouseUpForTesting() => OnTreeMouseUp(_tree, new MouseEventArgs(MouseButtons.Left, 1, 0, 0, 0));
+
+    /// <summary>Presses on a filter's row: on its content by default, or on its checkbox.</summary>
+    internal void ClickFilterForTesting(Filter f, Keys mods = Keys.None, bool onCheckbox = false, MouseButtons button = MouseButtons.Left)
+    {
+        if (NodeFor(f) is not { } n) return;
+        var row = n.Bounds;
+        MouseDownForTesting(new Point(onCheckbox ? Math.Max(0, row.Left - 4) : row.Left + 2, row.Top + row.Height / 2), mods, button);
+        MouseUpForTesting();
+    }
+
+    /// <summary>Whether a placeholder row is standing in for a group being dragged, and what it says.</summary>
+    internal string? GhostTextForTesting => _ghost?.Text;
+
+    internal void CancelDragForTesting() => CancelDrag();
+
+    internal void DropGroupForTesting() { if (_dragGroup is not null) DropGroup(); else ResetDrag(); }
+
     /// <summary>Whether pressing here would pick the filter up, by way of the real handler.</summary>
     internal bool PressArmsDragForTesting(Point at)
     {
-        OnTreeMouseDown(_tree, new MouseEventArgs(MouseButtons.Left, 1, at.X, at.Y, 0));
+        HandleMouseDown(_tree.GetNodeAt(0, at.Y), at, MouseButtons.Left, Keys.None);
         bool armed = _pressed is not null;
         _pressed = null;
+        _collapseOnUp = null;
         return armed;
     }
 
@@ -868,7 +1236,7 @@ public sealed class FilterTreeControl : UserControl
     /// keeps it out of the user's own collapsed set, and dropping puts back exactly what they had open.</summary>
     private void SetDragSubtreeCollapsed(bool collapsed)
     {
-        if (_dragNode is null || _dragNode.Nodes.Count == 0) return;
+        if (_dragNode is null || _dragGroup is not null || _dragNode.Nodes.Count == 0) return;
         _building = true;
         _tree.BeginUpdate();
         try { if (collapsed) _dragNode.Collapse(); else RestoreExpansion(_dragNode); }
@@ -887,7 +1255,7 @@ public sealed class FilterTreeControl : UserControl
 
     private void UpdateDropPosition(Point pt)
     {
-        if (_doc is null || _dragNode?.Tag is not Filter dragged) return;
+        if (_doc is null || _dragNode is null) return;
         _dragPoint = pt;
 
         var rows = new List<TreeNode>();
@@ -911,7 +1279,43 @@ public sealed class FilterTreeControl : UserControl
         var siblings = parent?.Children ?? _doc.Filters.Roots;
         int index = spot.Slot == 0 ? 0 : IndexAfter(siblings, (Filter)rows[spot.Slot - 1].Tag!, spot.Level, rows[spot.Slot - 1].Level);
 
-        MoveLive(dragged, parent, index);
+        if (_dragGroup is not null) MoveGhost(rows, spot, parent, index);
+        else if (_dragNode.Tag is Filter dragged) MoveLive(dragged, parent, index);
+    }
+
+    /// <summary>Carries the placeholder to where the group would land. Only the tree moves - the filters
+    /// themselves are placed once, on the drop, so a drag across a long list re-evaluates nothing.</summary>
+    private void MoveGhost(List<TreeNode> rows, DropSpot spot, Filter? parent, int index)
+    {
+        if (_ghost is null) return;
+        _dropAt = (parent, index);
+
+        var host = parent is null ? _tree.Nodes : NodeFor(parent)?.Nodes;
+        if (host is null) return;
+
+        _building = true;
+        _tree.BeginUpdate();
+        try
+        {
+            // Out first, then measure: the row above is one place further along while the placeholder is
+            // still sitting in front of it.
+            _ghost.Remove();
+            int at = host.Count;
+            if (spot.Slot == 0) at = 0;
+            else
+            {
+                var above = rows[spot.Slot - 1];
+                for (int level = above.Level; level > spot.Level; level--) above = above.Parent!;
+                at = above.Index + 1;
+            }
+            host.Insert(Math.Clamp(at, 0, host.Count), _ghost);
+            NodeFor(parent)?.Expand();
+        }
+        finally { _tree.EndUpdate(); _building = false; }
+
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
+        _tree.Invalidate();
     }
 
     /// <summary>The slot in <paramref name="siblings"/> just after the row above the drop, once that row has
@@ -991,6 +1395,8 @@ public sealed class FilterTreeControl : UserControl
     private void OnDragDrop(object? sender, DragEventArgs e)
     {
         StopAutoScroll();
+        if (_dragGroup is not null) { DropGroup(); return; }
+
         bool moved = _dragNode is not null && _doc is not null && _dragOrigin is { } origin
                      && _dragNode.Tag is Filter f
                      && (!ReferenceEquals(f.Parent, origin.Parent)
@@ -999,10 +1405,31 @@ public sealed class FilterTreeControl : UserControl
         if (moved) FiltersChanged?.Invoke();   // the only re-evaluation: none of the live moves triggered one
     }
 
+    /// <summary>Places the whole group in one go. All or nothing: a drop the model refuses - too deep, or
+    /// into the group's own subtree - leaves the tree exactly as it was.</summary>
+    private void DropGroup()
+    {
+        var group = _dragGroup;
+        var at = _dropAt;
+        bool moved = _doc is not null && group is not null && at is { } spot
+                     && _doc.Filters.MoveMany(group, spot.Parent, spot.Index);
+        ResetDrag();
+        if (group is not null)
+        {
+            _selected.Clear();
+            foreach (var f in group) _selected.Add(f.Id);
+            if (NodeFor(group[0]) is { } first) { SetCurrent(first); first.EnsureVisible(); }
+            _anchorId = group[0].Id;
+            SelectionChanged();
+        }
+        if (moved) FiltersChanged?.Invoke();
+    }
+
     /// <summary>Escape during a drag, or dropping nowhere, puts the filter back where it started.</summary>
     private void CancelDrag()
     {
         StopAutoScroll();
+        if (_dragGroup is not null) { ResetDrag(); return; }   // the model was never touched
         if (_doc is not null && _dragNode?.Tag is Filter f && _dragOrigin is { } origin)
             MoveLive(f, origin.Parent, origin.Index);
         ResetDrag();
@@ -1011,6 +1438,18 @@ public sealed class FilterTreeControl : UserControl
     private void ResetDrag()
     {
         SetDragSubtreeCollapsed(false);
+        if (_dragGroup is not null)
+        {
+            _building = true;
+            _tree.BeginUpdate();
+            try { _ghost?.Remove(); }
+            finally { _tree.EndUpdate(); _building = false; }
+            _ghost = null;
+            _dragGroup = null;
+            _dropAt = null;
+            _dragNode = null;
+            SyncToModel();   // the real rows come back from the model, which is the only record of them
+        }
         _dragNode = null;
         _dragOrigin = null;
         StopAutoScroll();
@@ -1087,9 +1526,12 @@ public sealed class FilterTreeControl : UserControl
         var menu = new ContextMenuStrip();
         menu.Items.Add("Add Filter…", null, (_, _) => AddRequested?.Invoke(null));
         menu.Items.Add("Add Child Filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
-        menu.Items.Add("Edit Filter…", null, (_, _) => { if (SelectedFilter is { } f) EditRequested?.Invoke(f); });
-        menu.Items.Add(new ToolStripMenuItem("Duplicate Filter", null, (_, _) => DuplicateSelected()) { ShortcutKeyDisplayString = "Ctrl+D" });
-        menu.Items.Add("Remove Filter", null, (_, _) => RemoveSelected());
+        var edit = new ToolStripMenuItem("Edit Filter…", null, (_, _) => RaiseEditRequest());
+        var duplicate = new ToolStripMenuItem("Duplicate Filter", null, (_, _) => DuplicateSelected()) { ShortcutKeyDisplayString = "Ctrl+D" };
+        var remove = new ToolStripMenuItem("Remove Filter", null, (_, _) => RemoveSelected());
+        menu.Items.Add(edit);
+        menu.Items.Add(duplicate);
+        menu.Items.Add(remove);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Find Next Match", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, true); }) { ShortcutKeyDisplayString = "F4" });
         menu.Items.Add(new ToolStripMenuItem("Find Previous Match", null, (_, _) => { if (SelectedFilter is { } f) FindFilterRequested?.Invoke(f, false); }) { ShortcutKeyDisplayString = "Shift+F4" });
@@ -1100,54 +1542,91 @@ public sealed class FilterTreeControl : UserControl
         menu.Items.Add("Enable All", null, (_, _) => SetAllEnabled(true));
         menu.Items.Add("Disable All", null, (_, _) => SetAllEnabled(false));
         menu.Items.Add("Remove All", null, (_, _) => RemoveAll());
+        // The group can reach past the row that was right-clicked, so the menu says what it will act on.
+        menu.Opening += (_, _) =>
+        {
+            int n = SelectedCount;
+            edit.Text = n > 1 ? $"Edit Appearance of {n} Filters…" : "Edit Filter…";
+            duplicate.Text = n > 1 ? $"Duplicate {n} Filters" : "Duplicate Filter";
+            remove.Text = n > 1 ? $"Remove {n} Filters" : "Remove Filter";
+        };
         return menu;
     }
 
     public void RemoveSelected()
     {
-        if (_doc is null || SelectedFilter is not { } f) return;
-        BeforeFiltersEdited?.Invoke("Remove Filter");
-        var node = _flat.FirstOrDefault(n => ReferenceEquals(n.Tag, f));
-        _doc.Filters.Remove(f);
+        if (_doc is null) return;
+        var roots = FilterCollection.SelectionRoots(SelectedFilters);
+        if (roots.Count == 0) return;
+        BeforeFiltersEdited?.Invoke(Label("Remove", roots.Count));
 
-        if (node is null) Rebuild();   // not on screen for some reason; fall back to a full refresh
+        var rows = VisibleRows();
+        var nodes = roots.Select(NodeFor).OfType<TreeNode>().ToList();
+        int landing = nodes.Count == 0 ? -1 : nodes.Min(n => { int i = rows.IndexOf(n); return i < 0 ? int.MaxValue : i; });
+        foreach (var f in roots) _doc.Filters.Remove(f);
+
+        if (nodes.Count != roots.Count) Rebuild();   // something was not on screen; fall back to a full refresh
         else
         {
-            // Drop just this node (its children go with it) instead of calling Rebuild(). Rebuild clears
-            // and recreates every node, so the whole list blanks and repopulates - a visible flash on every
-            // delete. Removing one node leaves the rest of the tree, its scroll position and its expansion
-            // state completely untouched.
-            var next = node.NextNode ?? node.PrevNode ?? node.Parent;
+            // Drop just these nodes (their children go with them) instead of calling Rebuild(). Rebuild
+            // clears and recreates every node, so the whole list blanks and repopulates - a visible flash on
+            // every delete. Removing nodes leaves the rest of the tree, its scroll position and its
+            // expansion state completely untouched.
             _building = true;
             _tree.BeginUpdate();
-            node.Remove();
+            foreach (var n in nodes) n.Remove();
             _flat.Clear();
             FlattenInto(_tree.Nodes);
             _tree.EndUpdate();
             _building = false;
-            // Keep a sensible selection so repeated Delete presses keep working without re-clicking.
-            if (next is not null) _tree.SelectedNode = next;
+
+            // Whatever moved up into the first deleted row's place, so repeated Delete presses keep working.
+            var left = VisibleRows();
+            if (left.Count > 0 && landing >= 0)
+                _tree.SelectedNode = left[Math.Clamp(landing, 0, left.Count - 1)];
         }
 
+        ReconcileSelection();
         FiltersChanged?.Invoke();
     }
 
-    /// <summary>Ctrl+Up/Down reorders the selected filter among its siblings; Ctrl+Right nests it under the
-    /// filter above it, Ctrl+Left moves it back out one level.</summary>
+    private static string Label(string verb, int count) => count == 1 ? $"{verb} Filter" : $"{verb} {count} Filters";
+
+    /// <summary>Alt+Up/Down reorders the selected filters among their siblings; Alt+Right nests them under
+    /// the filter above, Alt+Left moves them back out one level.
+    ///
+    /// The order the group is walked in is what keeps it in one piece: moving down or out has to start from
+    /// the bottom of the group, since each filter lands where the one below it used to be.</summary>
     public void MoveSelected(Keys key)
     {
-        if (_doc is null || SelectedFilter is not { } f) return;
-        BeforeFiltersEdited?.Invoke("Move Filter");
-        bool moved = key switch
+        if (_doc is null) return;
+        var roots = FilterCollection.SelectionRoots(SelectedFilters);
+        if (roots.Count == 0) return;
+        BeforeFiltersEdited?.Invoke(Label("Move", roots.Count));
+
+        bool reverse = key is Keys.Down or Keys.Left;
+        var order = reverse ? Enumerable.Reverse(roots) : roots;
+        bool moved = false;
+        foreach (var f in order)
         {
-            Keys.Up => _doc.Filters.Reorder(f, -1),
-            Keys.Down => _doc.Filters.Reorder(f, +1),
-            Keys.Right => _doc.Filters.Indent(f),
-            Keys.Left => _doc.Filters.Outdent(f),
-            _ => false
-        };
+            moved |= key switch
+            {
+                Keys.Up => _doc.Filters.Reorder(f, -1),
+                Keys.Down => _doc.Filters.Reorder(f, +1),
+                Keys.Right => _doc.Filters.Indent(f),
+                Keys.Left => _doc.Filters.Outdent(f),
+                _ => false
+            };
+        }
         if (!moved) return;   // already at an end / top level: leave the tree alone
-        SyncMovedNode(f);
+
+        if (roots.Count == 1) SyncMovedNode(roots[0]);
+        else
+        {
+            SyncToModel();
+            if (NodeFor(roots[0]) is { } first) { SetCurrent(first); first.EnsureVisible(); }
+            ReconcileSelection();
+        }
         // Nesting changes what a filter matches, and sibling order decides which filter colours a line, so
         // the snapshot has to be rebuilt either way.
         FiltersChanged?.Invoke();
@@ -1183,18 +1662,32 @@ public sealed class FilterTreeControl : UserControl
         node.EnsureVisible();
     }
 
-    /// <summary>Copies the selected filter and everything under it in as the next sibling. The copy gets
-    /// fresh ids: it is a new filter that happens to look like an existing one, and sharing ids would make
-    /// the two indistinguishable to the list, the presets and the match cache.</summary>
+    /// <summary>Copies the selected filters and everything under them in as their own next siblings. The
+    /// copies get fresh ids: they are new filters that happen to look like existing ones, and sharing ids
+    /// would make the two indistinguishable to the list, the presets and the match cache.</summary>
     public void DuplicateSelected()
     {
-        if (_doc is null || SelectedFilter is not { } f) return;
-        BeforeFiltersEdited?.Invoke("Duplicate Filter");
-        var copy = f.Clone();
-        var siblings = f.Parent?.Children ?? _doc.Filters.Roots;
-        _doc.Filters.Add(copy, f.Parent, siblings.IndexOf(f) + 1);
+        if (_doc is null) return;
+        var roots = FilterCollection.SelectionRoots(SelectedFilters);
+        if (roots.Count == 0) return;
+        BeforeFiltersEdited?.Invoke(Label("Duplicate", roots.Count));
+
+        var copies = new List<Filter>();
+        foreach (var f in roots)
+        {
+            var copy = f.Clone();
+            var siblings = f.Parent?.Children ?? _doc.Filters.Roots;
+            _doc.Filters.Add(copy, f.Parent, siblings.IndexOf(f) + 1);
+            copies.Add(copy);
+        }
         SyncToModel();
-        if (NodeFor(copy) is { } node) { _tree.SelectedNode = node; node.EnsureVisible(); }
+
+        // The copies are what the user is now working on, the way a paste leaves what was pasted selected.
+        _selected.Clear();
+        foreach (var c in copies) _selected.Add(c.Id);
+        if (NodeFor(copies[0]) is { } node) { SetCurrent(node); node.EnsureVisible(); }
+        _anchorId = copies[0].Id;
+        SelectionChanged();
         FiltersChanged?.Invoke();
     }
 
@@ -1233,25 +1726,9 @@ public sealed class FilterTreeControl : UserControl
         FiltersChanged?.Invoke();
     }
 
-    /// <summary>Sets the selected filter and everything nested under it to one state - the Shift+Space and
-    /// Shift+click gesture, and the menu entries for it.</summary>
-    public void SetSelectedSubtreeEnabled(bool enabled)
-    {
-        if (_tree.SelectedNode is { } n) SetSubtreeEnabled(n, enabled);
-    }
-
-    private void SetSubtreeEnabled(TreeNode root, bool enabled)
-    {
-        if (_doc is null) return;
-        // Same in-place rule as enable/disable-all: only the checkboxes change, so mutate them rather than
-        // rebuilding, and let _building swallow the per-node AfterCheck so this raises one change, not many.
-        _building = true;
-        _tree.BeginUpdate();
-        try { ApplyEnabled(root, enabled); }
-        finally { _tree.EndUpdate(); _building = false; }
-        _tree.Invalidate();
-        FiltersChanged?.Invoke();
-    }
+    /// <summary>Sets the selected filters and everything nested under them to one state - the Shift+Space
+    /// and Shift+click gesture, and the menu entries for it.</summary>
+    public void SetSelectedSubtreeEnabled(bool enabled) => SetEnabled(SelectedFilters, enabled, subtree: true);
 
     private static void ApplyEnabled(TreeNode node, bool enabled)
     {

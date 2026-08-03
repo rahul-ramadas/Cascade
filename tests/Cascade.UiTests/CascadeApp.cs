@@ -297,6 +297,18 @@ internal sealed class CascadeApp : IDisposable
     public bool WaitForFilterCount(int expected, int ms = 5000)
         => Retry.WhileFalse(() => RootFilterNames().Length == expected, TimeSpan.FromMilliseconds(ms), Poll).Result;
 
+    /// <summary>What the filter list's header says about the selection. A tree reports one selected item to
+    /// UI Automation whatever the list is really holding, so the header's own name is the only place a
+    /// group is visible from outside the app - and it is there so the user can see it too. Read off the
+    /// tree's own parent rather than the window: a whole-window walk visits every log row.</summary>
+    public string? SelectionNote()
+        => Tree().Parent?.FindAllChildren().Select(e => e.Name ?? "")
+                 .FirstOrDefault(n => n.StartsWith("Filter list", StringComparison.Ordinal));
+
+    public bool WaitForSelectionCount(int expected, int ms = 4000)
+        => Retry.WhileFalse(() => SelectionNote() == $"Filter list: {expected} selected",
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
+
     /// <summary>The lowest 1-based file line currently on screen, or -1 when nothing is visible.</summary>
     public int FirstVisibleLine()
     {
@@ -434,6 +446,12 @@ internal sealed class CascadeApp : IDisposable
     public void CtrlKey(AutomationElement target, VirtualKeyShort key) => SendKey(target, key, VirtualKeyShort.CONTROL);
     public void Key(AutomationElement target, VirtualKeyShort key) => SendKey(target, key);
     public void ShiftKey(AutomationElement target, VirtualKeyShort key) => SendKey(target, key, VirtualKeyShort.SHIFT);
+
+    /// <summary>Alt has to go through the message loop: an Alt keystroke is never an "input key", so
+    /// WinForms answers it in ProcessCmdKey before the control's KeyDown is ever reached - which a sent
+    /// message skips entirely.</summary>
+    public void AltKey(AutomationElement target, VirtualKeyShort key)
+        => SendKeyAsDialogKey(target, key, VirtualKeyShort.ALT);
 
     /// <summary>Puts text into an edit control through its value pattern, which needs no focus at all.</summary>
     public void SetText(AutomationElement edit, string text)

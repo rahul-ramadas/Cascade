@@ -437,16 +437,28 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(Mi("&Add Filter…", (_, _) => AddFilter(null)));
         filters.DropDownItems.Add(Mi("Add &Child Filter…", (_, _) => AddFilter(_filterTree.SelectedFilter)));
         filters.DropDownItems.Add(Mi("New Filter from Se&lection…", (_, _) => NewFilterFromSelection(), Keys.Control | Keys.N));
-        filters.DropDownItems.Add(Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); }));
-        filters.DropDownItems.Add(Mi("Duplica&te Filter", (_, _) => _filterTree.DuplicateSelected(), Keys.Control | Keys.D));
-        filters.DropDownItems.Add(Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected()));
+        var miEdit = Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); });
+        var miDuplicate = Mi("Duplica&te Filter", (_, _) => _filterTree.DuplicateSelected(), Keys.Control | Keys.D);
+        var miRemove = Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected());
+        filters.DropDownItems.Add(miEdit);
+        filters.DropDownItems.Add(miDuplicate);
+        filters.DropDownItems.Add(miRemove);
         filters.DropDownItems.Add(new ToolStripSeparator());
         // The keys themselves are handled by the filter tree (they only apply while it has focus), so these
         // just advertise them.
-        filters.DropDownItems.Add(Hint("Move &Up", "Ctrl+Up", () => _filterTree.MoveSelected(Keys.Up)));
-        filters.DropDownItems.Add(Hint("Move &Down", "Ctrl+Down", () => _filterTree.MoveSelected(Keys.Down)));
-        filters.DropDownItems.Add(Hint("&Indent (nest under filter above)", "Ctrl+Right", () => _filterTree.MoveSelected(Keys.Right)));
-        filters.DropDownItems.Add(Hint("&Outdent", "Ctrl+Left", () => _filterTree.MoveSelected(Keys.Left)));
+        filters.DropDownItems.Add(Hint("Move &Up", "Alt+Up", () => _filterTree.MoveSelected(Keys.Up)));
+        filters.DropDownItems.Add(Hint("Move &Down", "Alt+Down", () => _filterTree.MoveSelected(Keys.Down)));
+        filters.DropDownItems.Add(Hint("&Indent (nest under filter above)", "Alt+Right", () => _filterTree.MoveSelected(Keys.Right)));
+        filters.DropDownItems.Add(Hint("&Outdent", "Alt+Left", () => _filterTree.MoveSelected(Keys.Left)));
+        // What the commands above will act on. Several filters can be selected and scrolled out of sight,
+        // so the menu says how many rather than leaving Remove to be found out about afterwards.
+        filters.DropDownOpening += (_, _) =>
+        {
+            int n = _filterTree.SelectedCount;
+            miEdit.Text = n > 1 ? $"&Edit Appearance of {n} Filters…" : "&Edit Filter…";
+            miDuplicate.Text = n > 1 ? $"Duplica&te {n} Filters" : "Duplica&te Filter";
+            miRemove.Text = n > 1 ? $"&Remove {n} Filters" : "&Remove Filter";
+        };
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
         filters.DropDownItems.Add(Mi("Find Pre&vious Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
@@ -884,6 +896,7 @@ public sealed class MainForm : Form
 
     private void EditFilter(Filter filter)
     {
+        if (_filterTree.SelectedCount > 1) { EditAppearance(_filterTree.SelectedFilters); return; }
         using var dlg = new FilterEditDialog(filter, isNew: false, _doc.Filters.EnumerateDepthFirst().ToList(),
                                              filter.Parent, ViewDefaults);
         _history.Begin("Edit Filter", _doc.Filters);
@@ -893,6 +906,22 @@ public sealed class MainForm : Form
             OnFiltersChanged();
         }
         else _history.Abandon();
+    }
+
+    /// <summary>Appearance, and only appearance, for a group of filters: a pattern belongs to one filter, so
+    /// there is nothing for the rest of the editor to show.</summary>
+    private void EditAppearance(IReadOnlyList<Filter> filters)
+    {
+        if (filters.Count == 0) return;
+        using var dlg = new AppearanceDialog(filters, _doc.Filters.EnumerateDepthFirst().ToList(), ViewDefaults);
+        _history.Begin(filters.Count == 1 ? "Edit Filter" : $"Edit {filters.Count} Filters", _doc.Filters);
+        bool changed = false;
+        if (dlg.ShowDialog(this) == DialogResult.OK)
+            foreach (var f in filters) changed |= dlg.Change.ApplyTo(f);
+
+        if (!changed) { _history.Abandon(); return; }
+        _filterTree.SyncToModel();
+        OnFiltersChanged();
     }
 
     /// <summary>What the log view draws with when no filter says otherwise - the bottom of the inheritance
