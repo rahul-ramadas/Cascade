@@ -2046,7 +2046,7 @@ internal static class SelfTest
     {
         Line("-- suggested filter colours --");
 
-        bool ok = Check("there are enough of them for a filter file of hundreds", LuckyColors.Count >= 800,
+        bool ok = Check("there are enough of them for a filter file of hundreds", LuckyColors.Count >= 100,
                         LuckyColors.Count.ToString());
 
         double worstContrast = double.MaxValue;
@@ -2060,24 +2060,50 @@ internal static class SelfTest
         ok &= Check("every pair is readable, by the ratio and not by eye", worstContrast >= 4.5,
                     $"worst is {worstContrast:0.0}:1 at {worstAt}");
 
-        // No two identical entries: a ring that repeats itself would hand back a colour it had already
+        // No two identical entries: a set that repeats itself would hand back a colour it had already
         // offered while claiming to have moved on.
         int duplicates = LuckyColors.Count -
                          Enumerable.Range(0, LuckyColors.Count).Select(i => LuckyColors.At(i).Back).Distinct().Count();
         ok &= Check("and no two entries are the same colour", duplicates == 0, $"{duplicates} repeats");
 
-        double neighbours = double.MaxValue;
+        // The whole point of packing the set offline: NOTHING in it looks like anything else in it. This is
+        // the check the old weighted-RGB metric passed while the palette visibly held duplicates.
+        double closest = double.MaxValue;
+        var alike = (a: 0, b: 0);
         for (int i = 0; i < LuckyColors.Count; i++)
-            neighbours = Math.Min(neighbours, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 1).Back));
-        ok &= Check("consecutive presses give visibly different colours", neighbours > 120,
-                    $"nearest neighbours are {neighbours:0} apart");
+            for (int j = i + 1; j < LuckyColors.Count; j++)
+            {
+                double d = LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(j).Back);
+                if (d < closest) { closest = d; alike = (i, j); }
+            }
+        ok &= Check("and no two of them look alike", closest >= 11,
+                    $"#{LuckyColors.At(alike.a).Back.ToHex()} and #{LuckyColors.At(alike.b).Back.ToHex()} " +
+                    $"are {closest:0.0} apart");
+
+        // Consecutive PRESSES, which walk the set by a stride - not neighbours in it, which are sorted by
+        // hue and so are meant to be similar.
+        var loner = new Filter();
+        double presses = double.MaxValue;
+        int step = -1;
+        for (int i = 0; i < LuckyColors.Count; i++)
+        {
+            int then = LuckyColors.Next(step, Array.Empty<Filter>(), loner);
+            if (i > 0) presses = Math.Min(presses, LuckyColors.Distance(LuckyColors.At(step).Back, LuckyColors.At(then).Back));
+            step = then;
+        }
+        ok &= Check("consecutive presses give visibly different colours", presses > 20,
+                    $"nearest two in a row are {presses:0.0} apart");
 
         // Two presses apart matters as much: the button is pressed until something is liked, so a run of
         // three must not go there and back.
         double twoApart = double.MaxValue;
         for (int i = 0; i < LuckyColors.Count; i++)
-            twoApart = Math.Min(twoApart, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(i + 2).Back));
-        ok &= Check("and so do the ones two presses apart", twoApart > 100, $"nearest are {twoApart:0} apart");
+        {
+            int one = LuckyColors.Next(i, Array.Empty<Filter>(), loner);
+            int two = LuckyColors.Next(one, Array.Empty<Filter>(), loner);
+            twoApart = Math.Min(twoApart, LuckyColors.Distance(LuckyColors.At(i).Back, LuckyColors.At(two).Back));
+        }
+        ok &= Check("and so do the ones two presses apart", twoApart > 12, $"nearest are {twoApart:0.0} apart");
 
         // Colours already in use are skipped.
         var mine = new Filter();
@@ -2101,15 +2127,15 @@ internal static class SelfTest
         // something none of them is wearing. Disabled filters keep their colours and will be switched back
         // on, so they count exactly as much as enabled ones.
         var many = new List<Filter>();
-        for (int i = 0; i < 160; i++)
-            many.Add(new Filter { Enabled = false, Style = { Background = LuckyColors.At(i * 5).Back } });
+        for (int i = 0; i < 60; i++)
+            many.Add(new Filter { Enabled = false, Style = { Background = LuckyColors.At(i * 2).Back } });
         var offered = new List<RgbColor>();
         int walk = -1;
         for (int i = 0; i < 20; i++) { walk = LuckyColors.Next(walk, many, mine); offered.Add(LuckyColors.At(walk).Back); }
         double nearestTaken = offered.Min(o => many.Min(f => LuckyColors.Distance(f.Style.Background!.Value, o)));
-        ok &= Check("with a hundred and sixty filters coloured it still finds room",
-                    nearestTaken > 40 && offered.Distinct().Count() == offered.Count,
-                    $"nearest offered is {nearestTaken:0} from one in use, {offered.Distinct().Count()} of 20 distinct");
+        ok &= Check("with sixty filters coloured it still finds room",
+                    nearestTaken > 11 && offered.Distinct().Count() == offered.Count,
+                    $"nearest offered is {nearestTaken:0.0} from one in use, {offered.Distinct().Count()} of 20 distinct");
 
         // Down to almost nothing acceptable it still has to keep moving, not stick on one colour.
         var crowded = new List<Filter>();
@@ -2123,7 +2149,7 @@ internal static class SelfTest
 
         // With every colour but one spoken for it must offer that one - not simply the next along, which
         // would be a plain duplicate of a colour already on screen.
-        const int roomy = 500;
+        const int roomy = 55;
         var all = new List<Filter>();
         for (int i = 0; i < LuckyColors.Count; i++)
             if (i != roomy) all.Add(new Filter { Style = { Background = LuckyColors.At(i).Back } });
@@ -3891,7 +3917,7 @@ internal static class SelfTest
         };
         var child = new Filter { Match = { Text = "disk" } };
         // Wearing a colour the ring actually offers, so there is something for the palette to leave out. The
-        // parent's own colours are picked for the inheritance checks and need not be in the ring at all.
+        // parent's own colours are picked for the inheritance checks and need not be in the palette at all.
         var worn = new Filter { Match = { Text = "net" }, Style = { Background = LuckyColors.At(0).Back } };
 
         using var dlg = new FilterEditDialog(child, isNew: true, new[] { parent, worn }, parent, defaults)
@@ -3943,17 +3969,16 @@ internal static class SelfTest
         var free = dlg.PaletteForTesting;
         ok &= Check("the palette leaves out what is already worn",
                     free.Count is > 20 && free.Count < LuckyColors.Palette.Count,
-                    $"{free.Count} of {LuckyColors.Palette.Count} ({LuckyColors.Count} in the ring)");
+                    $"{free.Count} of {LuckyColors.Palette.Count}");
         RgbColor[] inUse = [navy, yellow, LuckyColors.At(0).Back];
         double nearest = free.Count == 0 ? 0 : free.Min(f => inUse.Min(u => LuckyColors.Distance(f.Back, u)));
-        ok &= Check("and offers nothing close to a colour in use", nearest > 42, $"{nearest:F0} away at the closest");
+        ok &= Check("and offers nothing close to a colour in use", nearest > 11, $"{nearest:F1} away at the closest");
         var lucky = LuckyColors.At(LuckyColors.Next(-1, new[] { parent, worn }, child));
         ok &= Check("and covers what the lucky button would hand out next",
-                    free.Any(f => LuckyColors.Distance(f.Back, lucky.Back) <= 42), $"#{lucky.Back.ToHex()}");
+                    free.Any(f => LuckyColors.Distance(f.Back, lucky.Back) <= 11), $"#{lucky.Back.ToHex()}");
 
-        // The ring sweeps 143 hues, so neighbours in it are all but the same colour. That is right for a
-        // button that steps a long way each press and useless in a grid, where a screenful of near-identical
-        // swatches is no choice at all.
+        // The set is packed offline so that nothing in it looks like anything else in it; taking entries
+        // away cannot break that, so it holds for whatever is left once the worn ones go.
         double closest = double.MaxValue;
         var worstPair = (a: 0, b: 0);
         for (int i = 0; i < free.Count; i++)
@@ -3962,9 +3987,9 @@ internal static class SelfTest
                 double d = LuckyColors.Distance(free[i].Back, free[j].Back);
                 if (d < closest) { closest = d; worstPair = (i, j); }
             }
-        ok &= Check("and no two colours in it look alike", free.Count < 2 || closest > 42,
+        ok &= Check("and no two colours in it look alike", free.Count < 2 || closest >= 11,
                     free.Count < 2 ? "too few to say"
-                                   : $"#{free[worstPair.a].Back.ToHex()} and #{free[worstPair.b].Back.ToHex()} are {closest:F0} apart");
+                                   : $"#{free[worstPair.a].Back.ToHex()} and #{free[worstPair.b].Back.ToHex()} are {closest:F1} apart");
 
         // Worked out once, so wearing a colour can only ever take an entry away. Thinning per call instead
         // would let an excluded colour promote a neighbour and shuffle everything after it. Measured
