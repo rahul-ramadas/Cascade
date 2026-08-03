@@ -4053,7 +4053,10 @@ internal static class SelfTest
 
         // Everything fits, so there must be nothing to scroll - a viewport a couple of pixels short of the
         // content leaves a scrollbar with a hair of travel in it, which reads as "there is more below".
-        using (var everything = new PaletteDialog(free, "sample text", null)
+        // The rows are asked for explicitly rather than left to the screen: how much of the palette fits by
+        // default depends on how tall the monitor is, and CI's is short.
+        var twoRows = free.Take(10).ToList();
+        using (var everything = new PaletteDialog(twoRows, "sample text", null, visibleRows: 2)
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(0, 0),
@@ -4064,7 +4067,7 @@ internal static class SelfTest
             Pump();
             ok &= Check("with room for every colour the palette does not scroll at all",
                         !everything.ScrollsForTesting && everything.ScrollRangeForTesting == 0,
-                        $"{everything.CountForTesting} colours, {everything.ScrollRangeForTesting}px of travel");
+                        $"{everything.CountForTesting} colours in 2 rows, {everything.ScrollRangeForTesting}px of travel");
             ok &= Check("and shows a whole number of rows",
                         everything.ViewportForTesting % everything.CellForTesting(0).Height == 0,
                         $"viewport {everything.ViewportForTesting}px, a row is {everything.CellForTesting(0).Height}px");
