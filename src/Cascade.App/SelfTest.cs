@@ -81,6 +81,8 @@ internal static class SelfTest
             ok &= Timed("line spacing", RunLineSpacingChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
+            ok &= Timed("filter expand", RunFilterExpandChecks);
+            ok &= Timed("drag nesting", RunDragNestingChecks);
             ok &= Timed("filter enable", RunFilterEnableChecks);
             ok &= Timed("filter selection", RunFilterSelectionChecks);
             ok &= Timed("appearance", RunAppearanceChecks);
@@ -1717,6 +1719,235 @@ internal static class SelfTest
         ok &= Check("the first gap of all can only be top level",
                     At(-5, indent * 4).Level == 0 && At(-5, 0).Slot == 0);
         return ok;
+    }
+
+    /// <summary>Expanding a filter leaves the list where it was.
+    ///
+    /// Left to itself the tree scrolls on every expansion, to fit as much of the newly revealed subtree on
+    /// screen as it can - so the row being looked at is yanked somewhere else, and during a drag a drop
+    /// that nests into a folded filter moves the list out from under the pointer. See BufferedTreeView.
+    /// The fixture deliberately gives the parent more children than there is room for below it, or the
+    /// tree would have had no reason to scroll and the checks would pass by themselves.</summary>
+    private static bool RunFilterExpandChecks()
+    {
+        Line("-- expanding a filter --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_expand_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(300, 520),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            var filters = new FilterCollection();
+            for (int i = 0; i < 40; i++)
+                filters.Roots.Add(new Filter { Match = new FilterMatch { Text = $"f{i:00}" } });
+            var parent = filters.Roots[5];
+            for (int c = 0; c < 20; c++)
+            {
+                var kid = new Filter { Match = new FilterMatch { Text = $"kid{c:00}" } };
+                filters.Roots.Add(kid);
+                filters.Move(kid, parent, parent.Children.Count);
+            }
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            int rows = tree.TreeHeightForTesting / tree.RowHeightForTesting;
+            bool ok = Check($"the parent has more children ({parent.Children.Count}) than the pane has rows ({rows}), " +
+                            "so the tree has a reason to scroll",
+                            parent.Children.Count > rows);
+            if (!ok) return false;
+
+            // Folded, with the parent one row down from the top: the tree used to pull it up to the top.
+            tree.CollapseForTesting(parent);
+            Pump();
+            tree.ScrollToForTesting(filters.Roots[4]);
+            Pump();
+            string before = tree.TopFilterForTesting?.Match.Text ?? "?";
+            tree.ExpandForTesting(parent);
+            Pump();
+            string after = tree.TopFilterForTesting?.Match.Text ?? "?";
+            ok &= Check($"unfolding a filter on screen does not scroll the list [{before} -> {after}]", before == after);
+            ok &= Check("and it really did unfold", tree.IsExpandedForTesting(parent));
+
+            // Folded, with the parent above the view: the tree used to jump the whole way to its subtree.
+            tree.CollapseForTesting(parent);
+            Pump();
+            tree.ScrollToForTesting(filters.Roots[20]);
+            Pump();
+            before = tree.TopFilterForTesting?.Match.Text ?? "?";
+            tree.ExpandForTesting(parent);
+            Pump();
+            after = tree.TopFilterForTesting?.Match.Text ?? "?";
+            ok &= Check($"nor does unfolding one that is above the view [{before} -> {after}]", before == after);
+
+            // Reaching a filter inside a folded subtree still has to open it and go there.
+            tree.CollapseForTesting(parent);
+            Pump();
+            tree.ScrollToForTesting(filters.Roots[0]);
+            Pump();
+            tree.RevealForTesting(parent.Children[^1]);
+            Pump();
+            var shown = tree.VisibleFiltersForTesting;
+            ok &= Check($"but reaching a filter inside a folded one still opens it and shows it " +
+                        $"[top {tree.TopFilterForTesting?.Match.Text}]",
+                        tree.IsExpandedForTesting(parent) && shown.Contains(parent.Children[^1]));
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Carrying a filter up through an unfolded subtree has to walk it one place at a time, the
+    /// same as anywhere else in the list.
+    ///
+    /// The gap between a filter and its first child is the awkward one: the row above the gap IS the
+    /// parent being dropped into, so there is nothing inside that parent to count the position from. Read
+    /// as "not found" it becomes "append", and the filter is flung to the BOTTOM of the subtree and then
+    /// straight back out on the next row of travel - which is what "it jumps somewhere I did not mean it
+    /// to go" looks like. The walk below is measured in display rows, so one row of pointer travel has to
+    /// be exactly one row of movement whatever level the filter is at.</summary>
+    private static bool RunDragNestingChecks()
+    {
+        Line("-- dragging into and out of a subtree --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_nest_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(300, 520),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            var filters = new FilterCollection();
+            for (int i = 0; i < 40; i++)
+                filters.Roots.Add(new Filter { Match = new FilterMatch { Text = $"f{i:00}" } });
+            var parent = filters.Roots[10];
+            for (int c = 0; c < 8; c++)
+            {
+                var kid = new Filter { Match = new FilterMatch { Text = $"kid{c:00}" } };
+                filters.Roots.Add(kid);
+                filters.Move(kid, parent, parent.Children.Count);
+            }
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            int rowH = tree.RowHeightForTesting;
+            int lastWholeRow = tree.TreeHeightForTesting / rowH - 1;
+            int MiddleOfRow(int index) => index * rowH + rowH / 2;
+
+            // Put the parent's whole subtree on screen with a row to spare either side, and carry the
+            // filter below it upwards past every one of its children.
+            tree.ScrollToForTesting(filters.Roots[9]);
+            Pump();
+            bool ok = Check($"the parent and all {parent.Children.Count} of its children are on screen, " +
+                            $"with room below ({lastWholeRow + 1} rows)",
+                            lastWholeRow >= parent.Children.Count + 3);
+            if (!ok) return false;
+
+            var carried = filters.Roots[11];
+            int kids = parent.Children.Count;
+            var grab = tree.RowBoundsForTesting(carried);
+            int grabX = grab.Left + 2;
+            tree.StartDragForTesting(carried, new Point(grabX, grab.Top + grab.Height / 2));
+
+            // Stay clear of the top and bottom rows, where holding the pointer starts the auto-scroll.
+            var places = new List<string>();
+            var inside = new List<int>();
+            var display = new List<int>();
+            for (int r = lastWholeRow - 1; r >= 1; r--)
+            {
+                tree.DragToForTesting(new Point(grabX, MiddleOfRow(r)));
+                Pump();
+                var siblings = carried.Parent?.Children ?? doc.Filters.Roots;
+                int at = siblings.IndexOf(carried);
+                places.Add($"{carried.Parent?.Match.Text ?? "root"}[{at}]");
+                if (ReferenceEquals(carried.Parent, parent)) inside.Add(at);
+                display.Add(Array.IndexOf(tree.RowOrderForTesting, carried.Match.Text));
+            }
+            Line("   " + string.Join(" ", places));
+
+            ok &= Check($"a drop just under a filter makes the dragged one its FIRST child, not its last " +
+                        $"[{string.Join(" ", inside)}]",
+                        inside.Count > 0 && inside[^1] == 0);
+            ok &= Check($"it walks up through the children rather than jumping about inside them " +
+                        $"[{string.Join(" ", inside)}]",
+                        inside.Count == kids &&
+                        inside.SequenceEqual(Enumerable.Range(0, kids).Reverse()));
+            var steps = display.Zip(display.Skip(1), (a, b) => a - b).ToList();
+            ok &= Check($"one row of pointer travel never moves it more than one row, in or out of the " +
+                        $"subtree [{string.Join(" ", display)}]",
+                        steps.Count > kids && steps.All(s => s is 0 or 1) && display[0] - display[^1] >= kids);
+
+            tree.DropForTesting();
+            Pump();
+
+            // Nesting into a FOLDED filter must not move the list either - that is the expansion the tree
+            // used to scroll for, and it happens in the middle of a drag with the pointer standing still.
+            tree.CollapseForTesting(parent);
+            Pump();
+            tree.ScrollToForTesting(filters.Roots[4]);
+            Pump();
+            string before = tree.TopFilterForTesting?.Match.Text ?? "?";
+            var folded = tree.RowBoundsForTesting(parent);
+            var moved = filters.Roots[6];
+            var mRow = tree.RowBoundsForTesting(moved);
+            tree.StartDragForTesting(moved, new Point(mRow.Left + 2, mRow.Top + mRow.Height / 2));
+            // Straight down to the gap under the folded filter, and one indent right to nest into it.
+            tree.DragToForTesting(new Point(mRow.Left + 2 + tree.IndentForTesting, folded.Bottom + 2));
+            Pump();
+            string after = tree.TopFilterForTesting?.Match.Text ?? "?";
+            ok &= Check($"nesting into a folded filter does not scroll the list [{before} -> {after}]", before == after);
+            ok &= Check($"and the filter really did go into it, at the top [{moved.Parent?.Match.Text ?? "root"}" +
+                        $"[{(moved.Parent?.Children ?? doc.Filters.Roots).IndexOf(moved)}]]",
+                        ReferenceEquals(moved.Parent, parent) && parent.Children.IndexOf(moved) == 0);
+            tree.CancelDragForTesting();
+            Pump();
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
     }
 
     /// <summary>Dragging a filter rearranges the list under the pointer, which is exactly what makes it

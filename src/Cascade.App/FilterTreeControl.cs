@@ -1106,6 +1106,7 @@ public sealed class FilterTreeControl : UserControl
     internal void AutoScrollTickForTesting() => AutoScrollTick();
 
     internal int RowHeightForTesting => _tree.ItemHeight;
+    internal int IndentForTesting => _tree.Indent;
     internal int TreeHeightForTesting => _tree.ClientSize.Height;
     internal int TreeWidthForTesting => _tree.ClientSize.Width;
     internal bool IsExpandedForTesting(Filter f) => NodeFor(f)?.IsExpanded ?? false;
@@ -1159,6 +1160,12 @@ public sealed class FilterTreeControl : UserControl
     internal string[] VisibleRowNamesForTesting => VisibleRows().Select(n => n.Text).ToArray();
 
     internal void CollapseForTesting(Filter f) { if (NodeFor(f) is { } n) n.Collapse(); }
+
+    internal void ExpandForTesting(Filter f) { if (NodeFor(f) is { } n) n.Expand(); }
+
+    /// <summary>Brings a filter into view the way the list's own search does, opening anything folded in
+    /// front of it.</summary>
+    internal void RevealForTesting(Filter f) { if (NodeFor(f) is { } n) RevealNode(n); }
 
     /// <summary>A press at this point with these modifiers, through the real handler.</summary>
     internal void MouseDownForTesting(Point at, Keys mods = Keys.None, MouseButtons button = MouseButtons.Left)
@@ -1333,6 +1340,10 @@ public sealed class FilterTreeControl : UserControl
     /// been walked up to the level being dropped at.</summary>
     private static int IndexAfter(List<Filter> siblings, Filter above, int dropLevel, int aboveLevel)
     {
+        // Deeper than the row above means becoming that row's first child - there is nothing inside the
+        // new parent to count from. Without this the search below asks the parent's own children where the
+        // parent is, gets "nowhere", and appends to the end of the subtree instead.
+        if (dropLevel > aboveLevel) return 0;
         var anchor = above;
         for (int level = aboveLevel; level > dropLevel; level--) anchor = anchor.Parent!;
         int i = siblings.IndexOf(anchor);
