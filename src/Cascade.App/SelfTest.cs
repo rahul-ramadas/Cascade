@@ -1721,6 +1721,22 @@ internal static class SelfTest
         return ok;
     }
 
+    /// <summary>Gives the filter list exactly this many rows.
+    ///
+    /// A pane sized in PIXELS holds a different number of rows on a machine with different display
+    /// scaling - 14 here, 21 on the build agent - so a fixture built around "more children than fit"
+    /// silently stops meaning anything. Sizing it in rows instead makes the arithmetic the same
+    /// everywhere. The loop is because the header's own height moves with the window.</summary>
+    private static void FitTreeToRows(Form host, FilterTreeControl tree, int rows)
+    {
+        for (int i = 0; i < 4 && tree.TreeHeightForTesting / tree.RowHeightForTesting != rows; i++)
+        {
+            int chrome = host.ClientSize.Height - tree.TreeHeightForTesting;
+            host.ClientSize = new Size(host.ClientSize.Width, chrome + rows * tree.RowHeightForTesting);
+            Pump();
+        }
+    }
+
     /// <summary>Expanding a filter leaves the list where it was.
     ///
     /// Left to itself the tree scrolls on every expansion, to fit as much of the newly revealed subtree on
@@ -1754,6 +1770,7 @@ internal static class SelfTest
             tree.Attach(doc);
             host.Show();
             Pump();
+            FitTreeToRows(host, tree, 14);
 
             var filters = new FilterCollection();
             for (int i = 0; i < 40; i++)
@@ -1854,6 +1871,8 @@ internal static class SelfTest
             tree.Attach(doc);
             host.Show();
             Pump();
+            // Verified across 12..24 rows, so nothing here is tuned to one particular row height.
+            FitTreeToRows(host, tree, 14);
 
             var filters = new FilterCollection();
             for (int i = 0; i < 40; i++)
@@ -1907,10 +1926,14 @@ internal static class SelfTest
             ok &= Check($"a drop just under a filter makes the dragged one its FIRST child, not its last " +
                         $"[{string.Join(" ", inside)}]",
                         inside.Count > 0 && inside[^1] == 0);
+            // Read off the places it visits, not how many samples each took: one place of hysteresis is
+            // inherent (the filter occupies a row in the list it is being placed into) and how it falls
+            // depends on the row height, which follows the display's scaling.
+            var walked = new List<int>();
+            foreach (int at in inside) if (walked.Count == 0 || walked[^1] != at) walked.Add(at);
             ok &= Check($"it walks up through the children rather than jumping about inside them " +
-                        $"[{string.Join(" ", inside)}]",
-                        inside.Count == kids &&
-                        inside.SequenceEqual(Enumerable.Range(0, kids).Reverse()));
+                        $"[{string.Join(" ", walked)}]",
+                        walked.SequenceEqual(Enumerable.Range(0, kids).Reverse()));
             var steps = display.Zip(display.Skip(1), (a, b) => a - b).ToList();
             ok &= Check($"one row of pointer travel never moves it more than one row, in or out of the " +
                         $"subtree [{string.Join(" ", display)}]",
