@@ -1136,14 +1136,24 @@ internal static class SelfTest
             grid.ReleaseForTesting(2, xOfChar(reqAt + 3));
             ok &= Check("and letting go there keeps it", grid.SelectedText == "req", grid.SelectedText ?? "(none)");
 
-            // Double-click takes the word under the pointer; the separators around it are not part of it.
+            // Double-click asks for a filter for this line rather than selecting the word under the pointer:
+            // this view is for reading a log, and turning a line into a filter is what deserves a gesture
+            // that short.
+            var asked = new List<string?>();
+            grid.NewFilterRequested += part => asked.Add(part);
+            grid.ClickForTesting(4, 5);   // somewhere else first, so nothing is picked out to carry
             grid.DoubleClickForTesting(2, xOfChar(reqAt + 3));
-            ok &= Check("double-click selects the word", grid.SelectedText == "req-abc123", grid.SelectedText ?? "(none)");
+            ok &= Check("double-click asks for a filter", asked.Count == 1, asked.Count.ToString());
+            ok &= Check("for the whole line, nothing having been picked out", asked.Count == 1 && asked[0] is null,
+                        asked.Count == 1 ? asked[0] ?? "(the whole line)" : "(nothing asked)");
 
-            // ...and it stops at whitespace rather than running to the end of the line.
-            int getAt = text.IndexOf("GET", StringComparison.Ordinal);
-            grid.DoubleClickForTesting(2, xOfChar(getAt + 1));
-            ok &= Check("a word stops at the space around it", grid.SelectedText == "GET", grid.SelectedText ?? "(none)");
+            // ...and with part of the line picked out, for that part - the click that starts the double-click
+            // clears the selection, so it has to be carried across.
+            grid.DragForTesting(2, xOfChar(reqAt), xOfChar(reqAt + 10));
+            grid.DoubleClickForTesting(2, xOfChar(reqAt + 3));
+            ok &= Check("and for the part picked out when there is one",
+                        asked.Count == 2 && asked[1] == "req-abc123",
+                        asked.Count == 2 ? asked[1] ?? "(the whole line)" : "(nothing asked)");
 
             // Moving away drops it: the range meant a place the user is no longer looking at.
             grid.PressKeyForTesting(Keys.Down);
@@ -2262,6 +2272,19 @@ internal static class SelfTest
             ok &= Check($"and the filter still agrees with its tick " +
                         $"(filter {(other.Enabled ? "on" : "off")}, box {(boxAfter ? "on" : "off")})",
                         other.Enabled == boxAfter);
+
+            // Double-clicking a filter that has children means "edit this" and only that. The tree's own
+            // answer is to fold the subtree, which left a double-click doing two unrelated things at once.
+            // The expander is untouched by that: it is excluded by hit-test, and a single click on it is not
+            // a double-click at all.
+            var withKids = tree.RowBoundsForTesting(parent);
+            int kidMid = withKids.Top + withKids.Height / 2;
+            bool openBefore = tree.IsExpandedForTesting(parent);
+            tree.SendDoubleClickOnlyForTesting(new Point(withKids.Left + 2, kidMid));
+            Pump();
+            ok &= Check($"double-clicking a filter with children does not fold it " +
+                        $"({(openBefore ? "open" : "shut")} -> {(tree.IsExpandedForTesting(parent) ? "open" : "shut")})",
+                        tree.IsExpandedForTesting(parent) == openBefore);
             return ok;
         }
         finally
@@ -2356,6 +2379,52 @@ internal static class SelfTest
         var filter = new Filter { Match = { Text = "sample text" } };
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
                           "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
+
+        // Those keys are pressed while writing the pattern, so they must not take the keyboard out of the
+        // box - the same rule the find bar's two options follow.
+        using (var opts = new FilterEditDialog(new Filter { Match = { Text = "sample text" } }, isNew: true))
+        {
+            opts.StartPosition = FormStartPosition.Manual;
+            opts.Location = new Point(0, 0);
+            opts.Opacity = 0;
+            opts.Show();
+            Pump();
+            opts.FocusTextForTesting(3, 4);
+            Pump();
+            ok &= Check("the pattern box has the keyboard to start with", opts.TextHasFocusForTesting);
+            ok &= Check("and a caret and selection worth keeping", opts.TextSelectionForTesting == (3, 4),
+                        opts.TextSelectionForTesting.ToString());
+
+            foreach (char key in "RCEOBLI")
+            {
+                AltKey(opts, key);
+                Pump();
+            }
+            ok &= Check("ticking the options leaves the keyboard in the box", opts.TextHasFocusForTesting);
+            ok &= Check("and the caret and selection where they were",
+                        opts.TextSelectionForTesting == (3, 4), opts.TextSelectionForTesting.ToString());
+            ok &= Check("and what is inherited is still explained",
+                        opts.NoteForTesting.Contains("parent filter", StringComparison.Ordinal),
+                        opts.NoteForTesting);
+
+            // A strip that wraps answers for a narrower width than it is then given, so its row reserves
+            // lines that are never drawn - which is where the band of empty space down this dialog came
+            // from. Every strip should be exactly as tall as the tallest thing in it.
+            int spare = AllControls(opts).OfType<FlowLayoutPanel>()
+                .Select(s => s.Height - s.Controls.Cast<Control>()
+                                         .Select(c => c.Height + c.Margin.Vertical).DefaultIfEmpty(0).Max())
+                .DefaultIfEmpty(0).Max();
+            ok &= Check("no row of the filter dialog reserves space it never draws", spare <= 0, $"{spare}px over");
+
+            // The pattern box holds a whole log line copied in from the text, so it gets what is left after
+            // the labels - not a share of it.
+            ok &= Check("the pattern box runs the width of the dialog",
+                        opts.PatternWidthForTesting > opts.ClientSize.Width * 3 / 4,
+                        $"box {opts.PatternWidthForTesting} of {opts.ClientSize.Width}");
+
+            opts.Close();
+            Pump();
+        }
 
         // The find bar claims exactly two Alt keys, for its two options. It lives in a window that owns a
         // menu bar, so the letters it takes must be ones no top-level menu wants - otherwise Alt+R would

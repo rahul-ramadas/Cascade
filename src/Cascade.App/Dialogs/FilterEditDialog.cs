@@ -25,18 +25,24 @@ public sealed class FilterEditDialog : DialogBase
     internal Font FontForTesting => _text.Font;
 
     private readonly TextBox _text = new() { Dock = DockStyle.Fill, Font = Mono, MaxLength = MaxPatternLength };
-    private readonly CheckBox _regex = new() { Text = "&Regular expression", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
-    private readonly CheckBox _caseSensitive = new() { Text = "&Case sensitive", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
-    private readonly CheckBox _excluding = new() { Text = "&Excluding filter (hides matching lines)", AutoSize = true, Margin = new Padding(0, 3, 0, 3) };
-    private readonly Label _regexError = new() { ForeColor = Color.Firebrick, AutoSize = false, AutoEllipsis = true };
+    private readonly QuietCheckBox _regex = new() { Text = "&Regular expression", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
+    private readonly QuietCheckBox _caseSensitive = new() { Text = "&Case sensitive", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
+    private readonly QuietCheckBox _excluding = new() { Text = "&Excluding filter (hides matching lines)", AutoSize = true, Margin = new Padding(0, 3, 0, 3) };
+    private readonly Label _note = new() { AutoSize = false, AutoEllipsis = true };
 
-    private readonly CheckBox _setFore = new() { Text = "Text col&or", AutoSize = true, Margin = new Padding(0, 4, 6, 3) };
+    /// <summary>What is inherited, in the place a bad pattern complains from. The two never both apply: a
+    /// pattern that will not compile is the more urgent thing to say, and the note is always true anyway.
+    /// </summary>
+    private const string InheritNote =
+        "Unchecked colors, and styles left neither on nor off, come from the parent filter.";
+
+    private readonly QuietCheckBox _setFore = new() { Text = "Text col&or", AutoSize = true, Margin = new Padding(0, 4, 6, 3) };
     private readonly Button _foreBtn = new() { FlatStyle = FlatStyle.Flat };
-    private readonly CheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(28, 4, 6, 3) };
+    private readonly QuietCheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(28, 4, 6, 3) };
     private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat };
     private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(24, 3, 0, 3) };
-    private readonly CheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(0, 4, 24, 3) };
-    private readonly CheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true };
+    private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(0, 4, 24, 3) };
+    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true };
 
     private readonly IReadOnlyList<Filter> _siblings;
     private int _lucky = -1;
@@ -82,19 +88,15 @@ public sealed class FilterEditDialog : DialogBase
             rows++;
         }
 
-        // The field column only. Cells are given explicitly throughout: left to place things itself, a
-        // TableLayoutPanel deals its cells out to the VISIBLE controls in order, so the error line appearing
-        // would take the cell next to it and shift everything along.
-        void NoteRow(Control field)
-        {
-            field.Margin = new Padding(0, Dpi(2), 0, Dpi(2));
-            root.Controls.Add(field, 1, rows);
-            rows++;
-        }
-
+        // Cells are given explicitly throughout: left to place things itself, a TableLayoutPanel deals its
+        // cells out to the VISIBLE controls in order, so a control appearing would take the cell next to it
+        // and shift everything along.
         static FlowLayoutPanel Strip(params Control[] items)
         {
-            var strip = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true };
+            // Never wrapping: asked for its preferred height inside an auto-sizing column, a wrapping strip
+            // answers for a narrower width than it is then given, so the row reserves space for lines that
+            // are never drawn - which is where the dialog's dead band came from.
+            var strip = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false };
             strip.Controls.AddRange(items);
             return strip;
         }
@@ -106,14 +108,8 @@ public sealed class FilterEditDialog : DialogBase
         // All three options on one row: the excluding flag used to sit alone under a blank label, which
         // read as though it belonged to nothing.
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
-        Row("Colors:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn));
-        Row("Style:", Strip(_bold, _italic));
-        NoteRow(new Label
-        {
-            Text = "Unchecked colors and squares are inherited from the parent filter.",
-            AutoSize = true,
-            ForeColor = Color.Gray
-        });
+        // Colour and style are one idea - what a matching line looks like - and the note below covers both.
+        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _bold, _italic, _luckyBtn));
 
         // The error shares the button row rather than having one of its own: that row is as tall as the
         // buttons whatever else is in it, so a bad pattern cannot push them down the dialog.
@@ -121,10 +117,10 @@ public sealed class FilterEditDialog : DialogBase
         buttons.Dock = DockStyle.None;
         buttons.Anchor = AnchorStyles.Right;    // centred against the error text, not pinned to the row's top
         buttons.Margin = new Padding(0);
-        _regexError.Dock = DockStyle.Fill;
-        _regexError.TextAlign = ContentAlignment.MiddleLeft;
-        _regexError.Margin = new Padding(0, 0, Dpi(12), 0);
-        _regexError.Height = Dpi(24);
+        _note.Dock = DockStyle.Fill;
+        _note.TextAlign = ContentAlignment.MiddleLeft;
+        _note.Margin = new Padding(0, 0, Dpi(12), 0);
+        _note.Height = Dpi(24);
 
         var bottom = new TableLayoutPanel
         {
@@ -137,7 +133,7 @@ public sealed class FilterEditDialog : DialogBase
         };
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        bottom.Controls.Add(_regexError, 0, 0);
+        bottom.Controls.Add(_note, 0, 0);
         bottom.Controls.Add(buttons, 1, 0);
 
         root.Controls.Add(bottom, 0, rows);
@@ -162,6 +158,16 @@ public sealed class FilterEditDialog : DialogBase
 
     /// <summary>Test seam: types into the pattern field, so a check can watch the error line appear.</summary>
     internal void SetTextForTesting(string text) => _text.Text = text;
+    internal bool TextHasFocusForTesting => ActiveControl == _text;
+    internal int PatternWidthForTesting => _text.Width;
+    internal (int Start, int Length) TextSelectionForTesting => (_text.SelectionStart, _text.SelectionLength);
+    internal string NoteForTesting => _note.Text;
+    internal void FocusTextForTesting(int start, int length)
+    {
+        ActiveControl = _text;
+        _text.SelectionStart = start;
+        _text.SelectionLength = length;
+    }
 
     protected override void OnLoad(EventArgs e)    {
         base.OnLoad(e);                    // DialogBase AutoSize has fit the form to its content
@@ -257,7 +263,9 @@ public sealed class FilterEditDialog : DialogBase
             try { _ = System.Text.RegularExpressions.Regex.Match("", _text.Text); }
             catch (ArgumentException ex) { message = "Invalid regex: " + ex.Message; }
         }
-        _regexError.Text = message;
+        bool bad = message.Length > 0;
+        _note.ForeColor = bad ? Color.Firebrick : Color.Gray;
+        _note.Text = bad ? message : InheritNote;
     }
 
     private void Apply()

@@ -47,6 +47,11 @@ internal sealed class BufferedTreeView : TreeView
         SendMessage(Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER);
     }
 
+    /// <summary>True while a double-click on a row's own content is being handled. The tree's default answer
+    /// to that is to expand or collapse the row, which is not what double-clicking a filter means - see the
+    /// cancel in FilterTreeControl. The expander keeps its job, so it is excluded here.</summary>
+    internal bool InContentDoubleClick { get; private set; }
+
     /// <summary>The tree eats the second click of a double-click on a checkbox: the box flips but no state
     /// change is reported, so the tick and what it stands for stop agreeing. Turning it back into an ordinary
     /// click makes two quick clicks simply tick twice - which is what they look like - and stops the tree
@@ -54,15 +59,18 @@ internal sealed class BufferedTreeView : TreeView
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_PAINT) Paints++;
-        if (m.Msg == WM_LBUTTONDBLCLK && IsOnCheckBox(m.LParam)) m.Msg = WM_LBUTTONDOWN;
-        base.WndProc(ref m);
+        if (m.Msg == WM_LBUTTONDBLCLK && HitAt(m.LParam) == TreeViewHitTestLocations.StateImage) m.Msg = WM_LBUTTONDOWN;
+        if (m.Msg != WM_LBUTTONDBLCLK) { base.WndProc(ref m); return; }
+
+        InContentDoubleClick = HitAt(m.LParam) != TreeViewHitTestLocations.PlusMinus;
+        try { base.WndProc(ref m); }
+        finally { InContentDoubleClick = false; }
     }
 
-    private bool IsOnCheckBox(IntPtr lParam)
+    private TreeViewHitTestLocations HitAt(IntPtr lParam)
     {
         long packed = lParam.ToInt64();
-        var point = new Point((short)(packed & 0xFFFF), (short)((packed >> 16) & 0xFFFF));
-        return HitTest(point).Location == TreeViewHitTestLocations.StateImage;
+        return HitTest(new Point((short)(packed & 0xFFFF), (short)((packed >> 16) & 0xFFFF))).Location;
     }
 
     protected override void OnFontChanged(EventArgs e)

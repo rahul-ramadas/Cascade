@@ -90,6 +90,9 @@ public sealed class FilterTreeControl : UserControl
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
         _tree.AfterCollapse += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Add(f.Id); };
         _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node is not null) HandleDoubleClick(e.Node, e.X); };
+        // Double-clicking a filter means "edit this" and nothing else. Only the expander folds the subtree.
+        _tree.BeforeExpand += (_, e) => { if (_tree.InContentDoubleClick) e.Cancel = true; };
+        _tree.BeforeCollapse += (_, e) => { if (_tree.InContentDoubleClick) e.Cancel = true; };
         _tree.MouseDown += OnTreeMouseDown;
         _tree.MouseMove += OnTreeMouseMove;
         _tree.MouseUp += (_, _) => _pressed = null;
@@ -745,6 +748,15 @@ public sealed class FilterTreeControl : UserControl
         SendMessage(_tree.Handle, WM_LBUTTONUP, IntPtr.Zero, lParam);
         SendMessage(_tree.Handle, WM_LBUTTONDBLCLK, (IntPtr)MK_LBUTTON, lParam);
         SendMessage(_tree.Handle, WM_LBUTTONUP, IntPtr.Zero, lParam);
+    }
+
+    /// <summary>Just the double-click message. The button-down that really precedes it puts Windows into its
+    /// drag-detect loop, which without a real mouse to answer it blocks for over a minute - so a check about
+    /// what the tree does with the double-click itself sends only that.</summary>
+    internal void SendDoubleClickOnlyForTesting(Point at)
+    {
+        var lParam = (IntPtr)((at.Y << 16) | (at.X & 0xFFFF));
+        SendMessage(_tree.Handle, WM_LBUTTONDBLCLK, (IntPtr)MK_LBUTTON, lParam);
     }
 
     private const int WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, MK_LBUTTON = 0x0001;
