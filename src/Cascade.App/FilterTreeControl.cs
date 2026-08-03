@@ -1440,15 +1440,14 @@ public sealed class FilterTreeControl : UserControl
         SetDragSubtreeCollapsed(false);
         if (_dragGroup is not null)
         {
-            _building = true;
-            _tree.BeginUpdate();
-            try { _ghost?.Remove(); }
-            finally { _tree.EndUpdate(); _building = false; }
             _ghost = null;
             _dragGroup = null;
             _dropAt = null;
             _dragNode = null;
-            SyncToModel();   // the real rows come back from the model, which is the only record of them
+            // The real rows come back from the model, which is the only record of them - and the same pass
+            // takes the placeholder out, since it answers to no filter and so is left over at the end of
+            // its level. Removing it here as well would be a line that looks load-bearing and is not.
+            SyncToModel();
         }
         _dragNode = null;
         _dragOrigin = null;

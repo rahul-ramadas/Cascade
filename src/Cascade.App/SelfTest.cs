@@ -1949,8 +1949,11 @@ internal static class SelfTest
                     landed == $"{one.Match.Text} {two.Match.Text} {three.Match.Text}");
         ok &= Check($"the group it dropped is what stays selected [{string.Join(" ", tree.SelectedNamesForTesting)}]",
                     string.Join(" ", tree.SelectedNamesForTesting) == landed);
-        ok &= Check($"and there is no placeholder left behind [{tree.GhostTextForTesting ?? "none"}]",
-                    tree.GhostTextForTesting is null);
+        // Read off the rows, not the field that held the placeholder: that field is cleared either way, so
+        // a placeholder still standing in the list would go unnoticed.
+        var leftovers = tree.VisibleRowNamesForTesting.Where(n => n.EndsWith(" filters", StringComparison.Ordinal)).ToArray();
+        ok &= Check($"and there is no placeholder row left behind [{(leftovers.Length == 0 ? "none" : string.Join(" ", leftovers))}]",
+                    leftovers.Length == 0);
         ok &= Check($"the list shows what the model says [{string.Join(" ", tree.VisibleRowNamesForTesting.Take(3))}]",
                     string.Join(" ", tree.VisibleRowNamesForTesting.Take(3)) == landed);
         return ok;
