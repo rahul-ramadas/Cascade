@@ -173,6 +173,7 @@ public sealed class MainForm : Form
         // A held drag or a held key never lets the message queue empty, and a repaint only arrives when it
         // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
         _grid.SelectionChanged += () => { UpdateStatus(); _status.Update(); };
+        _grid.NewFilterRequested += NewFilterFromDoubleClick;
         _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); _findBar.SnapHeightTo(_grid.RowPitch); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
@@ -885,6 +886,19 @@ public sealed class MainForm : Form
         long line = _grid.CaretLine;
         if (line < 0) { MessageBox.Show(this, "Select a line in the text view first.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         CreateFilterFromLine(line);
+    }
+
+    /// <summary>Double-clicking a line in the log. The part of it that was picked out if there was one,
+    /// otherwise the whole line - the click that began the double-click has already put the caret there.</summary>
+    private void NewFilterFromDoubleClick(string? picked)
+    {
+        if (picked is { Length: > 0 })
+        {
+            CreateFilterFrom(SeedPatternFromLine(picked));
+            return;
+        }
+        long line = _grid.CaretLine;
+        if (line >= 0) CreateFilterFromLine(line);
     }
 
     private void CreateFilterFrom(string pattern)

@@ -85,6 +85,10 @@ public sealed class LineGridControl : Control
     private int _clickCount;
 
     public event Action? SelectionChanged;
+    /// <summary>Double-clicking a line asks for a filter to be written for it. Carries the part of the line
+    /// that was picked out, or null to mean the whole of it.</summary>
+    public event Action<string?>? NewFilterRequested;
+    private string? _carriedSelection;
     public event Action? ZoomChanged;
 
     /// <summary>Raised with the 0-based marker index when marker navigation runs off the end. The host
@@ -228,29 +232,6 @@ public sealed class LineGridControl : Control
     private int MeasureWidth(ReadOnlySpan<char> text, Font font)
         => text.IsEmpty ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
-
-    /// <summary>Word boundaries around <paramref name="index"/>, for double-click. "Word" is a run of
-    /// letters, digits and the punctuation that holds identifiers together, which is what makes
-    /// double-clicking a request id or a path pick up the whole thing.</summary>
-    private static (int From, int To) WordAt(string text, int index)
-    {
-        if (text.Length == 0) return (0, 0);
-        int at = Math.Clamp(index, 0, text.Length - 1);
-        if (!IsWordChar(text[at]))
-        {
-            // Between words: take the run of whatever is there, so a double-click never selects nothing.
-            int s = at, e = at + 1;
-            while (s > 0 && !IsWordChar(text[s - 1])) s--;
-            while (e < text.Length && !IsWordChar(text[e])) e++;
-            return (s, e);
-        }
-        int from = at, to = at + 1;
-        while (from > 0 && IsWordChar(text[from - 1])) from--;
-        while (to < text.Length && IsWordChar(text[to])) to++;
-        return (from, to);
-    }
-
-    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c is '_' or '-' or '.' or ':' or '/' or '\\';
 
     /// <summary>Character selection is a plain-text idea, so it is not offered while the line is split into
     /// columns - a click there keeps meaning "select this row".</summary>
@@ -1139,19 +1120,18 @@ public sealed class LineGridControl : Control
         _lastClickAt = DateTime.UtcNow;
         _lastClickAtPoint = e.Location;
 
-        if (_clickCount == 2 && CharSelectionAvailable)
+        if (_clickCount == 2)
         {
-            // Double-click selects the word under the pointer, as a text box does.
-            string text = DisplayText(row);
-            (_charAnchor, _charFocus) = WordAt(text, CharIndexAt(row, e.X, e.Y));
-            _charRow = row;
-            _caretRow = row;
-            _sel.SetSingle(row);
-            _charDragging = false;
-            Invalidate();
-            SelectionChanged?.Invoke();
+            // Double-click writes a filter for this line - the part picked out if there was one, the whole
+            // line otherwise. It does NOT select the word under the pointer: this view is for reading a log,
+            // and turning a line into a filter is the thing worth a gesture that short.
+            NewFilterRequested?.Invoke(_carriedSelection);
             return;
         }
+
+        // Remembered before the click below throws it away, so the double-click that may follow can still
+        // make a filter from the part of the line that was picked out.
+        _carriedSelection = row == _charRow && HasCharSelection ? SelectedText : null;
 
         // A plain click - and a triple click - means the whole line, which is also where a drag starts from.
         ClearCharSelection();
