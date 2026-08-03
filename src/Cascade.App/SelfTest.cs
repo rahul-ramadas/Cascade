@@ -4051,6 +4051,43 @@ internal static class SelfTest
             Pump();
         }
 
+        // Everything fits, so there must be nothing to scroll - a viewport a couple of pixels short of the
+        // content leaves a scrollbar with a hair of travel in it, which reads as "there is more below".
+        using (var everything = new PaletteDialog(free, "sample text", null)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        })
+        {
+            everything.Show();
+            Pump();
+            ok &= Check("with room for every colour the palette does not scroll at all",
+                        !everything.ScrollsForTesting && everything.ScrollRangeForTesting == 0,
+                        $"{everything.CountForTesting} colours, {everything.ScrollRangeForTesting}px of travel");
+            ok &= Check("and shows a whole number of rows",
+                        everything.ViewportForTesting % everything.CellForTesting(0).Height == 0,
+                        $"viewport {everything.ViewportForTesting}px, a row is {everything.CellForTesting(0).Height}px");
+            everything.Close();
+            Pump();
+        }
+
+        // Picking a colour by hand previews it while the picker is open, and cancelling puts back what was
+        // there - including the tick, which choosing a colour turns on.
+        dlg.SetColorsForTesting(fore: null, back: null);
+        Pump();
+        var untouched = dlg.PreviewForTesting;
+        dlg.PickColorForTesting(foreground: false, previewed: moss, accepted: null);
+        Pump();
+        ok &= Check("cancelling the colour picker puts back what was there",
+                    Say(dlg.PreviewForTesting) == Say(untouched), $"{Say(untouched)} -> {Say(dlg.PreviewForTesting)}");
+
+        RgbColor rust = new(0xB7, 0x41, 0x0E);
+        dlg.PickColorForTesting(foreground: false, previewed: moss, accepted: rust);
+        Pump();
+        ok &= Check("and accepting it keeps what was chosen", Is(dlg.PreviewForTesting.Back, rust),
+                    Say(dlg.PreviewForTesting));
+
         ok &= Check("the dialog is a fixed size",
                     dlg.FormBorderStyle == FormBorderStyle.FixedDialog && !dlg.MaximizeBox,
                     $"{dlg.FormBorderStyle}, maximise {dlg.MaximizeBox}");

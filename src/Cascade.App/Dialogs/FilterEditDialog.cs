@@ -162,8 +162,8 @@ public sealed class FilterEditDialog : DialogBase
         Controls.Add(root);
         MinimumSize = new Size(Dpi(560), 0);
 
-        _foreBtn.Click += (_, _) => PickColor(ref _fore, _setFore);
-        _backBtn.Click += (_, _) => PickColor(ref _back, _setBack);
+        _foreBtn.Click += (_, _) => PickColor(foreground: true);
+        _backBtn.Click += (_, _) => PickColor(foreground: false);
         _luckyBtn.Click += (_, _) => FeelLucky();
         _chipsBtn.Click += (_, _) => ShowPalette();
         _setFore.CheckedChanged += (_, _) => UpdateColorButtons();
@@ -271,15 +271,60 @@ public sealed class FilterEditDialog : DialogBase
     internal (Color Fore, Color Back, bool Bold, bool Italic) PreviewForTesting =>
         (_text.ForeColor, _text.BackColor, _text.Font.Bold, _text.Font.Italic);
 
-    private void PickColor(ref RgbColor target, CheckBox set)
+    /// <summary>The system picker, with the pattern box following the colour as it is chosen. Cancelling
+    /// puts back exactly what was there, including whether the box was ticked at all - picking a colour
+    /// ticks it, so a cancelled pick must untick it again.</summary>
+    private void PickColor(bool foreground)
     {
-        using var dlg = new ColorDialog { FullOpen = true, Color = Color.FromArgb(target.R, target.G, target.B) };
+        var box = foreground ? _setFore : _setBack;
+        RgbColor before = foreground ? _fore : _back;
+        bool wasSet = box.Checked;
+
+        void Show(RgbColor c)
+        {
+            if (foreground) _fore = c; else _back = c;
+            box.Checked = true;
+            UpdateColorButtons();
+            _text.Update();   // the picker owns the message loop; nothing else will repaint this
+        }
+
+        using var dlg = new LiveColorDialog(Color.FromArgb(before.R, before.G, before.B));
+        dlg.Previewing += c => Show(new RgbColor(c.R, c.G, c.B));
+
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            target = new RgbColor(dlg.Color.R, dlg.Color.G, dlg.Color.B);
-            set.Checked = true;
-            UpdateColorButtons();
+            Show(new RgbColor(dlg.Color.R, dlg.Color.G, dlg.Color.B));
+            return;
         }
+
+        if (foreground) _fore = before; else _back = before;
+        box.Checked = wasSet;
+        UpdateColorButtons();
+    }
+
+    /// <summary>Test seam for the pick-and-revert path. The picker itself cannot be driven headlessly, but
+    /// what surrounds it - preview while choosing, keep on OK, put back on cancel - is ordinary code.</summary>
+    internal void PickColorForTesting(bool foreground, RgbColor previewed, RgbColor? accepted)
+    {
+        var box = foreground ? _setFore : _setBack;
+        RgbColor before = foreground ? _fore : _back;
+        bool wasSet = box.Checked;
+
+        if (foreground) _fore = previewed; else _back = previewed;
+        box.Checked = true;
+        UpdateColorButtons();
+
+        if (accepted is { } kept)
+        {
+            if (foreground) _fore = kept; else _back = kept;
+            box.Checked = true;
+        }
+        else
+        {
+            if (foreground) _fore = before; else _back = before;
+            box.Checked = wasSet;
+        }
+        UpdateColorButtons();
     }
 
     /// <summary>Offers a legible colour pair nobody else is using, and a different one on every press.</summary>
