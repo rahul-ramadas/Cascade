@@ -36,13 +36,15 @@ public sealed class FilterEditDialog : DialogBase
     private const string InheritNote =
         "Unchecked colors, and styles left neither on nor off, come from the parent filter.";
 
-    private readonly QuietCheckBox _setFore = new() { Text = "Text col&or", AutoSize = true, Margin = new Padding(0, 4, 6, 3) };
-    private readonly Button _foreBtn = new() { FlatStyle = FlatStyle.Flat };
-    private readonly QuietCheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(28, 4, 6, 3) };
-    private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat };
-    private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(24, 3, 0, 3) };
-    private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(0, 4, 24, 3) };
-    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true };
+    // One scale across this row: 6 binds a tick to the swatch it owns, 24 separates one idea from the next.
+    // The extra 6 on the tops is what centres a caption against the taller swatch buttons beside it.
+    private readonly QuietCheckBox _setFore = new() { Text = "Text col&or", AutoSize = true, Margin = new Padding(0, 6, 6, 3) };
+    private readonly Button _foreBtn = new() { FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 3, 0, 3) };
+    private readonly QuietCheckBox _setBack = new() { Text = "&Background", AutoSize = true, Margin = new Padding(24, 6, 6, 3) };
+    private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 3, 0, 3) };
+    private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(16, 3, 0, 3) };
+    private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(32, 6, 24, 3) };
+    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 0, 3) };
 
     private readonly IReadOnlyList<Filter> _siblings;
     private int _lucky = -1;
@@ -109,7 +111,8 @@ public sealed class FilterEditDialog : DialogBase
         // read as though it belonged to nothing.
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
         // Colour and style are one idea - what a matching line looks like - and the note below covers both.
-        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _bold, _italic, _luckyBtn));
+        // "Lucky" offers a colour, so it belongs with the swatches rather than after the style ticks.
+        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _bold, _italic));
 
         // The error shares the button row rather than having one of its own: that row is as tall as the
         // buttons whatever else is in it, so a bad pattern cannot push them down the dialog.
