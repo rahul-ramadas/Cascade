@@ -47,6 +47,9 @@ internal static class UiShots
         filterError.SetTextForTesting(@"\[OrderService\].+(Disk");
         ShotDialog(filterError, outDir, "filter-edit-error");
 
+        var free = LuckyColors.Free(new[] { demoFilter }, badFilter);
+        ShotDialog(new PaletteDialog(free, @"\[OrderService\].+Disk", null), outDir, "palette");
+
         ShotFindBar(outDir, "find", "");
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
         ShotFindBar(outDir, "find-badregex", "", badPattern: "bth(port");

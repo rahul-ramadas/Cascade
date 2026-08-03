@@ -75,13 +75,7 @@ internal static class LuckyColors
     /// use rather than handing back a duplicate.</summary>
     public static int Next(int from, IEnumerable<Filter> others, Filter self)
     {
-        var used = new List<RgbColor>();
-        foreach (var f in others)
-        {
-            if (ReferenceEquals(f, self)) continue;
-            if (f.Style.Background is { } b) used.Add(b);
-            if (f.Style.Foreground is { } g) used.Add(g);
-        }
+        var used = InUse(others, self);
 
         int best = from + 1;
         double bestRoom = -1;
@@ -95,6 +89,31 @@ internal static class LuckyColors
             if (room > bestRoom) { bestRoom = room; best = from + step; }
         }
         return best;
+    }
+
+    /// <summary>Every pair the button would be willing to offer - the same room-to-spare rule, applied to
+    /// the whole ring at once so they can be shown together. In ring order, which is the order repeated
+    /// presses walk, so what is on offer here is what patience with the button would eventually turn up.
+    /// </summary>
+    public static List<Pair> Free(IEnumerable<Filter> others, Filter self)
+    {
+        var used = InUse(others, self);
+        var free = new List<Pair>();
+        for (int i = 0; i < Count; i++)
+            if (Room(At(i), used) > TooClose) free.Add(At(i));
+        return free;
+    }
+
+    private static List<RgbColor> InUse(IEnumerable<Filter> others, Filter self)
+    {
+        var used = new List<RgbColor>();
+        foreach (var f in others)
+        {
+            if (ReferenceEquals(f, self)) continue;
+            if (f.Style.Background is { } b) used.Add(b);
+            if (f.Style.Foreground is { } g) used.Add(g);
+        }
+        return used;
     }
 
     /// <summary>How far the nearest colour in use is from this pair's background - the colour it would show
