@@ -113,6 +113,18 @@ public sealed class MainForm : Form
     internal bool FindBarIsOpenForTesting => _findBar.Visible;
     internal bool FindBarRedrawsInOneGoForTesting => _findBar.MessageRedrawsInOneGoForTesting;
     internal FindBar FindBarForTesting => _findBar;
+    /// <summary>Drives the form's own shortcut handling, which is where Tab and Escape are decided.</summary>
+    internal bool PressCmdKeyForTesting(Keys keys)
+    {
+        Message m = default;
+        return ProcessCmdKey(ref m, keys);
+    }
+    internal string FocusedAreaForTesting =>
+        _findBar.ContainsFocus ? "find bar"
+        : _filterTree.SearchBarHasFocus ? "filter search"
+        : _filterTree.ListHasFocus ? "filter list"
+        : _grid.Focused ? "log"
+        : ActiveControl?.Name is { Length: > 0 } n ? n : ActiveControl?.GetType().Name ?? "(nothing)";
     internal void CloseFindForTesting() => CloseFind();
     internal void SetStatusProgressForTesting(double fraction)
     {
@@ -248,12 +260,17 @@ public sealed class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        // Inside the bar, Tab walks its own controls - the term, the two buttons, the two options - rather
-        // than jumping straight out to another pane. The filter search bar earns the same treatment.
-        if (keyData is Keys.Tab or (Keys.Shift | Keys.Tab) && (_findBar.ContainsFocus || _filterTree.SearchBarHasFocus))
-            return base.ProcessCmdKey(ref msg, keyData);
-        if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
-        if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
+        // Tab inside either bar walks that bar's OWN controls and wraps at the ends. Letting the form have
+        // it instead tabs out of the bar into whatever is next in the window - the presets list, as it
+        // happens - with no way back in. A bar is left through Escape, not through Tab.
+        if (keyData is Keys.Tab or (Keys.Shift | Keys.Tab))
+        {
+            bool forward = keyData == Keys.Tab;
+            if (_findBar.ContainsFocus) { _findBar.MoveFocusWithin(forward); return true; }
+            if (_filterTree.SearchBarHasFocus) { _filterTree.MoveSearchFocusWithin(forward); return true; }
+            CycleFocus(forward);
+            return true;
+        }
 
         // ESCAPE, IN ORDER. Three things answer to it, and they are ranked by how loudly each is asking:
         //  1. A search actually running. The status bar is at that moment telling the user "Esc to stop",

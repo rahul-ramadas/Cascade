@@ -496,6 +496,51 @@ public class UiFeatureTests
         finally { File.Delete(log); File.Delete(tat); }
     }
 
+    /// <summary>Tab has two stops, and a bar that is open keeps it. Tabbing out of a bar used to land on
+    /// whatever came next in the window - the presets list - with no way back in.</summary>
+    [Fact]
+    public void Tab_has_two_stops_and_never_walks_out_of_an_open_bar()
+    {
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "alpha", "beta");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            app.ClickMenuOrThrow("View", "Focus Text Area");
+            Check("it starts on the log", app.WaitForArea("log"), app.FocusedArea());
+
+            var walk = new List<string>();
+            for (int i = 0; i < 4; i++) { app.TabFromFocus(); walk.Add(app.FocusedArea()); }
+            Check("Tab alternates between the log and the filter list",
+                  walk.SequenceEqual(["filter list", "log", "filter list", "log"]), string.Join(" -> ", walk));
+
+            // Five stops inside the find bar, and Tab must stay among them.
+            app.OpenFind();
+            Check("opening find puts the keyboard in the bar", app.WaitForArea("find bar"), app.FocusedArea());
+            var inBar = new List<string>();
+            for (int i = 0; i < 8; i++) { app.TabFromFocus(); inBar.Add(app.FocusedArea()); }
+            Check("Tab never walks out of the find bar", inBar.All(a => a == "find bar"),
+                  string.Join(" -> ", inBar.Distinct()));
+            app.CloseFind();
+
+            // One stop inside the filter search bar, so Tab has nowhere to go and stays put.
+            app.OpenFilterSearch();
+            Check("opening the filter search puts the keyboard in its bar",
+                  app.WaitForArea("filter search"), app.FocusedArea());
+            var inSearch = new List<string>();
+            for (int i = 0; i < 4; i++) { app.TabFromFocus(); inSearch.Add(app.FocusedArea()); }
+            Check("nor out of the filter search bar", inSearch.All(a => a == "filter search"),
+                  string.Join(" -> ", inSearch.Distinct()));
+
+            Assert.True(fails.Count == 0, "Tab:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
     /// <summary>The filter search bar comes up on demand and goes away again, and while it is up the list
     /// is genuinely shorter - the point of the change being that it costs nothing when it is not in use.
     /// </summary>

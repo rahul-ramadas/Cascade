@@ -26,7 +26,7 @@ public sealed class FilterTreeControl : UserControl
     /// <summary>The search box and its trimmings, along the BOTTOM of the pane. Below rather than above so
     /// that opening it leaves the column header and the top of the list exactly where they were - the list
     /// simply gets shorter from the end, which is the edge nothing is anchored to.</summary>
-    private readonly Panel _searchBar = new() { Dock = DockStyle.Bottom, Visible = false, BackColor = SystemColors.Control };
+    private readonly SeparatedPanel _searchBar = new() { Dock = DockStyle.Bottom, Visible = false, BackColor = SystemColors.Control };
     private readonly Label _searchLabel = new() { Text = "Find filter:", AutoSize = false, Dock = DockStyle.Left, TextAlign = ContentAlignment.MiddleLeft };
     private readonly Button _searchClose = new() { Text = "\u2715", Dock = DockStyle.Right, FlatStyle = FlatStyle.Flat, TabStop = false, AccessibleName = "Close filter search" };
     private readonly BufferedTreeView _tree = new()
@@ -140,10 +140,23 @@ public sealed class FilterTreeControl : UserControl
     private void SizeSearchBar()
     {
         int pad = LogicalToDeviceUnits(4);
-        _searchBar.Height = _search.PreferredHeight + pad * 2;
-        _searchBar.Padding = new Padding(pad, pad, pad, pad);
+        _searchBar.Height = _search.PreferredHeight + pad * 2 + 1;   // the extra pixel is the rule on top
+        _searchBar.Padding = new Padding(pad, pad + 1, pad, pad);
         _searchLabel.Width = TextRenderer.MeasureText(_searchLabel.Text, Font).Width + LogicalToDeviceUnits(6);
         _searchClose.Size = new Size(_search.PreferredHeight, _search.PreferredHeight);
+    }
+
+    /// <summary>A panel with a hairline along its top, so the bar reads as its own surface rather than as
+    /// the list running on past its last row. The list's scrollbar stops short of the bar, which leaves the
+    /// close button looking unmoored without one.</summary>
+    private sealed class SeparatedPanel : Panel
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            using var pen = new Pen(SystemColors.ControlDark);
+            e.Graphics.DrawLine(pen, 0, 0, Width, 0);
+        }
     }
 
     protected override void OnFontChanged(EventArgs e)
@@ -755,6 +768,12 @@ public sealed class FilterTreeControl : UserControl
     internal void TypeSearchForTesting(string text) => _search.Text = text;
     internal void PressSearchKeyForTesting(Keys key) => OnSearchKeyDown(_search, new KeyEventArgs(key));
     internal void ClickSearchCloseForTesting() => _searchClose.PerformClick();
+    internal Bitmap SearchBarPictureForTesting()
+    {
+        var bmp = new Bitmap(Math.Max(1, _searchBar.Width), Math.Max(1, _searchBar.Height));
+        _searchBar.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        return bmp;
+    }
     /// <summary>What the header paints, so a check can see the hint appear and go.</summary>
     internal Bitmap HeaderPictureForTesting()
     {
@@ -1260,6 +1279,14 @@ public sealed class FilterTreeControl : UserControl
 
     /// <summary>True when anything in the search bar has the keyboard - the box or its close button.</summary>
     public bool SearchBarHasFocus => _searchBar.Visible && _searchBar.ContainsFocus;
+
+    /// <summary>Tab, kept inside the bar - the same rule the find bar follows. With one stop in it that
+    /// means Tab stays put, which is the honest answer: there is nowhere else in the bar to go.</summary>
+    public void MoveSearchFocusWithin(bool forward)
+    {
+        Control? from = _searchBar.Controls.Cast<Control>().FirstOrDefault(c => c.Focused);
+        _searchBar.SelectNextControl(from, forward, tabStopOnly: true, nested: true, wrap: true);
+    }
 
     /// <summary>Moves keyboard focus into the filter list (selecting the first filter if none is selected).</summary>
     public void FocusList()

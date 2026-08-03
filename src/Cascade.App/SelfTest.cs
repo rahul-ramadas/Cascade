@@ -86,6 +86,7 @@ internal static class SelfTest
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
+            ok &= Timed("tab stops", RunTabStopChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
@@ -4212,6 +4213,21 @@ internal static class SelfTest
                         tree.SearchBarBoundsForTesting.Top >= tree.TreeAreaForTesting.Bottom,
                         $"bar at {tree.SearchBarBoundsForTesting.Top}, list ends {tree.TreeAreaForTesting.Bottom}");
 
+            // A rule along its top edge. Without one the bar's right-hand end reads as unmoored, because the
+            // list's scrollbar stops short of it and there is nothing else to say where the list ended.
+            using (var bar = tree.SearchBarPictureForTesting())
+            {
+                int ruled = 0;
+                for (int x = 0; x < bar.Width; x++)
+                {
+                    var onTheRule = bar.GetPixel(x, 0);
+                    var justBelow = bar.GetPixel(x, Math.Min(2, bar.Height - 1));
+                    if (Luma(onTheRule) < Luma(justBelow) - 20) ruled++;
+                }
+                ok &= Check("with a rule along its top to part it from the list", ruled > bar.Width * 3 / 4,
+                            $"{ruled} of {bar.Width} columns ruled");
+            }
+
             tree.TypeSearchForTesting("charlie");
             Pump();
             ok &= Check("typing walks to the match", tree.SelectedFilter?.Match.Text == "charlie",
@@ -4279,6 +4295,82 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
+    }
+
+    private static int Luma(Color c) => (c.R * 299 + c.G * 587 + c.B * 114) / 1000;
+
+    /// <summary>Where Tab goes. Two areas, and a bar you have opened keeps it: tabbing out of a bar lands
+    /// on whatever happens to be next in the window - the presets list, as it turned out - with no way
+    /// back in, so the only way out of a bar is Escape.
+    ///
+    /// The "never leaves" checks here run through a seam that calls ProcessCmdKey with an empty message,
+    /// so they cannot tell a real escape from a no-op. UiFeatureTests.Tab_has_two_stops_and_never_walks_
+    /// out_of_an_open_bar posts real Tab keys and is what actually holds that line.</summary>
+    private static bool RunTabStopChecks()
+    {
+        Line("-- what Tab does --");
+
+        using var form = new MainForm(new AppSettings(), new MachineState(), Array.Empty<string>())
+        {
+            NoSavePrompt = true,
+            Opacity = 0,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Size = new Size(1000, 720),
+        };
+        form.Show();
+        Pump();
+
+        string Area() => form.FocusedAreaForTesting;
+
+        form.GridForTesting.Focus();
+        Pump();
+        bool ok = Check("it starts on the log", Area() == "log", Area());
+
+        var walk = new List<string>();
+        for (int i = 0; i < 4; i++) { form.PressCmdKeyForTesting(Keys.Tab); Pump(); walk.Add(Area()); }
+        string[] alternating = ["filter list", "log", "filter list", "log"];
+        ok &= Check("Tab alternates between the log and the filter list",
+                    walk.SequenceEqual(alternating), string.Join(" -> ", walk));
+
+        var backwards = new List<string>();
+        for (int i = 0; i < 2; i++) { form.PressCmdKeyForTesting(Keys.Shift | Keys.Tab); Pump(); backwards.Add(Area()); }
+        string[] bothWays = ["filter list", "log"];
+        ok &= Check("and Shift+Tab does the same, there being only the two",
+                    backwards.SequenceEqual(bothWays), string.Join(" -> ", backwards));
+
+        // The find bar has five stops of its own; Tab must visit them and come back, never leave.
+        form.ClickMenuForTesting("Edit", "Find");
+        Pump();
+        ok &= Check("opening find puts the keyboard in the bar", Area() == "find bar", Area());
+
+        var inBar = new List<string>();
+        for (int i = 0; i < 8; i++) { form.PressCmdKeyForTesting(Keys.Tab); Pump(); inBar.Add(Area()); }
+        ok &= Check("Tab never leaves the find bar", inBar.TrueForAll(a => a == "find bar"),
+                    string.Join(" -> ", inBar.Distinct()));
+        ok &= Check("and it really does move about inside it",
+                    form.FindBarForTesting.FocusedForTesting is { Length: > 0 },
+                    form.FindBarForTesting.FocusedForTesting ?? "(none)");
+        form.CloseFindForTesting();
+        Pump();
+
+        // Same rule for the filter search bar, which has one stop - so Tab stays put rather than falling out.
+        form.FilterTreeForTesting.ShowSearch();
+        Pump();
+        ok &= Check("opening the filter search puts the keyboard in its bar", Area() == "filter search", Area());
+        var inSearch = new List<string>();
+        for (int i = 0; i < 4; i++) { form.PressCmdKeyForTesting(Keys.Tab); Pump(); inSearch.Add(Area()); }
+        ok &= Check("Tab never leaves the filter search bar either",
+                    inSearch.TrueForAll(a => a == "filter search"), string.Join(" -> ", inSearch.Distinct()));
+
+        // ...and Escape, which is the way out, hands it back to the list rather than to nowhere.
+        form.PressCmdKeyForTesting(Keys.Escape);
+        Pump();
+        ok &= Check("Escape leaves the bar and lands on the filter list", Area() == "filter list", Area());
+
+        form.Close();
+        Pump();
+        return ok;
     }
 
 

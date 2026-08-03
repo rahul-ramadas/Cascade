@@ -193,6 +193,12 @@ public sealed class FindBar : UserControl
 
     private void Preview() => PreviewChanged?.Invoke(_text.Text.Length == 0 ? null : Query());
 
+    /// <summary>Tab, kept inside the bar. Handing it to the form instead walks out of the bar and into
+    /// whatever control happens to be next in the window, which is no use to anyone: the way out of a bar
+    /// is Escape.</summary>
+    internal void MoveFocusWithin(bool forward) =>
+        SelectNextControl(ActiveControl, forward, tabStopOnly: true, nested: true, wrap: true);
+
     /// <summary>A hairline under the bar, so the log below reads as a separate surface rather than as text
     /// that happens to start lower down. The bar keeps a pixel of padding for it, or the table filling the
     /// bar would cover it.</summary>
