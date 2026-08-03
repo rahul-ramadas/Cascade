@@ -12,7 +12,7 @@ public class PersistenceTests
         <TextAnalysisTool.NET version="2025-11-21" showOnlyFilteredLines="True">
           <filters>
             <filter enabled="y" excluding="n" description="errors" foreColor="ff0000" type="matches_text" case_sensitive="n" regex="n" text="[ERROR]" />
-            <filter enabled="n" excluding="y" description="" type="matches_text" case_sensitive="y" regex="y" text="\[OrderService\].+Svc::" />
+            <filter enabled="n" excluding="y" description="" type="matches_text" case_sensitive="y" regex="y" text="\[payment-svc\].+declined" />
             <filter enabled="n" excluding="n" description="" foreColor="ffff00" backColor="000000" type="matches_text" case_sensitive="n" regex="n" text="&quot;TraceType&quot;:&quot;Warning&quot;" />
           </filters>
         </TextAnalysisTool.NET>
@@ -40,7 +40,7 @@ public class PersistenceTests
         Assert.Equal(FilterKind.Exclude, f1.Kind);
         Assert.True(f1.Match.Regex);
         Assert.True(f1.Match.CaseSensitive);
-        Assert.Equal(@"\[OrderService\].+Svc::", f1.Match.Text);
+        Assert.Equal(@"\[payment-svc\].+declined", f1.Match.Text);
 
         var f2 = c.Roots[2];
         Assert.Equal("\"TraceType\":\"Warning\"", f2.Match.Text); // XML entities unescaped
@@ -86,18 +86,5 @@ public class PersistenceTests
             Assert.False(loadedCols.Columns[1].Visible);
         }
         finally { File.Delete(path); }
-    }
-
-    [Fact]
-    public void Real_orders_tat_imports_if_present()
-    {
-        const string path = @"E:\Scripts\Orders.tat";
-        if (!File.Exists(path)) return; // environment-dependent fixture
-
-        var c = TatImporter.Import(path);
-        Assert.Equal(175, c.Roots.Count);
-        Assert.All(c.Roots, f => Assert.Equal(FilterMatchType.Text, f.Match.Type));
-        Assert.Contains(c.Roots, f => f.Match.Regex);
-        Assert.Contains(c.Roots, f => f.Kind == FilterKind.Exclude);
     }
 }

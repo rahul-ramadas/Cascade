@@ -67,7 +67,7 @@ internal static class UiShots
         ShotFindBar(outDir, "find-badregex", "", badPattern: "charge(declined");
 
         var cols = new ColumnSpec();
-        ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
+        ShotDialog(new ColumnsDialog(cols, "[2026-07-31T09:31:17][api-gateway][3][2FA8][315C][http][Handler][INFO][TFLAG] message text"), outDir, "columns");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog(null), outDir, "about");
@@ -92,7 +92,7 @@ internal static class UiShots
         for (int i = 0; i < 30; i++)
         {
             string lvl = i % 4 == 0 ? "ERROR" : i % 4 == 1 ? "WARN " : "INFO ";
-            sb.Append($"[2026-07-16T18:06:{i:00}][inventory-svc][{lvl}] disk network message {i}\n");
+            sb.Append($"[2026-07-31T09:00:{i:00}][api-gateway][{lvl}] payment order message {i}\n");
         }
         string path = Path.Combine(Path.GetTempPath(), "cascade_fsearch_" + Guid.NewGuid().ToString("N") + ".log");
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
@@ -104,8 +104,8 @@ internal static class UiShots
         doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xC0, 0, 0), Bold = true } });
         doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
         doc.Filters.Add(new Filter { Enabled = true, Description = "info", Match = { Text = "INFO" }, Style = { Foreground = new RgbColor(0x60, 0x60, 0x60) } });
-        doc.Filters.Add(new Filter { Enabled = true, Description = "disk io", Match = { Text = "disk" }, Style = { Foreground = new RgbColor(0, 0, 0xC0) } });
-        doc.Filters.Add(new Filter { Enabled = true, Description = "network", Match = { Text = "network" }, Style = { Foreground = new RgbColor(0, 0x88, 0) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "payments", Match = { Text = "payment" }, Style = { Foreground = new RgbColor(0, 0, 0xC0) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "orders", Match = { Text = "order" }, Style = { Foreground = new RgbColor(0, 0x88, 0) } });
         doc.ApplyFilters();
         WaitIdle(doc);
 
@@ -151,7 +151,7 @@ internal static class UiShots
         for (int i = 0; i < 40; i++)
         {
             string lvl = i % 4 == 0 ? "ERROR" : i % 4 == 1 ? "WARN " : "INFO ";
-            sb.Append($"[2026-07-16T18:06:{i:00}.123][inventory-svc][{i:000}][{lvl}] message number {i} with detail text\n");
+            sb.Append($"[2026-07-31T09:00:{i:00}.123][api-gateway][{i:000}][{lvl}] message number {i} with detail text\n");
         }
         string path = Path.Combine(Path.GetTempPath(), "cascade_states_" + Guid.NewGuid().ToString("N") + ".log");
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));

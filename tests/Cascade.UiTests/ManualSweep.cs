@@ -10,23 +10,25 @@ using Xunit;
 namespace Cascade.UiTests;
 
 /// <summary>
-/// TEMPORARY exploratory rig: drives the real app on the real 7.37 GB trace with the real filter set, using
-/// actual mouse and keyboard, and writes findings plus screenshots. Gated on CASCADE_MANUAL=1.
+/// Exploratory rig: drives the real app on a large generated log with a generated filter set, using actual
+/// mouse and keyboard, and writes findings plus screenshots. Gated on CASCADE_MANUAL=1.
 /// </summary>
 public class ManualSweep : IDisposable
 {
-    private const string Big = @"E:\Repos\test-file.txt";
-    private const string RealFilters = @"E:\Scripts\Orders.cascade";
-    private const string Out = @"E:\Temp\manual";
-    private static readonly string Filters = Path.Combine(Out, "Orders.cascade");
+    private static readonly string Out =
+        Environment.GetEnvironmentVariable("CASCADE_MANUAL_OUT")
+        ?? Path.Combine(Path.GetTempPath(), "cascade-manual");
+    private static readonly string Filters = Path.Combine(Out, "fixture.cascade");
+    private const string PresetName = "gateway only";
 
     private readonly List<string> _log = new();
     private readonly List<string> _bugs = new();
     private CascadeApp _app = null!;
     private int _shot;
 
-    /// <summary>Asked for by hand. Everything here - the trace, the filter set, the place it writes - lives on
-    /// one machine, so anywhere else the rig must do NOTHING AT ALL, tearing down included.</summary>
+    /// <summary>Asked for by hand: it takes the mouse and the keyboard for several minutes, and generates a
+    /// few hundred megabytes the first time. Anywhere else it must do NOTHING AT ALL, tearing down
+    /// included.</summary>
     private static bool Asked => Environment.GetEnvironmentVariable("CASCADE_MANUAL") == "1";
 
     public void Dispose()
@@ -52,10 +54,10 @@ public class ManualSweep : IDisposable
         if (!Asked) return;
         SetProcessDpiAwarenessContext(-4);
         Directory.CreateDirectory(Out);
-        // A copy, so saving can be exercised without touching the real thing.
-        File.Copy(RealFilters, Filters, overwrite: true);
+        // Written fresh each run, so saving and editing can be exercised from a known state.
+        BigFixture.WriteFilters(Filters);
 
-        _app = CascadeApp.LaunchExisting(Big, Filters, CascadeApp.NewSettingsDir(),
+        _app = CascadeApp.LaunchExisting(BigFixture.Log(), Filters, CascadeApp.NewSettingsDir(),
                                          ownsFiles: false, ownsSettingsDir: true);
         _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
         Thread.Sleep(1500);
@@ -295,7 +297,7 @@ public class ManualSweep : IDisposable
         var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
         _app.SetText(edit, "");
         Thread.Sleep(300);
-        Keyboard.Type("OrderService");            // typed, as a user would
+        Keyboard.Type(BigFixture.EveryLineTerm);   // typed, as a user would
         Thread.Sleep(1500);
         int typed = MarkedPixels();
         Say($"marks while the bar is open: {typed}");
@@ -378,9 +380,9 @@ public class ManualSweep : IDisposable
 
     private void UndoMenuWording()
     {
-        var node = _app.FilterNode("[ORDER_SET_STATE]") ?? _app.FilterNode("[order-service]");
+        var node = _app.FilterNode(BigFixture.MidFilter) ?? _app.FilterNode(BigFixture.HugeFilter);
         if (node is null) { Check("a filter to edit", false); return; }
-        if (!ClickFilterRow("[ORDER_SET_STATE]") && !ClickFilterRow("[order-service]")) { Check("the filter is reachable", false); return; }
+        if (!ClickFilterRow(BigFixture.MidFilter) && !ClickFilterRow(BigFixture.HugeFilter)) { Check("the filter is reachable", false); return; }
         Thread.Sleep(500);
         Chord(VirtualKeyShort.KEY_D);
         Thread.Sleep(2000);
@@ -394,7 +396,7 @@ public class ManualSweep : IDisposable
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
 
-        if (!ClickFilterRow("[ORDER_SET_STATE]")) ClickFilterRow("[order-service]");
+        if (!ClickFilterRow(BigFixture.MidFilter)) ClickFilterRow(BigFixture.HugeFilter);
         Thread.Sleep(400);
         Chord(VirtualKeyShort.KEY_Z);
         Thread.Sleep(2000);
@@ -496,7 +498,7 @@ public class ManualSweep : IDisposable
         if (dlg is null) { Check("the bar opened", false); return; }
         var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
 
-        _app.SetText(edit, "HCI_RegUpdateCOD");
+        _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(300);
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
@@ -518,7 +520,7 @@ public class ManualSweep : IDisposable
         if (regex is not null)
         {
             regex.IsChecked = true;
-            _app.SetText(edit, "HCI_RegUpdate[A-Z]+");
+            _app.SetText(edit, BigFixture.RegexTerm);
             Thread.Sleep(400);
             Keyboard.Press(VirtualKeyShort.RETURN);
             Thread.Sleep(4000);
@@ -526,7 +528,7 @@ public class ManualSweep : IDisposable
             Check("a regex search finds something", Tally().Contains("Match"), Tally());
 
             // ...and one that cannot match must say so, or the regex is not really being used.
-            _app.SetText(edit, "HCI_RegUpdate[0-9]{6}");
+            _app.SetText(edit, BigFixture.ImpossibleRegexTerm);
             Thread.Sleep(400);
             Keyboard.Press(VirtualKeyShort.RETURN);
             Thread.Sleep(6000);
@@ -558,7 +560,7 @@ public class ManualSweep : IDisposable
         var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
         _app.SetText(edit, "");
         Thread.Sleep(200);
-        Keyboard.Type("HCI_RegUpdate");
+        Keyboard.Type(BigFixture.EveryLineTerm);
         Thread.Sleep(1500);
         int typed = MarkedPixels();
         Say($"marked pixels: {plain} -> {typed} on typing alone");
@@ -643,20 +645,20 @@ public class ManualSweep : IDisposable
 
     // ---- stages ----
 
-    /// <summary>The saved filter set matches nothing in this file, so first make the view show something.</summary>
+    /// <summary>Nothing in the saved set is enabled, so first make the view show something.</summary>
     private void GetContentOnScreen()
     {
-        Check("the file is indexed", Status().Contains("Total: 33,180,857"), Status());
+        Check("the file is indexed", Status().Contains(BigFixture.TotalStatus), Status());
 
-        var node = _app.FilterNode("[order-service]");
-        Check("the [order-service] filter is in the list", node is not null);
+        var node = _app.FilterNode(BigFixture.HugeFilter);
+        Check($"the {BigFixture.HugeFilter} filter is in the list", node is not null);
         if (node is null) return;
 
         node.AsTreeItem().Select();
         Thread.Sleep(300);
         _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);   // the subtree, so plenty matches
         WaitFiltered();
-        Say($"after enabling [order-service]: {Status()}");
+        Say($"after enabling {BigFixture.HugeFilter}: {Status()}");
         Check("enabling it fills the view", _app.Rows().Length > 0, $"{_app.Rows().Length} rows");
         Check("and the count is no longer zero", !Status().Contains("Fil: 0"), Status());
         Shot("content");
@@ -676,7 +678,7 @@ public class ManualSweep : IDisposable
         {
             string text = tip.Name ?? "";
             Say($"tip: {text.Replace("\n", " | ")}");
-            Check("the tip names a filter that matched", text.Contains("order-service", StringComparison.OrdinalIgnoreCase), text);
+            Check("the tip names a filter that matched", text.Contains("api-gateway", StringComparison.OrdinalIgnoreCase), text);
         }
         ShotScreen("tooltip");
 
@@ -809,7 +811,7 @@ public class ManualSweep : IDisposable
             Check("and blank once none of them are", bare.Count == 0, string.Join(" ", bare));
             Shot("map-blank");
 
-            if (ClickFilterRow("[order-service]"))
+            if (ClickFilterRow(BigFixture.HugeFilter))
             {
                 _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
                 WaitFiltered();
@@ -820,8 +822,8 @@ public class ManualSweep : IDisposable
                 Shot("map-two-filters");
             }
 
-            // The colours have to be the filters' own, on the real thing and not just in a fixture.
-            foreach (string name in new[] { "[order-service]", "[OrderDispatchLoop]" })
+            // The colours have to be the filters' own, on a real window and not just in a fixture.
+            foreach (string name in new[] { BigFixture.HugeFilter, BigFixture.BusyFilter })
             {
                 var own = FilterRowColour(name);
                 if (own is null) { Say($"  (no colour on {name})"); continue; }
@@ -1067,7 +1069,7 @@ public class ManualSweep : IDisposable
         long top = _app.FirstVisibleLine();
         _app.SetText(edit, "");
         Thread.Sleep(200);
-        Keyboard.Type("hci_regupdate");
+        Keyboard.Type(BigFixture.EveryLineTerm);
         Thread.Sleep(1500);
         Check("typing does not move the view", _app.FirstVisibleLine() == top, $"{top} -> {_app.FirstVisibleLine()}");
         Shot("find-typing");
@@ -1091,9 +1093,9 @@ public class ManualSweep : IDisposable
         // Ctrl+F while the box already has the keyboard: typing must replace the term.
         CtrlF();
         Thread.Sleep(300);
-        Keyboard.Type("smpdib");
+        Keyboard.Type(BigFixture.SparseTerm);
         Thread.Sleep(500);
-        Check("Ctrl+F selects the term so a new one types straight over it", _app.TextOf(edit) == "smpdib", _app.TextOf(edit));
+        Check("Ctrl+F selects the term so a new one types straight over it", _app.TextOf(edit) == BigFixture.SparseTerm, _app.TextOf(edit));
 
         // Click the log, then Ctrl+F must come back to the box. Well down the view: the find bar is modeless
         // and sits over the top-left of it.
@@ -1119,7 +1121,7 @@ public class ManualSweep : IDisposable
         Thread.Sleep(400);
 
         // Esc chain.
-        _app.SetText(edit, "hci_regupdate");
+        _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(200);
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
@@ -1138,13 +1140,13 @@ public class ManualSweep : IDisposable
         Shot("find-after-arrows");
 
         // Hiding and showing must move the split. The date is on every line, so half the hits are on lines
-        // the [order-service] filter is not showing.
+        // the enabled filter is not showing.
         CtrlF();
         Thread.Sleep(400);
         var box = _app.FindDialog("Find")?.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
         if (box is not null)
         {
-            _app.SetText(box, "2026-07-16T18");
+            _app.SetText(box, BigFixture.EveryLineDate);
             Thread.Sleep(300);
             Keyboard.Press(VirtualKeyShort.RETURN);
             Thread.Sleep(6000);
@@ -1172,7 +1174,7 @@ public class ManualSweep : IDisposable
 
     private void UndoRedo()
     {
-        if (!ClickFilterRow("[order-service]")) { Check("a filter to work on", false); return; }
+        if (!ClickFilterRow(BigFixture.HugeFilter)) { Check("a filter to work on", false); return; }
         Thread.Sleep(600);
         int before = _app.RootFilterNames().Length;
         Say($"roots before: {before}");
@@ -1229,28 +1231,28 @@ public class ManualSweep : IDisposable
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(1500);
         ShotScreen("presets-naming");
-        Keyboard.Type("order-service only");
+        Keyboard.Type(PresetName);
         Thread.Sleep(400);
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(1800);
         Say($"presets now: {string.Join(" | ", SafePresetNames())}");
-        Check("the preset appears in the list", SafePresetNames().Any(n => n.Contains("order-service")),
+        Check("the preset appears in the list", SafePresetNames().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
               string.Join("|", SafePresetNames()));
         Shot("presets");
 
         // Turning its filters off must clear it; clicking it must bring them back.
-        if (ClickFilterRow("[order-service]"))
+        if (ClickFilterRow(BigFixture.HugeFilter))
         {
             _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
             Thread.Sleep(4000);
-            Say($"after switching [order-service] off: {Status()}");
+            Say($"after switching {BigFixture.HugeFilter} off: {Status()}");
             Say($"still ticked: {string.Join(" | ", TickedFilters())}");
             Check("switching its filters off drops the preset out of effect",
-                  !_app.ActivePresets().Any(n => n.Contains("order-service")), string.Join("|", _app.ActivePresets()));
+                  !_app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)), string.Join("|", _app.ActivePresets()));
 
-            _app.SelectPreset("order-service only");
+            _app.SelectPreset(PresetName);
             Thread.Sleep(5000);
-            Check("selecting it turns them back on", _app.ActivePresets().Any(n => n.Contains("order-service")),
+            Check("selecting it turns them back on", _app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
                   string.Join("|", _app.ActivePresets()));
             Check("and the view fills again", _app.Rows().Length > 0, $"{_app.Rows().Length} rows");
             Shot("presets-applied");
@@ -1304,7 +1306,7 @@ public class ManualSweep : IDisposable
     private void WaitIndexed()
     {
         var until = DateTime.UtcNow.AddSeconds(90);
-        while (DateTime.UtcNow < until && !Status().Contains("Total: 33,180,857")) Thread.Sleep(500);
+        while (DateTime.UtcNow < until && !Status().Contains(BigFixture.TotalStatus)) Thread.Sleep(500);
         Thread.Sleep(1500);
     }
 

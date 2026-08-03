@@ -108,7 +108,7 @@ public sealed class FindSearch : IDisposable
     ///
     /// <paramref name="visible"/> reads the visibility of 64 lines per word, or is null when nothing is
     /// hidden. Both are answered a machine word at a time: asking line by line meant twenty million
-    /// callbacks on a term like "OrderService", which was 160 ms of frozen window every time the caret moved.</summary>
+    /// callbacks on a common term, which was 160 ms of frozen window every time the caret moved.</summary>
     public FindTally Count(VisibleWordReader? visible, long currentLine)
     {
         lock (_sync)

@@ -10,21 +10,21 @@ using Xunit;
 namespace Cascade.UiTests;
 
 /// <summary>
-/// EXPLORATORY: photographs the match map on the real trace under several filter sets, so its legibility can
-/// be judged rather than guessed at. Gated on CASCADE_MAPLOOK=1. Writes E:\Temp\maplook.
+/// EXPLORATORY: photographs the match map on a large generated log under several filter sets, so its
+/// legibility can be judged rather than guessed at. Gated on CASCADE_MAPLOOK=1.
 /// </summary>
 public class MapLook : IDisposable
 {
-    private const string Big = @"E:\Repos\test-file.txt";
-    private const string RealFilters = @"E:\Scripts\Orders.cascade";
-    private const string Out = @"E:\Temp\maplook";
-    private static readonly string Filters = Path.Combine(Out, "Orders.cascade");
+    private static readonly string Out =
+        Environment.GetEnvironmentVariable("CASCADE_MAPLOOK_OUT")
+        ?? Path.Combine(Path.GetTempPath(), "cascade-maplook");
+    private static readonly string Filters = Path.Combine(Out, "fixture.cascade");
 
     private readonly List<string> _log = new();
     private CascadeApp _app = null!;
 
-    /// <summary>Asked for by hand. Everything here - the trace, the filter set, the place it writes - lives on
-    /// one machine, so anywhere else this must do NOTHING AT ALL, tearing down included.</summary>
+    /// <summary>Asked for by hand: it takes the screen for a few minutes and generates a few hundred
+    /// megabytes the first time. Anywhere else this must do NOTHING AT ALL, tearing down included.</summary>
     private static bool Asked => Environment.GetEnvironmentVariable("CASCADE_MAPLOOK") == "1";
 
     public void Dispose()
@@ -43,9 +43,9 @@ public class MapLook : IDisposable
         if (!Asked) return;
         SetProcessDpiAwarenessContext(-4);
         Directory.CreateDirectory(Out);
-        File.Copy(RealFilters, Filters, overwrite: true);
+        BigFixture.WriteFilters(Filters);
 
-        _app = CascadeApp.LaunchExisting(Big, Filters, CascadeApp.NewSettingsDir(),
+        _app = CascadeApp.LaunchExisting(BigFixture.Log(), Filters, CascadeApp.NewSettingsDir(),
                                          ownsFiles: false, ownsSettingsDir: true);
         _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
         Thread.Sleep(1500);
@@ -53,10 +53,11 @@ public class MapLook : IDisposable
         WaitIndexed();
         AllOff();
 
-        Scene("a-one-huge", "[order-service]");
-        Scene("b-two-rare", "[ERROR]", "[WARNING]");
-        Scene("c-mixed", "[order-service]", "[ERROR]", "[OrderDispatchLoop]");
-        Scene("d-many", "[order-service]", "[ERROR]", "[OrderDispatchLoop]", "[bthusb]", "[db-pool]", "[bthserv]");
+        Scene("a-one-huge", BigFixture.HugeFilter);
+        Scene("b-two-rare", BigFixture.RareFilter, BigFixture.WarnFilter);
+        Scene("c-mixed", BigFixture.HugeFilter, BigFixture.RareFilter, BigFixture.BusyFilter);
+        Scene("d-many", BigFixture.HugeFilter, BigFixture.RareFilter, BigFixture.BusyFilter,
+                        BigFixture.ExtraFilterA, BigFixture.ExtraFilterB, BigFixture.ExtraFilterC);
 
         Assert.True(true);
     }
