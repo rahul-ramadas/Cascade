@@ -586,7 +586,7 @@ public class UiFeatureTests
     }
 
     [Fact]
-    public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
+    public void Alt_arrows_reorder_and_nest_the_selected_filter()
     {
         string log = TestData.WriteLogFile();
         string tat = TestData.WriteFilterFile("MATCH", "alpha", "beta");
@@ -607,33 +607,82 @@ public class UiFeatureTests
 
             CheckOrder("initial order", "MATCH", "alpha", "beta");
 
-            // Ctrl+Up / Ctrl+Down reorder within the same level.
+            // Alt+Up / Alt+Down reorder within the same level. Ctrl+arrow walks the selection now, which is
+            // what any other list does with it.
             var tree = app.Tree();
             app.FocusFilter("beta");
-            app.CtrlKey(tree, VirtualKeyShort.UP);
-            CheckOrder("ctrl+up moves it above alpha", "MATCH", "beta", "alpha");
+            app.AltKey(tree, VirtualKeyShort.UP);
+            CheckOrder("alt+up moves it above alpha", "MATCH", "beta", "alpha");
 
-            app.CtrlKey(tree, VirtualKeyShort.DOWN);
-            CheckOrder("ctrl+down puts it back", "MATCH", "alpha", "beta");
+            app.AltKey(tree, VirtualKeyShort.DOWN);
+            CheckOrder("alt+down puts it back", "MATCH", "alpha", "beta");
 
-            // Ctrl+Right nests it under the filter above it.
-            app.CtrlKey(tree, VirtualKeyShort.RIGHT);
-            CheckOrder("ctrl+right removes it from the top level", "MATCH", "alpha");
-            Check("ctrl+right nests it under alpha",
+            // Alt+Right nests it under the filter above it.
+            app.AltKey(tree, VirtualKeyShort.RIGHT);
+            CheckOrder("alt+right removes it from the top level", "MATCH", "alpha");
+            Check("alt+right nests it under alpha",
                 CascadeApp.IndexOfFilter(app.ChildFilterNames("alpha"), "beta") >= 0,
                 string.Join(" | ", app.ChildFilterNames("alpha")));
 
-            // Ctrl+Left moves it back out, directly after its old parent.
-            app.CtrlKey(tree, VirtualKeyShort.LEFT);
-            CheckOrder("ctrl+left restores it to the top level", "MATCH", "alpha", "beta");
+            // Alt+Left moves it back out, directly after its old parent.
+            app.AltKey(tree, VirtualKeyShort.LEFT);
+            CheckOrder("alt+left restores it to the top level", "MATCH", "alpha", "beta");
 
             // The first filter has nothing above it, so both are no-ops rather than errors.
             app.FocusFilter("MATCH");
-            app.CtrlKey(tree, VirtualKeyShort.UP);
-            app.CtrlKey(tree, VirtualKeyShort.RIGHT);
+            app.AltKey(tree, VirtualKeyShort.UP);
+            app.AltKey(tree, VirtualKeyShort.RIGHT);
             CheckOrder("no-op at the top of the list", "MATCH", "alpha", "beta");
 
             Assert.True(fails.Count == 0, "Filter reorder failures:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
+    public void Several_filters_can_be_selected_and_removed_together()
+    {
+        // Through the real window, with real keystrokes: the group is built with Shift+Down, removed with
+        // one Delete, and put back with one Ctrl+Z. Each of the three filters below "MATCH" matches exactly
+        // one line the others do not, so the status bar's filtered count moves by three and back - which is
+        // what proves the model changed rather than just the list.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "line 999", "line 998", "line 997");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            Check("starts with four filters", app.RootFilterNames().Length == 4, string.Join(" | ", app.RootFilterNames()));
+
+            var tree = app.Tree();
+            app.FocusFilter("line 999");
+            app.ShiftKey(tree, VirtualKeyShort.DOWN);
+            app.ShiftKey(tree, VirtualKeyShort.DOWN);
+            Check("the list says how many are selected",
+                  app.WaitForSelectionCount(3), app.SelectionNote() ?? "(no note)");
+
+            app.Key(tree, VirtualKeyShort.DELETE);
+            Check("one delete takes all three", app.WaitForFilterCount(1), string.Join(" | ", app.RootFilterNames()));
+            Check("and the ones it took are gone",
+                  app.WaitForNoFilter("line 999") && app.WaitForNoFilter("line 998") && app.WaitForNoFilter("line 997"),
+                  string.Join(" | ", app.RootFilterNames()));
+            Check("the filter that was not selected is untouched", app.FilterNode("MATCH") is not null,
+                  string.Join(" | ", app.RootFilterNames()));
+
+            // Undo is a form-level shortcut, so it has to go through the message loop - a sent message
+            // reaches the control's KeyDown and skips ProcessCmdKey entirely.
+            app.SendKeyAsDialogKey(tree, VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Check("one undo brings all three back", app.WaitForFilterCount(4), string.Join(" | ", app.RootFilterNames()));
+            Check("in the order they were in",
+                  CascadeApp.IndexOfFilter(app.RootFilterNames(), "line 999") == 1 &&
+                  CascadeApp.IndexOfFilter(app.RootFilterNames(), "line 998") == 2 &&
+                  CascadeApp.IndexOfFilter(app.RootFilterNames(), "line 997") == 3,
+                  string.Join(" | ", app.RootFilterNames()));
+
+            Assert.True(fails.Count == 0, "Filter multi-select failures:\n  " + string.Join("\n  ", fails));
         }
         finally { File.Delete(log); File.Delete(tat); }
     }

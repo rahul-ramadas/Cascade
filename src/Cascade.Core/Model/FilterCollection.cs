@@ -66,6 +66,62 @@ public sealed class FilterCollection
         filter.Parent = null;
     }
 
+    // ---- operating on several filters at once ----
+
+    /// <summary>The filters in <paramref name="chosen"/> that no other member already carries: a filter
+    /// whose ancestor is also chosen is dropped, because every structural operation - remove, move,
+    /// duplicate - takes a filter's whole subtree with it, so naming both would do the work twice.
+    /// The order they were given in is kept, which is the list order the caller reads them off the tree in.</summary>
+    public static List<Filter> SelectionRoots(IEnumerable<Filter> chosen)
+    {
+        var all = chosen as IReadOnlyCollection<Filter> ?? chosen.ToList();
+        var set = new HashSet<Filter>(all);   // Filter does not override Equals, so this is identity
+        return all.Where(f => !HasChosenAncestor(f, set)).ToList();
+    }
+
+    private static bool HasChosenAncestor(Filter f, HashSet<Filter> chosen)
+    {
+        for (var p = f.Parent; p is not null; p = p.Parent)
+            if (chosen.Contains(p)) return true;
+        return false;
+    }
+
+    /// <summary>Removes every filter in <paramref name="chosen"/>, subtrees and all. One call so the caller
+    /// makes one undo entry rather than one per filter.</summary>
+    public void RemoveMany(IEnumerable<Filter> chosen)
+    {
+        foreach (var f in SelectionRoots(chosen)) Remove(f);
+    }
+
+    /// <summary>Moves every filter in <paramref name="chosen"/> under <paramref name="newParent"/>, landing
+    /// them consecutively from <paramref name="index"/> in the order given.
+    ///
+    /// All or nothing: if any one of them could not be moved there - a cycle, or a subtree too tall for the
+    /// depth limit - none of them are, so a refused drop leaves the tree exactly as it was rather than half
+    /// rearranged.</summary>
+    public bool MoveMany(IEnumerable<Filter> chosen, Filter? newParent, int index)
+    {
+        var roots = SelectionRoots(chosen);
+        if (roots.Count == 0) return false;
+        if (roots.Any(f => !CanMove(f, newParent))) return false;
+
+        // Dropping into a filter that is itself being moved would take the whole group with it.
+        if (newParent is not null && roots.Any(f => ReferenceEquals(f, newParent) || f.IsAncestorOf(newParent))) return false;
+
+        var list = newParent?.Children ?? Roots;
+        int at = Math.Clamp(index, 0, list.Count);
+        bool moved = false;
+        foreach (var f in roots)
+        {
+            // Move reads its index in the list as it stands before the filter is taken out of it, so the
+            // slot just after the one that landed last is the right thing to ask for either way.
+            if (!Move(f, newParent, at)) continue;
+            at = list.IndexOf(f) + 1;
+            moved = true;
+        }
+        return moved;
+    }
+
     /// <summary>True if <paramref name="filter"/> may be moved under <paramref name="newParent"/>
     /// without creating a cycle or exceeding <see cref="MaxDepth"/>.</summary>
     public static bool CanMove(Filter filter, Filter? newParent)
