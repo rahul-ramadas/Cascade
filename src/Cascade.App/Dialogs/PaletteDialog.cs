@@ -36,15 +36,18 @@ internal sealed class PaletteDialog : DialogBase
         int needed = Math.Max(1, (pairs.Count + columns - 1) / columns);
         int room = Math.Max(6, (Screen.PrimaryScreen?.WorkingArea.Height ?? Dpi(700)) * 55 / 100 / cellH);
         int rows = visibleRows ?? Math.Clamp(needed, 6, room);
+        bool scrolls = needed > rows;
 
         _scroller = new Quiet
         {
             AutoScroll = true,
-            Dock = DockStyle.Fill,
             Margin = new Padding(0, 0, 0, Dpi(4)),
-            BorderStyle = BorderStyle.FixedSingle,
-            Size = new Size(_chips.Width + SystemInformation.VerticalScrollBarWidth + Dpi(2), cellH * rows)
+            BorderStyle = BorderStyle.FixedSingle
         };
+        // CLIENT size, not size: the border would otherwise take a couple of pixels off the viewport and
+        // leave a scrollbar with two pixels of travel in it even when everything fits.
+        _scroller.ClientSize = new Size(_chips.Width + (scrolls ? SystemInformation.VerticalScrollBarWidth : 0),
+                                        cellH * rows);
         var scroller = _scroller;
         scroller.Controls.Add(_chips);
 
@@ -89,6 +92,8 @@ internal sealed class PaletteDialog : DialogBase
     internal void ScrollToForTesting(int y) => _scroller.AutoScrollPosition = new Point(0, y);
     internal void ClickForTesting(int index) => _chips.ClickForTesting(index);
     internal bool ScrollsForTesting => _chips.Height > _scroller.ClientSize.Height;
+    /// <summary>How far the scrollbar can actually be dragged - zero when everything is on screen.</summary>
+    internal int ScrollRangeForTesting => Math.Max(0, _chips.Height - _scroller.ClientSize.Height);
     /// <summary>Tab away and back, which is what makes a scrolling panel chase the focus.</summary>
     internal void CycleFocusForTesting()
     {
