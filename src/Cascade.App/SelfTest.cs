@@ -2569,7 +2569,13 @@ internal static class SelfTest
 
             // ---- what it looks like ----
             var painted = new FilterCollection();
-            Filter Add(string text) { var f = new Filter { Match = new FilterMatch { Text = text } }; painted.Add(f); return f; }
+            var own = new RgbColor(0xFF, 0xEB, 0xB4);
+            Filter Add(string text)
+            {
+                var f = new Filter { Match = new FilterMatch { Text = text }, Style = { Background = own } };
+                painted.Add(f);
+                return f;
+            }
             var p1 = Add("p1"); var p2 = Add("p2"); var p3 = Add("p3"); var p4 = Add("p4");
             doc.SetFilters(painted);
             tree.Rebuild();
@@ -2580,14 +2586,17 @@ internal static class SelfTest
 
             var area = tree.TreeAreaForTesting;
             using var shot = Capture(host);
+            Color Pixel(int x, int y)
+            {
+                int hx = area.Left + x, hy = area.Top + y;
+                return hx < 0 || hy < 0 || hx >= shot.Width || hy >= shot.Height ? Color.Transparent : shot.GetPixel(hx, hy);
+            }
             int Rule(int y)
             {
                 int n = 0;
                 for (int x = 0; x < tree.TreeWidthForTesting; x++)
                 {
-                    int hx = area.Left + x, hy = area.Top + y;
-                    if (hx < 0 || hy < 0 || hx >= shot.Width || hy >= shot.Height) continue;
-                    var px = shot.GetPixel(hx, hy);
+                    var px = Pixel(x, y);
                     if (px.R == SystemColors.Highlight.R && px.G == SystemColors.Highlight.G &&
                         px.B == SystemColors.Highlight.B) n++;
                 }
@@ -2595,6 +2604,7 @@ internal static class SelfTest
             }
             var r1 = tree.RowBoundsForTesting(p1);
             var r2 = tree.RowBoundsForTesting(p2);
+            var r3 = tree.RowBoundsForTesting(p3);
             var r4 = tree.RowBoundsForTesting(p4);
             int wide = tree.TreeWidthForTesting / 2;
             int top = Rule(r1.Top), inside = Rule(r2.Top), below = Rule(r4.Top);
@@ -2602,6 +2612,23 @@ internal static class SelfTest
                         top > wide);
             ok &= Check($"...none between the rows inside it ({inside}px)", inside <= 4);
             ok &= Check($"...and none below the last of them ({below}px)", below <= 4);
+
+            // The strip left of the text is the only part of a row the filter's own colours do not own, so
+            // that is where being selected has to show. How blue it is says which of the three states a row
+            // is in - and the tint has to be read off a pixel, since it is a wash over what is already there.
+            int Blueness(Rectangle row) => Pixel(3, row.Top + row.Height / 2) is var px ? px.B - px.R : 0;
+            int plain = Blueness(r4), inGroup = Blueness(r1), cursor = Blueness(r3);
+            ok &= Check($"an unselected filter's strip is left alone (blue {plain})", plain < 12);
+            ok &= Check($"a selected one is tinted (blue {inGroup})", inGroup > 25);
+            ok &= Check($"and the row the keyboard is on is tinted harder still " +
+                        $"({cursor} against {inGroup})", cursor > inGroup + 25);
+
+            // ...and it stops where the filter's own colours start, or selecting a filter would misreport
+            // the very thing the list is there to show.
+            var kept = Pixel(tree.TreeWidthForTesting - 3, r3.Top + r3.Height / 2);
+            ok &= Check($"the filter's own colour is not washed over " +
+                        $"(#{kept.R:X2}{kept.G:X2}{kept.B:X2} against #{own.R:X2}{own.G:X2}{own.B:X2})",
+                        kept.R == own.R && kept.G == own.G && kept.B == own.B);
             return ok;
         }
         finally

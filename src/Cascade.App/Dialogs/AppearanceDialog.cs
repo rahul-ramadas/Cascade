@@ -41,6 +41,11 @@ public sealed class AppearanceDialog : DialogBase
 
     private const string VariesText = "varies";
 
+    /// <summary>What the sample says. Deliberately not the filters' own patterns: those are usually regular
+    /// expressions and far too long for the box, and none of that tells you whether the colours being
+    /// chosen can be read. A plain sentence with a mix of letter shapes does.</summary>
+    private const string SampleText = "The quick brown fox jumps over the lazy dog \u2014 0123456789";
+
     /// <summary>What the flag lists offer, in order. Index 0 is the one a set of filters that disagree
     /// starts on, so pressing OK without touching anything changes nothing.</summary>
     private static readonly (string Text, StyleEdit Edit, bool Value)[] FlagChoices =
@@ -222,10 +227,7 @@ public sealed class AppearanceDialog : DialogBase
         _preview.ForeColor = ToColor(fore);
         _preview.BackColor = ToColor(back);
         _preview.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0)];
-        _preview.Text = _filters.Count == 1
-            ? _filters[0].DisplayName
-            : string.Join("  \u00b7  ", _filters.Take(4).Select(f => f.DisplayName))
-              + (_filters.Count > 4 ? "  \u00b7  \u2026" : "");
+        _preview.Text = SampleText;
     }
 
     private StyleChange Read() => new(
@@ -285,7 +287,7 @@ public sealed class AppearanceDialog : DialogBase
         var current = _setBack.CheckState == CheckState.Checked || _setFore.CheckState == CheckState.Checked
             ? new LuckyColors.Pair(_back, _fore) : (LuckyColors.Pair?)null;
 
-        using var dlg = new PaletteDialog(free, _preview.Text.Length > 0 ? _preview.Text : "Sample text", current);
+        using var dlg = new PaletteDialog(free, SampleText, current);
         if (dlg.ShowDialog(this) != DialogResult.OK || free.Count == 0) return;
 
         _back = dlg.Picked.Back;

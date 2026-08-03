@@ -899,8 +899,17 @@ public sealed class FilterTreeControl : UserControl
 
         if (selected)
         {
+            // The strip left of the text - tree lines, expander, tick box - is the only part of the row the
+            // filter's own colours do not own, so that is where being selected is shown. Translucent
+            // because Windows has already painted the tick box into it and it has to stay legible.
+            using (var tint = new SolidBrush(Color.FromArgb(
+                       ReferenceEquals(e.Node, _tree.SelectedNode) ? CurrentTint : SelectedTint,
+                       SystemColors.Highlight)))
+                g.FillRectangle(tint, 0, bounds.Top, Math.Max(0, e.Node.Bounds.Left), h);
+
             // One outline around a run of selected rows, not a box around each: the shared edges are drawn
-            // only where the run actually ends, so a range reads as one thing.
+            // only where the run actually ends, so a range reads as one thing - which the shading on its
+            // own cannot say when the rows in it wear different colours.
             using var selPen = new Pen(SystemColors.Highlight);
             int right = Math.Max(1, rightEdge - 1);
             int bottom = bounds.Top + h - 1;
@@ -909,17 +918,19 @@ public sealed class FilterTreeControl : UserControl
             if (!IsSelected(e.Node.PrevVisibleNode)) g.DrawLine(selPen, 0, bounds.Top, right, bounds.Top);
             if (!IsSelected(e.Node.NextVisibleNode)) g.DrawLine(selPen, 0, bottom, right, bottom);
         }
-
-        // Which row the keyboard is standing on. Worth showing only when it is not simply the one selected
-        // filter - and it has to be shown when Ctrl has walked it off the group entirely.
-        if (ReferenceEquals(e.Node, _tree.SelectedNode) && (_selected.Count > 1 || !selected))
+        else if (ReferenceEquals(e.Node, _tree.SelectedNode))
         {
+            // Ctrl+arrow can walk the current row off the group, and then nothing else marks where the
+            // keyboard is standing. Inside the group the darker strip says it.
             using var focusPen = new Pen(SystemColors.Highlight) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
-            int inset = selected ? 2 : 0;
-            g.DrawRectangle(focusPen, inset, bounds.Top + inset,
-                            Math.Max(1, rightEdge - 1 - inset * 2), Math.Max(1, h - 1 - inset * 2));
+            g.DrawRectangle(focusPen, 0, bounds.Top, Math.Max(1, rightEdge - 1), Math.Max(1, h - 1));
         }
     }
+
+    /// <summary>How strongly the strip is tinted for a selected filter, and for the one the keyboard is
+    /// standing on. Measured against the tick box underneath: much past this and it stops being legible.</summary>
+    private const int SelectedTint = 60;
+    private const int CurrentTint = 150;
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
     private static Color ToColor(RgbColor c) => Color.FromArgb(c.R, c.G, c.B);
