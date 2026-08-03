@@ -36,27 +36,27 @@ internal static class UiShots
         var demoFilter = new Filter
         {
             Enabled = true,
-            Description = "disk errors",
-            Match = { Text = @"\[OrderService\].+Disk", Regex = true },
+            Description = "declined charges",
+            Match = { Text = @"\[payment-svc\s*\].+declined", Regex = true },
             Style = { Foreground = new RgbColor(0xFF, 0xFF, 0xFF), Background = new RgbColor(0x9C, 0x27, 0xB0) }
         };
         ShotDialog(new FilterEditDialog(demoFilter, isNew: false), outDir, "filter-edit");
 
-        var badFilter = new Filter { Enabled = true, Match = { Text = @"\[OrderService\].+Disk", Regex = true } };
+        var badFilter = new Filter { Enabled = true, Match = { Text = @"\[payment-svc\s*\].+declined", Regex = true } };
         var filterError = new FilterEditDialog(badFilter, isNew: false);
-        filterError.SetTextForTesting(@"\[OrderService\].+(Disk");
+        filterError.SetTextForTesting(@"\[payment-svc\s*\].+(declined");
         ShotDialog(filterError, outDir, "filter-edit-error");
 
         var free = LuckyColors.Free(new[] { demoFilter }, badFilter);
-        ShotDialog(new PaletteDialog(free, @"\[OrderService\].+Disk", null), outDir, "palette");
+        ShotDialog(new PaletteDialog(free, @"\[payment-svc\s*\].+declined", null), outDir, "palette");
 
         // Three filters that agree on a background and disagree on everything else, which is the state the
         // dialog exists to show: one shared colour offered back, the rest saying so.
         var group = new List<Filter>
         {
             demoFilter,
-            new() { Description = "timeouts", Match = { Text = "Timeout" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0), Bold = true } },
-            new() { Description = "resets", Match = { Text = "HardReset" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0) } },
+            new() { Description = "timeouts", Match = { Text = "upstream timeout" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0), Bold = true } },
+            new() { Description = "retries", Match = { Text = "retrying inventory-svc" }, Style = { Background = new RgbColor(0x9C, 0x27, 0xB0) } },
         };
         ShotDialog(new AppearanceDialog(group, group,
                        new ResolvedStyle(new RgbColor(0x1F, 0x1F, 0x1F), new RgbColor(0xFF, 0xFF, 0xFF), false, false)),
@@ -64,7 +64,7 @@ internal static class UiShots
 
         ShotFindBar(outDir, "find", "");
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
-        ShotFindBar(outDir, "find-badregex", "", badPattern: "bth(port");
+        ShotFindBar(outDir, "find-badregex", "", badPattern: "charge(declined");
 
         var cols = new ColumnSpec();
         ShotDialog(new ColumnsDialog(cols, "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] message text"), outDir, "columns");
