@@ -458,6 +458,47 @@ internal sealed class CascadeApp : IDisposable
         => Retry.WhileFalse(() => AllStatusText().Contains(text, StringComparison.Ordinal),
                TimeSpan.FromMilliseconds(ms), Poll).Result;
 
+    /// <summary>Waits for the keyboard to reach a named area.</summary>
+    public bool WaitForArea(string area, int ms = 4000)
+        => Retry.WhileFalse(() => FocusedArea() == area, TimeSpan.FromMilliseconds(ms), Poll).Result;
+
+    /// <summary>Tab, POSTED to whatever has the keyboard. Tab is decided in the form's ProcessCmdKey, which
+    /// only runs for pre-processed messages - a sent message goes straight to the window procedure and
+    /// skips it, so this has to be posted.</summary>
+    public void TabFromFocus(bool forward = true)
+    {
+        var target = FocusedElement();
+        if (forward) SendKeyAsDialogKey(target, VirtualKeyShort.TAB);
+        else SendKeyAsDialogKey(target, VirtualKeyShort.TAB, VirtualKeyShort.SHIFT);
+        Settle(1);
+    }
+
+    /// <summary>Which area of the window has the keyboard. Every one of them reports as an unnamed pane, so
+    /// this asks where the focused thing IS rather than what it calls itself. The find bar is hosted inside
+    /// the log view, so it has to be tested for before the log.</summary>
+    public string FocusedArea()
+    {
+        AutomationElement? focused;
+        try { focused = FocusedElement(); } catch (Exception) { return "(none)"; }
+        if (focused is null) return "(none)";
+        var r = focused.BoundingRectangle;
+
+        var findNext = Window.FindFirstDescendant(cf => cf.ByName("Find next"));
+        if (findNext is not null && findNext.BoundingRectangle.Height > 0 &&
+            Math.Abs(r.Y - findNext.BoundingRectangle.Y) < findNext.BoundingRectangle.Height)
+            return "find bar";
+
+        var searchBox = FindFilterSearchBox();
+        if (searchBox is not null && Covers(searchBox.BoundingRectangle, r)) return "filter search";
+        if (Covers(Grid().BoundingRectangle, r)) return "log";
+        if (Covers(Tree().BoundingRectangle, r)) return "filter list";
+        return $"{focused.ControlType}:{focused.Name}";
+
+        static bool Covers(System.Drawing.Rectangle outer, System.Drawing.Rectangle inner)
+            => inner.Width > 0 && outer.Width > 0 &&
+               outer.Contains(inner.X + inner.Width / 2, inner.Y + inner.Height / 2);
+    }
+
     /// <summary>The filter list's search box, if the bar is up. Found by name rather than "the first
     /// edit", because other boxes in the window would be picked up instead.</summary>
     public AutomationElement? FindFilterSearchBox()
