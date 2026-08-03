@@ -20,17 +20,6 @@ internal readonly record struct FilterColumns(int DescX, int CountX, int Descrip
 internal sealed class FilterListHeader : Control
 {
     private FilterColumns _columns;
-    private bool _hint = true;
-
-    /// <summary>Whether to advertise the search key. There is nothing on screen to say the filter list can
-    /// be searched at all once the box is only there when asked for, so the header says so - and stops
-    /// saying it while the box is up, when it would only be repeating itself.</summary>
-    internal void SetSearchHint(bool show)
-    {
-        if (show == _hint) return;
-        _hint = show;
-        Invalidate();
-    }
 
     public FilterListHeader()
     {
@@ -67,20 +56,19 @@ internal sealed class FilterListHeader : Control
         int filterRoom = Math.Max(0, _columns.FilterRight - inset * 2);
         TextRenderer.DrawText(g, "Filter", Font, new Rectangle(inset, 0, filterRoom, Height), fore, flags);
 
-        // Only when there is room for all of it: half a hint reads as a clipped column name. Measured
-        // against an unbounded box - a proposed size of nothing, with EndEllipsis set, answers about what
-        // fits in nothing.
-        if (_hint)
-        {
-            var unbounded = new Size(int.MaxValue, int.MaxValue);
-            const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
-            int used = TextRenderer.MeasureText(g, "Filter", Font, unbounded, measure).Width;
-            const string Hint = "  (Ctrl+E to search)";
-            int wants = TextRenderer.MeasureText(g, Hint, Font, unbounded, measure).Width;
-            if (used + wants <= filterRoom)
-                TextRenderer.DrawText(g, Hint, Font, new Rectangle(inset + used, 0, wants, Height),
-                                      SystemColors.GrayText, flags);
-        }
+        // Always, even while the bar is up: it is as much a reminder of how to get BACK to the box after
+        // clicking away from it as it is an announcement that the list can be searched. Only when there is
+        // room for all of it, though - half a hint reads as a clipped column name. Measured against an
+        // unbounded box, since a proposed size of nothing with EndEllipsis set answers about what fits in
+        // nothing.
+        var unbounded = new Size(int.MaxValue, int.MaxValue);
+        const TextFormatFlags measure = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        int used = TextRenderer.MeasureText(g, "Filter", Font, unbounded, measure).Width;
+        const string Hint = "  (Ctrl+E to search)";
+        int wants = TextRenderer.MeasureText(g, Hint, Font, unbounded, measure).Width;
+        if (used + wants <= filterRoom)
+            TextRenderer.DrawText(g, Hint, Font, new Rectangle(inset + used, 0, wants, Height),
+                                  SystemColors.GrayText, flags);
         if (_columns.HasDescription)
             TextRenderer.DrawText(g, "Description", Font,
                 new Rectangle(_columns.DescX + inset, 0, Math.Max(0, _columns.DescriptionWidth - inset * 2), Height), fore, flags);

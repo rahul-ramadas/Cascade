@@ -166,11 +166,31 @@ public sealed class FilterTreeControl : UserControl
     }
 
     private const int FocusBarWidth = 3;
+    private DockStyle _presetsEdge = DockStyle.None;
+
+    /// <summary>Which side the presets pane is on, so the list can be closed off along it. The header's
+    /// rule and the search bar's both run to that edge, so a rule down it joins the two and the pane reads
+    /// as one box rather than as rows that stop halfway across the window.</summary>
+    internal void SetPresetsEdge(DockStyle edge)
+    {
+        if (edge == _presetsEdge) return;
+        _presetsEdge = edge;
+        // A pixel the children do not get, or the tree would paint over the rule.
+        Padding = new Padding(FocusBarWidth, 0, edge == DockStyle.Right ? 1 : 0, edge == DockStyle.Bottom ? 1 : 0);
+        Invalidate();
+    }
 
     /// <summary>Draws the focus accent bar in the reserved left strip, aligned with the focused sub-area.</summary>
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+
+        if (_presetsEdge != DockStyle.None)
+        {
+            using var edge = new Pen(SystemColors.ControlDark);
+            if (_presetsEdge == DockStyle.Right) e.Graphics.DrawLine(edge, Width - 1, 0, Width - 1, Height);
+            else e.Graphics.DrawLine(edge, 0, Height - 1, Width, Height - 1);
+        }
         int w = Padding.Left;
         if (w <= 0) return;
         Rectangle r;
@@ -1256,7 +1276,6 @@ public sealed class FilterTreeControl : UserControl
         if (!_searchBar.Visible)
         {
             _searchBar.Visible = true;
-            _header.SetSearchHint(false);
         }
         _search.Focus();
         _search.SelectAll();
@@ -1270,7 +1289,6 @@ public sealed class FilterTreeControl : UserControl
         if (!_searchBar.Visible) return;
         _search.Clear();               // also undims the list, through TextChanged
         _searchBar.Visible = false;
-        _header.SetSearchHint(true);
         FocusList();
     }
 

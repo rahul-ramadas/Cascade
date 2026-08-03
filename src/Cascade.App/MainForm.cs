@@ -1169,6 +1169,9 @@ public sealed class MainForm : Form
     private void LayoutPresetPane()
     {
         _filterPane.Panel2Collapsed = !_settings.ShowFilterPresets;
+        _filterTree.SetPresetsEdge(!_settings.ShowFilterPresets ? DockStyle.None
+                                   : _filterPane.Orientation == Orientation.Vertical ? DockStyle.Right
+                                   : DockStyle.Bottom);
         if (!_settings.ShowFilterPresets) return;
         int total = _filterPane.Orientation == Orientation.Vertical ? _filterPane.Width : _filterPane.Height;
         int wanted = _filterPane.Orientation == Orientation.Vertical ? LogicalToDeviceUnits(200) : LogicalToDeviceUnits(120);

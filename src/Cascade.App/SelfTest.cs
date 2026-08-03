@@ -4199,10 +4199,12 @@ internal static class SelfTest
 
             tree.ShowSearch();
             Pump();
-            int quietened;
-            using (var open = tree.HeaderPictureForTesting()) quietened = InkAfterTheTitle(open);
-            ok &= Check("and stops once the bar is up to say it", quietened == 0,
-                        $"{quietened} pixels still there");
+            int stillThere;
+            using (var open = tree.HeaderPictureForTesting()) stillThere = InkAfterTheTitle(open);
+            // It stays: as much a reminder of how to get back to the box after clicking away from it as an
+            // announcement that the list can be searched at all.
+            ok &= Check("and keeps saying it while the bar is up", stillThere == advertised,
+                        $"{advertised} pixels -> {stillThere}");
 
             ok &= Check("opening it shows the bar", tree.SearchOpen);
             ok &= Check("and puts the caret in it", tree.SearchBoxHasFocusForTesting);
