@@ -249,15 +249,28 @@ public sealed class MainForm : Form
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         // Inside the bar, Tab walks its own controls - the term, the two buttons, the two options - rather
-        // than jumping straight out to another pane.
-        if (keyData is Keys.Tab or (Keys.Shift | Keys.Tab) && _findBar.ContainsFocus)
+        // than jumping straight out to another pane. The filter search bar earns the same treatment.
+        if (keyData is Keys.Tab or (Keys.Shift | Keys.Tab) && (_findBar.ContainsFocus || _filterTree.SearchBarHasFocus))
             return base.ProcessCmdKey(ref msg, keyData);
         if (keyData == Keys.Tab) { CycleFocus(forward: true); return true; }
         if (keyData == (Keys.Shift | Keys.Tab)) { CycleFocus(forward: false); return true; }
+
+        // ESCAPE, IN ORDER. Three things answer to it, and they are ranked by how loudly each is asking:
+        //  1. A search actually running. The status bar is at that moment telling the user "Esc to stop",
+        //     so it gets the key wherever they happen to be standing.
+        //  2. The filter search bar, but only from inside the filter pane. The two panes are disjoint, so
+        //     scoping this one to focus removes the conflict outright rather than ranking two unrelated
+        //     things against each other - and it is the nearest state to hand when you are in that pane.
+        //  3. The find bar, which is the log pane's equivalent and the fallback everywhere else.
         if (keyData == Keys.Escape && _findBusy) { _doc.CancelFind(); return true; }
+        if (keyData == Keys.Escape && _filterTree.SearchOpen && _filterTree.ContainsFocus)
+        {
+            _filterTree.HideSearch();
+            return true;
+        }
         // ...and once nothing is running, Esc puts the whole thing away: bar closed, highlights off, counts
         // with them. It has to work while typing the term too, which is why the general "not in a text box"
-        // guard (there to leave the filter search box's own Esc alone) only applies outside the bar.
+        // guard only applies outside the bar.
         if (keyData == Keys.Escape && (_findBar.Visible || _lastQuery is not null)
             && (_findBar.ContainsFocus || !IsTextInputFocused())) { CloseFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
@@ -390,7 +403,7 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Focus &Text Area", (_, _) => FocusTextArea(), Keys.Control | Keys.Shift | Keys.T));
         view.DropDownItems.Add(Mi("Foc&us Filter List", (_, _) => FocusFilterList(), Keys.Control | Keys.Shift | Keys.F));
-        view.DropDownItems.Add(Mi("Focus Filter &Search", (_, _) => FocusFilterSearch(), Keys.Control | Keys.E));
+        view.DropDownItems.Add(Mi("Fin&d Filter", (_, _) => FocusFilterSearch(), Keys.Control | Keys.E));
         _miPresets = new ToolStripMenuItem("Show Filter &Presets", null, (_, _) =>
         {
             _settings.ShowFilterPresets = !_settings.ShowFilterPresets;
@@ -430,7 +443,7 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(BuildPresetsMenu());
         filters.DropDownItems.Add(new ToolStripSeparator());
-        filters.DropDownItems.Add(Hint("&Find Filter", "Ctrl+E", () => _filterTree.FocusSearch()));
+        filters.DropDownItems.Add(Hint("&Find Filter", "Ctrl+E", FocusFilterSearch));
 
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add(Mi("&About Cascade", (_, _) => ShowAbout()));
@@ -1263,19 +1276,16 @@ public sealed class MainForm : Form
 
     private void FocusFilterList() { EnsureFilterListVisible(); _filterTree.FocusList(); }
 
-    private void FocusFilterSearch() { EnsureFilterListVisible(); _filterTree.FocusSearch(); }
+    private void FocusFilterSearch() { EnsureFilterListVisible(); _filterTree.ShowSearch(); }
 
-    /// <summary>Tab / Shift+Tab cycles focus between the three main areas: log view → filter search → filter list.</summary>
+    /// <summary>Tab / Shift+Tab cycles focus between the two main areas: the log view and the filter list.
+    /// The filter search bar is not one of them - it is a thing you open, use and dismiss, like the find
+    /// bar, and tabbing into it when it is not even on screen would be a stop at nothing.</summary>
     private void CycleFocus(bool forward)
     {
-        int current = _grid.Focused ? 0 : _filterTree.SearchHasFocus ? 1 : _filterTree.ListHasFocus ? 2 : 0;
-        int next = ((forward ? current + 1 : current - 1) % 3 + 3) % 3;
-        switch (next)
-        {
-            case 1: FocusFilterSearch(); break;
-            case 2: FocusFilterList(); break;
-            default: FocusTextArea(); break;
-        }
+        _ = forward;   // with two areas both directions are the same move
+        if (_grid.Focused) FocusFilterList();
+        else FocusTextArea();
     }
 
     private void EnsureFilterListVisible()

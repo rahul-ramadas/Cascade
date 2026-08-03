@@ -85,6 +85,7 @@ internal static class SelfTest
             ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
+            ok &= Timed("filter search bar", RunFilterSearchBarChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
@@ -2934,6 +2935,11 @@ internal static class SelfTest
                 filters.Add(new Filter { Match = new FilterMatch { Text = i == 20 ? "zulu early" : i == 45 ? "zulu late" : $"alpha {i}" } });
             SetFilters(doc, tree, filters.ToArray());
 
+            // Measured with the search bar already up, because that is the state the reveal happens in -
+            // the bar takes a couple of rows off the bottom of the list and the band moves with them.
+            tree.ShowSearch();
+            Pump();
+
             int visible = Math.Max(1, tree.TreeHeightForTesting / Math.Max(1, tree.RowHeightForTesting));
             int top = visible / 4;
             int bottom = Math.Max(top, visible * 3 / 4 - 1);
@@ -2945,7 +2951,7 @@ internal static class SelfTest
                 tree.VisibleFiltersForTesting.FindIndex(f => f.Match.Text == text);
 
             // Typing jumps to the first match, which is below the view.
-            tree.SetSearchText("zulu");
+            tree.TypeSearchForTesting("zulu");
             Pump();
             ok &= Check($"a filter below the view arrives at the bottom of the middle half " +
                         $"(offset {OffsetOf("zulu early")} of {visible})", OffsetOf("zulu early") == bottom);
@@ -4115,6 +4121,161 @@ internal static class SelfTest
         return true;
     }
 
+    /// <summary>The filter search bar: a thing you open on Ctrl+E, use, and dismiss - not a permanent box
+    /// taking a line off the top of the list for ever.</summary>
+    private static bool RunFilterSearchBarChecks()
+    {
+        Line("-- the filter search bar --");
+
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_fsearch_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, "one line is enough\n", new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                // Shorter than the list on purpose: a match at the end can only be hidden behind the bar
+                // if the list has to scroll to reach it.
+                ClientSize = new Size(320, 400),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+
+            // Names chosen so each search below has one obvious answer, and the interesting one is last.
+            string[] names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+                              "india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
+                              "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whisky",
+                              "xray", "yankee", "zulu-last"];
+            var filters = new FilterCollection();
+            foreach (string n in names) filters.Roots.Add(new Filter { Match = new FilterMatch { Text = n } });
+            doc.SetFilters(filters);
+            tree.Attach(doc);
+            Pump();
+
+            var last = filters.Roots[^1];
+
+            bool ok = Check("the list is built", tree.RowCountForTesting == names.Length,
+                            tree.RowCountForTesting.ToString());
+            ok &= Check("and the search bar starts out of the way", !tree.SearchOpen);
+            int fullTree = tree.TreeHeightForTesting;
+
+            // The header is the only thing on screen saying the list can be searched at all. Counted in the
+            // band to the RIGHT of the word "Filter", because the two pictures also differ for dull reasons
+            // - opening the bar re-lays the columns - and a check that only asks "did anything change" is
+            // answered by that instead.
+            int wordEnds = tree.HeaderWidthForTesting("Filter") + tree.ColumnsForTesting.FilterRight / 8;
+            int InkAfterTheTitle(Bitmap header)
+            {
+                int ink = 0;
+                for (int x = wordEnds; x < Math.Min(header.Width, tree.ColumnsForTesting.FilterRight); x++)
+                    for (int y = 0; y < header.Height - 1; y++)      // last row is the rule under the header
+                        if (header.GetPixel(x, y).ToArgb() != SystemColors.Control.ToArgb()) ink++;
+                return ink;
+            }
+
+            int advertised;
+            using (var closed = tree.HeaderPictureForTesting()) advertised = InkAfterTheTitle(closed);
+            ok &= Check("the header advertises the key while the bar is away", advertised > 0,
+                        $"{advertised} pixels of hint past x={wordEnds}");
+
+            tree.ShowSearch();
+            Pump();
+            int quietened;
+            using (var open = tree.HeaderPictureForTesting()) quietened = InkAfterTheTitle(open);
+            ok &= Check("and stops once the bar is up to say it", quietened == 0,
+                        $"{quietened} pixels still there");
+
+            ok &= Check("opening it shows the bar", tree.SearchOpen);
+            ok &= Check("and puts the caret in it", tree.SearchBoxHasFocusForTesting);
+            ok &= Check("and the list gives up exactly the bar's height",
+                        tree.TreeHeightForTesting == fullTree - tree.SearchBarBoundsForTesting.Height,
+                        $"{fullTree} -> {tree.TreeHeightForTesting}, bar is {tree.SearchBarBoundsForTesting.Height}px");
+            ok &= Check("which is below the list, not above it",
+                        tree.SearchBarBoundsForTesting.Top >= tree.TreeAreaForTesting.Bottom,
+                        $"bar at {tree.SearchBarBoundsForTesting.Top}, list ends {tree.TreeAreaForTesting.Bottom}");
+
+            tree.TypeSearchForTesting("charlie");
+            Pump();
+            ok &= Check("typing walks to the match", tree.SelectedFilter?.Match.Text == "charlie",
+                        tree.SelectedFilter?.Match.Text ?? "(none)");
+
+            // THE ONE THAT MATTERS: a match at the very end has to be somewhere it can be seen, not tucked
+            // behind the bar that has just appeared.
+            ok &= Check("the list is too short to show every filter at once",
+                        tree.TreeHeightForTesting / Math.Max(1, tree.RowHeightForTesting) < names.Length,
+                        $"{tree.TreeHeightForTesting / Math.Max(1, tree.RowHeightForTesting)} rows of {names.Length}");
+            tree.TypeSearchForTesting("zulu-last");
+            Pump();
+            ok &= Check("a match at the end of the list is found", ReferenceEquals(tree.SelectedFilter, last),
+                        tree.SelectedFilter?.Match.Text ?? "(none)");
+            var row = tree.RowBoundsForTesting(last);
+            ok &= Check("and is not left underneath the search bar",
+                        row.Height > 0 && row.Top >= 0 && row.Bottom <= tree.TreeAreaForTesting.Height,
+                        $"row {row.Top}..{row.Bottom}, the list is {tree.TreeAreaForTesting.Height}px tall");
+
+            // Enter and Shift+Enter walk the matches.
+            tree.TypeSearchForTesting("o");
+            Pump();
+            var firstHit = tree.SelectedFilter;
+            tree.PressSearchKeyForTesting(Keys.Enter);
+            Pump();
+            var secondHit = tree.SelectedFilter;
+            ok &= Check("Enter goes on to the next match", !ReferenceEquals(firstHit, secondHit),
+                        $"{firstHit?.Match.Text} then {secondHit?.Match.Text}");
+            tree.PressSearchKeyForTesting(Keys.Enter | Keys.Shift);
+            Pump();
+            ok &= Check("and Shift+Enter comes back", ReferenceEquals(tree.SelectedFilter, firstHit),
+                        tree.SelectedFilter?.Match.Text ?? "(none)");
+
+            tree.PressSearchKeyForTesting(Keys.Escape);
+            Pump();
+            ok &= Check("Escape in the box puts the bar away", !tree.SearchOpen);
+            ok &= Check("and takes the term with it", tree.SearchTermForTesting.Length == 0,
+                        tree.SearchTermForTesting);
+            ok &= Check("and gives the list its height back", tree.TreeHeightForTesting == fullTree,
+                        $"{tree.TreeHeightForTesting} of {fullTree}");
+            ok &= Check("and hands the keyboard back to the list", tree.ListHasFocus);
+
+            // Escape from the list, which is where walking the matches leaves you.
+            tree.ShowSearch();
+            tree.TypeSearchForTesting("delta");
+            Pump();
+            tree.FocusList();
+            Pump();
+            tree.PressKeyForTesting(Keys.Escape);
+            Pump();
+            ok &= Check("Escape from the list closes it too", !tree.SearchOpen);
+
+            tree.ShowSearch();
+            Pump();
+            tree.ClickSearchCloseForTesting();
+            Pump();
+            ok &= Check("and so does the close button", !tree.SearchOpen);
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+
     private static bool RunMenuMnemonicChecks()
     {
         Line("-- menu keyboard access --");
@@ -4149,7 +4310,7 @@ internal static class SelfTest
 
         // A command with a key must say so where it is offered. These two run the same thing from different
         // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
-        string[] shortcuts = ["Find Filter\tCtrl+E", "Focus Filter Search\tCtrl+E"];
+        string[] shortcuts = ["Find Filter\tCtrl+E"];
         var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
         var advertised = AllMenuItems(bar.Items)
             .Select(m => (m.Text ?? "").Replace("&", "") + "\t" +

@@ -102,8 +102,12 @@ internal static class UiShots
         host.Controls.Add(tree);
         tree.SetSettings(settings);
         tree.Attach(doc);
-        tree.SetSearchText("ERROR"); // matches only the "errors" filter; the rest are dimmed
         host.Show();
+        Settle();
+        // Closed, which is how the list normally stands - and the only place the key is advertised.
+        CapControl(host, dir, "filter-list");
+
+        tree.SetSearchText("ERROR"); // matches only the "errors" filter; the rest are dimmed
         Settle();
         CapControl(host, dir, "filter-search");
 

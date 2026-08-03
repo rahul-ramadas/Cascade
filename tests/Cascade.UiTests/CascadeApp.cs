@@ -318,6 +318,17 @@ internal sealed class CascadeApp : IDisposable
         Settle(1);
     }
 
+    /// <summary>The filter the list has selected, by name, or null when nothing is.</summary>
+    public string? SelectedFilterName()
+        => Window.FindAllDescendants(cf => cf.ByControlType(ControlType.TreeItem))
+                 .FirstOrDefault(n => n.Patterns.LegacyIAccessible.PatternOrDefault?.State.ValueOrDefault
+                                       .HasFlag(AccessibilityState.STATE_SYSTEM_SELECTED) == true)?.Name;
+
+    /// <summary>Waits for the filter list's selection to land on a filter whose name contains the text.</summary>
+    public bool WaitForSelectedFilter(string containsText, int ms = 4000)
+        => Retry.WhileFalse(() => (SelectedFilterName() ?? "").Contains(containsText, StringComparison.OrdinalIgnoreCase),
+               TimeSpan.FromMilliseconds(ms), Poll).Result;
+
     /// <summary>Waits for a status-bar message containing <paramref name="containsText"/>. The whole-window
     /// flash is far too brief to observe, so the wording in the status bar is what the tests assert on.</summary>
     public bool WaitForFindMessage(string containsText, int ms = 4000)
@@ -447,12 +458,32 @@ internal sealed class CascadeApp : IDisposable
         => Retry.WhileFalse(() => AllStatusText().Contains(text, StringComparison.Ordinal),
                TimeSpan.FromMilliseconds(ms), Poll).Result;
 
-    /// <summary>The filter list's search box. Found by name rather than "the first edit", because a hidden
-    /// Find dialog is still part of the window's tree and would be picked up instead.</summary>
-    public AutomationElement FilterSearchBox()
-        => Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByName("Filter search")),
-               TimeSpan.FromSeconds(5)).Result
-           ?? throw new InvalidOperationException("filter search box not found");
+    /// <summary>The filter list's search box, if the bar is up. Found by name rather than "the first
+    /// edit", because other boxes in the window would be picked up instead.</summary>
+    public AutomationElement? FindFilterSearchBox()
+        => Window.FindFirstDescendant(cf => cf.ByName("Filter search"));
+
+    /// <summary>Whether the filter search bar is on screen. It only exists while open, so asking for it is
+    /// the same question as asking whether it is showing.</summary>
+    public bool FilterSearchIsOpen()
+    {
+        var box = FindFilterSearchBox();
+        return box is not null && !box.IsOffscreen;
+    }
+
+    /// <summary>Opens the filter search bar through the menu and hands back its box. The menu rather than
+    /// Ctrl+E because a menu Invoke is reliable however the window is placed; the shortcut has a test of
+    /// its own.</summary>
+    public AutomationElement OpenFilterSearch()
+    {
+        if (!FilterSearchIsOpen()) ClickMenuOrThrow("View", "Find Filter");
+        return Retry.WhileNull(FindFilterSearchBox, TimeSpan.FromSeconds(5)).Result
+               ?? throw new InvalidOperationException("filter search box did not appear");
+    }
+
+    /// <summary>Waits for the filter search bar to go away.</summary>
+    public bool WaitFilterSearchClosed(int ms = 5000)
+        => Retry.WhileFalse(() => !FilterSearchIsOpen(), TimeSpan.FromMilliseconds(ms), Poll).Result;
 
     // ---- actions via menus / dialogs ----
 

@@ -184,7 +184,7 @@ public class UiFeatureTests
         var view = app.MenuItemNames("View");
         Check("View has Focus Text Area", view.Any(n => n.Contains("Focus Text", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
         Check("View has Focus Filter List", view.Any(n => n.Contains("Focus Filter L", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
-        Check("View has Focus Filter Search", view.Any(n => n.Contains("Focus Filter S", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
+        Check("View has Find Filter", view.Any(n => n.Contains("Find Filter", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
         var filtersItems = app.MenuItemNames("Filters");
         Check("Filters has Find Next Match", filtersItems.Any(n => n.Contains("Find Next Match", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
         Check("Filters has New Filter from Selection", filtersItems.Any(n => n.Contains("New Filter from Selection", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
@@ -496,6 +496,50 @@ public class UiFeatureTests
         finally { File.Delete(log); File.Delete(tat); }
     }
 
+    /// <summary>The filter search bar comes up on demand and goes away again, and while it is up the list
+    /// is genuinely shorter - the point of the change being that it costs nothing when it is not in use.
+    /// </summary>
+    [Fact]
+    public void Filter_search_opens_on_demand_and_closes_again()
+    {
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "alpha", "beta", "gamma");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var fails = new List<string>();
+            void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+            Check("the bar is not there to begin with", !app.FilterSearchIsOpen());
+            double listBefore = app.Tree().BoundingRectangle.Height;
+
+            var box = app.OpenFilterSearch();
+            Check("the menu brings it up", app.FilterSearchIsOpen());
+            double listOpen = app.Tree().BoundingRectangle.Height;
+            Check("and the list gives up room for it", listOpen < listBefore,
+                  $"{listBefore} -> {listOpen}");
+            Check("but not too much of it", listOpen > listBefore * 0.6, $"{listBefore} -> {listOpen}");
+
+            // It searches: typing a name and pressing Enter selects that filter.
+            app.SetText(box, "gamma");
+            app.Key(box, VirtualKeyShort.RETURN);
+            Check("it finds the filter typed into it",
+                  app.WaitForSelectedFilter("gamma"), app.SelectedFilterName() ?? "(none)");
+
+            // Escape from inside the box puts it away and gives the room back.
+            app.Key(box, VirtualKeyShort.ESCAPE);
+            Check("Escape puts it away", app.WaitFilterSearchClosed());
+            Check("and the list has its room back",
+                  Retry.WhileFalse(() => Math.Abs(app.Tree().BoundingRectangle.Height - listBefore) < 2,
+                                   TimeSpan.FromSeconds(3)).Result,
+                  $"{listBefore} -> {app.Tree().BoundingRectangle.Height}");
+
+            Assert.True(fails.Count == 0, "Filter search bar:\n  " + string.Join("\n  ", fails));
+        }
+        finally { File.Delete(log); File.Delete(tat); }
+    }
+
     [Fact]
     public void Ctrl_arrows_reorder_and_nest_the_selected_filter()
     {
@@ -715,7 +759,7 @@ public class UiFeatureTests
 
             // 4. Filter search for a filter that is not in the list. Deliberately after the find bar, which
             // has to hand the keyboard back when it closes.
-            var search = app.FilterSearchBox();
+            var search = app.OpenFilterSearch();
             app.SetText(search, "zzz-no-such-filter");
             app.Key(search, VirtualKeyShort.RETURN);
             Check("filter search reports the end", app.WaitForFindMessage("No more filters"));
