@@ -50,7 +50,7 @@ public class ColumnTests
     }
 
     [Fact]
-    public void Template_etw_bracket_delimited_line()
+    public void Template_bracket_delimited_line()
     {
         var spec = new ColumnSpec
         {
@@ -58,14 +58,14 @@ public class ColumnTests
             Template = "[[time]][[provider]][[cpu]][[pid]][[tid]][[source]][[func]][[level]][[flags]] [message]"
         };
         spec.SyncColumnsFromTemplate();
-        const string line = "[2026-07-16T18:06:48.8697002][inventory-svc][3][2FA8][315C][util_c5024][HidpWppDumpFdo][INFO][TRACE_FLAG_PNP] FDO:0x1 message here";
+        const string line = "[2026-07-31T09:31:17.8710000][api-gateway][3][2FA8][315C][http_c5024][HandleCheckout][INFO][TRACE_FLAG_HTTP] req-e38a626f message here";
         var fields = Split(spec, line);
-        Assert.Equal("2026-07-16T18:06:48.8697002", fields[0]);
-        Assert.Equal("inventory-svc", fields[1]);
+        Assert.Equal("2026-07-31T09:31:17.8710000", fields[0]);
+        Assert.Equal("api-gateway", fields[1]);
         Assert.Equal("3", fields[2]);
         Assert.Equal("INFO", fields[7]);
-        Assert.Equal("TRACE_FLAG_PNP", fields[8]);
-        Assert.Equal("FDO:0x1 message here", fields[9]);
+        Assert.Equal("TRACE_FLAG_HTTP", fields[8]);
+        Assert.Equal("req-e38a626f message here", fields[9]);
     }
 
     [Fact]

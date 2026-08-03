@@ -3160,7 +3160,7 @@ internal static class SelfTest
             // selects itself when its Alt key is pressed, which loses all three.
             probe.Activate();
             live.FocusInput();
-            live.SetTermForTesting("order-service", 3, 2);
+            live.SetTermForTesting("declined", 3, 2);
             Pump();
             var place = live.SelectionForTesting();
             ok &= Check($"the term box has the keyboard to start with (it is on {live.FocusedForTesting})",
@@ -3172,7 +3172,7 @@ internal static class SelfTest
             Pump();
             ok &= Check($"ticking the options leaves the keyboard in the box (it is on {live.FocusedForTesting})",
                         live.TermBoxHasFocusForTesting);
-            ok &= Check("and the term untouched", live.TermForTesting() == "order-service", live.TermForTesting());
+            ok &= Check("and the term untouched", live.TermForTesting() == "declined", live.TermForTesting());
             ok &= Check("and the caret and selection where they were",
                         live.SelectionForTesting() == place, $"{live.SelectionForTesting()} was {place}");
         }
@@ -3252,15 +3252,15 @@ internal static class SelfTest
             host.Show();
             Pump();
 
-            dlg.SetTermForTesting("order-service", 3, 2);
+            dlg.SetTermForTesting("declined", 3, 2);
             var before = dlg.SelectionForTesting();
-            bool ok = Check("the term and the place in it are set up", dlg.TermForTesting() == "order-service" && before == (3, 2),
+            bool ok = Check("the term and the place in it are set up", dlg.TermForTesting() == "declined" && before == (3, 2),
                             $"{dlg.TermForTesting()} at {before}");
 
             // Filling the drop-down used to reset the box, and it ran after every single search.
-            dlg.SetHistory(["order-service", "earlier", "older still"]);
+            dlg.SetHistory(["declined", "earlier", "older still"]);
             Pump();
-            ok &= Check("recalling the history leaves the term alone", dlg.TermForTesting() == "order-service",
+            ok &= Check("recalling the history leaves the term alone", dlg.TermForTesting() == "declined",
                         dlg.TermForTesting());
             ok &= Check("and leaves the caret and selection where they were",
                         dlg.SelectionForTesting() == before, $"{dlg.SelectionForTesting()} was {before}");
@@ -3268,28 +3268,28 @@ internal static class SelfTest
             dlg.EnterForTesting();
             Pump();
             ok &= Check("Enter searches for what is in the box",
-                        searched.Count == 1 && searched[0].Query.Text == "order-service" && searched[0].Forward,
+                        searched.Count == 1 && searched[0].Query.Text == "declined" && searched[0].Forward,
                         string.Join(",", searched.Select(s => s.Query.Text)));
-            ok &= Check("and does not disturb it", dlg.TermForTesting() == "order-service" && dlg.SelectionForTesting() == before,
+            ok &= Check("and does not disturb it", dlg.TermForTesting() == "declined" && dlg.SelectionForTesting() == before,
                         $"{dlg.TermForTesting()} at {dlg.SelectionForTesting()}");
 
             // A pattern that will not compile is not worth searching for: it would sweep the whole file to
             // report that nothing matched, and the bar already says what is wrong with it.
             dlg.SetRegexForTesting(true);
-            dlg.SetTermForTesting("bth(port", 0, 0);
+            dlg.SetTermForTesting("declin(ed", 0, 0);
             Pump();
             int asked = searched.Count;
             dlg.EnterForTesting();
             Pump();
             ok &= Check("Enter does not search for a pattern that will not compile", searched.Count == asked,
                         string.Join(",", searched.Select(s => s.Query.Text)));
-            dlg.SetTermForTesting("bth(port)", 0, 0);
+            dlg.SetTermForTesting("declin(ed)", 0, 0);
             Pump();
             dlg.EnterForTesting();
             Pump();
             ok &= Check("and searches again once it will", searched.Count == asked + 1);
             dlg.SetRegexForTesting(false);
-            dlg.SetTermForTesting("order-service", 3, 2);
+            dlg.SetTermForTesting("declined", 3, 2);
             Pump();
             searched.RemoveRange(1, searched.Count - 1);
 
@@ -3423,7 +3423,7 @@ internal static class SelfTest
     {
         Line("-- a filter made from a log line --");
 
-        string line = "[2026-07-16T18:06:48][inventory-svc][3][2FA8][315C][util][Func][INFO][TFLAG] " +
+        string line = "[2026-07-31T09:31:17][api-gateway][3][2FA8][315C][http][Handler][INFO][TFLAG] " +
                       new string('x', 900) + " tail";
         string seeded = MainForm.SeedPatternFromLine("  " + line + "  \t");
         bool ok = Check($"the whole line is carried over, not a prefix ({seeded.Length} of {line.Length} characters)",

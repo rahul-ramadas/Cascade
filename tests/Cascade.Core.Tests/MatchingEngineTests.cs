@@ -112,7 +112,7 @@ public class MatchingEngineTests
     // ---- regex rewriting ----
 
     [Theory]
-    [InlineData(@"\[OrderService\].+Svc::", true)]
+    [InlineData(@"\[payment-svc\].+declined", true)]
     [InlineData(@"a.+b.+c", true)]
     [InlineData(@"x.+?y", true)]
     [InlineData(@"nogap", false)]           // no separator: nothing to gain
@@ -129,7 +129,7 @@ public class MatchingEngineTests
     {
         string[] patterns =
         {
-            @"\[OrderService\].+Svc::",
+            @"\[payment-svc\].+declined",
             @"a.+b",
             @"a.+b.+c",
             @"x.+?y",
