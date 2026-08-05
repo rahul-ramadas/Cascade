@@ -426,9 +426,14 @@ public class ManualSweep : IDisposable
         var item = list.FindAllChildren().FirstOrDefault();
         if (item is null) { Check("a preset item", false); return; }
 
+        // Past the leading square: a press there is the tick box, and would switch the preset's filters on.
         var r = item.BoundingRectangle;
-        Mouse.Click(new Point(r.Left + 30, r.Top + r.Height / 2));
+        var onLabel = new Point(r.Left + r.Height + 30, r.Top + r.Height / 2);
+        Mouse.Click(onLabel);
         Thread.Sleep(500);
+        Check("clicking a preset's name does not put it in effect",
+              !_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)),
+              _app.DescribePresets());
 
         // F2 renames.
         Keyboard.Press(VirtualKeyShort.F2);
@@ -446,7 +451,7 @@ public class ManualSweep : IDisposable
               string.Join("|", SafePresetNames()));
 
         // Delete removes it.
-        Mouse.Click(new Point(r.Left + 30, r.Top + r.Height / 2));
+        Mouse.Click(onLabel);
         Thread.Sleep(400);
         Keyboard.Press(VirtualKeyShort.DELETE);
         Thread.Sleep(1200);
@@ -1248,12 +1253,12 @@ public class ManualSweep : IDisposable
             Say($"after switching {BigFixture.HugeFilter} off: {Status()}");
             Say($"still ticked: {string.Join(" | ", TickedFilters())}");
             Check("switching its filters off drops the preset out of effect",
-                  !_app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)), string.Join("|", _app.ActivePresets()));
+                  !_app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)), _app.DescribePresets());
 
-            _app.SelectPreset(PresetName);
+            _app.TickPreset(PresetName);
             Thread.Sleep(5000);
-            Check("selecting it turns them back on", _app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
-                  string.Join("|", _app.ActivePresets()));
+            Check("ticking it turns them back on", _app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
+                  _app.DescribePresets());
             Check("and the view fills again", _app.Rows().Length > 0, $"{_app.Rows().Length} rows");
             Shot("presets-applied");
         }

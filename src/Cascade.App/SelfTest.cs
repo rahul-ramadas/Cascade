@@ -428,9 +428,10 @@ internal static class SelfTest
         Pump();
     }
 
-    /// <summary>The presets pane's selection IS the set of presets in effect, and the enabled filters are
-    /// the union of what is selected. Both directions have to hold: selecting applies, and enabling by hand
-    /// selects.</summary>
+    /// <summary>A preset's TICK says it is in effect, and the enabled filters are the union of what is
+    /// ticked. Its SELECTION is only the user's aim, and must survive anything the model does - while the
+    /// two were one thing, aiming at a preset switched its filters back on and it could never be updated to
+    /// drop one.</summary>
     private static bool RunFilterPresetChecks()
     {
         Line("-- filter presets --");
@@ -478,54 +479,119 @@ internal static class SelfTest
                             string.Join(" | ", pane.LabelsForTesting));
             ok &= Check("nothing is in effect while every filter is off", pane.ActiveForTesting.Length == 0);
 
-            // Selecting one preset means "just this".
-            pane.SelectForTesting("first");
+            // Ticking one preset puts exactly its filters on.
+            pane.TickForTesting("first");
             Pump();
-            ok &= Check("selecting a preset enables exactly its filters", a.Enabled && !b.Enabled && !c.Enabled,
+            ok &= Check("ticking a preset enables exactly its filters", a.Enabled && !b.Enabled && !c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
-            // Adding a second means "both", and does not drop the first.
-            pane.SelectForTesting("first", "second");
+            // Ticking a second means "both", and does not drop the first.
+            pane.TickForTesting("first", "second");
             Pump();
-            ok &= Check("adding a preset enables the union", a.Enabled && b.Enabled && c.Enabled,
+            ok &= Check("ticking a second enables the union", a.Enabled && b.Enabled && c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
-            pane.SelectForTesting("second");
+            pane.TickForTesting("second");
             Pump();
-            ok &= Check("dropping a preset turns its filters back off", !a.Enabled && b.Enabled && c.Enabled,
+            ok &= Check("unticking one turns its filters back off", !a.Enabled && b.Enabled && c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
-            pane.SelectForTesting();
+            pane.TickForTesting();
             Pump();
-            ok &= Check("selecting nothing leaves every filter off", !a.Enabled && !b.Enabled && !c.Enabled,
+            ok &= Check("unticking the last leaves every filter off", !a.Enabled && !b.Enabled && !c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
-            // A burst of selection changes must cost one re-filter, not one each: applying is what re-runs
-            // the filters over the whole file.
+            // A burst of tick changes must cost one re-filter, not one each: applying is what re-runs the
+            // filters over the whole file.
             applied = 0;
-            pane.SelectForTesting("first");
-            pane.SelectForTesting("second");
-            pane.SelectForTesting("first", "second");
+            pane.TickForTesting("first");
+            pane.TickForTesting("second");
+            pane.TickForTesting("first", "second");
             Pump();
-            ok &= Check("a burst of selection changes re-filters once", applied == 1, $"applied {applied} times");
+            ok &= Check("a burst of tick changes re-filters once", applied == 1, $"applied {applied} times");
 
             // Landing on the same set of filters must cost nothing at all. Every click in the pane used to
             // re-run a pass over the whole file to arrive back where it started, which on a big file is a
             // visible flicker of the progress bar and a great deal of work for no answer.
             applied = 0;
-            pane.SelectForTesting("first", "second");
+            pane.TickForTesting("first", "second");
             Pump();
-            pane.SelectForTesting("first", "second");
+            pane.TickForTesting("first", "second");
             Pump();
             ok &= Check("but re-picking the same presets does not re-filter at all", applied == 0,
                         $"applied {applied} times");
-            applied = 0;
-            pane.SelectForTesting();
+
+            // ---- the tick and the selection are different things ----
+
+            // THE REPORTED BUG. Aiming at a preset - by clicking its name, or by right-clicking it to reach
+            // the menu - must not switch a single filter.
+            pane.TickForTesting();
             Pump();
-            pane.SelectForTesting();
+            pane.ClickForTesting("first");
             Pump();
-            ok &= Check("nor does clearing a selection that is already clear", applied == 1,
-                        $"applied {applied} times");
+            ok &= Check("clicking a preset's name aims at it and switches nothing on",
+                        pane.SelectedForTesting == "first" && pane.ActiveForTesting.Length == 0 && !a.Enabled,
+                        $"selected '{pane.SelectedForTesting}', in effect [{string.Join(",", pane.ActiveForTesting)}], a={a.Enabled}");
+
+            pane.ClickForTesting("second", MouseButtons.Right);
+            Pump();
+            ok &= Check("right-clicking a preset aims the menu at it and switches nothing on",
+                        pane.SelectedForTesting == "second" && pane.ActiveForTesting.Length == 0 && !b.Enabled && !c.Enabled,
+                        $"selected '{pane.SelectedForTesting}', in effect [{string.Join(",", pane.ActiveForTesting)}]");
+
+            // The tick box is the one place a press does switch filters.
+            pane.ClickForTesting("first", onTick: true);
+            Pump();
+            ok &= Check("pressing the tick box does put the preset in effect", a.Enabled && !b.Enabled,
+                        $"a={a.Enabled} b={b.Enabled}");
+            pane.ClickForTesting("first", onTick: true);
+            Pump();
+            ok &= Check("and pressing it again takes it out", !a.Enabled, $"a={a.Enabled}");
+
+            // Windows toggles a tick of its own accord when an already-selected row is clicked, and on the
+            // second click of a double-click - which is how renaming would switch a preset on.
+            pane.NativeToggleForTesting("first");
+            Pump();
+            ok &= Check("a tick Windows set on its own is refused",
+                        pane.ActiveForTesting.Length == 0 && !a.Enabled,
+                        $"in effect [{string.Join(",", pane.ActiveForTesting)}], a={a.Enabled}");
+
+            // Nothing in the model may move the user's aim.
+            pane.SelectForTesting("first");
+            b.Enabled = true; c.Enabled = true;
+            pane.RefreshActive();
+            Pump();
+            ok &= Check("the selection stays where the user put it while the filters change under it",
+                        pane.SelectedForTesting == "first" && pane.ActiveForTesting.SequenceEqual(new[] { "second" }),
+                        $"selected '{pane.SelectedForTesting}', in effect [{string.Join(",", pane.ActiveForTesting)}]");
+
+            // ---- the workflow the whole change exists for ----
+            pane.TickForTesting("second");
+            Pump();
+            c.Enabled = false;                       // drop one of its filters by hand
+            pane.RefreshActive();
+            ok &= Check("dropping one of a preset's filters unticks it", pane.ActiveForTesting.Length == 0,
+                        string.Join(",", pane.ActiveForTesting));
+            pane.ClickForTesting("second", MouseButtons.Right);
+            Pump();
+            ok &= Check("and the filter stays off while the menu is aimed at the preset", !c.Enabled);
+            pane.UpdateSelected();
+            Pump();
+            ok &= Check("so the preset can be updated to drop it",
+                        collection.Presets[1].FilterIds.SequenceEqual(new[] { b.Id }),
+                        $"second now names {collection.Presets[1].FilterIds.Count} filters");
+            ok &= Check("and what is left of it is in effect again",
+                        pane.ActiveForTesting.SequenceEqual(new[] { "second" }), string.Join(",", pane.ActiveForTesting));
+
+            // "Apply Only This Preset" is what a single click used to mean.
+            pane.TickForTesting("first", "second");
+            Pump();
+            pane.SelectForTesting("first");
+            pane.ApplyOnlySelected();
+            Pump();
+            ok &= Check("applying only the selected preset takes the others out",
+                        pane.ActiveForTesting.SequenceEqual(new[] { "first" }) && a.Enabled && !b.Enabled,
+                        $"in effect [{string.Join(",", pane.ActiveForTesting)}], a={a.Enabled} b={b.Enabled}");
 
             // The other direction: enabling by hand is enough to put a preset in effect.
             a.Enabled = false; b.Enabled = false; c.Enabled = false;
@@ -534,15 +600,15 @@ internal static class SelfTest
                         string.Join(",", pane.ActiveForTesting));
             b.Enabled = true;
             pane.RefreshActive();
-            ok &= Check("a half-enabled preset is not in effect", pane.ActiveForTesting.Length == 0,
-                        string.Join(",", pane.ActiveForTesting));
-            c.Enabled = true;
-            pane.RefreshActive();
-            ok &= Check("enabling every filter of a preset by hand puts it in effect",
+            ok &= Check("ticking every filter of a preset by hand puts it in effect",
                         pane.ActiveForTesting.SequenceEqual(new[] { "second" }), string.Join(",", pane.ActiveForTesting));
 
+            // The tick box has to be inside the strip that reacts to a press, or the two disagree about
+            // where a preset is switched on. Measured against the zone, never a raw pixel count.
+            ok &= CheckTickZoneCoversTheBox(pane);
+
             // A deleted filter is remembered but reported.
-            collection.Remove(c);
+            collection.Remove(b);
             pane.Rebuild();
             ok &= Check("a preset says how many of its filters have gone",
                         pane.LabelsForTesting[1].Contains("1 missing"), string.Join(" | ", pane.LabelsForTesting));
@@ -556,6 +622,33 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Ticks the first preset and compares the two renderings: whatever changed is the box, and all
+    /// of it has to fall inside the strip a press toggles from.</summary>
+    private static bool CheckTickZoneCoversTheBox(FilterPresetsControl pane)
+    {
+        pane.TickForTesting();
+        Pump();
+        using var off = pane.RenderRowsForTesting();
+        pane.TickForTesting("first");
+        Pump();
+        using var on = pane.RenderRowsForTesting();
+
+        var row = pane.RowBoundsForTesting(0);
+        int left = int.MaxValue, right = -1;
+        int wide = Math.Min(off.Width, on.Width), tall = Math.Min(off.Height, on.Height);
+        for (int y = Math.Max(0, row.Top); y < Math.Min(row.Bottom, tall); y++)
+            for (int x = 0; x < wide; x++)
+                if (off.GetPixel(x, y).ToArgb() != on.GetPixel(x, y).ToArgb())
+                {
+                    left = Math.Min(left, x);
+                    right = Math.Max(right, x);
+                }
+
+        int zone = pane.TickZoneWidthForTesting;
+        return Check("the tick zone covers the box it draws", right >= 0 && right < zone,
+                     $"the box spans {left}..{right}, the zone is {zone}px wide");
     }
 
     /// <summary>The minimap is the log seen from far enough away that a row is a pixel, so what matters is

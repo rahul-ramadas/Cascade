@@ -319,8 +319,9 @@ public class UiFeatureTests
     [Fact]
     public void Presets_switch_filters_on_together()
     {
-        // The pane's selection IS the set of presets in effect and the enabled filters are the union of it,
-        // so Fil: is what proves a click reached the filters rather than just the list.
+        // A preset's TICK is what puts it in effect, and the enabled filters are the union of what is
+        // ticked, so Fil: is what proves a tick reached the filters rather than just the list. The
+        // SELECTION is only the user's aim and must apply nothing at all.
         string log = TestData.WriteLogFile();
         string filters = TestData.WritePresetFile(
             new[] { "MATCH", "line 999", "line 998" },
@@ -334,18 +335,26 @@ public class UiFeatureTests
             void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
             Check("both presets are listed", app.PresetNames().Length == 2, string.Join(" | ", app.PresetNames()));
-            Check("nothing is in effect to start with", app.ActivePresets().Length == 0, string.Join(" | ", app.ActivePresets()));
+            Check("nothing is in effect to start with", app.ActivePresets().Length == 0, app.DescribePresets());
             Check("no filters enabled to start with", app.WaitStatus("Fil:", $"Fil: {TestData.LineCount:N0}"), app.StatusText("Fil:"));
 
-            app.SelectPreset("just match");
-            Check("selecting one preset enables its filter", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));
+            // Aiming at a preset must not switch anything on - this is the whole reason tick and selection
+            // are different things.
+            app.SelectPresetRow("just match");
+            Check("selecting a preset aims at it", app.SelectedPresetName().StartsWith("just match", StringComparison.Ordinal),
+                  app.DescribePresets());
+            Check("but selecting one applies nothing", app.ActivePresets().Length == 0, app.DescribePresets());
+            Check("and leaves every filter alone", app.WaitStatus("Fil:", $"Fil: {TestData.LineCount:N0}"), app.StatusText("Fil:"));
 
-            app.AddPreset("the pair");
-            Check("adding a preset enables the union", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
-            Check("both show as in effect", app.ActivePresets().Length == 2, string.Join(" | ", app.ActivePresets()));
+            app.TickPreset("just match");
+            Check("ticking one preset enables its filter", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));
 
-            app.SelectPreset("the pair");
-            Check("selecting one alone drops the other", app.WaitStatus("Fil:", "Fil: 2"), app.StatusText("Fil:"));
+            app.TickPreset("the pair");
+            Check("ticking a second enables the union", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 2:N0}"), app.StatusText("Fil:"));
+            Check("both show as in effect", app.ActivePresets().Length == 2, app.DescribePresets());
+
+            app.SetActivePresets("the pair");
+            Check("unticking one drops its filters", app.WaitStatus("Fil:", "Fil: 2"), app.StatusText("Fil:"));
 
             // The other direction: turning a filter off by hand must clear the preset that named it.
             // Shift+Space rather than Space: the plain one is handled by the native tree, which ignores an
@@ -356,7 +365,17 @@ public class UiFeatureTests
             Check("unticking a filter by hand reaches the model", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
             Check("a half-enabled preset stops showing as in effect",
                   Retry.WhileFalse(() => app.ActivePresets().Length == 0, TimeSpan.FromSeconds(4)).Result,
-                  string.Join(" | ", app.ActivePresets()));
+                  app.DescribePresets());
+
+            // ...and now the preset can be updated to drop that filter, which is what the old design made
+            // impossible: aiming at the preset used to switch its filters straight back on.
+            app.SelectPresetRow("the pair");
+            Check("aiming at the drifted preset leaves the filter off", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
+            app.ClickMenuOrThrow("Filters", "Presets", "Update Preset from Enabled Filters");
+            Check("updating it puts it back in effect without turning anything on",
+                  Retry.WhileFalse(() => app.ActivePresets().Length == 1, TimeSpan.FromSeconds(4)).Result,
+                  app.DescribePresets());
+            Check("and the filter it dropped is still off", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
 
             Assert.True(fails.Count == 0, "Preset failures:\n  " + string.Join("\n  ", fails));
         }

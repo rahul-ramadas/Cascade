@@ -49,8 +49,8 @@ and drag a group as one, with undo and redo a hundred steps deep. `Ctrl+E` searc
 without hiding or reordering it, and `F4` walks the matches of one filter without changing what's on
 screen.
 
-**Presets** name a combination of filters — *the payment incident*, *the slow queries* — and put it on
-in a click.
+**Presets** name a combination of filters — *the payment incident*, *the slow queries* — and switch it on
+with a tick. Tick two and you get both.
 
 ### Dim or hide
 
