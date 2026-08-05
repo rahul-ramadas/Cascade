@@ -110,6 +110,8 @@ public static class CascadeFile
             Name = col.Name,
             Visible = col.Visible,
             Width = col.Width,
+            WidthChars = col.WidthChars,
+            Source = col.Source,
             Align = col.Align.ToString()
         }).ToList()
     };
@@ -132,8 +134,12 @@ public static class CascadeFile
                     Name = col.Name ?? "",
                     Visible = col.Visible,
                     Width = col.Width,
+                    WidthChars = col.WidthChars,
+                    // Absent in files written before a column could be carried away from its own field.
+                    Source = col.Source ?? -1,
                     Align = Enum.TryParse<ColumnAlign>(col.Align, out var a) ? a : ColumnAlign.Left
                 });
+        c.NormalizeSources();
         return c;
     }
 
@@ -188,6 +194,8 @@ public static class CascadeFile
         public string? Name { get; set; }
         public bool Visible { get; set; } = true;
         public int Width { get; set; }
+        public int WidthChars { get; set; }
+        public int? Source { get; set; }
         public string? Align { get; set; }
     }
 }

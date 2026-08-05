@@ -193,7 +193,9 @@ internal static class UiShots
         doc.Columns.Mode = ColumnSplitMode.Delimiter;
         doc.Columns.Delimiter = "]";
         doc.Columns.Columns.Clear();
-        foreach (var (n, w) in new[] { ("Time", 190), ("Provider", 90), ("Id", 55), ("Level", 80), ("Message", 360) })
+        // The last one is left to size itself, which is how a log usually reads: fixed fields on the left
+        // and the message running on to the right-hand edge.
+        foreach (var (n, w) in new[] { ("Time", 190), ("Provider", 90), ("Id", 55), ("Level", 80), ("Message", 0) })
             doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w });
         grid.RefreshView();
         Settle();

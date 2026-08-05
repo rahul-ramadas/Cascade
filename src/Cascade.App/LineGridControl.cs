@@ -34,6 +34,18 @@ public sealed class LineGridControl : Control
     private readonly RowSelection _sel = new();
     private readonly List<ColumnValue> _cols = new();
 
+    // ---- column geometry and the gestures on the header (see the "columns" region below) ----
+    private int[] _colWidths = [];      // resolved pixel width per column in the spec; 0 when hidden
+    private int[] _colNatural = [];     // what each column's content asked for when it was last measured
+    private string? _naturalKey;        // what that measurement was made of, so it is not repeated per scroll
+    private ColumnGesture _colGesture;
+    private int _colIndex = -1;         // the column being resized or reordered
+    private int _colGrabX, _colGrabWidth;
+    private bool _colMoved;
+    private TextBox? _renameBox;
+    private int _renameIndex = -1;
+    private bool _renaming;
+
     private CascadeDocument? _doc;
     private AppSettings _settings = new();
 
@@ -41,6 +53,9 @@ public sealed class LineGridControl : Control
     private FontFamily? _fontFamily;
     private int _rowHeight = 16;
     private int _charWidth = 8;
+    /// <summary>Whether every character is the same width, measured rather than asked of the family name.
+    /// It is what decides whether a column is sized in characters or in pixels.</summary>
+    private bool _monospaced = true;
 
     private long _firstRow;
     private int _hScroll;
@@ -490,11 +505,14 @@ public sealed class LineGridControl : Control
 
     public void Attach(CascadeDocument doc, AppSettings settings)
     {
+        EndRename(commit: false);
         _doc = doc;
         _settings = settings;
         _firstRow = 0;
         _hScroll = 0;
         _caretRow = -1;
+        _naturalKey = null;
+        _colWidths = [];
         _sel.Clear();
         ClearCharSelection();
         ClearViewAnchor();
@@ -529,6 +547,11 @@ public sealed class LineGridControl : Control
         _rowHeight = Math.Max(_fontRegular.Height + Math.Max(0, _settings.ExtraLineSpacing), 8);
         _charWidth = Math.Max(1, TextRenderer.MeasureText("0", _fontRegular, new Size(1000, 100),
             TextFormatFlags.NoPadding).Width);
+        // Asked of the shapes, not of the name: "Consolas" is fixed-pitch and "Segoe UI" is not, but a
+        // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
+        _monospaced = TextRenderer.MeasureText("iiiiiiiiii", _fontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
+                   == TextRenderer.MeasureText("WWWWWWWWWW", _fontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        _naturalKey = null;   // the widths the content asks for are measured in this font
         Invalidate();
     }
 
@@ -538,6 +561,9 @@ public sealed class LineGridControl : Control
     {
         long rows = _doc?.RowCount ?? 0;
         int visible = EffectiveVisibleRows;
+
+        // A rename box belongs to a header that may no longer be there.
+        if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
 
         _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
@@ -574,6 +600,9 @@ public sealed class LineGridControl : Control
     private int MeasureVisibleWidth()
     {
         if (_doc is null || Wrapping) return 0;
+        // Split into columns, the content is as wide as the columns are - the lines behind them are not
+        // what is drawn, and measuring those would give the scrollbar a range nothing on screen matches.
+        if (_doc.Columns.Enabled) return TotalColumnsWidth();
         long rows = _doc.RowCount;
         int widest = 0;
         for (int i = 0; i < VisibleRowCount; i++)
@@ -887,7 +916,7 @@ public sealed class LineGridControl : Control
         var splitter = columns ? new ColumnSplitter(_doc.Columns) : null;
         int runningMaxWidth = 0;
 
-        if (columns) DrawColumnHeader(g, gutter, contentW);
+        if (columns) { EnsureColumnLayout(); DrawColumnHeader(g, gutter, contentW); }
 
         _layout.Clear();
         int atY = TextTop;
@@ -990,12 +1019,21 @@ public sealed class LineGridControl : Control
         int x = gutter - _hScroll;
         var clip = g.Clip;
         g.SetClip(new Rectangle(gutter, top, contentW, _rowHeight));
-        foreach (var def in _doc!.Columns.Columns)
+        var spec = _doc!.Columns;
+        for (int i = 0; i < spec.Columns.Count; i++)
         {
+            var def = spec.Columns[i];
             if (!def.Visible) continue;
-            int w = def.Width > 0 ? def.Width : DefaultColumnWidth;
+            int w = _colWidths[i];
+            // The one being carried is shaded, so it is clear which column the pointer has hold of.
+            if (_colGesture == ColumnGesture.Reorder && i == _colIndex && _colMoved)
+                using (var b = new SolidBrush(Color.FromArgb(60, _settings.SelectionBack)))
+                    g.FillRectangle(b, x, top, w, _rowHeight - 1);
             TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
                 Color.FromArgb(80, 80, 80), TextFlags | TextFormatFlags.EndEllipsis);
+            // A hairline on every edge: without one there is nothing to aim the resize pointer at.
+            using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
+                g.DrawLine(pen, x + w - 1, top + 2, x + w - 1, top + _rowHeight - 3);
             x += w;
         }
         g.Clip = clip;
@@ -1003,8 +1041,9 @@ public sealed class LineGridControl : Control
 
     private int TotalColumnsWidth()
     {
+        EnsureColumnLayout();
         int w = 0;
-        foreach (var def in _doc!.Columns.Columns) if (def.Visible) w += def.Width > 0 ? def.Width : DefaultColumnWidth;
+        foreach (int width in _colWidths) w += width;
         return w;
     }
 
@@ -1018,8 +1057,8 @@ public sealed class LineGridControl : Control
         {
             var def = spec.Columns[i];
             if (!def.Visible) continue;
-            int w = def.Width > 0 ? def.Width : DefaultColumnWidth;
-            string val = i < _cols.Count ? text.Substring(_cols[i].Start, _cols[i].Length) : "";
+            int w = _colWidths[i];
+            string val = CellText(text, def, _cols);
             var cellFlags = def.Align == ColumnAlign.Right ? flags | TextFormatFlags.Right
                           : def.Align == ColumnAlign.Center ? flags | TextFormatFlags.HorizontalCenter : flags;
             TextRenderer.DrawText(g, val, font, new Rectangle(x + 3, y, w - 6, _rowHeight), fore, cellFlags);
@@ -1027,6 +1066,520 @@ public sealed class LineGridControl : Control
         }
         return TotalColumnsWidth();
     }
+
+    // ================= columns: resized, reordered, renamed and hidden from the header itself =================
+
+    /// <summary>What a cell shows: the field the column says it shows, wherever that column has been
+    /// carried to. The paint and the checks both come through here, so they cannot disagree.</summary>
+    private static string CellText(string line, ColumnDef def, List<ColumnValue> values)
+        => def.Source >= 0 && def.Source < values.Count
+            ? line.Substring(values[def.Source].Start, values[def.Source].Length)
+            : "";
+
+    private enum ColumnGesture { None, Resize, Reorder }
+
+    /// <summary>How close to an edge counts as aiming at it.</summary>
+    private int ResizeGrip => LogicalToDeviceUnits(4);
+
+    /// <summary>The narrowest a column may be made. Wide enough that its edge can still be grabbed, which
+    /// is what stops a column being dragged away to nothing and becoming unrecoverable.</summary>
+    private int MinColumnWidth => Math.Max(LogicalToDeviceUnits(12), _charWidth * 2);
+
+    /// <summary>Padding either side of a cell's text, so a column fitted to its content does not end
+    /// exactly on the last glyph.</summary>
+    private int CellPadding => Math.Max(LogicalToDeviceUnits(10), _charWidth);
+
+    /// <summary>The width a column has been given, or 0 when it is free to be fitted. Characters win while
+    /// a fixed-pitch font is in use so that zooming keeps the same fields visible.</summary>
+    private int ExplicitWidth(ColumnDef def)
+        => _monospaced && def.WidthChars > 0 ? def.WidthChars * _charWidth
+         : def.Width > 0 ? def.Width : 0;
+
+    /// <summary>What the content of each column asks for, measured from the rows on screen. Deliberately
+    /// NOT redone as the view scrolls: a column that resized itself under the reader every few lines would
+    /// be unusable. It is redone when the columns, the font or the file change, and on request.</summary>
+    private void EnsureNaturalWidths()
+    {
+        var spec = _doc!.Columns;
+        int n = spec.Columns.Count;
+        string key = NaturalKey();
+        if (_naturalKey == key && _colNatural.Length == n) return;
+        _naturalKey = key;
+        _colNatural = new int[n];
+
+        for (int i = 0; i < n; i++)
+            _colNatural[i] = TextRenderer.MeasureText(spec.Columns[i].Name, _fontBold,
+                new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
+                + CellPadding;
+
+        var splitter = new ColumnSplitter(spec);
+        var values = new List<ColumnValue>();
+        long rows = _doc.RowCount;
+        int sampled = 0;
+        for (int r = 0; r < VisibleRowCount && sampled < 400; r++)
+        {
+            long row = _firstRow + r;
+            if (row < 0 || row >= rows) break;
+            string text = _doc.GetLineText(_doc.RowToLine(row));
+            splitter.Split(text, values);
+            sampled++;
+            for (int i = 0; i < n; i++)
+            {
+                if (!spec.Columns[i].Visible) continue;
+                int src = spec.Columns[i].Source;
+                if (src < 0 || src >= values.Count) continue;
+                int w = TextRenderer.MeasureText(text.AsSpan(values[src].Start, values[src].Length), _fontRegular,
+                    new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
+                    + CellPadding;
+                if (w > _colNatural[i]) _colNatural[i] = w;
+            }
+        }
+
+        // Nothing to measure yet (a file still opening, or an empty one): fall back to something usable
+        // rather than to nothing, and ask again once there are rows - the key says so.
+        for (int i = 0; i < n; i++)
+            if (_colNatural[i] <= 0) _colNatural[i] = DefaultColumnWidth;
+    }
+
+    /// <summary>What the measured widths depend on. Not the scroll position, and not the exact row count -
+    /// only whether there is anything to measure at all.</summary>
+    private string NaturalKey()
+    {
+        var spec = _doc!.Columns;
+        var sb = new StringBuilder();
+        sb.Append(_settings.FontFamily).Append('|').Append(_settings.EffectiveFontSize).Append('|')
+          .Append(spec.Mode).Append('|').Append(spec.Delimiter).Append('|').Append(spec.Template).Append('|')
+          .Append(spec.MaxSplits).Append('|').Append(spec.CollapseConsecutive).Append('|')
+          .Append(_doc.RowCount > 0 ? '1' : '0').Append('|');
+        foreach (var c in spec.Columns) sb.Append(c.Name).Append(c.Visible ? '+' : '-').Append(c.Source).Append('\u0001');
+        return sb.ToString();
+    }
+
+    /// <summary>Resolves every column's drawn width. Cheap, and redone on every use, so a resize or a
+    /// window change is felt immediately; only the content measurement behind it is cached.</summary>
+    private void EnsureColumnLayout()
+    {
+        var spec = _doc!.Columns;
+        int n = spec.Columns.Count;
+        if (_colWidths.Length != n) _colWidths = new int[n];
+        if (n == 0) return;
+        // A column added in code says nothing about which field it shows; settle that here, once, rather
+        // than leaving every such spec drawing empty cells.
+        spec.NormalizeSources();
+        EnsureNaturalWidths();
+
+        var wanted = new List<int>(n);
+        var auto = new List<bool>(n);
+        var at = new List<int>(n);
+        for (int i = 0; i < n; i++)
+        {
+            _colWidths[i] = 0;
+            if (!spec.Columns[i].Visible) continue;
+            int explicitWidth = ExplicitWidth(spec.Columns[i]);
+            at.Add(i);
+            auto.Add(explicitWidth == 0);
+            wanted.Add(explicitWidth == 0 ? _colNatural[i] : explicitWidth);
+        }
+        if (at.Count == 0) return;
+
+        var fitted = ColumnLayout.Fit(wanted, auto, ContentWidth, MinColumnWidth);
+        for (int k = 0; k < at.Count; k++) _colWidths[at[k]] = fitted[k];
+    }
+
+    /// <summary>Left edge of a column in client coordinates, scrolling included.</summary>
+    private int ColumnLeft(int index)
+    {
+        EnsureColumnLayout();
+        int x = GutterWidth() - _hScroll;
+        for (int i = 0; i < index && i < _colWidths.Length; i++) x += _colWidths[i];
+        return x;
+    }
+
+    private Rectangle ColumnHeaderRect(int index)
+        => new(ColumnLeft(index), TopInset, Math.Max(0, _colWidths[index]), _rowHeight);
+
+    /// <summary>Whether a point is on the column header - the strip the gestures below belong to.</summary>
+    private bool InColumnHeader(int y)
+        => HeaderHeight > 0 && y >= TopInset && y < TopInset + HeaderHeight;
+
+    /// <summary>The column whose right-hand edge is under <paramref name="x"/>, or -1. Hidden columns have
+    /// no edge, so resizing one is not offered - it is not on screen to be aimed at.</summary>
+    private int DividerAt(int x)
+    {
+        EnsureColumnLayout();
+        int edge = GutterWidth() - _hScroll;
+        for (int i = 0; i < _colWidths.Length; i++)
+        {
+            if (_colWidths[i] <= 0) continue;
+            edge += _colWidths[i];
+            if (Math.Abs(x - edge) <= ResizeGrip) return i;
+        }
+        return -1;
+    }
+
+    /// <summary>The column under <paramref name="x"/>, or -1 past the last one.</summary>
+    private int ColumnAt(int x)
+    {
+        EnsureColumnLayout();
+        int left = GutterWidth() - _hScroll;
+        for (int i = 0; i < _colWidths.Length; i++)
+        {
+            if (_colWidths[i] <= 0) continue;
+            if (x >= left && x < left + _colWidths[i]) return i;
+            left += _colWidths[i];
+        }
+        return -1;
+    }
+
+    private List<int> VisibleColumnIndices()
+    {
+        var list = new List<int>();
+        var spec = _doc!.Columns;
+        for (int i = 0; i < spec.Columns.Count; i++) if (spec.Columns[i].Visible) list.Add(i);
+        return list;
+    }
+
+    /// <summary>Raised whenever the columns are changed from the header, so the window can record that
+    /// there is something to save.</summary>
+    internal event Action? ColumnsChanged;
+
+    /// <summary>Raised by the header's "Columns…" entry, so the full settings still have one home.</summary>
+    internal event Action? ColumnSettingsRequested;
+
+    /// <summary>One place every in-view column edit ends: the drawn widths are stale, the header and every
+    /// row have to be redrawn, and whoever owns the file has to know it now differs from what is on disk.
+    /// It does NOT re-measure the content - the measurement's own key covers the changes that could affect
+    /// it, so a resize drag does not pay for one on every step of the gesture.</summary>
+    private void ColumnsEdited()
+    {
+        _maxContentWidth = 0;
+        EnsureColumnLayout();
+        UpdateHScroll();
+        Invalidate();
+        Update();                    // a held drag never empties the queue, so a repaint has to be pushed
+        ColumnsChanged?.Invoke();
+    }
+
+    /// <summary>Gives a column a width, in whole characters where that means anything.</summary>
+    private void SetColumnWidth(int index, int pixels)
+    {
+        var def = _doc!.Columns.Columns[index];
+        pixels = Math.Max(MinColumnWidth, pixels);
+        if (_monospaced)
+        {
+            pixels = ColumnLayout.SnapToChars(pixels, _charWidth);
+            def.WidthChars = Math.Max(1, pixels / _charWidth);
+        }
+        else def.WidthChars = 0;
+        def.Width = pixels;
+    }
+
+    /// <summary>Sizes a column to what is in it, which is what double-clicking its edge means.</summary>
+    internal void FitColumnToContent(int index)
+    {
+        if (_doc is null || index < 0 || index >= _doc.Columns.Columns.Count) return;
+        _naturalKey = null;
+        EnsureNaturalWidths();
+        SetColumnWidth(index, _colNatural[index]);
+        ColumnsEdited();
+    }
+
+    /// <summary>Hands every column back to the layout, so the row fills the window again.</summary>
+    internal void FitColumnsToWindow()
+    {
+        if (_doc is null) return;
+        foreach (var def in _doc.Columns.Columns) { def.Width = 0; def.WidthChars = 0; }
+        _naturalKey = null;
+        ColumnsEdited();
+    }
+
+    internal void SetColumnVisible(int index, bool visible)
+    {
+        if (_doc is null || index < 0 || index >= _doc.Columns.Columns.Count) return;
+        // The last one standing may not be hidden: there would then be no header left to unhide it from.
+        if (!visible && VisibleColumnIndices().Count <= 1) return;
+        if (_doc.Columns.Columns[index].Visible == visible) return;
+        _doc.Columns.Columns[index].Visible = visible;
+        ColumnsEdited();
+    }
+
+    internal void SetColumnAlign(int index, ColumnAlign align)
+    {
+        if (_doc is null || index < 0 || index >= _doc.Columns.Columns.Count) return;
+        if (_doc.Columns.Columns[index].Align == align) return;
+        _doc.Columns.Columns[index].Align = align;
+        ColumnsEdited();
+    }
+
+    /// <summary>Moves a column so it sits at <paramref name="toVisiblePosition"/> among the visible ones.
+    /// Hidden columns keep their place in the list rather than being dragged along by a move they had no
+    /// part in.</summary>
+    internal void MoveColumnTo(int index, int toVisiblePosition)
+    {
+        if (_doc is null) return;
+        var cols = _doc.Columns.Columns;
+        if (index < 0 || index >= cols.Count) return;
+        var def = cols[index];
+        cols.RemoveAt(index);
+        var visible = new List<int>();
+        for (int i = 0; i < cols.Count; i++) if (cols[i].Visible) visible.Add(i);
+        int insertAt = toVisiblePosition >= 0 && toVisiblePosition < visible.Count ? visible[toVisiblePosition] : cols.Count;
+        cols.Insert(insertAt, def);
+    }
+
+    /// <summary>The gesture the pointer would start on the header, if any. Returns false when the press
+    /// belongs to the log rather than to the header.</summary>
+    private bool HandleHeaderMouseDown(MouseEventArgs e, int clicks)
+    {
+        if (_doc is null || !InColumnHeader(e.Y)) return false;
+        EndRename(commit: true);
+
+        if (e.Button == MouseButtons.Right)
+        {
+            ShowColumnMenu(e.Location);
+            return true;
+        }
+        if (e.Button != MouseButtons.Left) return true;
+
+        int divider = DividerAt(e.X);
+        if (divider >= 0)
+        {
+            // On an edge: a double-click sizes that column to its content, a drag sizes it by hand.
+            if (clicks >= 2) { FitColumnToContent(divider); return true; }
+            _colGesture = ColumnGesture.Resize;
+            _colIndex = divider;
+            _colGrabX = e.X;
+            _colGrabWidth = _colWidths[divider];
+            _colMoved = false;
+            Capture = true;
+            return true;
+        }
+
+        int column = ColumnAt(e.X);
+        if (column < 0) return true;
+        if (clicks >= 2) { BeginRename(column); return true; }
+        _colGesture = ColumnGesture.Reorder;
+        _colIndex = column;
+        _colGrabX = e.X;
+        _colMoved = false;
+        Capture = true;
+        return true;
+    }
+
+    private void HandleHeaderMouseMove(MouseEventArgs e)
+    {
+        switch (_colGesture)
+        {
+            case ColumnGesture.Resize:
+                {
+                    int width = _colGrabWidth + (e.X - _colGrabX);
+                    var def = _doc!.Columns.Columns[_colIndex];
+                    int before = ExplicitWidth(def);
+                    SetColumnWidth(_colIndex, width);
+                    if (ExplicitWidth(def) != before) { _colMoved = true; ColumnsEdited(); }
+                    break;
+                }
+            case ColumnGesture.Reorder:
+                {
+                    if (!_colMoved && Math.Abs(e.X - _colGrabX) < SystemInformation.DragSize.Width) break;
+                    _colMoved = true;
+                    var visible = VisibleColumnIndices();
+                    int from = visible.IndexOf(_colIndex);
+                    if (from < 0) break;
+                    var widths = visible.Select(i => _colWidths[i]).ToList();
+                    int to = ColumnLayout.DropTarget(widths, from, e.X - (GutterWidth() - _hScroll));
+                    if (to != from) { MoveColumnTo(_colIndex, to); _colIndex = VisibleColumnIndices()[to]; ColumnsEdited(); }
+                    else Invalidate();
+                    break;
+                }
+            default:
+                SetCursorTo(InColumnHeader(e.Y) && DividerAt(e.X) >= 0 ? Cursors.VSplit : Cursors.Default);
+                break;
+        }
+    }
+
+    /// <summary>Only when it differs: assigning Cursor talks to the window every time, and this runs on
+    /// every pointer move.</summary>
+    private void SetCursorTo(Cursor cursor) { if (Cursor != cursor) Cursor = cursor; }
+
+    private void EndColumnGesture()
+    {
+        if (_colGesture == ColumnGesture.None) return;
+        bool moved = _colMoved;
+        _colGesture = ColumnGesture.None;
+        _colIndex = -1;
+        _colMoved = false;
+        Capture = false;
+        SetCursorTo(Cursors.Default);
+        if (moved) ColumnsEdited();
+        else Invalidate();
+    }
+
+    // ---- renaming, in place ----
+
+    /// <summary>Puts an edit box over the header cell, which is where the name is read, so renaming needs
+    /// no dialog and no hunting for the setting.</summary>
+    internal void BeginRename(int index)
+    {
+        if (_doc is null || index < 0 || index >= _doc.Columns.Columns.Count) return;
+        if (!_doc.Columns.Columns[index].Visible) return;
+        EndRename(commit: true);
+        var rect = ColumnHeaderRect(index);
+        if (rect.Width <= 0) return;
+        _renameIndex = index;
+        _renameBox = new TextBox
+        {
+            Text = _doc.Columns.Columns[index].Name,
+            Bounds = rect,
+            BorderStyle = BorderStyle.FixedSingle,
+            Font = _fontRegular
+        };
+        _renameBox.KeyDown += (_, ke) =>
+        {
+            if (ke.KeyCode == Keys.Enter) { ke.Handled = ke.SuppressKeyPress = true; EndRename(commit: true); Focus(); }
+            else if (ke.KeyCode == Keys.Escape) { ke.Handled = ke.SuppressKeyPress = true; EndRename(commit: false); Focus(); }
+        };
+        _renameBox.LostFocus += (_, _) => EndRename(commit: true);
+        Controls.Add(_renameBox);
+        _renameBox.BringToFront();
+        _renameBox.Focus();
+        _renameBox.SelectAll();
+    }
+
+    /// <summary>Takes the edit box away, keeping what was typed or discarding it. Guarded against re-entry
+    /// on purpose: committing takes the focus away, which raises LostFocus, which asks to commit again.</summary>
+    internal void EndRename(bool commit)
+    {
+        if (_renameBox is null || _renaming) return;
+        _renaming = true;
+        try
+        {
+            var box = _renameBox;
+            _renameBox = null;
+            int index = _renameIndex;
+            _renameIndex = -1;
+            string name = box.Text.Trim();
+            Controls.Remove(box);
+            box.Dispose();
+            if (commit && index >= 0 && index < _doc!.Columns.Columns.Count && name.Length > 0
+                && _doc.Columns.Columns[index].Name != name)
+            {
+                _doc.Columns.Columns[index].Name = name;
+                ColumnsEdited();
+            }
+            else Invalidate();
+        }
+        finally { _renaming = false; }
+    }
+
+    internal bool IsRenamingForTesting => _renameBox is not null;
+
+    // ---- the header's own menu: everything about a column, where the column is ----
+
+    private void ShowColumnMenu(Point at)
+    {
+        var spec = _doc!.Columns;
+        int index = ColumnAt(at.X);
+        // A check margin and no image one: the list at the top is a set of ticks saying which columns are
+        // shown, and turning the image margin off takes away the very place a tick is drawn.
+        var menu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = true };
+
+        // Every column, ticked or not - a hidden column has no header to right-click, so this list is the
+        // only way back to one.
+        for (int i = 0; i < spec.Columns.Count; i++)
+        {
+            int which = i;
+            var def = spec.Columns[i];
+            var item = new ToolStripMenuItem(def.Name.Length > 0 ? def.Name : $"Column {i + 1}")
+            {
+                Checked = def.Visible,
+                CheckOnClick = true,
+                Enabled = !def.Visible || VisibleColumnIndices().Count > 1
+            };
+            item.Click += (_, _) => SetColumnVisible(which, item.Checked);
+            menu.Items.Add(item);
+        }
+
+        if (index >= 0)
+        {
+            string name = spec.Columns[index].Name;
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(Entry($"&Rename \"{name}\"…", () => BeginRename(index)));
+            menu.Items.Add(Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false),
+                                 VisibleColumnIndices().Count > 1));
+            menu.Items.Add(Entry($"Fit \"{name}\" to &Content", () => FitColumnToContent(index)));
+
+            var align = new ToolStripMenuItem("&Align");
+            foreach (var (text, value) in new[] { ("&Left", ColumnAlign.Left), ("&Right", ColumnAlign.Right), ("&Centre", ColumnAlign.Center) })
+            {
+                var a = value;
+                var item = new ToolStripMenuItem(text) { Checked = spec.Columns[index].Align == a };
+                item.Click += (_, _) => SetColumnAlign(index, a);
+                align.DropDownItems.Add(item);
+            }
+            menu.Items.Add(align);
+        }
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(Entry("&Fit All Columns to Window", FitColumnsToWindow));
+        menu.Items.Add(Entry("&Columns…", () => ColumnSettingsRequested?.Invoke()));
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(this, at);
+
+        static ToolStripMenuItem Entry(string text, Action run, bool enabled = true)
+        {
+            var item = new ToolStripMenuItem(text) { Enabled = enabled };
+            item.Click += (_, _) => run();
+            return item;
+        }
+    }
+
+    // ---- seams, so the gestures above can be checked without a mouse ----
+
+    internal int ColumnWidthForTesting(int index) { EnsureColumnLayout(); return index >= 0 && index < _colWidths.Length ? _colWidths[index] : -1; }
+    internal int ColumnLeftForTesting(int index) => ColumnLeft(index);
+    internal int ColumnHeaderYForTesting => TopInset + _rowHeight / 2;
+    internal int CharWidthForTesting => _charWidth;
+    internal bool MonospacedForTesting => _monospaced;
+    internal int MinColumnWidthForTesting => MinColumnWidth;
+    internal int ContentWidthForTesting => ContentWidth;
+    internal int NaturalWidthForTesting(int index) { EnsureNaturalWidths(); return _colNatural[index]; }
+    internal string[] ColumnNamesForTesting => _doc is null ? [] : _doc.Columns.Columns.Select(c => c.Name).ToArray();
+    internal int DividerAtForTesting(int x) => DividerAt(x);
+    internal int ColumnAtForTesting(int x) => ColumnAt(x);
+
+    /// <summary>What one cell of one row is drawn with - the paint's own lookup, not a copy of it.</summary>
+    internal string CellTextForTesting(long row, int column)
+    {
+        if (_doc is null || column < 0 || column >= _doc.Columns.Columns.Count) return "";
+        string text = _doc.GetLineText(_doc.RowToLine(row));
+        new ColumnSplitter(_doc.Columns).Split(text, _cols);
+        return CellText(text, _doc.Columns.Columns[column], _cols);
+    }
+
+    internal void PressHeaderForTesting(int x, int clicks = 1)
+    {
+        ForgetLastClick();
+        HandleHeaderMouseDown(new MouseEventArgs(MouseButtons.Left, clicks, x, ColumnHeaderYForTesting, 0), clicks);
+    }
+
+    internal void DragHeaderToForTesting(int x)
+        => HandleHeaderMouseMove(new MouseEventArgs(MouseButtons.Left, 0, x, ColumnHeaderYForTesting, 0));
+
+    internal void ReleaseHeaderForTesting() => EndColumnGesture();
+
+    /// <summary>A whole drag of a column edge, from grab to release.</summary>
+    internal void DragColumnEdgeForTesting(int index, int toX)
+    {
+        PressHeaderForTesting(ColumnLeft(index) + _colWidths[index]);
+        DragHeaderToForTesting(toX);
+        EndColumnGesture();
+    }
+
+    internal void SetRenameTextForTesting(string text) { if (_renameBox is not null) _renameBox.Text = text; }
+
+    /// <summary>Gives a column a width outright, so a check can set one up without a gesture.</summary>
+    internal void SetColumnWidthForTesting(int index, int pixels) { SetColumnWidth(index, pixels); ColumnsEdited(); }
 
     private int DrawFullLine(Graphics g, string text, int gutter, int y, Color fore, Font font)
     {
@@ -1107,18 +1660,26 @@ public sealed class LineGridControl : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         Focus();
-        if (_doc is null || e.Button != MouseButtons.Left) { base.OnMouseDown(e); return; }
+        if (_doc is null) { base.OnMouseDown(e); return; }
+
+        // Windows only ever reports one or two clicks, so a triple has to be counted here. Counted for the
+        // left button only, or a right-click would leave a stray count behind for the next real one.
+        if (e.Button == MouseButtons.Left)
+        {
+            bool repeat = (DateTime.UtcNow - _lastClickAt).TotalMilliseconds <= SystemInformation.DoubleClickTime
+                          && Math.Abs(e.X - _lastClickAtPoint.X) <= SystemInformation.DragSize.Width
+                          && Math.Abs(e.Y - _lastClickAtPoint.Y) <= SystemInformation.DragSize.Height;
+            _clickCount = repeat ? Math.Min(3, _clickCount + 1) : 1;
+            _lastClickAt = DateTime.UtcNow;
+            _lastClickAtPoint = e.Location;
+        }
+
+        if (HandleHeaderMouseDown(e, _clickCount)) return;
+        if (e.Button != MouseButtons.Left) { base.OnMouseDown(e); return; }
+
         long row = RowAtY(e.Y); // resolves against the live viewport before stabilization is dropped
         ClearViewAnchor();
         if (row < 0 || row >= _doc.RowCount) return;
-
-        // Windows only ever reports one or two clicks, so a triple has to be counted here.
-        bool repeat = (DateTime.UtcNow - _lastClickAt).TotalMilliseconds <= SystemInformation.DoubleClickTime
-                      && Math.Abs(e.X - _lastClickAtPoint.X) <= SystemInformation.DragSize.Width
-                      && Math.Abs(e.Y - _lastClickAtPoint.Y) <= SystemInformation.DragSize.Height;
-        _clickCount = repeat ? Math.Min(3, _clickCount + 1) : 1;
-        _lastClickAt = DateTime.UtcNow;
-        _lastClickAtPoint = e.Location;
 
         if (_clickCount == 2)
         {
@@ -1156,6 +1717,10 @@ public sealed class LineGridControl : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (_doc is not null && _doc.Columns.Enabled) HandleHeaderMouseMove(e);
+        else SetCursorTo(Cursors.Default);
+        if (_colGesture != ColumnGesture.None) return;
+
         TrackHover(e.Location);
         if (_dragging && _doc is not null)
         {
@@ -1194,6 +1759,7 @@ public sealed class LineGridControl : Control
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
+        if (_colGesture != ColumnGesture.None) { EndColumnGesture(); return; }
         _dragging = false;
         _charOriginRow = -1;
         // A press that never moved sideways selected the whole line, so drop the empty range it armed.
@@ -1217,6 +1783,7 @@ public sealed class LineGridControl : Control
     protected override void OnMouseLeave(EventArgs e)
     {
         HideTip();
+        if (_colGesture == ColumnGesture.None) SetCursorTo(Cursors.Default);
         base.OnMouseLeave(e);
     }
 

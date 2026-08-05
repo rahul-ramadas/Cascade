@@ -12,9 +12,20 @@ public sealed class ColumnDef
     public string Name { get; set; } = "";
     public bool Visible { get; set; } = true;
     public int Width { get; set; } // display width in pixels; 0 = auto
+
+    /// <summary>Which field of the split line this column shows, counted from 0 in the order the line is
+    /// split. Kept apart from the column's place in the list, because that place is only where the column
+    /// is DRAWN - carrying a header about has to move the data with it, not relabel the fields.
+    /// -1 means "not decided yet"; see <see cref="ColumnSpec.NormalizeSources"/>.</summary>
+    public int Source { get; set; } = -1;
+
+    /// <summary>Width in characters, which is what a width means when the log is being read in a
+    /// fixed-pitch font: zooming then keeps the same fields visible instead of clipping them. Takes
+    /// precedence over <see cref="Width"/> while such a font is in use; 0 leaves the pixel width to speak.</summary>
+    public int WidthChars { get; set; }
     public ColumnAlign Align { get; set; } = ColumnAlign.Left;
 
-    public ColumnDef Clone() => new() { Name = Name, Visible = Visible, Width = Width, Align = Align };
+    public ColumnDef Clone() => new() { Name = Name, Visible = Visible, Width = Width, WidthChars = WidthChars, Align = Align, Source = Source };
 }
 
 /// <summary>
@@ -115,9 +126,22 @@ public sealed class ColumnSpec
     public void SyncColumnsFromTemplate()
     {
         var (names, _) = BuildTemplate(Template);
-        var existing = Columns.ToDictionary(c => c.Name, c => c);
+        // First one wins rather than throwing: nothing stops two columns being renamed the same thing.
+        var existing = new Dictionary<string, ColumnDef>(StringComparer.Ordinal);
+        foreach (var c in Columns) existing.TryAdd(c.Name, c);
         Columns.Clear();
         foreach (var n in names)
             Columns.Add(existing.TryGetValue(n, out var e) ? e : new ColumnDef { Name = n });
+        // Reading the template again is starting over, so every column shows the field it was written for.
+        for (int i = 0; i < Columns.Count; i++) Columns[i].Source = i;
+    }
+
+    /// <summary>Settles which field each column shows for any that has not been told. Columns written
+    /// before the two were separate - and any file saved by such a build - show the field at their own
+    /// place in the list, which is exactly what they used to do.</summary>
+    public void NormalizeSources()
+    {
+        for (int i = 0; i < Columns.Count; i++)
+            if (Columns[i].Source < 0) Columns[i].Source = i;
     }
 }

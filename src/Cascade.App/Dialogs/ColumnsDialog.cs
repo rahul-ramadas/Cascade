@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
@@ -160,12 +161,15 @@ public sealed class ColumnsDialog : DialogBase
             var splitter = new ColumnSplitter(_working);
             var values = new List<ColumnValue>();
             splitter.Split(_sample, values);
-            var existing = _working.Columns.ToDictionary(c => c.Name, c => c);
+            var existing = new Dictionary<string, ColumnDef>(StringComparer.Ordinal);
+            foreach (var c in _working.Columns) existing.TryAdd(c.Name, c);
             _working.Columns.Clear();
             for (int i = 0; i < values.Count; i++)
             {
                 string name = string.IsNullOrEmpty(values[i].Name) ? $"Col {i + 1}" : values[i].Name;
-                _working.Columns.Add(existing.TryGetValue(name, out var e) ? e : new ColumnDef { Name = name });
+                var def = existing.TryGetValue(name, out var e) ? e : new ColumnDef { Name = name };
+                def.Source = i;   // reading the sample again is starting over, in the order the line splits
+                _working.Columns.Add(def);
             }
         }
         PopulateGrid();
@@ -193,25 +197,52 @@ public sealed class ColumnsDialog : DialogBase
         CommitEditorsToWorking();
         for (int i = 0; i < _grid.Rows.Count && i < _working.Columns.Count; i++)
         {
-            _working.Columns[i].Visible = Convert.ToBoolean(_grid.Rows[i].Cells["visible"].Value ?? true);
-            _working.Columns[i].Width = int.TryParse(Convert.ToString(_grid.Rows[i].Cells["width"].Value), out int w) ? Math.Max(0, w) : 0;
+            var def = _working.Columns[i];
+            def.Visible = Convert.ToBoolean(_grid.Rows[i].Cells["visible"].Value ?? true);
+            int width = int.TryParse(Convert.ToString(_grid.Rows[i].Cells["width"].Value), out int w) ? Math.Max(0, w) : 0;
+            // Only when it was actually typed over: a width dragged in the header is kept in characters,
+            // and rewriting it here from the pixel figure shown would quietly undo that on every OK.
+            if (width != def.Width) { def.Width = width; def.WidthChars = 0; }
         }
     }
 
-    private static string DetectTemplate(string sample)
+    /// <summary>Reads the leading <c>[...]</c> groups off a line and writes a template that matches them,
+    /// which is what makes turning columns on a single click for the log formats that have them. The
+    /// fields are named from what is in them where that can be told - "Time" and "Level" are worth a great
+    /// deal more than "field1" on a header nobody has got round to renaming yet.</summary>
+    internal static string DetectTemplate(string sample)
     {
+        ArgumentNullException.ThrowIfNull(sample);
         var sb = new StringBuilder();
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         int i = 0, n = 0;
         while (i < sample.Length && sample[i] == '[')
         {
             int j = sample.IndexOf(']', i + 1);
             if (j < 0) break;
             n++;
-            sb.Append("[[field").Append(n).Append("]]");
+            string name = NameForField(sample.Substring(i + 1, j - i - 1), n);
+            while (!used.Add(name)) name = $"Field{n}_{used.Count}";
+            sb.Append("[[").Append(name).Append("]]");
             i = j + 1;
         }
         if (n == 0) return "";
         if (i < sample.Length) sb.Append(" [message]");
         return sb.ToString();
+    }
+
+    private static readonly string[] LevelWords =
+        ["TRACE", "DEBUG", "VERBOSE", "INFO", "INFORMATION", "WARN", "WARNING", "ERROR", "ERR", "FATAL", "CRITICAL"];
+
+    private static string NameForField(string value, int n)
+    {
+        string v = value.Trim();
+        // Guarded before parsing: DateTime.TryParse will happily read a bare number as a day of the month.
+        if (v.Length >= 8 && (v.Contains(':', StringComparison.Ordinal) || v.Contains('-', StringComparison.Ordinal)
+                              || v.Contains('/', StringComparison.Ordinal))
+            && DateTime.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+            return "Time";
+        if (LevelWords.Contains(v, StringComparer.OrdinalIgnoreCase)) return "Level";
+        return "Field" + n;
     }
 }
