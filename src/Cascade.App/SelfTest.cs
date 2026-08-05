@@ -62,6 +62,7 @@ internal static class SelfTest
             ok &= Timed("settings", RunSettingsChecks);
             ok &= Timed("machine state", RunMachineStateChecks);
             ok &= Timed("render", RunRenderChecks);
+            ok &= Timed("columns", RunColumnChecks);
             ok &= Timed("navigation", RunNavigationChecks);
             ok &= Timed("filter list", RunFilterListChecks);
             ok &= Timed("filter search", RunFilterSearchRevealChecks);
@@ -267,6 +268,275 @@ internal static class SelfTest
             Pump();
             ok &= Check($"an automated scroll survives an armed view anchor (row {grid.FirstRowForTesting})",
                         grid.FirstRowForTesting == 15);
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>
+    /// The column header is where columns are laid out: dragging an edge sizes one, carrying a header
+    /// moves one, double-clicking a name renames it and the header's own menu hides and shows them. All of
+    /// it is driven here against a real control, because none of it can be driven through UI Automation -
+    /// a drag needs a real mouse, and these gestures have no automation pattern to invoke.
+    /// </summary>
+    private static bool RunColumnChecks()
+    {
+        Line("-- columns --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_columns_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        // The service field is short at the top of the file and long further down, so "the widths do not
+        // follow the scroll" and "asking for a fit does change them" can be told apart.
+        for (int i = 0; i < 40; i++)
+            sb.Append($"[2026-08-04T09:31:{i % 60:00}][api][INFO ] short message {i}\n");
+        for (int i = 40; i < 90; i++)
+            sb.Append($"[2026-08-04T09:31:{i % 60:00}][payment-service-europe-west][WARN ] short message {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            doc.Columns.Enabled = true;
+            doc.Columns.Mode = ColumnSplitMode.Template;
+            doc.Columns.Template = "[[time]][[service]][[level]] [message]";
+            doc.Columns.SyncColumnsFromTemplate();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(900, 420),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            int edits = 0;
+            grid.ColumnsChanged += () => edits++;
+
+            // --- what "auto" means: every column as wide as it needs, and the row filling the window ---
+
+            bool ok = Check("the log is being read in a fixed-pitch font, so the character rules apply",
+                            grid.MonospacedForTesting);
+            int[] Widths() => [.. Enumerable.Range(0, 4).Select(grid.ColumnWidthForTesting)];
+            var auto = Widths();
+            ok &= Check($"the columns fill the width of the view exactly ({auto.Sum()} of {grid.ContentWidthForTesting})",
+                        auto.Sum() == grid.ContentWidthForTesting, string.Join(", ", auto));
+            ok &= Check("and none of them is the old fixed 160 pixels for everything",
+                        auto.Distinct().Count() > 1, string.Join(", ", auto));
+            for (int i = 0; i < 3; i++)
+                ok &= Check($"column {i} is at least as wide as what is in it ({auto[i]} vs {grid.NaturalWidthForTesting(i)})",
+                            auto[i] >= grid.NaturalWidthForTesting(i));
+            ok &= Check("the last column takes the room left over rather than leaving a gap",
+                        auto[3] > grid.NaturalWidthForTesting(3) || auto.Sum() == grid.ContentWidthForTesting);
+
+            // --- the widths do not chase the content as the view scrolls ---
+
+            grid.SetVerticalScrollValue(60);
+            grid.RefreshView();
+            Pump();
+            var afterScroll = Widths();
+            ok &= Check("the columns hold still while the view scrolls over wider content",
+                        afterScroll.SequenceEqual(auto), string.Join(", ", afterScroll));
+
+            // ...but asking for a fit does re-measure, or the check above would pass by never changing.
+            grid.FitColumnsToWindow();
+            Pump();
+            var refitted = Widths();
+            ok &= Check($"asking for a fit re-measures what is on screen ({refitted[1]} vs {auto[1]} for the service)",
+                        refitted[1] > auto[1], string.Join(", ", refitted));
+            ok &= Check("and still fills the width exactly", refitted.Sum() == grid.ContentWidthForTesting);
+
+            grid.SetVerticalScrollValue(0);
+            grid.FitColumnsToWindow();
+            Pump();
+
+            // --- dragging an edge ---
+
+            edits = 0;
+            int before = grid.ColumnWidthForTesting(0);
+            int charWidth = grid.CharWidthForTesting;
+            grid.DragColumnEdgeForTesting(0, grid.ColumnLeftForTesting(0) + before + charWidth * 5 + 3);
+            int dragged = grid.ColumnWidthForTesting(0);
+            ok &= Check($"dragging a column edge widens that column ({before} -> {dragged})", dragged > before);
+            ok &= Check($"and the width lands on a whole number of characters ({dragged} / {charWidth})",
+                        dragged % charWidth == 0, $"{dragged} % {charWidth} = {dragged % charWidth}");
+            ok &= Check($"and it is recorded in characters, so a zoom keeps the same fields ({doc.Columns.Columns[0].WidthChars} chars)",
+                        doc.Columns.Columns[0].WidthChars == dragged / charWidth);
+            ok &= Check("and the file now differs from what is on disk", edits > 0, $"{edits} edits reported");
+            ok &= Check("and the other columns give up the room, so the row still fills the view",
+                        Widths().Sum() == grid.ContentWidthForTesting, string.Join(", ", Widths()));
+
+            // Zooming keeps the column the same number of characters wide - the point of storing it that way.
+            int charsWide = doc.Columns.Columns[0].WidthChars;
+            grid.Zoom(20);
+            Pump();
+            ok &= Check($"zooming keeps that column {charsWide} characters wide, not {before} pixels",
+                        grid.ColumnWidthForTesting(0) == charsWide * grid.CharWidthForTesting
+                        && grid.CharWidthForTesting != charWidth,
+                        $"{grid.ColumnWidthForTesting(0)} px at {grid.CharWidthForTesting} px/char");
+            grid.ResetZoom();
+            Pump();
+
+            // A column may not be dragged away to nothing: its own edge would then be unreachable.
+            grid.DragColumnEdgeForTesting(0, 0);
+            ok &= Check($"a column cannot be dragged narrower than it can be grabbed ({grid.ColumnWidthForTesting(0)})",
+                        grid.ColumnWidthForTesting(0) >= grid.MinColumnWidthForTesting);
+
+            // With a proportional font there is no character to snap to, so the width is plain pixels.
+            settings.FontFamily = "Segoe UI";
+            grid.ApplySettings(settings);
+            Pump();
+            ok &= Check("a proportional font is recognised as one", !grid.MonospacedForTesting);
+            grid.DragColumnEdgeForTesting(1, grid.ColumnLeftForTesting(1) + grid.ColumnWidthForTesting(1) + 37);
+            ok &= Check("and a column dragged in one is sized in pixels, not characters",
+                        doc.Columns.Columns[1].WidthChars == 0 && doc.Columns.Columns[1].Width > 0,
+                        $"{doc.Columns.Columns[1].Width} px, {doc.Columns.Columns[1].WidthChars} chars");
+            settings.FontFamily = "Consolas";
+            grid.ApplySettings(settings);
+            grid.FitColumnsToWindow();
+            Pump();
+
+            // --- aiming at the header ---
+
+            int mid = grid.ColumnLeftForTesting(1) + grid.ColumnWidthForTesting(1) / 2;
+            ok &= Check("a point in the middle of a header names that column", grid.ColumnAtForTesting(mid) == 1);
+            ok &= Check("and is not mistaken for its edge", grid.DividerAtForTesting(mid) < 0);
+            int edge = grid.ColumnLeftForTesting(1) + grid.ColumnWidthForTesting(1);
+            ok &= Check("a point on an edge names the column it belongs to", grid.DividerAtForTesting(edge) == 1);
+
+            // --- carrying a header to another place ---
+
+            edits = 0;
+            var startOrder = grid.ColumnNamesForTesting;
+            string[] Cells() => [.. Enumerable.Range(0, 4).Select(i => grid.CellTextForTesting(0, i))];
+            var startCells = Cells();
+            ok &= Check($"a row reads as its fields, left to right ({string.Join(" | ", startCells)})",
+                        startCells[0].StartsWith("2026", StringComparison.Ordinal) && startCells[3].Contains("message", StringComparison.Ordinal));
+
+            grid.PressHeaderForTesting(grid.ColumnLeftForTesting(3) + grid.ColumnWidthForTesting(3) / 2);
+            var places = new List<int>();
+            for (int x = grid.ColumnLeftForTesting(3) + grid.ColumnWidthForTesting(3) / 2; x >= grid.ColumnLeftForTesting(0); x -= 6)
+            {
+                grid.DragHeaderToForTesting(x);
+                places.Add(Array.IndexOf(grid.ColumnNamesForTesting, "message"));
+            }
+            grid.ReleaseHeaderForTesting();
+            ok &= Check($"carrying a header left walks it to the front ({string.Join("", places)})",
+                        places[^1] == 0 && places[0] == 3);
+            bool walked = true;
+            for (int i = 1; i < places.Count; i++) if (places[i] > places[i - 1]) walked = false;
+            ok &= Check("and it walks rather than flickering between two places",
+                        walked, string.Join("", places));
+            ok &= Check("the other columns keep their order behind it",
+                        grid.ColumnNamesForTesting.SequenceEqual(startOrder.Where(n => n != "message").Prepend("message")),
+                        string.Join(", ", grid.ColumnNamesForTesting));
+            // The header used to move on its own and leave the text where it was: the column's place in
+            // the list was also which field it showed, so carrying one relabelled the fields.
+            var carriedCells = Cells();
+            ok &= Check($"and the data goes with it ({string.Join(" | ", carriedCells)})",
+                        carriedCells[0] == startCells[3] && carriedCells[1] == startCells[0]
+                        && carriedCells[2] == startCells[1] && carriedCells[3] == startCells[2]);
+            ok &= Check("and the move is something to save", edits > 0);
+
+            // Put it back the way round it started, through the same gesture.
+            grid.PressHeaderForTesting(grid.ColumnLeftForTesting(0) + grid.ColumnWidthForTesting(0) / 2);
+            for (int x = grid.ColumnLeftForTesting(0); x <= grid.ColumnLeftForTesting(3) + grid.ColumnWidthForTesting(3); x += 6)
+                grid.DragHeaderToForTesting(x);
+            grid.ReleaseHeaderForTesting();
+            ok &= Check("and carrying it back restores the order it started in",
+                        grid.ColumnNamesForTesting.SequenceEqual(startOrder), string.Join(", ", grid.ColumnNamesForTesting));
+            ok &= Check("and the rows read as they did to begin with", Cells().SequenceEqual(startCells),
+                        string.Join(" | ", Cells()));
+
+            // --- hiding and showing ---
+
+            edits = 0;
+            int wasWide = grid.ColumnWidthForTesting(1);
+            grid.SetColumnVisible(1, false);
+            Pump();
+            ok &= Check("a hidden column takes up no room at all", grid.ColumnWidthForTesting(1) == 0);
+            ok &= Check("and the columns still show their own fields, not the ones next door",
+                        grid.CellTextForTesting(0, 0) == startCells[0] && grid.CellTextForTesting(0, 2) == startCells[2],
+                        string.Join(" | ", Cells()));
+            ok &= Check("and the rest spread out to fill the view",
+                        Widths().Sum() == grid.ContentWidthForTesting, string.Join(", ", Widths()));
+            ok &= Check("and hiding it is something to save", edits > 0);
+            grid.SetColumnVisible(1, true);
+            Pump();
+            ok &= Check($"showing it again gives it its room back ({grid.ColumnWidthForTesting(1)} vs {wasWide})",
+                        grid.ColumnWidthForTesting(1) > 0);
+
+            for (int i = 1; i < 4; i++) grid.SetColumnVisible(i, false);
+            ok &= Check("the last column standing cannot be hidden - there would be no header left to bring it back",
+                        doc.Columns.Columns.Count(c => c.Visible) == 1);
+            grid.SetColumnVisible(0, false);
+            ok &= Check("...even asked directly", doc.Columns.Columns[0].Visible);
+            for (int i = 1; i < 4; i++) grid.SetColumnVisible(i, true);
+            Pump();
+
+            // --- renaming in place ---
+
+            edits = 0;
+            grid.BeginRename(0);
+            ok &= Check("double-clicking a name opens an edit box over it", grid.IsRenamingForTesting);
+            grid.SetRenameTextForTesting("Timestamp");
+            grid.EndRename(commit: true);
+            ok &= Check("...and what is typed becomes the column's name",
+                        doc.Columns.Columns[0].Name == "Timestamp", doc.Columns.Columns[0].Name);
+            ok &= Check("and the box is gone afterwards", !grid.IsRenamingForTesting);
+            ok &= Check("and renaming is something to save", edits > 0);
+
+            grid.BeginRename(0);
+            grid.SetRenameTextForTesting("discarded");
+            grid.EndRename(commit: false);
+            ok &= Check("giving up on a rename leaves the name alone",
+                        doc.Columns.Columns[0].Name == "Timestamp", doc.Columns.Columns[0].Name);
+
+            grid.BeginRename(0);
+            grid.SetRenameTextForTesting("   ");
+            grid.EndRename(commit: true);
+            ok &= Check("and a name cannot be emptied", doc.Columns.Columns[0].Name == "Timestamp");
+
+            // --- fitting one column to what is in it ---
+
+            grid.SetColumnWidthForTesting(2, grid.CharWidthForTesting * 30);
+            grid.FitColumnToContent(2);
+            int fitted = grid.ColumnWidthForTesting(2);
+            ok &= Check($"double-clicking an edge sizes that column to what is in it ({fitted} for \"WARN \")",
+                        fitted < grid.CharWidthForTesting * 30 && fitted >= grid.NaturalWidthForTesting(2) - grid.CharWidthForTesting,
+                        $"natural {grid.NaturalWidthForTesting(2)}");
+
+            // --- and the header still draws, with everything moved about ---
+
+            grid.RefreshView();
+            Pump();
+            using (var shot = Capture(host))
+                ok &= Check("the header is still drawn after all of that",
+                            shot.Width == host.ClientSize.Width && grid.RowsPaintedForTesting > 0,
+                            $"{grid.RowsPaintedForTesting} rows painted");
+
+            // --- what turning columns on with nothing set up offers ---
+
+            string detected = ColumnsDialog.DetectTemplate(
+                "[2026-08-04T09:31:17][api-gateway][INFO ] a message");
+            ok &= Check($"the fields of a bracketed line are read off it and named for what is in them ({detected})",
+                        detected == "[[Time]][[Field2]][[Level]] [message]");
+            ok &= Check("a line with nothing to split on offers nothing rather than an empty header",
+                        ColumnsDialog.DetectTemplate("plain text with no fields").Length == 0);
             return ok;
         }
         finally

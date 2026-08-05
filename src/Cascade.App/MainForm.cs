@@ -49,6 +49,7 @@ public sealed class MainForm : Form
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
+    private ToolStripMenuItem _miColumns = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     private FindBar _findBar = null!;
@@ -191,6 +192,11 @@ public sealed class MainForm : Form
         _filterTree.BeforeFiltersEdited += label => _history.Begin(label, _doc.Filters);
         _presets.PresetsApplied += () => { _filterTree.RefreshCheckStates(); OnFiltersChanged(); };
         _presets.PresetsEdited += () => { _filtersDirty = true; UpdateTitle(); };
+        // Columns are saved in the filter file, so a width dragged in the header is an unsaved change just
+        // as an edited filter is. Only on the way from clean to dirty: a drag reports every step of itself,
+        // and rewriting the title bar sixty times a second is not free.
+        _grid.ColumnsChanged += () => { if (!_filtersDirty) { _filtersDirty = true; UpdateTitle(); } };
+        _grid.ColumnSettingsRequested += ShowColumns;
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
@@ -402,7 +408,11 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(_miWordWrap);
         // Columns lay text out in fixed cells, which wrapping would tear apart - say so by greying the item
         // rather than letting it be ticked and quietly ignored.
-        view.DropDownOpening += (_, _) => _miWordWrap.Enabled = !_doc.Columns.Enabled;
+        view.DropDownOpening += (_, _) =>
+        {
+            _miWordWrap.Enabled = !_doc.Columns.Enabled;
+            _miColumns.Checked = _doc.Columns.Enabled;
+        };
         _miFilterTips = new ToolStripMenuItem("Show Matching Filters on Ho&ver", null, (_, _) =>
         {
             _settings.ShowFilterTooltips = !_settings.ShowFilterTooltips;
@@ -412,6 +422,10 @@ public sealed class MainForm : Form
         { Checked = _settings.ShowFilterTooltips };
         view.DropDownItems.Add(_miFilterTips);
         view.DropDownItems.Add(BuildMarkersMenu());
+        _miColumns = new ToolStripMenuItem("Split Into Colum&ns", null, (_, _) => ToggleColumns())
+        { Checked = _doc.Columns.Enabled };
+        view.DropDownItems.Add(_miColumns);
+        view.DropDownItems.Add(Mi("Fit Column&s to Window", (_, _) => _grid.FitColumnsToWindow()));
         view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
@@ -1353,15 +1367,58 @@ public sealed class MainForm : Form
 
     private void ShowColumns()
     {
-        string sample = _doc.CompletedLineCount > 0 ? _doc.GetLineText(Math.Max(0, _grid.CaretLine < 0 ? 0 : _grid.CaretLine)) : "";
-        using var dlg = new ColumnsDialog(_doc.Columns, sample);
+        var before = Describe(_doc.Columns);
+        using var dlg = new ColumnsDialog(_doc.Columns, SampleLine());
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             CopyColumnSpec(dlg.Result, _doc.Columns);
             _doc.Columns.Columns.Clear();
             foreach (var c in dlg.Result.Columns) _doc.Columns.Columns.Add(c);
+            // Columns live in the filter file, so changing them is an unsaved change like any other.
+            if (Describe(_doc.Columns) != before) { _filtersDirty = true; UpdateTitle(); }
             _grid.RefreshView();
         }
+    }
+
+    /// <summary>The line under the caret, which is what "auto-detect" and the column widths are read from.</summary>
+    private string SampleLine()
+        => _doc.CompletedLineCount > 0 ? _doc.GetLineText(Math.Max(0, _grid.CaretLine < 0 ? 0 : _grid.CaretLine)) : "";
+
+    /// <summary>Everything about the columns that is worth saving, as one string - so "did that change
+    /// anything?" is one comparison rather than a field-by-field walk that a new field could fall out of.</summary>
+    private static string Describe(ColumnSpec spec)
+        => string.Join('\u0001', new[] { spec.Enabled.ToString(), spec.Mode.ToString(), spec.Delimiter,
+                                         spec.CollapseConsecutive.ToString(), spec.MaxSplits.ToString(), spec.Template }
+            .Concat(spec.Columns.Select(c => $"{c.Name}/{c.Visible}/{c.Width}/{c.WidthChars}/{c.Align}/{c.Source}")));
+
+    /// <summary>Turns the column view on and off from the menu. Turning it on with nothing set up would
+    /// otherwise show an empty header, so the fields are read off the current line first - and if the line
+    /// does not offer any, the settings open instead of nothing happening.</summary>
+    private void ToggleColumns()
+    {
+        if (_doc.Columns.Enabled)
+        {
+            _doc.Columns.Enabled = false;
+            _miColumns.Checked = false;
+            _filtersDirty = true;
+            UpdateTitle();
+            _grid.RefreshView();
+            return;
+        }
+
+        if (_doc.Columns.Columns.Count == 0)
+        {
+            string template = ColumnsDialog.DetectTemplate(SampleLine());
+            if (template.Length == 0) { ShowColumns(); return; }
+            _doc.Columns.Mode = ColumnSplitMode.Template;
+            _doc.Columns.Template = template;
+            _doc.Columns.SyncColumnsFromTemplate();
+        }
+        _doc.Columns.Enabled = true;
+        _miColumns.Checked = true;
+        _filtersDirty = true;
+        UpdateTitle();
+        _grid.RefreshView();
     }
 
     private void ShowPreferences()

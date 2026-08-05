@@ -94,8 +94,12 @@ Split each line for display, on a delimiter or with a bracket template that name
 [timestamp] [[service]] [[level]] [[request]] [message]
 ```
 
-Columns can be renamed, resized, aligned and hidden. Filtering always runs on the whole raw line, so
-turning columns on can never change what you see.
+**View > Split Into Columns** reads the fields off the current line for you. Everything else happens on
+the header itself: drag an edge to resize (snapping to whole characters in a fixed-pitch font),
+double-click an edge to fit a column to its content, carry a header sideways to reorder, double-click a
+name to rename it, and right-click for the tick list that shows and hides columns. Anything left to size
+itself shares out the width of the window, so no space goes to waste. Filtering always runs on the whole
+raw line, so turning columns on can never change what you see.
 
 ---
 
