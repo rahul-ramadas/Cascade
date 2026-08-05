@@ -488,6 +488,7 @@ public sealed class MainForm : Form
     private ToolStripMenuItem BuildPresetsMenu()
     {
         var m = new ToolStripMenuItem("&Presets");
+        m.DropDownItems.Add(Mi("Apply &Only This Preset", (_, _) => _presets.ApplyOnlySelected()));
         m.DropDownItems.Add(Mi("&Save Enabled Filters as Preset…", (_, _) => { EnsurePresetsVisible(); _presets.SaveCurrent(); }));
         m.DropDownItems.Add(Mi("&Update Preset from Enabled Filters", (_, _) => _presets.UpdateSelected()));
         m.DropDownItems.Add(Mi("&Rename Preset…", (_, _) => _presets.RenameSelected()));

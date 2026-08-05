@@ -252,35 +252,70 @@ internal sealed class CascadeApp : IDisposable
         => Retry.WhileNull(() => Window.FindFirstDescendant(cf => cf.ByName("Filter presets")),
                TimeSpan.FromSeconds(5)).Result ?? throw new InvalidOperationException("Filter presets list not found.");
 
-    public string[] PresetNames()
-        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem)).Select(i => i.Name ?? "").ToArray();
+    /// <summary>The preset rows. A CheckedListBox reports its rows as CheckBox, not ListItem - and it is the
+    /// Toggle pattern on them that says which presets are in effect.</summary>
+    private AutomationElement[] PresetItems()
+        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.CheckBox));
+
+    public string[] PresetNames() => PresetItems().Select(i => i.Name ?? "").ToArray();
 
     private AutomationElement PresetItem(string name)
-        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem))
-               .FirstOrDefault(i => (i.Name ?? "").StartsWith(name, StringComparison.OrdinalIgnoreCase))
+        => PresetItems().FirstOrDefault(i => (i.Name ?? "").StartsWith(name, StringComparison.OrdinalIgnoreCase))
            ?? throw new InvalidOperationException($"Preset '{name}' is not listed: {string.Join(" | ", PresetNames())}");
 
-    /// <summary>Puts the preset list's selection exactly where asked. Set item by item rather than through
-    /// SelectionItem.Select(), which on a multi-select list adds rather than replacing.</summary>
-    public void SelectPreset(params string[] names)
+    /// <summary>Whether a preset is in effect - which is its TICK, not whether it is selected. Selecting a
+    /// preset only aims the commands at it and applies nothing.</summary>
+    private static bool PresetIsActive(AutomationElement item)
+        => item.Patterns.Toggle.PatternOrDefault?.ToggleState.ValueOrDefault == ToggleState.On;
+
+    /// <summary>Ticks a preset, so it joins whatever is already in effect. Aim with the selection, then
+    /// Space - the tick box is a few pixels wide and the suite never uses real clicks.</summary>
+    public void TickPreset(string name)
     {
-        foreach (var item in PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem)))
+        var item = PresetItem(name);
+        if (PresetIsActive(item)) return;
+        item.Patterns.SelectionItem.Pattern.Select();
+        SendKey(PresetList(), VirtualKeyShort.SPACE);
+        Settle(1);
+    }
+
+    public void UntickPreset(string name)
+    {
+        var item = PresetItem(name);
+        if (!PresetIsActive(item)) return;
+        item.Patterns.SelectionItem.Pattern.Select();
+        SendKey(PresetList(), VirtualKeyShort.SPACE);
+        Settle(1);
+    }
+
+    /// <summary>Puts exactly these presets in effect and takes every other out.</summary>
+    public void SetActivePresets(params string[] names)
+    {
+        foreach (var item in PresetItems())
         {
-            bool want = names.Any(n => (item.Name ?? "").StartsWith(n, StringComparison.OrdinalIgnoreCase));
-            var pattern = item.Patterns.SelectionItem.PatternOrDefault;
-            if (pattern is null) continue;
-            if (want && !pattern.IsSelected.ValueOrDefault) pattern.AddToSelection();
-            else if (!want && pattern.IsSelected.ValueOrDefault) pattern.RemoveFromSelection();
+            string label = item.Name ?? "";
+            bool want = names.Any(n => label.StartsWith(n, StringComparison.OrdinalIgnoreCase));
+            if (PresetIsActive(item) == want) continue;
+            item.Patterns.SelectionItem.Pattern.Select();
+            SendKey(PresetList(), VirtualKeyShort.SPACE);
+            Settle(1);
         }
     }
 
-    /// <summary>Ctrl+clicking a preset: it joins whatever is already in effect.</summary>
-    public void AddPreset(string name) => PresetItem(name).Patterns.SelectionItem.Pattern.AddToSelection();
+    /// <summary>Aims at a preset without applying it - what a click on its name, or a right-click, does.</summary>
+    public void SelectPresetRow(string name) => PresetItem(name).Patterns.SelectionItem.Pattern.Select();
 
-    public string[] ActivePresets()
-        => PresetList().FindAllChildren(cf => cf.ByControlType(ControlType.ListItem))
-               .Where(i => i.Patterns.SelectionItem.PatternOrDefault?.IsSelected.ValueOrDefault == true)
-               .Select(i => i.Name ?? "").ToArray();
+    public string SelectedPresetName()
+        => PresetItems().FirstOrDefault(i => i.Patterns.SelectionItem.PatternOrDefault?.IsSelected.ValueOrDefault == true)
+               ?.Name ?? "";
+
+    public string[] ActivePresets() => PresetItems().Where(PresetIsActive).Select(i => i.Name ?? "").ToArray();
+
+    /// <summary>How the presets report their state, for diagnosing a pane that will not tick.</summary>
+    public string DescribePresets()
+        => string.Join(" ; ", PresetItems()
+               .Select(i => $"'{i.Name}' toggle={i.Patterns.Toggle.PatternOrDefault?.ToggleState.ValueOrDefault.ToString() ?? "none"}" +
+                            $" selected={i.Patterns.SelectionItem.PatternOrDefault?.IsSelected.ValueOrDefault}"));
 
     /// <summary>Position of a filter within <paramref name="names"/>, or -1.</summary>
     public static int IndexOfFilter(string[] names, string containsText)

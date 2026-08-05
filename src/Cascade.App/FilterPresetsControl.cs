@@ -8,20 +8,24 @@ namespace Cascade.App;
 /// <summary>
 /// The filter presets pane: named sets of filters to switch on together.
 ///
-/// The list's selection <b>is</b> the set of presets in effect, and the enabled filters are the union of
-/// what is selected - so clicking one preset means "just this", and Ctrl+clicking a second means "both",
-/// with no separate apply step. The selection is always derived from which filters are actually enabled,
-/// never from what was last clicked, so ticking a filter by hand in the list next door lights the matching
-/// preset up (or clears it) exactly as applying it would.
+/// A preset's <b>tick</b> says it is in effect, and the enabled filters are the union of what is ticked - so
+/// ticking one means "and this too", and unticking it takes its filters away again. The ticks are derived
+/// from which filters are actually enabled, never from what was last clicked, so ticking a filter by hand in
+/// the list next door lights the matching preset up (or clears it) exactly as applying it would.
+///
+/// The <b>selection</b> is the user's alone: it says which preset the commands act on, and nothing in the
+/// model ever moves it. That separation is the whole point - while the two were one thing, any click that
+/// aimed at a preset also switched its filters back on, so a preset could never be updated to drop one.
 /// </summary>
 public sealed class FilterPresetsControl : UserControl
 {
-    private readonly ListBox _list = new()
+    private readonly CheckedListBox _list = new()
     {
         Dock = DockStyle.Fill,
-        SelectionMode = SelectionMode.MultiExtended,
+        SelectionMode = SelectionMode.One,
         IntegralHeight = false,
         BorderStyle = BorderStyle.None,
+        CheckOnClick = false,
         AccessibleName = "Filter presets"
     };
 
@@ -45,8 +49,9 @@ public sealed class FilterPresetsControl : UserControl
     };
 
     private CascadeDocument? _doc;
-    private bool _syncing;          // true while the selection is being written from the model
-    private bool _applyQueued;      // collapses a burst of selection changes into one re-filter
+    private bool _settingTicks;     // true only while we write a tick ourselves; everything else is vetoed
+    private bool _applyQueued;      // collapses a burst of tick changes into one re-filter
+    private bool _downOnTick;       // the last press landed on a tick box, so its double-click is not a rename
 
     /// <summary>The enabled filters changed, so the view has to be brought up to date.</summary>
     public event Action? PresetsApplied;
@@ -63,9 +68,13 @@ public sealed class FilterPresetsControl : UserControl
         _list.ContextMenuStrip = menu;
         _empty.ContextMenuStrip = menu;
         _header.ContextMenuStrip = menu;
-        _list.SelectedIndexChanged += (_, _) => QueueApply();
+        // Windows toggles a tick for gestures of its own - clicking a row that is already selected, and the
+        // second click of any double-click - which would switch a preset's filters on merely for aiming at
+        // it. Vetoing every change we did not make ourselves is what keeps tick and selection apart.
+        _list.ItemCheck += (_, e) => { if (!_settingTicks) e.NewValue = e.CurrentValue; };
+        _list.MouseDown += (_, e) => HandleMouseDown(_list.IndexFromPoint(e.Location), e.X, e.Button);
         _list.KeyDown += OnKeyDown;
-        _list.DoubleClick += (_, _) => RenameSelected();
+        _list.DoubleClick += (_, _) => { if (!_downOnTick) RenameSelected(); };
 
         Controls.Add(_list);
         Controls.Add(_empty);
@@ -84,40 +93,39 @@ public sealed class FilterPresetsControl : UserControl
     private FilterPreset? Current => _list.SelectedIndex >= 0 && _list.SelectedIndex < Presets.Count
         ? Presets[_list.SelectedIndex] : null;
 
+    /// <summary>The leading square of a row, where the tick box is drawn. Pressing there toggles the preset;
+    /// anywhere else only aims at it.</summary>
+    private int TickZoneWidth => _list.ItemHeight;
+
     /// <summary>Re-reads the presets and which of them are in effect. Cheap enough to call on any change.</summary>
     public void Rebuild()
     {
         if (_doc is null) return;
-        _syncing = true;
+        var keep = Current;
         _list.BeginUpdate();
         _list.Items.Clear();
         foreach (var p in Presets) _list.Items.Add(Label(p));
         _list.EndUpdate();
-        _syncing = false;
 
         bool any = Presets.Count > 0;
         _list.Visible = any;
         _empty.Visible = !any;
+        // Rebuilding is our doing, not the user's, so put their aim back where they left it.
+        int was = keep is null ? -1 : Presets.IndexOf(keep);
+        if (was >= 0) _list.SelectedIndex = was;
         RefreshActive();
     }
 
-    /// <summary>Brings the selection back in line with which filters are actually enabled.</summary>
+    /// <summary>Brings the ticks back in line with which filters are actually enabled. Never touches the
+    /// selection: that belongs to the user.</summary>
     public void RefreshActive()
     {
-        if (_doc is null || _syncing) return;
-        var wanted = new List<int>();
-        for (int i = 0; i < Presets.Count; i++)
-            if (_doc.Filters.IsPresetActive(Presets[i])) wanted.Add(i);
-
-        var current = _list.SelectedIndices.Cast<int>().ToList();
-        if (current.SequenceEqual(wanted)) return;
-
-        _syncing = true;
-        _list.BeginUpdate();
-        _list.ClearSelected();
-        foreach (int i in wanted) _list.SetSelected(i, true);
-        _list.EndUpdate();
-        _syncing = false;
+        if (_doc is null) return;
+        for (int i = 0; i < Presets.Count && i < _list.Items.Count; i++)
+        {
+            bool on = _doc.Filters.IsPresetActive(Presets[i]);
+            if (_list.GetItemChecked(i) != on) SetTick(i, on);
+        }
     }
 
     private string Label(FilterPreset p)
@@ -126,18 +134,45 @@ public sealed class FilterPresetsControl : UserControl
         return missing == 0 ? p.Name : $"{p.Name}   ({missing} missing)";
     }
 
-    /// <summary>Selection changes arrive one per click but several per drag, and each one would otherwise
+    private void HandleMouseDown(int index, int x, MouseButtons button)
+    {
+        _downOnTick = false;
+        if (index < 0 || index >= Presets.Count) return;
+        if (button is not (MouseButtons.Left or MouseButtons.Right)) return;
+        // Aim at the row under the pointer whichever button it was. Windows does this for the left button
+        // and not at all for the right, and the menu has to act on the preset that was right-clicked.
+        _list.SelectedIndex = index;
+        if (button == MouseButtons.Right) return;
+        _downOnTick = x < TickZoneWidth;
+        if (_downOnTick) ToggleAt(index);
+    }
+
+    private void ToggleAt(int index)
+    {
+        if (index < 0 || index >= Presets.Count || index >= _list.Items.Count) return;
+        SetTick(index, !_list.GetItemChecked(index));
+        QueueApply();
+    }
+
+    private void SetTick(int index, bool on)
+    {
+        _settingTicks = true;
+        try { _list.SetItemChecked(index, on); }
+        finally { _settingTicks = false; }
+    }
+
+    /// <summary>Tick changes arrive one per click but several per command, and each one would otherwise
     /// re-run the filters. Applying once the message has been handled collapses a burst into a single pass.</summary>
     private void QueueApply()
     {
-        if (_syncing || _doc is null || _applyQueued || !IsHandleCreated) return;
+        if (_doc is null || _applyQueued || !IsHandleCreated) return;
         _applyQueued = true;
         BeginInvoke(() =>
         {
             _applyQueued = false;
             if (_doc is null) return;
-            var selected = _list.SelectedIndices.Cast<int>().Where(i => i < Presets.Count).Select(i => Presets[i]).ToList();
-            if (_doc.Filters.ApplyPresets(selected)) PresetsApplied?.Invoke();
+            var ticked = _list.CheckedIndices.Cast<int>().Where(i => i < Presets.Count).Select(i => Presets[i]).ToList();
+            if (_doc.Filters.ApplyPresets(ticked)) PresetsApplied?.Invoke();
         });
     }
 
@@ -146,6 +181,8 @@ public sealed class FilterPresetsControl : UserControl
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
+        var only = menu.Items.Add("Apply Only This Preset", null, (_, _) => ApplyOnlySelected());
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Save Enabled Filters as Preset…", null, (_, _) => SaveCurrent());
         var update = menu.Items.Add("Update Preset from Enabled Filters", null, (_, _) => UpdateSelected());
         menu.Items.Add(new ToolStripSeparator());
@@ -158,7 +195,7 @@ public sealed class FilterPresetsControl : UserControl
         menu.Opening += (_, _) =>
         {
             bool one = Current is not null;
-            update.Enabled = rename.Enabled = duplicate.Enabled = delete.Enabled = one;
+            only.Enabled = update.Enabled = rename.Enabled = duplicate.Enabled = delete.Enabled = one;
         };
         return menu;
     }
@@ -167,11 +204,25 @@ public sealed class FilterPresetsControl : UserControl
     {
         switch (e.KeyCode)
         {
+            case Keys.Space: ToggleAt(_list.SelectedIndex); break;
             case Keys.F2: RenameSelected(); break;
             case Keys.Delete: DeleteSelected(); break;
             default: return;
         }
         e.Handled = e.SuppressKeyPress = true;
+    }
+
+    /// <summary>Puts one preset in effect and takes every other out, which is what a single click used to
+    /// mean before the tick took that job over.</summary>
+    public void ApplyOnlySelected()
+    {
+        if (_doc is null || Current is not { } p) return;
+        for (int i = 0; i < Presets.Count && i < _list.Items.Count; i++)
+        {
+            bool want = ReferenceEquals(Presets[i], p);
+            if (_list.GetItemChecked(i) != want) SetTick(i, want);
+        }
+        QueueApply();
     }
 
     public void SaveCurrent()
@@ -219,14 +270,56 @@ public sealed class FilterPresetsControl : UserControl
 
     public bool HasSelection => Current is not null;
 
+    private int IndexOfPreset(string name) => Presets.FindIndex(p => p.Name == name);
+
     internal string[] LabelsForTesting => _list.Items.Cast<object>().Select(o => o.ToString() ?? "").ToArray();
 
-    internal string[] ActiveForTesting => _list.SelectedIndices.Cast<int>().Select(i => Presets[i].Name).ToArray();
+    /// <summary>The presets in effect - which is what is ticked, and no longer what is selected.</summary>
+    internal string[] ActiveForTesting
+        => _list.CheckedIndices.Cast<int>().Where(i => i < Presets.Count).Select(i => Presets[i].Name).ToArray();
 
-    internal void SelectForTesting(params string[] names)
+    internal string SelectedForTesting => Current?.Name ?? "";
+
+    internal int TickZoneWidthForTesting => TickZoneWidth;
+
+    internal void TickForTesting(params string[] names)
     {
-        _list.ClearSelected();
-        for (int i = 0; i < Presets.Count; i++)
-            if (names.Contains(Presets[i].Name)) _list.SetSelected(i, true);
+        for (int i = 0; i < Presets.Count && i < _list.Items.Count; i++)
+        {
+            bool want = names.Contains(Presets[i].Name, StringComparer.Ordinal);
+            if (_list.GetItemChecked(i) != want) SetTick(i, want);
+        }
+        QueueApply();
+    }
+
+    /// <summary>Drives the real mouse handler, so where in the row the press lands is part of what is
+    /// checked. Injected keys do not set real modifier state, so the button has to be a parameter.</summary>
+    internal void ClickForTesting(string name, MouseButtons button = MouseButtons.Left, bool onTick = false)
+    {
+        int i = IndexOfPreset(name);
+        if (i >= 0) HandleMouseDown(i, onTick ? TickZoneWidth / 2 : TickZoneWidth + 8, button);
+    }
+
+    /// <summary>What Windows does off its own bat when an already-selected row is clicked, or on the second
+    /// click of a double-click. It has to come to nothing.</summary>
+    internal void NativeToggleForTesting(string name)
+    {
+        int i = IndexOfPreset(name);
+        if (i >= 0) _list.SetItemChecked(i, !_list.GetItemChecked(i));
+    }
+
+    internal void SelectForTesting(string name)
+    {
+        int i = IndexOfPreset(name);
+        if (i >= 0) _list.SelectedIndex = i;
+    }
+
+    internal Rectangle RowBoundsForTesting(int index) => _list.GetItemRectangle(index);
+
+    internal Bitmap RenderRowsForTesting()
+    {
+        var bmp = new Bitmap(Math.Max(1, _list.Width), Math.Max(1, _list.Height));
+        _list.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        return bmp;
     }
 }
