@@ -72,6 +72,7 @@ internal static class SelfTest
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("cell selection", RunColumnSelectionChecks);
             ok &= Timed("underline", RunUnderlineChecks);
+            ok &= Timed("close filters", RunCloseFiltersChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
@@ -1710,6 +1711,105 @@ internal static class SelfTest
             host?.Dispose();
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Closing the filter file throws away everything unsaved in it, on one menu click, with no
+    /// undo behind it - so it has to ask, exactly as closing the window does.</summary>
+    private static bool RunCloseFiltersChecks()
+    {
+        Line("-- closing the filters --");
+
+        // The rule itself, read without a modal prompt standing in the way.
+        bool ok = Check("unsaved changes to a filter file are worth asking about",
+                        MainForm.ShouldOfferToSaveFilters(false, dirty: true, "x.cascade"));
+        ok &= Check("nothing to ask when nothing has changed",
+                    !MainForm.ShouldOfferToSaveFilters(false, dirty: false, "x.cascade"));
+        ok &= Check("nor when there is no file to save to",
+                    !MainForm.ShouldOfferToSaveFilters(false, dirty: true, null));
+        ok &= Check("and a headless run is never asked", !MainForm.ShouldOfferToSaveFilters(true, true, "x.cascade"));
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_st_close_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(log, Enumerable.Range(1, 200).Select(i => i % 5 == 0 ? $"ERROR line {i}" : $"plain line {i}"));
+        string filters = Path.Combine(Path.GetTempPath(), "cascade_st_close_" + Guid.NewGuid().ToString("N") + ".cascade");
+        const string OriginalFile = """
+            { "filters": [ { "id": "f1", "enabled": true, "matchType": "Text", "text": "ERROR" } ] }
+            """;
+
+        MainForm? form = null;
+        try
+        {
+            File.WriteAllText(filters, OriginalFile, new UTF8Encoding(false));
+            form = new MainForm(new AppSettings(), new MachineState(), [log, "/Filters:" + filters])
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 600),
+            };
+            var answer = DialogResult.Cancel;
+            form.AnswerSavePromptForTesting = () => answer;
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 200; i++) { Thread.Sleep(20); Pump(); }
+
+            int Filters() => doc.Filters.EnumerateDepthFirst().Count();
+            ok &= Check($"the filter file is loaded ({Filters()} filters)", Filters() == 1 && form.FilterFileForTesting == filters);
+
+            // Nothing unsaved: closing them asks nothing and simply does it.
+            ok &= Check("with nothing changed there is nothing to ask about", !form.FiltersAreDirtyForTesting);
+            ok &= Check("so closing the filters just closes them",
+                        form.ClickMenuForTesting("File", "Close Filters") && Filters() == 0 &&
+                        form.FilterFileForTesting is null);
+
+            // Now with something unsaved. Load it again and change it.
+            form.LoadFiltersForTesting(filters);
+            Pump();
+            ok &= Check("the file can be loaded again", Filters() == 1 && form.FilterFileForTesting == filters,
+                        $"{Filters()} filters, {form.FilterFileForTesting}");
+            form.ClickMenuForTesting("Filters", "Disable All");
+            Pump();
+            ok &= Check("and turning a filter off is an unsaved change", form.FiltersAreDirtyForTesting);
+
+            answer = DialogResult.Cancel;
+            form.ClickMenuForTesting("File", "Close Filters");
+            Pump();
+            ok &= Check("answering \"cancel\" leaves the filters exactly where they were",
+                        Filters() == 1 && form.FilterFileForTesting == filters && form.FiltersAreDirtyForTesting,
+                        $"{Filters()} filters, {form.FilterFileForTesting}");
+
+            answer = DialogResult.No;
+            form.ClickMenuForTesting("File", "Close Filters");
+            Pump();
+            ok &= Check("answering \"no\" closes them", Filters() == 0 && form.FilterFileForTesting is null);
+            ok &= Check("and leaves the file on disk as it was",
+                        File.ReadAllText(filters).Contains("\"enabled\": true", StringComparison.Ordinal) ||
+                        File.ReadAllText(filters) == OriginalFile,
+                        File.ReadAllText(filters));
+
+            // ...and "yes" writes it out before letting go of it.
+            form.LoadFiltersForTesting(filters);
+            Pump();
+            form.ClickMenuForTesting("Filters", "Disable All");
+            Pump();
+            answer = DialogResult.Yes;
+            form.ClickMenuForTesting("File", "Close Filters");
+            Pump();
+            ok &= Check("answering \"yes\" closes them too", Filters() == 0 && form.FilterFileForTesting is null);
+            var saved = CascadeFile.Load(filters).Filters;
+            ok &= Check("having written the change out first",
+                        saved.Roots.Count == 1 && !saved.Roots[0].Enabled,
+                        $"{saved.Roots.Count} filters, first enabled = {(saved.Roots.Count > 0 ? saved.Roots[0].Enabled : (bool?)null)}");
+
+            form.AnswerSavePromptForTesting = () => DialogResult.No;
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            try { File.Delete(log); } catch { /* ignore */ }
+            try { File.Delete(filters); } catch { /* ignore */ }
         }
     }
 
