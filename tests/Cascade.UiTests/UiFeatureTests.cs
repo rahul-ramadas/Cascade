@@ -912,6 +912,43 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void Ctrl_shift_c_splits_the_log_into_columns_and_back()
+    {
+        // A bracketed log, so turning columns on finds fields to split by and never has to ask.
+        string log = TestData.WriteBracketedLogFile();
+        string tat = TestData.WriteFilterFile();
+        using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                  ownsFiles: true, ownsSettingsDir: true);
+        var fails = new List<string>();
+        void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+        app.ScrollRowToMiddle(500);
+        var grid = app.Grid();
+        int rowsBefore = app.Rows().Length;
+        int topBefore = app.FirstVisibleLine();
+        Check("the log is showing several lines to begin with", rowsBefore > 4, $"{rowsBefore} rows");
+
+        // The header is drawn, not a control, so what it can be seen by is the row it takes off the top:
+        // one fewer line fits, and the top line moves down one so the reader's place is kept.
+        app.SendKeyAsDialogKey(grid, VirtualKeyShort.KEY_C, VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
+        bool took = Retry.WhileFalse(() => app.Rows().Length == rowsBefore - 1,
+                                     TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
+        Check("ctrl+shift+c gives the log a column header", took,
+              $"{rowsBefore} rows -> {app.Rows().Length}");
+        Check("and the log keeps its place, minus the row the header took",
+              app.FirstVisibleLine() == topBefore + 1, $"top {topBefore} -> {app.FirstVisibleLine()}");
+
+        app.SendKeyAsDialogKey(grid, VirtualKeyShort.KEY_C, VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
+        bool back = Retry.WhileFalse(() => app.Rows().Length == rowsBefore,
+                                     TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
+        Check("pressing it again takes the header away", back, $"{app.Rows().Length} rows");
+        Check("and hands the line back at the top", app.FirstVisibleLine() == topBefore,
+              $"top is {app.FirstVisibleLine()}, was {topBefore}");
+
+        Assert.True(fails.Count == 0, "Column mode failures:\n  " + string.Join("\n  ", fails));
+    }
+
+    [Fact]
     public void Copy_and_docking_work()
     {
         using var app = CascadeApp.Launch();

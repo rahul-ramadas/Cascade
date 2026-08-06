@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.RegularExpressions;
 
 namespace Cascade.Core.Columns;
@@ -48,7 +49,7 @@ public sealed class ColumnSplitter
         for (int i = 0; i < _fieldNames.Count; i++)
         {
             var g = m.Groups[i + 1];
-            output.Add(new ColumnValue(NameOfField(i, _fieldNames[i]), g.Success ? g.Index : 0, g.Success ? g.Length : 0));
+            output.Add(new ColumnValue(NameOfField(i) ?? _fieldNames[i], g.Success ? g.Index : 0, g.Success ? g.Length : 0));
         }
         return true;
     }
@@ -56,7 +57,7 @@ public sealed class ColumnSplitter
     private bool SplitDelimiter(string line, List<ColumnValue> output)
     {
         string delim = Spec.Delimiter;
-        if (string.IsNullOrEmpty(delim)) { output.Add(new ColumnValue(NameOfField(0, "Col 1"), 0, line.Length)); return true; }
+        if (string.IsNullOrEmpty(delim)) { AddField(output, 0, 0, line.Length); return true; }
 
         int pos = 0, col = 0;
         while (pos <= line.Length)
@@ -86,14 +87,17 @@ public sealed class ColumnSplitter
     }
 
     private void AddField(List<ColumnValue> output, int field, int start, int len)
-        => output.Add(new ColumnValue(NameOfField(field, $"Col {field + 1}"), start, Math.Max(0, len)));
+        => output.Add(new ColumnValue(NameOfField(field) ?? "Col " + (field + 1).ToString(CultureInfo.InvariantCulture),
+                                      start, Math.Max(0, len)));
 
     /// <summary>What to call a field: the name of whichever column shows it, wherever that column has been
-    /// carried to, and a positional name when no column has claimed it.</summary>
-    private string NameOfField(int field, string fallback)
+    /// carried to, or null when no column has claimed it. Null rather than a positional fallback because
+    /// this runs for every field of every line drawn, and building a name nothing is going to read is the
+    /// bulk of what splitting a wide line used to cost.</summary>
+    private string? NameOfField(int field)
     {
         foreach (var c in Spec.Columns)
             if (c.Source == field && c.Name.Length > 0) return c.Name;
-        return fallback;
+        return null;
     }
 }
