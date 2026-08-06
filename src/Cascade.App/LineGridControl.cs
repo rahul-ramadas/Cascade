@@ -1727,6 +1727,7 @@ public sealed class LineGridControl : Control
         // Every column, ticked or not - a hidden column has no header to right-click, so this list is the
         // only way back to one.
         var ticks = new List<ToolStripMenuItem>();
+        var forThisColumn = new List<(ToolStripMenuItem Item, bool NeedsAnother)>();
         void SyncTicks()
         {
             // The last column standing may not be hidden, so a tick is not always honoured; and every row's
@@ -1736,6 +1737,11 @@ public sealed class LineGridControl : Control
                 ticks[i].Checked = spec.Columns[i].Visible;
                 ticks[i].Enabled = !spec.Columns[i].Visible || VisibleColumnIndices().Count > 1;
             }
+            // Because the menu outlives a tick, the column it was opened over can be hidden while it is
+            // still up - and renaming or fitting a column nobody can see does nothing.
+            bool shown = index >= 0 && spec.Columns[index].Visible;
+            foreach (var (item, needsAnother) in forThisColumn)
+                item.Enabled = shown && (!needsAnother || VisibleColumnIndices().Count > 1);
         }
 
         for (int i = 0; i < spec.Columns.Count; i++)
@@ -1755,11 +1761,9 @@ public sealed class LineGridControl : Control
         {
             string name = spec.Columns[index].Name;
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add(Entry($"&Rename \"{name}\"…", () => BeginRename(index)));
-            menu.Items.Add(Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false),
-                                 VisibleColumnIndices().Count > 1));
-            menu.Items.Add(Entry($"Fit \"{name}\" to &Content", () => FitColumnToContent(index)));
-
+            var rename = Entry($"&Rename \"{name}\"…", () => BeginRename(index));
+            var hide = Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false));
+            var fit = Entry($"Fit \"{name}\" to &Content", () => FitColumnToContent(index));
             var align = new ToolStripMenuItem("&Align");
             foreach (var (text, value) in new[] { ("&Left", ColumnAlign.Left), ("&Right", ColumnAlign.Right), ("&Centre", ColumnAlign.Center) })
             {
@@ -1768,8 +1772,16 @@ public sealed class LineGridControl : Control
                 item.Click += (_, _) => { menu.Close(); SetColumnAlign(index, a); };
                 align.DropDownItems.Add(item);
             }
+            forThisColumn.Add((rename, false));
+            forThisColumn.Add((hide, true));
+            forThisColumn.Add((fit, false));
+            forThisColumn.Add((align, false));
+            menu.Items.Add(rename);
+            menu.Items.Add(hide);
+            menu.Items.Add(fit);
             menu.Items.Add(align);
         }
+        SyncTicks();
 
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Entry("&Fit All Columns to Window", FitColumnsToWindow));
@@ -1783,7 +1795,6 @@ public sealed class LineGridControl : Control
             return item;
         }
     }
-
     /// <summary>The header menu as it would be shown over one column, so a check can read what it offers
     /// and press its entries.</summary>
     internal ContextMenuStrip ColumnMenuForTesting(int index) => BuildColumnMenu(index);

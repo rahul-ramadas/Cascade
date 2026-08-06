@@ -247,7 +247,9 @@ public sealed class ColumnsDialog : DialogBase
             i = j + 1;
         }
         if (n == 0) return "";
-        if (i < sample.Length) sb.Append(" [message]");
+        // In the same case as the names above it: "Time, Field2, Level, message" reads as though the last
+        // one came from somewhere else.
+        if (i < sample.Length) sb.Append(" [Message]");
         return sb.ToString();
     }
 
