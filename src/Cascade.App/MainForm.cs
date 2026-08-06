@@ -199,6 +199,7 @@ public sealed class MainForm : Form
         _grid.ColumnSettingsRequested += ShowColumns;
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
+        _filterTree.AddBelowRequested += after => AddFilter(after.Parent, after);
         _filterTree.FindFilterRequested += FindFilterMatch;
         _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
@@ -935,8 +936,13 @@ public sealed class MainForm : Form
         _miRedo.Text = _history.RedoLabel is { } r ? $"R&edo {r}" : "R&edo";
     }
 
-    private void AddFilter(Filter? parent)
+    private void AddFilter(Filter? parent) => AddFilter(parent, after: null);
+
+    /// <summary>Adds a filter. <paramref name="after"/> puts it directly below that one as its sibling -
+    /// what the list's own menu offers; otherwise the preference decides which end of the list it goes to.</summary>
+    private void AddFilter(Filter? parent, Filter? after)
     {
+        if (after is not null) parent = after.Parent;
         if (parent is not null && parent.Depth + 1 >= FilterCollection.MaxDepth)
         {
             MessageBox.Show(this, "Maximum nesting depth reached.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -948,8 +954,9 @@ public sealed class MainForm : Form
         _history.Begin("Add Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            _doc.Filters.Add(filter, parent);
+            _doc.Filters.Add(filter, parent, WhereNewFilterGoes(after));
             _filterTree.SyncToModel();
+            _filterTree.RevealFilter(filter);
             OnFiltersChanged();
         }
         else _history.Abandon();
@@ -1037,11 +1044,23 @@ public sealed class MainForm : Form
         _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            _doc.Filters.Add(filter);
+            _doc.Filters.Add(filter, null, WhereNewFilterGoes(null));
             _filterTree.SyncToModel();
+            _filterTree.RevealFilter(filter);
             OnFiltersChanged();
         }
         else _history.Abandon();
+    }
+
+    /// <summary>Where a new filter lands among its siblings: directly below the one it was asked for, else
+    /// whichever end of the list the reader prefers. -1 means the end.</summary>
+    private int WhereNewFilterGoes(Filter? after) => NewFilterIndex(_settings.AddNewFiltersAtTop, after, _doc.Filters);
+
+    internal static int NewFilterIndex(bool addAtTop, Filter? after, FilterCollection filters)
+    {
+        if (after is null) return addAtTop ? 0 : -1;
+        var siblings = after.Parent?.Children ?? filters.Roots;
+        return siblings.IndexOf(after) + 1;
     }
 
     private void FindSelectedFilterMatch(bool forward)

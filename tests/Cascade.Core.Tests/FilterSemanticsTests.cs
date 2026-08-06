@@ -172,6 +172,42 @@ public class FilterSemanticsTests
     }
 
     [Fact]
+    public void Add_puts_a_filter_where_it_was_asked_for()
+    {
+        // Where a new filter lands is a preference now, and adding one below another is a command of its
+        // own, so the index is no longer always "at the end".
+        var c = new FilterCollection();
+        Filter a = Make("a", true), b = Make("b", true);
+        c.Add(a); c.Add(b);
+
+        var top = Make("top", true);
+        c.Add(top, null, 0);
+        Assert.Equal(new[] { top, a, b }, c.Roots);
+
+        var end = Make("end", true);
+        c.Add(end, null, -1);
+        Assert.Equal(new[] { top, a, b, end }, c.Roots);
+
+        var between = Make("between", true);
+        c.Add(between, null, 2);
+        Assert.Equal(new[] { top, a, between, b, end }, c.Roots);
+
+        // Among children, and the parent has to be set whichever index was asked for.
+        var first = Make("first", true);
+        c.Add(first, a, 0);
+        var second = Make("second", true);
+        c.Add(second, a, 1);
+        Assert.Equal(new[] { first, second }, a.Children);
+        Assert.Same(a, first.Parent);
+        Assert.Same(a, second.Parent);
+
+        // An index past the end is the end, not an exception.
+        var late = Make("late", true);
+        c.Add(late, a, 99);
+        Assert.Equal(new[] { first, second, late }, a.Children);
+    }
+
+    [Fact]
     public void Reorder_moves_a_filter_within_its_own_siblings()
     {
         var c = new FilterCollection();

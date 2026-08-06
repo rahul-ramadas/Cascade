@@ -13,6 +13,7 @@ internal sealed class BufferedTreeView : TreeView
     private const int TVS_NOHSCROLL = 0x8000;
     private const int WM_LBUTTONDOWN = 0x0201;
     private const int WM_LBUTTONDBLCLK = 0x0203;
+    private const int WM_CONTEXTMENU = 0x007B;
     private const int WM_PAINT = 0x000F;
 
     /// <summary>How many times the list has actually repainted. Flicker is repaints nobody asked for, and
@@ -75,6 +76,9 @@ internal sealed class BufferedTreeView : TreeView
     /// cancel in FilterTreeControl. The expander keeps its job, so it is excluded here.</summary>
     internal bool InContentDoubleClick { get; private set; }
 
+    /// <summary>Whether the context menu now opening was asked for from the keyboard.</summary>
+    internal bool ContextMenuFromKeyboard { get; private set; }
+
     /// <summary>The tree eats the second click of a double-click on a checkbox: the box flips but no state
     /// change is reported, so the tick and what it stands for stop agreeing. Turning it back into an ordinary
     /// click makes two quick clicks simply tick twice - which is what they look like - and stops the tree
@@ -82,6 +86,9 @@ internal sealed class BufferedTreeView : TreeView
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_PAINT) Paints++;
+        // A menu asked for from the keyboard reports no position (lParam -1), so it belongs to the selected
+        // row rather than to whatever the pointer happens to be over.
+        if (m.Msg == WM_CONTEXTMENU) ContextMenuFromKeyboard = m.LParam.ToInt64() == -1;
         if (m.Msg == WM_LBUTTONDBLCLK && HitAt(m.LParam) == TreeViewHitTestLocations.StateImage) m.Msg = WM_LBUTTONDOWN;
         if (m.Msg != WM_LBUTTONDBLCLK) { base.WndProc(ref m); return; }
 
