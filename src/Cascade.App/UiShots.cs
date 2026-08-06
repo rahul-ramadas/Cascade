@@ -5,6 +5,7 @@ using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
+using Cascade.Core.Find;
 using Cascade.Core.Model;
 
 namespace Cascade.App;
@@ -200,6 +201,15 @@ internal static class UiShots
         grid.RefreshView();
         Settle();
         CapControl(host, dir, "state-columns");
+
+        // Text picked out inside one cell, with a find term live: the selection must sit in the cell it was
+        // dragged in and the marks must land on the glyphs, cell by cell.
+        grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("message", false, false)));
+        grid.SelectPartOfCellForTesting(5, 1, 0, 11);
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-columns-selected");
+        grid.SetFindHighlight(null);
 
         // Scrolled right with long lines in view: nothing may be painted over the marker/line-number margin.
         // The host is narrowed first, otherwise the content fits and there is nothing to scroll.

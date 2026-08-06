@@ -82,10 +82,15 @@ public sealed class LineGridControl : Control
     private long _charRow = -1;
     private int _charAnchor, _charFocus;
     private bool _charDragging;
+    // Which column the selection lives in while the log is split into cells, so a drag stays inside the
+    // cell it began in. -1 means "whole lines", which is also how a selection made in one mode is spotted
+    // and dropped when the other is turned on.
+    private int _charColumn = -1;
     // Where a drag first took hold. Kept while the drag wanders onto other rows, which is what lets coming
     // back to that row go back to selecting characters on it.
     private long _charOriginRow = -1;
     private int _charOriginAt;
+    private int _charOriginColumn = -1;
     private DateTime _lastClickAt;
 
     // Hover tip naming the filters that matched a line. Held off until the pointer has settled, so it never
@@ -165,16 +170,23 @@ public sealed class LineGridControl : Control
     {
         if (_charRow < 0) return;
         _charRow = -1;
+        _charColumn = -1;
         _charAnchor = _charFocus = 0;
         Invalidate();
     }
 
-    /// <summary>A row's text as it is drawn: tabs expanded, so a character index means the same thing to the
-    /// hit test, the painting and the clipboard.</summary>
+    /// <summary>Whether the log is being shown split into cells rather than as whole lines.</summary>
+    private bool ColumnsOn => _doc is not null && _doc.Columns.Enabled;
+
+    /// <summary>A row's text as it is drawn, so a character index means the same thing to the hit test, the
+    /// painting and the clipboard. Tabs are expanded because that is how a whole line is drawn - but NOT
+    /// while the line is split into cells, where each cell is drawn straight out of the line and a tab is
+    /// usually the very thing the line was split on.</summary>
     private string DisplayText(long row)
     {
         if (_doc is null) return "";
-        return Expand(_doc.GetLineText(_doc.RowToLine(row)));
+        string raw = _doc.GetLineText(_doc.RowToLine(row));
+        return ColumnsOn ? raw : Expand(raw);
     }
 
     /// <summary>Tabs as the spaces they are drawn as, so a character index means the same thing to the hit
@@ -186,31 +198,46 @@ public sealed class LineGridControl : Control
 
     /// <summary>Character index in a row's displayed text nearest to <paramref name="x"/>, by binary search
     /// on the measured width of the prefix - the same measurement the drawing uses, so the highlight lands
-    /// exactly where the pointer did. <paramref name="y"/> picks the wrapped segment.</summary>
-    private int CharIndexAt(long row, int x, int y)
+    /// exactly where the pointer did. <paramref name="y"/> picks the wrapped segment. Split into cells the
+    /// cell under the pointer takes the place of the segment, and the index still counts from the start of
+    /// the line, so everything downstream - the clipboard, the marks on other lines, a filter made from the
+    /// selection - is unchanged.</summary>
+    private int CharIndexAt(long row, int x, int y) => CharIndexAt(row, x, y, out _);
+
+    private int CharIndexAt(long row, int x, int y, out int column)
     {
+        column = -1;
         string text = DisplayText(row);
         if (text.Length == 0) return 0;
         var font = FontForRow(row, text);
+        if (ColumnsOn)
+        {
+            column = ColumnUnder(x);
+            return column < 0 ? 0 : CharIndexIn(row, column, x);
+        }
         (int from, int to) = SegmentAt(row, text, font, y);
-
         int left = GutterWidth() - (Wrapping ? 0 : _hScroll);
-        int target = Math.Max(0, x - left);
-        string part = text[from..to];
+        return from + NearestChar(text.AsSpan(from, to - from), x - left, font);
+    }
 
+    /// <summary>Which character of <paramref name="part"/> the pointer is nearest to, <paramref name="at"/>
+    /// being measured from where that text starts on screen.</summary>
+    private int NearestChar(ReadOnlySpan<char> part, int at, Font font)
+    {
+        int target = Math.Max(0, at);
         int lo = 0, hi = part.Length;
         while (lo < hi)
         {
             int mid = (lo + hi + 1) / 2;
-            if (PrefixWidth(part, mid, font) <= target) lo = mid; else hi = mid - 1;
+            if (MeasureWidth(part[..mid], font) <= target) lo = mid; else hi = mid - 1;
         }
         // Round to the nearer edge of the character the pointer is inside, as a text box does.
         if (lo < part.Length)
         {
-            int a = PrefixWidth(part, lo, font), b = PrefixWidth(part, lo + 1, font);
+            int a = MeasureWidth(part[..lo], font), b = MeasureWidth(part[..(lo + 1)], font);
             if (target - a > b - target) lo++;
         }
-        return from + lo;
+        return lo;
     }
 
     /// <summary>The stretch of a line drawn at a given y. The whole line when nothing is wrapped.</summary>
@@ -248,9 +275,10 @@ public sealed class LineGridControl : Control
         => text.IsEmpty ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
 
-    /// <summary>Character selection is a plain-text idea, so it is not offered while the line is split into
-    /// columns - a click there keeps meaning "select this row".</summary>
-    private bool CharSelectionAvailable => _doc is not null && !_doc.Columns.Enabled;
+    /// <summary>Selecting part of a line works split into cells as well as whole; the cell simply takes the
+    /// place of the line. What it never does is run from one cell into the next - the text between them is
+    /// not on screen, so a selection spanning them could not be shown or read back honestly.</summary>
+    private bool CharSelectionAvailable => _doc is not null;
 
     // ---- find highlighting ----
 
@@ -564,6 +592,9 @@ public sealed class LineGridControl : Control
 
         // A rename box belongs to a header that may no longer be there.
         if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
+        // Nor does a selection outlive the mode it was made in: split into cells the indices are into the
+        // line itself and belong to one cell, whole lines they are into the line with its tabs expanded.
+        if (_charRow >= 0 && ColumnsOn != (_charColumn >= 0)) ClearCharSelection();
 
         _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
@@ -913,7 +944,6 @@ public sealed class LineGridControl : Control
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
 
         bool columns = _doc.Columns.Enabled;
-        var splitter = columns ? new ColumnSplitter(_doc.Columns) : null;
         int runningMaxWidth = 0;
 
         if (columns) { EnsureColumnLayout(); DrawColumnHeader(g, gutter, contentW); }
@@ -957,8 +987,8 @@ public sealed class LineGridControl : Control
             var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
             var clip = g.Clip;
             g.SetClip(contentRect);
-            if (columns && splitter is not null)
-                DrawColumns(g, splitter, text, gutter, y, fore, font);
+            if (columns)
+                DrawColumns(g, text, row, gutter, y, fore, font, charSel);
             else
             {
                 CollectHighlights(shown, row);
@@ -1054,9 +1084,11 @@ public sealed class LineGridControl : Control
     /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
     /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
     /// once from <see cref="TotalColumnsWidth"/> rather than once per row.</summary>
-    private void DrawColumns(Graphics g, ColumnSplitter splitter, string text, int gutter, int y, Color fore, Font font)
+    private void DrawColumns(Graphics g, string text, long row, int gutter, int y, Color fore, Font font, bool charSel)
     {
-        splitter.Split(text, _cols);
+        Splitter().Split(text, _cols);
+        CollectHighlights(text, row);
+        bool marks = _highlights.Count > 0 || charSel;
         int x = gutter - _hScroll;
         int right = gutter + ContentWidth;
         var spec = _doc!.Columns;
@@ -1067,10 +1099,82 @@ public sealed class LineGridControl : Control
             int w = _colWidths[i];
             if (x >= right) break;
             if (x + w <= gutter) { x += w; continue; }
-            TextRenderer.DrawText(g, CellText(text, def, _cols), font, new Rectangle(x + 3, y, w - 6, _rowHeight),
-                fore, CellFlags(def.Align, x, w, gutter, right));
+            var cell = new Rectangle(x + CellInset, y, w - 2 * CellInset, _rowHeight);
+            var span = CellText(text, def, _cols);
+            if (!marks)
+            {
+                TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
+            }
+            else
+            {
+                var (from, to) = CellRange(def, _cols);
+                int originX = CellTextOrigin(cell.Left, cell.Width, span, font, def.Align);
+                FillCellHighlights(g, text, from, to, originX, cell, font);
+                TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
+                DrawCellHighlightText(g, text, from, to, originX, cell, font);
+                if (charSel && i == _charColumn) DrawCellCharSelection(g, text, from, to, originX, cell, font);
+            }
             x += w;
         }
+    }
+
+    /// <summary>Where a character of a cell's text sits on screen.</summary>
+    private int CellX(string line, int from, int index, int originX, Font font)
+        => originX + MeasureWidth(line.AsSpan(from, Math.Max(0, index - from)), font);
+
+    /// <summary>Fills whatever of the marked ranges falls inside this cell. Clamped to the cell's own box:
+    /// a cell whose text is wider than it is would otherwise paint its marks over the column beside it.</summary>
+    private void FillCellHighlights(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    {
+        foreach (var (at, len, colour) in _highlights)
+        {
+            int a = Math.Max(at, from), b = Math.Min(at + len, to);
+            if (b <= a) continue;
+            var rect = Rectangle.Intersect(cell, Span(a, b));
+            if (rect.Width <= 0) continue;
+            using var brush = new SolidBrush(colour);
+            g.FillRectangle(brush, rect);
+        }
+
+        Rectangle Span(int a, int b)
+        {
+            int x0 = CellX(line, from, a, originX, font), x1 = CellX(line, from, b, originX, font);
+            return new Rectangle(x0, cell.Top, Math.Max(1, x1 - x0), cell.Height);
+        }
+    }
+
+    /// <summary>Re-draws marked text over its own fill in the ordinary colour, as the whole-line path does -
+    /// a hit on a selected row would otherwise be white on orange.</summary>
+    private void DrawCellHighlightText(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    {
+        foreach (var (at, len, _) in _highlights)
+        {
+            int a = Math.Max(at, from), b = Math.Min(at + len, to);
+            if (b <= a) continue;
+            DrawInCell(g, line.AsSpan(a, b - a), CellX(line, from, a, originX, font), cell, font, _settings.Foreground);
+        }
+    }
+
+    private void DrawCellCharSelection(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    {
+        int a = Math.Clamp(Math.Min(_charAnchor, _charFocus), from, to);
+        int b = Math.Clamp(Math.Max(_charAnchor, _charFocus), from, to);
+        if (b <= a) return;
+        int x0 = CellX(line, from, a, originX, font), x1 = CellX(line, from, b, originX, font);
+        var rect = Rectangle.Intersect(cell, new Rectangle(x0, cell.Top, Math.Max(1, x1 - x0), cell.Height));
+        if (rect.Width <= 0) return;
+        using (var brush = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(brush, rect);
+        DrawInCell(g, line.AsSpan(a, b - a), x0, cell, font, _settings.SelectionFore);
+    }
+
+    /// <summary>Draws a stretch of a cell's text at an exact x, bounded by the cell so it cannot run into
+    /// the next column. Text that would start left of the cell is left alone - it is already drawn, and
+    /// moving it to fit would put it somewhere it does not belong.</summary>
+    private static void DrawInCell(Graphics g, ReadOnlySpan<char> text, int x, Rectangle cell, Font font, Color colour)
+    {
+        if (x < cell.Left || x >= cell.Right) return;
+        TextRenderer.DrawText(g, text, font, new Rectangle(x, cell.Top, cell.Right - x, cell.Height), colour,
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left);
     }
 
     /// <summary>How to draw one cell.
@@ -1104,6 +1208,93 @@ public sealed class LineGridControl : Control
         => def.Source >= 0 && def.Source < values.Count
             ? line.AsSpan(values[def.Source].Start, values[def.Source].Length)
             : default;
+
+    /// <summary>The stretch of the line a column shows, as indices into the line.</summary>
+    private static (int From, int To) CellRange(ColumnDef def, List<ColumnValue> values)
+    {
+        if (def.Source < 0 || def.Source >= values.Count) return (0, 0);
+        var v = values[def.Source];
+        return (v.Start, v.Start + v.Length);
+    }
+
+    /// <summary>Where a cell's text starts on screen. Not simply the left edge: a right- or centre-aligned
+    /// cell draws its text elsewhere in the box, and the hit test and the marks have to agree with the
+    /// glyphs.</summary>
+    private int CellTextOrigin(int cellLeft, int cellWidth, ReadOnlySpan<char> text, Font font, ColumnAlign align)
+    {
+        if (align == ColumnAlign.Left) return cellLeft;
+        int width = MeasureWidth(text, font);
+        return align == ColumnAlign.Right ? cellLeft + cellWidth - width
+                                          : cellLeft + (cellWidth - width) / 2;
+    }
+
+    /// <summary>The visible column <paramref name="x"/> is in, or the nearest one when the pointer is past
+    /// either end - so a drag that wanders off the side keeps selecting in the cell it began in. -1 when
+    /// there is no column to answer with.</summary>
+    private int ColumnUnder(int x)
+    {
+        if (_doc is null) return -1;
+        EnsureColumnLayout();
+        var spec = _doc.Columns;
+        int left = GutterWidth() - _hScroll, found = -1;
+        for (int i = 0; i < spec.Columns.Count; i++)
+        {
+            if (!spec.Columns[i].Visible || _colWidths[i] <= 0) continue;
+            // Take this cell if nothing has been taken yet - so a point left of the first one lands on it -
+            // or once the pointer has reached it; stop as soon as the pointer is inside.
+            if (found < 0 || x >= left) found = i;
+            if (x < left + _colWidths[i]) break;
+            left += _colWidths[i];
+        }
+        return found;
+    }
+
+    /// <summary>Where one cell of a row is: the stretch of the line it shows, and where that text starts on
+    /// screen. The hit test and the marks both come through here, so neither can disagree with the glyphs.</summary>
+    private (int From, int To, int OriginX) CellGeometry(int column, string text, Font font)
+    {
+        EnsureColumnLayout();
+        var def = _doc!.Columns.Columns[column];
+        Splitter().Split(text, _hitCells);
+        var (from, to) = CellRange(def, _hitCells);
+        int originX = CellTextOrigin(ColumnLeft(column) + CellInset, _colWidths[column] - 2 * CellInset,
+                                     text.AsSpan(from, to - from), font, def.Align);
+        return (from, to, originX);
+    }
+
+    /// <summary>Character index within one cell, counted from the start of the line. Used by a drag, which
+    /// has to stay in the cell it began in however far sideways the pointer wanders.</summary>
+    private int CharIndexIn(long row, int column, int x)
+    {
+        if (_doc is null || column < 0 || column >= _doc.Columns.Columns.Count) return 0;
+        string text = DisplayText(row);
+        var font = FontForRow(row, text);
+        var (from, to, originX) = CellGeometry(column, text, font);
+        return from + NearestChar(text.AsSpan(from, to - from), x - originX, font);
+    }
+
+    /// <summary>The gap between a cell's box and its text. One number, so the paint, the hit test and the
+    /// marks cannot drift apart.</summary>
+    private const int CellInset = 3;
+
+    private readonly List<ColumnValue> _hitCells = new();
+    private ColumnSplitter? _splitter;
+    private string? _splitterKey;
+
+    /// <summary>The splitter for the current spec. Kept rather than rebuilt because only the mode and the
+    /// template are snapshotted inside one (the delimiter, the column list and their sources are read live),
+    /// so those two are the whole of the key.</summary>
+    private ColumnSplitter Splitter()
+    {
+        var spec = _doc!.Columns;
+        string key = spec.Mode + "\u0001" + spec.Template;
+        if (_splitter is null || !ReferenceEquals(_splitter.Spec, spec) || _splitterKey != key)
+        {
+            _splitter = new ColumnSplitter(spec);
+            _splitterKey = key;
+        }
+        return _splitter;
+    }
 
     private enum ColumnGesture { None, Resize, Reorder }
 
@@ -1582,8 +1773,42 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null || column < 0 || column >= _doc.Columns.Columns.Count) return "";
         string text = _doc.GetLineText(_doc.RowToLine(row));
-        new ColumnSplitter(_doc.Columns).Split(text, _cols);
+        Splitter().Split(text, _cols);
         return CellText(text, _doc.Columns.Columns[column], _cols).ToString();
+    }
+
+    /// <summary>Screen x of a character inside one cell, so a check can aim at one rather than guess.</summary>
+    internal int XForCharInCellForTesting(long row, int column, int index)
+    {
+        string text = DisplayText(row);
+        var font = FontForRow(row, text);
+        var (from, _, originX) = CellGeometry(column, text, font);
+        return CellX(text, from, index, originX, font);
+    }
+
+    /// <summary>The stretch of a row's line that one cell shows.</summary>
+    internal (int From, int To) CellRangeForTesting(long row, int column)
+    {
+        string text = DisplayText(row);
+        var (from, to, _) = CellGeometry(column, text, FontForRow(row, text));
+        return (from, to);
+    }
+
+    /// <summary>Which cell the part-of-a-line selection lives in, or -1 for whole lines.</summary>
+    internal int CharColumnForTesting => _charColumn;
+
+    /// <summary>Picks out characters <paramref name="from"/>..<paramref name="to"/> of one cell's text,
+    /// so a render can be captured without a mouse.</summary>
+    internal void SelectPartOfCellForTesting(long row, int column, int from, int to)
+    {
+        var (start, end) = CellRangeForTesting(row, column);
+        _charRow = row;
+        _charColumn = column;
+        _charAnchor = Math.Clamp(start + from, start, end);
+        _charFocus = Math.Clamp(start + to, start, end);
+        _sel.SetSingle(row);
+        _caretRow = row;
+        Invalidate();
     }
 
     internal void PressHeaderForTesting(int x, int clicks = 1)
@@ -1733,12 +1958,14 @@ public sealed class LineGridControl : Control
         _dragging = true;
         _charDragging = false;
         _charOriginRow = -1;
+        _charOriginColumn = -1;
         if (CharSelectionAvailable && (ModifierKeys & (Keys.Shift | Keys.Control)) == 0)
         {
             // Armed, not shown: a drag that stays on this row turns into a character selection, one that
             // leaves it selects whole rows, and one that comes back picks the characters up again.
             _charRow = _charOriginRow = row;
-            _charAnchor = _charFocus = _charOriginAt = CharIndexAt(row, e.X, e.Y);
+            _charAnchor = _charFocus = _charOriginAt = CharIndexAt(row, e.X, e.Y, out _charColumn);
+            _charOriginColumn = _charColumn;
         }
         Invalidate();
         SelectionChanged?.Invoke();
@@ -1756,10 +1983,13 @@ public sealed class LineGridControl : Control
             long row = Math.Clamp(RowAtY(e.Y), 0, Math.Max(0, _doc.RowCount - 1));
             if (row == _charOriginRow)
             {
-                // Back on the row it started from, so it is a selection within that line again.
+                // Back on the row it started from, so it is a selection within that line again - and, when
+                // the line is split into cells, within the cell it started in.
                 _charRow = _charOriginRow;
+                _charColumn = _charOriginColumn;
                 _charAnchor = _charOriginAt;
-                int at = CharIndexAt(_charRow, e.X, e.Y);
+                int at = _charColumn >= 0 ? CharIndexIn(_charRow, _charColumn, e.X)
+                                          : CharIndexAt(_charRow, e.X, e.Y);
                 if (at != _charFocus || _caretRow != row || _sel.Count != 1)
                 {
                     _charFocus = at;
@@ -1791,6 +2021,7 @@ public sealed class LineGridControl : Control
         if (_colGesture != ColumnGesture.None) { EndColumnGesture(); return; }
         _dragging = false;
         _charOriginRow = -1;
+        _charOriginColumn = -1;
         // A press that never moved sideways selected the whole line, so drop the empty range it armed.
         if (!_charDragging && !HasCharSelection) ClearCharSelection();
         _charDragging = false;

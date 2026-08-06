@@ -70,6 +70,7 @@ internal static class SelfTest
             ok &= Timed("filter presets", RunFilterPresetChecks);
             ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("text selection", RunTextSelectionChecks);
+            ok &= Timed("cell selection", RunColumnSelectionChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
@@ -1642,6 +1643,143 @@ internal static class SelfTest
         {
             host?.Close();
             host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Picking text out of a line works the same split into cells as whole: a click still takes the
+    /// row, a drag takes what it covered, the same text is marked wherever else it shows, and a double-click
+    /// carries the part picked out into a new filter. What it must not do is run out of the cell it began
+    /// in - the text between two cells is not on screen, so a selection across them could not be honest.</summary>
+    private static bool RunColumnSelectionChecks()
+    {
+        Line("-- selecting text inside a cell --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_colsel_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < 40; i++)
+            sb.Append($"[2026-08-05T09:31:{i % 60:00}][api-gateway][INFO ] req-abc{i:000} GET /v1/orders -> 200\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.Columns.Enabled = true;
+            doc.Columns.Mode = ColumnSplitMode.Template;
+            doc.Columns.Template = "[[time]][[service]][[level]] [message]";
+            doc.Columns.SyncColumnsFromTemplate();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(1000, 320),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            const int Row = 2, Message = 3, Service = 1;
+            string text = doc.GetLineText(Row);
+            var (msgFrom, msgTo) = grid.CellRangeForTesting(Row, Message);
+            var (svcFrom, svcTo) = grid.CellRangeForTesting(Row, Service);
+            int X(int column, int index) => grid.XForCharInCellForTesting(Row, column, index);
+            int reqAt = text.IndexOf("req-abc", StringComparison.Ordinal);
+
+            bool ok = Check($"the message cell holds the message ({text[msgFrom..msgTo]})",
+                            text[msgFrom..msgTo].StartsWith("req-abc", StringComparison.Ordinal));
+            ok &= Check($"and the service cell the service ({text[svcFrom..svcTo]})", text[svcFrom..svcTo] == "api-gateway");
+
+            // A click still means the whole row, exactly as it does without columns.
+            grid.ClickForTesting(Row, X(Message, reqAt + 2));
+            ok &= Check("a click in a cell selects the whole line",
+                        !grid.HasCharSelection && grid.SelectedText is null, grid.SelectedText ?? "(none)");
+
+            // A drag inside a cell takes what it covered - the thing that could not be done at all before.
+            grid.DragForTesting(Row, X(Message, reqAt), X(Message, reqAt + 10));
+            ok &= Check("dragging inside a cell selects that part of the line",
+                        grid.SelectedText == text.Substring(reqAt, 10), grid.SelectedText ?? "(none)");
+            ok &= Check($"and the selection belongs to that cell (column {grid.CharColumnForTesting})",
+                        grid.CharColumnForTesting == Message);
+
+            // Dragging past the cell's own end stops at it: what lies between two cells is not on screen.
+            grid.DragForTesting(Row, X(Message, msgFrom), X(Message, msgFrom) + 5000);
+            ok &= Check("a drag off the right of a cell stops at the end of that cell",
+                        grid.SelectedText == text[msgFrom..msgTo], grid.SelectedText ?? "(none)");
+            grid.DragForTesting(Row, X(Service, svcTo), 0);
+            ok &= Check("and off the left, at the start of it",
+                        grid.SelectedText == text[svcFrom..svcTo], grid.SelectedText ?? "(none)");
+
+            // Dragging onto another row is whole lines again, and coming back picks the cell up where it was.
+            grid.PressForTesting(Row, X(Message, reqAt));
+            grid.DragOverRowForTesting(4, X(Message, reqAt + 10));
+            ok &= Check("a drag that has wandered onto another row is selecting whole lines",
+                        !grid.HasCharSelection && grid.CaretRowForTesting == 4, grid.SelectedText ?? "(none)");
+            grid.DragOverRowForTesting(Row, X(Message, reqAt + 3));
+            ok &= Check("and coming back selects inside the cell it started in",
+                        grid.SelectedText == text.Substring(reqAt, 3), grid.SelectedText ?? "(none)");
+            grid.ReleaseForTesting(Row, X(Message, reqAt + 3));
+
+            // Double-click carries the part picked out into a new filter, as it does for a whole line.
+            var asked = new List<string?>();
+            grid.NewFilterRequested += part => asked.Add(part);
+            grid.DragForTesting(Row, X(Service, svcFrom), X(Service, svcTo));
+            grid.DoubleClickForTesting(Row, X(Service, svcFrom + 2));
+            ok &= Check("double-clicking a cell asks for a filter for what was picked out",
+                        asked.Count == 1 && asked[0] == "api-gateway",
+                        asked.Count == 1 ? asked[0] ?? "(the whole line)" : "(nothing asked)");
+
+            // The visual contract, the same one the whole-line selection keeps: only the range is in the
+            // selection colours, and it does not spill into the cell beside it.
+            grid.DragForTesting(Row, X(Service, svcFrom), X(Service, svcTo));
+            grid.RefreshView();
+            Pump();
+            using (var picture = Capture(host))
+            {
+                int rowY = grid.RowMiddleForTesting(Row);
+                int inside = X(Service, svcFrom + 4);
+                int leftOfIt = grid.ColumnLeftForTesting(Service) - 8;
+                int rightOfIt = grid.ColumnLeftForTesting(Service) + grid.ColumnWidthForTesting(Service) + 8;
+                ok &= Check("the picked-out text is drawn selected",
+                            IsBackground(picture, inside, rowY, settings.SelectionBack),
+                            picture.GetPixel(Math.Clamp(inside, 0, picture.Width - 1), rowY).Name);
+                ok &= Check("and the cells either side of it are not",
+                            !IsBackground(picture, leftOfIt, rowY, settings.SelectionBack) &&
+                            !IsBackground(picture, rightOfIt, rowY, settings.SelectionBack),
+                            $"{picture.GetPixel(Math.Clamp(leftOfIt, 0, picture.Width - 1), rowY).Name} / " +
+                            $"{picture.GetPixel(Math.Clamp(rightOfIt, 0, picture.Width - 1), rowY).Name}");
+            }
+
+            // The same text elsewhere is marked, which is what makes picking an id out of one line useful.
+            // Every row carries "api-gateway", so the row below must show it marked in its own service cell.
+            using (var picture = Capture(host))
+            {
+                int otherY = grid.RowMiddleForTesting(Row + 1);
+                int otherX = grid.XForCharInCellForTesting(Row + 1, Service, grid.CellRangeForTesting(Row + 1, Service).From + 4);
+                ok &= Check("the same text on another line is marked too",
+                            IsBackground(picture, otherX, otherY, settings.FindHighlight),
+                            picture.GetPixel(Math.Clamp(otherX, 0, picture.Width - 1), otherY).Name);
+            }
+
+            // Turning the columns off drops a selection that only made sense inside a cell.
+            doc.Columns.Enabled = false;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("turning the columns off drops the cell's selection", !grid.HasCharSelection,
+                        grid.SelectedText ?? "(none)");
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
