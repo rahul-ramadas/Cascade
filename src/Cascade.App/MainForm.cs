@@ -431,7 +431,7 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(_miFilterTips);
         view.DropDownItems.Add(BuildMarkersMenu());
         _miColumns = new ToolStripMenuItem("Split Into Colum&ns", null, (_, _) => ToggleColumns())
-        { Checked = _doc.Columns.Enabled };
+        { Checked = _doc.Columns.Enabled, ShortcutKeys = Keys.Control | Keys.Shift | Keys.C };
         view.DropDownItems.Add(_miColumns);
         view.DropDownItems.Add(Mi("Fit Column&s to Window", (_, _) => _grid.FitColumnsToWindow()));
         view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
@@ -1463,11 +1463,7 @@ public sealed class MainForm : Form
     {
         if (_doc.Columns.Enabled)
         {
-            _doc.Columns.Enabled = false;
-            _miColumns.Checked = false;
-            _filtersDirty = true;
-            UpdateTitle();
-            _grid.RefreshView();
+            SetColumnsEnabled(false);
             return;
         }
 
@@ -1479,11 +1475,21 @@ public sealed class MainForm : Form
             _doc.Columns.Template = template;
             _doc.Columns.SyncColumnsFromTemplate();
         }
-        _doc.Columns.Enabled = true;
-        _miColumns.Checked = true;
+        SetColumnsEnabled(true);
+    }
+
+    /// <summary>Turns the header on or off, keeping the line the reader is looking at exactly where it is.
+    /// The header takes a row off the top of the text, so without this the whole log appears to slide.</summary>
+    private void SetColumnsEnabled(bool on)
+    {
+        _grid.KeepTextStillAcross(on ? 1 : -1, () =>
+        {
+            _doc.Columns.Enabled = on;
+            _grid.RefreshView();
+        });
+        _miColumns.Checked = on;
         _filtersDirty = true;
         UpdateTitle();
-        _grid.RefreshView();
     }
 
     private void ShowPreferences()

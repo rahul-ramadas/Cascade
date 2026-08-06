@@ -958,7 +958,7 @@ public sealed class LineGridControl : Control
             var clip = g.Clip;
             g.SetClip(contentRect);
             if (columns && splitter is not null)
-                runningMaxWidth = Math.Max(runningMaxWidth, DrawColumns(g, splitter, text, gutter, y, fore, font));
+                DrawColumns(g, splitter, text, gutter, y, fore, font);
             else
             {
                 CollectHighlights(shown, row);
@@ -1017,6 +1017,7 @@ public sealed class LineGridControl : Control
         using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, rect);
         using (var pen = new Pen(Color.FromArgb(210, 210, 210))) g.DrawLine(pen, 0, rect.Bottom - 1, rect.Width, rect.Bottom - 1);
         int x = gutter - _hScroll;
+        int right = gutter + contentW;
         var clip = g.Clip;
         g.SetClip(new Rectangle(gutter, top, contentW, _rowHeight));
         var spec = _doc!.Columns;
@@ -1025,12 +1026,14 @@ public sealed class LineGridControl : Control
             var def = spec.Columns[i];
             if (!def.Visible) continue;
             int w = _colWidths[i];
+            if (x >= right) break;                 // everything from here on is off the right-hand side
+            if (x + w <= gutter) { x += w; continue; }   // ...and this one is off the left
             // The one being carried is shaded, so it is clear which column the pointer has hold of.
             if (_colGesture == ColumnGesture.Reorder && i == _colIndex && _colMoved)
                 using (var b = new SolidBrush(Color.FromArgb(60, _settings.SelectionBack)))
                     g.FillRectangle(b, x, top, w, _rowHeight - 1);
             TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
-                Color.FromArgb(80, 80, 80), TextFlags | TextFormatFlags.EndEllipsis);
+                Color.FromArgb(80, 80, 80), CellFlags(ColumnAlign.Left, x, w, gutter, right));
             // A hairline on every edge: without one there is nothing to aim the resize pointer at.
             using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
                 g.DrawLine(pen, x + w - 1, top + 2, x + w - 1, top + _rowHeight - 3);
@@ -1047,34 +1050,60 @@ public sealed class LineGridControl : Control
         return w;
     }
 
-    private int DrawColumns(Graphics g, ColumnSplitter splitter, string text, int gutter, int y, Color fore, Font font)
+    /// <summary>Draws one row's cells. Only the ones on screen: with a line split into dozens of fields
+    /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
+    /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
+    /// once from <see cref="TotalColumnsWidth"/> rather than once per row.</summary>
+    private void DrawColumns(Graphics g, ColumnSplitter splitter, string text, int gutter, int y, Color fore, Font font)
     {
         splitter.Split(text, _cols);
         int x = gutter - _hScroll;
-        var flags = TextFlags | TextFormatFlags.EndEllipsis | TextFormatFlags.Left;
+        int right = gutter + ContentWidth;
         var spec = _doc!.Columns;
         for (int i = 0; i < spec.Columns.Count; i++)
         {
             var def = spec.Columns[i];
             if (!def.Visible) continue;
             int w = _colWidths[i];
-            string val = CellText(text, def, _cols);
-            var cellFlags = def.Align == ColumnAlign.Right ? flags | TextFormatFlags.Right
-                          : def.Align == ColumnAlign.Center ? flags | TextFormatFlags.HorizontalCenter : flags;
-            TextRenderer.DrawText(g, val, font, new Rectangle(x + 3, y, w - 6, _rowHeight), fore, cellFlags);
+            if (x >= right) break;
+            if (x + w <= gutter) { x += w; continue; }
+            TextRenderer.DrawText(g, CellText(text, def, _cols), font, new Rectangle(x + 3, y, w - 6, _rowHeight),
+                fore, CellFlags(def.Align, x, w, gutter, right));
             x += w;
         }
-        return TotalColumnsWidth();
+    }
+
+    /// <summary>How to draw one cell.
+    ///
+    /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is what makes text obey the clip the paint set
+    /// around the content area - without it a cell hanging off the left edge is drawn straight over the
+    /// marker and line-number margins. It is also the expensive part of a text draw (TextRenderer has to
+    /// read the region off the Graphics and select it into the DC), and a cell that sits wholly inside the
+    /// content area cannot escape it anyway, because DrawText already clips to the rectangle it is given.
+    /// So only the one cell at each edge pays for it. Measured with a line split into 65 fields: 66 -> 49 ms
+    /// a frame.</summary>
+    private static TextFormatFlags CellFlags(ColumnAlign align, int x, int w, int gutter, int right)
+    {
+        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
+        if (x < gutter || x + w > right) flags |= TextFormatFlags.PreserveGraphicsClipping;
+        return align switch
+        {
+            ColumnAlign.Right => flags | TextFormatFlags.Right,
+            ColumnAlign.Center => flags | TextFormatFlags.HorizontalCenter,
+            _ => flags | TextFormatFlags.Left
+        };
     }
 
     // ================= columns: resized, reordered, renamed and hidden from the header itself =================
 
     /// <summary>What a cell shows: the field the column says it shows, wherever that column has been
-    /// carried to. The paint and the checks both come through here, so they cannot disagree.</summary>
-    private static string CellText(string line, ColumnDef def, List<ColumnValue> values)
+    /// carried to. A span rather than a string - the paint asks for one per cell per row, and a line split
+    /// into dozens of fields would otherwise leave a screenful of substrings behind on every frame. The
+    /// paint and the checks both come through here, so they cannot disagree.</summary>
+    private static ReadOnlySpan<char> CellText(string line, ColumnDef def, List<ColumnValue> values)
         => def.Source >= 0 && def.Source < values.Count
-            ? line.Substring(values[def.Source].Start, values[def.Source].Length)
-            : "";
+            ? line.AsSpan(values[def.Source].Start, values[def.Source].Length)
+            : default;
 
     private enum ColumnGesture { None, Resize, Reorder }
 
@@ -1554,7 +1583,7 @@ public sealed class LineGridControl : Control
         if (_doc is null || column < 0 || column >= _doc.Columns.Columns.Count) return "";
         string text = _doc.GetLineText(_doc.RowToLine(row));
         new ColumnSplitter(_doc.Columns).Split(text, _cols);
-        return CellText(text, _doc.Columns.Columns[column], _cols);
+        return CellText(text, _doc.Columns.Columns[column], _cols).ToString();
     }
 
     internal void PressHeaderForTesting(int x, int clicks = 1)

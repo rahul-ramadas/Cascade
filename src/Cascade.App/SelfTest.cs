@@ -63,6 +63,7 @@ internal static class SelfTest
             ok &= Timed("machine state", RunMachineStateChecks);
             ok &= Timed("render", RunRenderChecks);
             ok &= Timed("columns", RunColumnChecks);
+            ok &= Timed("column mode", RunColumnModeChecks);
             ok &= Timed("navigation", RunNavigationChecks);
             ok &= Timed("filter list", RunFilterListChecks);
             ok &= Timed("filter search", RunFilterSearchRevealChecks);
@@ -545,6 +546,89 @@ internal static class SelfTest
         {
             try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Turning the column view on and off - from the keyboard, which is what it is here for, and
+    /// without the log appearing to slide when the header takes a row off the top of it.</summary>
+    private static bool RunColumnModeChecks()
+    {
+        Line("-- turning columns on and off --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_colmode_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(path, Enumerable.Range(1, 2000)
+            .Select(i => $"[2026-08-05T09:31:{i % 60:00}][api-gateway][INFO ] request {i} handled"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), new[] { path })
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 800),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 2000; i++) { Thread.Sleep(20); Pump(); }
+
+            var grid = form.GridForTesting;
+            grid.GoToLine(1000);   // well away from either end, so nothing is clamped
+            Pump();
+
+            long firstBefore = grid.FirstRowForTesting;
+            long watched = firstBefore + grid.VisibleRowCountForTesting / 2;
+            // Where a line sits ON SCREEN is the thing that must not change; the grid's own coordinates
+            // shift with the header, so they cannot tell.
+            int ScreenYOf(long row) => grid.PointToScreen(new Point(0, grid.RowMiddleForTesting(row))).Y;
+            int yBefore = ScreenYOf(watched);
+
+            bool ok = Check("the columns start off", !doc.Columns.Enabled);
+            ok &= Check("View > Split Into Columns turns them on",
+                        form.ClickMenuForTesting("View", "Split Into Columns") && doc.Columns.Enabled);
+            Pump();
+            ok &= Check($"the fields of the line are read off it ({doc.Columns.Columns.Count} columns: " +
+                        $"{string.Join(", ", doc.Columns.Columns.Select(c => c.Name))})",
+                        doc.Columns.Columns.Count == 4);
+            ok &= Check($"the header takes a row off the top of the log ({firstBefore} -> {grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == firstBefore + 1);
+            ok &= Check($"so the line being read has not moved on screen ({yBefore} -> {ScreenYOf(watched)})",
+                        ScreenYOf(watched) == yBefore);
+
+            ok &= Check("and the same item turns them off again",
+                        form.ClickMenuForTesting("View", "Split Into Columns") && !doc.Columns.Enabled);
+            Pump();
+            ok &= Check($"which hands the row back ({grid.FirstRowForTesting})",
+                        grid.FirstRowForTesting == firstBefore);
+            ok &= Check($"and still nothing has moved on screen ({ScreenYOf(watched)})",
+                        ScreenYOf(watched) == yBefore);
+
+            // The menu is where the key is discovered, so it has to say so - and stay in step with the state.
+            // That the key itself reaches the item is WinForms' own shortcut handling, covered end to end by
+            // UiFeatureTests.Ctrl_shift_c_splits_the_log_into_columns_and_back.
+            var item = AllMenuItems(form.MainMenuStrip!.Items)
+                .FirstOrDefault(m => (m.Text ?? "").Replace("&", "") == "Split Into Columns");
+            ok &= Check("the menu offers it", item is not null);
+            if (item is not null)
+            {
+                var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
+                ok &= Check($"and advertises the key beside it ({keys.ConvertToString(item.ShortcutKeys)})",
+                            item.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.C) && item.ShowShortcutKeys);
+                form.ClickMenuForTesting("View");   // the tick is set as the menu opens
+                Pump();
+                ok &= Check("and is unticked while the columns are off", !item.Checked);
+                ok &= Check("and ticked once they are on",
+                            form.ClickMenuForTesting("View", "Split Into Columns") && item.Checked);
+                form.ClickMenuForTesting("View", "Split Into Columns");
+            }
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
             try { File.Delete(path); } catch { /* ignore */ }
         }
     }
@@ -5750,7 +5834,7 @@ internal static class SelfTest
 
         // A command with a key must say so where it is offered. These two run the same thing from different
         // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
-        string[] shortcuts = ["Find Filter\tCtrl+E"];
+        string[] shortcuts = ["Find Filter\tCtrl+E", "Split Into Columns\tCtrl+Shift+C"];
         var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
         var advertised = AllMenuItems(bar.Items)
             .Select(m => (m.Text ?? "").Replace("&", "") + "\t" +

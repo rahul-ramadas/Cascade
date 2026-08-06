@@ -48,6 +48,20 @@ internal static class TestData
         return path;
     }
 
+    /// <summary>As <see cref="WriteLogFile()"/>, but with the leading <c>[...]</c> groups a real log has,
+    /// so "split into columns" has fields to find. Same line count and the same MATCH/other text, so every
+    /// helper that counts lines or looks for a match still applies.</summary>
+    public static string WriteBracketedLogFile()
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < LineCount; i++)
+            sb.Append($"[2026-08-05T09:31:{i % 60:00}][api-gateway][INFO ] ")
+              .Append(IsMatchLine(i) ? "MATCH line " : "other line ").Append(i).Append('\n');
+        string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        return path;
+    }
+
     /// <summary>A .tat with a single enabled include filter matching "MATCH".</summary>
     public static string WriteFilterFile() => WriteFilterFile("MATCH");
 
