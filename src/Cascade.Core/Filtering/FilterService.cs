@@ -108,12 +108,15 @@ public sealed class FilterService : IDisposable
             _current = gen;
             _processed = 0;
         }
-        // A filter that has just been deleted or edited can never be asked about again, so its results are
-        // dropped here rather than being kept for the life of the file.
-        _cache.RetainOnly(snapshot.CacheKeys());
         _wake.Set();
         return gen;
     }
+
+    /// <summary>Throws away everything cached for filters that <paramref name="snapshot"/> no longer
+    /// contains. The key is the whole predicate chain, so a filter that has been deleted or edited can never
+    /// be asked about again; disabled filters keep their results, which is what makes switching one back on
+    /// instant. Called on every filter change - including the one that leaves none.</summary>
+    public void RetainCachedResults(FilterSnapshot snapshot) => _cache.RetainOnly(snapshot.CacheKeys());
 
     /// <summary>Bytes currently held by the per-filter match cache.</summary>
     public long CacheBytes => _cache.UsedBytes;

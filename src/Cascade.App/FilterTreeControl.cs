@@ -89,6 +89,10 @@ public sealed class FilterTreeControl : UserControl
     /// decides how to report it, so all the find commands give identical feedback.</summary>
     public event Action<string>? NoFilterMatch;
 
+    /// <summary>Raised with the paths when files are dragged in from outside and dropped on the pane. The
+    /// list already accepts drags for its own reordering, so it has to answer for these itself.</summary>
+    public event Action<string[]>? FilesDropped;
+
     public FilterTreeControl()
     {
         var menu = BuildContextMenu();
@@ -118,8 +122,8 @@ public sealed class FilterTreeControl : UserControl
         _tree.AfterSelect += (_, e) => { if (!_selecting && !_building) SetSingleSelection(e.Node); };
         _tree.AfterExpand += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Remove(f.Id); };
         _tree.AfterCollapse += (_, e) => { if (!_building && e.Node?.Tag is Filter f) _collapsed.Add(f.Id); };
-        _tree.NodeMouseDoubleClick += (_, e) => { if (e.Node is not null) HandleDoubleClick(e.Node, e.X); };
         // Double-clicking a filter means "edit this" and nothing else. Only the expander folds the subtree.
+        // (The double-click itself is picked up in OnTreeMouseDown - see the note there.)
         _tree.BeforeExpand += (_, e) => { if (_tree.InContentDoubleClick) e.Cancel = true; };
         _tree.BeforeCollapse += (_, e) => { if (_tree.InContentDoubleClick) e.Cancel = true; };
         _tree.MouseDown += OnTreeMouseDown;
@@ -127,7 +131,7 @@ public sealed class FilterTreeControl : UserControl
         _tree.MouseUp += OnTreeMouseUp;
         _tree.KeyDown += OnTreeKeyDown;
         _tree.DrawNode += OnDrawNode;
-        _tree.DragEnter += (_, e) => e.Effect = DragDropEffects.Move;
+        _tree.DragEnter += (_, e) => e.Effect = DragEffectFor(e);
         _tree.DragOver += OnDragOver;
         _tree.DragDrop += OnDragDrop;
         _tree.DragLeave += (_, _) => StopAutoScroll();
@@ -217,7 +221,13 @@ public sealed class FilterTreeControl : UserControl
     }
 
     private void OnTreeMouseDown(object? sender, MouseEventArgs e)
-        => HandleMouseDown(_tree.GetNodeAt(0, e.Y), e.Location, e.Button, ModifierKeys);
+    {
+        // MEASURED: a TreeView raises no double-click event of any kind - not MouseDoubleClick, not
+        // DoubleClick - when the click misses every row. A second MouseDown is the only thing it reports,
+        // so that is where a double-click on the empty part of the list has to be recognised.
+        if (e.Button == MouseButtons.Left && e.Clicks == 2) { HandleDoubleClickAt(e.Location); return; }
+        HandleMouseDown(_tree.GetNodeAt(0, e.Y), e.Location, e.Button, ModifierKeys);
+    }
 
     /// <summary>The whole of what a press means, with the modifier keys passed in rather than read from the
     /// keyboard - injected keys do not set real key state, so a check could not otherwise reach any of it.</summary>
@@ -377,6 +387,14 @@ public sealed class FilterTreeControl : UserControl
     private void HandleDoubleClick(TreeNode node, int x)
     {
         if (x >= ContentLeft(node) && node.Tag is Filter f) EditRequested?.Invoke(f);
+    }
+
+    /// <summary>Double-clicking below the last filter asks for a new one - the empty part of the list is not
+    /// about any filter in particular, so it can only mean "another one".</summary>
+    private void HandleDoubleClickAt(Point at)
+    {
+        if (_tree.GetNodeAt(0, at.Y) is { } node) HandleDoubleClick(node, at.X);
+        else AddRequested?.Invoke(null);
     }
 
     public Filter? SelectedFilter => _tree.SelectedNode?.Tag as Filter;
@@ -1102,6 +1120,12 @@ public sealed class FilterTreeControl : UserControl
 
     internal void DropForTesting() => ResetDrag();
 
+    /// <summary>What the pane would do with a drag that is not one of its own filters, and what a drop of
+    /// one does. A real shell drag cannot be staged from a test, but everything after the data arrives can.</summary>
+    internal DragDropEffects DragEffectForTesting(DragEventArgs e) => DragEffectFor(e);
+
+    internal void DropOnTreeForTesting(DragEventArgs e) => OnDragDrop(_tree, e);
+
     /// <summary>One beat of the auto-scroll timer, which a test cannot wait on reliably.</summary>
     internal void AutoScrollTickForTesting() => AutoScrollTick();
 
@@ -1199,15 +1223,19 @@ public sealed class FilterTreeControl : UserControl
         return armed;
     }
 
-    /// <summary>Double-clicks here through the real handler, and reports the filter it asked to edit.</summary>
-    internal Filter? DoubleClickForTesting(Point at)
+    /// <summary>Double-clicks here through the real handler, and reports what it asked for: the filter to
+    /// edit, or a new one.</summary>
+    internal (Filter? Edit, bool Add) DoubleClickForTesting(Point at)
     {
-        Filter? asked = null;
-        void Watch(Filter f) => asked = f;
-        EditRequested += Watch;
-        try { if (_tree.GetNodeAt(at) is { } node) HandleDoubleClick(node, at.X); }
-        finally { EditRequested -= Watch; }
-        return asked;
+        Filter? edit = null;
+        bool add = false;
+        void WatchEdit(Filter f) => edit = f;
+        void WatchAdd(Filter? _) => add = true;
+        EditRequested += WatchEdit;
+        AddRequested += WatchAdd;
+        try { HandleDoubleClickAt(at); }
+        finally { EditRequested -= WatchEdit; AddRequested -= WatchAdd; }
+        return (edit, add);
     }
 
     /// <summary>Sends the whole message sequence a real double-click produces - down, up, double-click, up -
@@ -1230,6 +1258,15 @@ public sealed class FilterTreeControl : UserControl
         var lParam = (IntPtr)((at.Y << 16) | (at.X & 0xFFFF));
         SendMessage(_tree.Handle, WM_LBUTTONDBLCLK, (IntPtr)MK_LBUTTON, lParam);
     }
+
+    /// <summary>Raises the LIST'S OWN second-click MouseDown, which is all a TreeView reports when a
+    /// double-click lands on empty space - MEASURED: no MouseDoubleClick, no DoubleClick, no
+    /// NodeMouseDoubleClick. Injected window messages raise none of them either, because a TreeView reports
+    /// clicks from the native control's notifications rather than from WM_LBUTTONDBLCLK.</summary>
+    internal void RaiseDoubleClickEventForTesting(Point at)
+        => typeof(Control).GetMethod("OnMouseDown",
+               System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+           .Invoke(_tree, [new MouseEventArgs(MouseButtons.Left, 2, at.X, at.Y, 0)]);
 
     private const int WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_LBUTTONDBLCLK = 0x0203, MK_LBUTTON = 0x0001;
 
@@ -1263,12 +1300,21 @@ public sealed class FilterTreeControl : UserControl
 
     private void OnDragOver(object? sender, DragEventArgs e)
     {
-        if (_doc is null || _dragNode is null) { e.Effect = DragDropEffects.None; return; }
+        if (_doc is null || _dragNode is null) { e.Effect = DragEffectFor(e); return; }
         e.Effect = DragDropEffects.Move;
 
         var pt = _tree.PointToClient(new Point(e.X, e.Y));
         AutoScrollFor(pt);
         UpdateDropPosition(pt);
+    }
+
+    /// <summary>What a drag that is not one of our own filters is worth here: a file can be dropped on the
+    /// pane, anything else cannot. Saying Move for every drag - which is what this used to do - showed a
+    /// drop cursor over a file being dragged in and then quietly did nothing with it.</summary>
+    private DragDropEffects DragEffectFor(DragEventArgs e)
+    {
+        if (_dragNode is not null || _dragGroup is not null) return DragDropEffects.Move;
+        return e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
     }
 
     private void UpdateDropPosition(Point pt)
@@ -1417,6 +1463,12 @@ public sealed class FilterTreeControl : UserControl
     private void OnDragDrop(object? sender, DragEventArgs e)
     {
         StopAutoScroll();
+        if (_dragNode is null && _dragGroup is null)
+        {
+            if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true && e.Data.GetData(DataFormats.FileDrop) is string[] paths)
+                FilesDropped?.Invoke(paths);
+            return;
+        }
         if (_dragGroup is not null) { DropGroup(); return; }
 
         bool moved = _dragNode is not null && _doc is not null && _dragOrigin is { } origin
