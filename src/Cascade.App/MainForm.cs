@@ -1210,9 +1210,11 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Detaches the current filter file: clears all filters, forgets the file path, and stops it
-    /// from being auto-loaded next launch. (Save first if you want to keep the current set.)</summary>
+    /// from being auto-loaded next launch. Offers to save first, exactly as closing the window does - it is
+    /// the same loss either way, and it happens on one menu click with nothing to undo it.</summary>
     private void CloseFilters()
     {
+        if (!OfferToSaveFilters()) return;
         _doc.SetFilters(new FilterCollection());
         _history.Clear();
         SyncUndoMenu();
@@ -1805,17 +1807,41 @@ public sealed class MainForm : Form
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
-        if (!NoSavePrompt && _filtersDirty && _filterFilePath is not null)
-        {
-            var r = MessageBox.Show(this, "Save changes to filters?", "Cascade", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
-            if (r == DialogResult.Cancel) { e.Cancel = true; return; }
-            if (r == DialogResult.Yes) SaveFilters(false);
-        }
+        if (!OfferToSaveFilters()) { e.Cancel = true; return; }
         _refreshTimer.Stop();
         _settingsDirty = _stateDirty = true;   // a clean exit rewrites both, as it always has
         FlushConfig(force: true);
         Hide();
     }
+
+    /// <summary>Asks about unsaved filter changes before something throws them away, and saves them if that
+    /// is the answer. Returns false for "don't do it after all". One method rather than one per caller, so
+    /// closing the window and closing the filters cannot come to disagree about the question or about when
+    /// it is worth asking.</summary>
+    private bool OfferToSaveFilters()
+    {
+        if (!ShouldOfferToSaveFilters(NoSavePrompt, _filtersDirty, _filterFilePath)) return true;
+        var r = AnswerSavePromptForTesting?.Invoke()
+                ?? MessageBox.Show(this, "Save changes to filters?", "Cascade", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (r == DialogResult.Cancel) return false;
+        if (r == DialogResult.Yes) SaveFilters(false);
+        return true;
+    }
+
+    /// <summary>When unsaved filter changes are worth asking about. Static so the rule can be read without a
+    /// modal prompt standing in the way. Nothing is asked when there is no file to save to: the answer would
+    /// have to be a file dialog, which is a great deal to put in the way of closing a window.</summary>
+    internal static bool ShouldOfferToSaveFilters(bool suppressed, bool dirty, string? filterFilePath)
+        => !suppressed && dirty && filterFilePath is not null;
+
+    /// <summary>What to answer the save prompt with. Set only by checks - a modal message box in a headless
+    /// run has nobody to answer it. A field, not a property, because the WinForms analyser objects to
+    /// properties on a Control.</summary>
+    internal Func<DialogResult>? AnswerSavePromptForTesting;
+
+    internal string? FilterFileForTesting => _filterFilePath;
+    internal bool FiltersAreDirtyForTesting => _filtersDirty;
+    internal void LoadFiltersForTesting(string path) => LoadFiltersFrom(path);
 
     // Releasing the mapping of a very large log means the kernel has to give back every page of it that is
     // resident - two thirds of a second for a seven gigabyte trace, on the thread that draws. WinForms
