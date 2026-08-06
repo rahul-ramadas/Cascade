@@ -55,6 +55,9 @@ public sealed class AppSettings
     /// <summary>When true, <see cref="MachineState.LastFilterFile"/> is reloaded automatically at startup.</summary>
     public bool AutoLoadLastFilterFile { get; set; } = true;
 
+    /// <summary>Where a new filter goes among its siblings: the top of the list, or the end of it.</summary>
+    public bool AddNewFiltersAtTop { get; set; } = true;
+
     /// <summary>Whether the filter presets pane shares the filter pane.</summary>
     public bool ShowFilterPresets { get; set; } = true;
 

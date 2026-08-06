@@ -43,6 +43,11 @@ public sealed class FilterTreeControl : UserControl
     };
     private readonly FilterListHeader _header = new() { Dock = DockStyle.Top };
 
+    /// <summary>A row's worth of blank list kept below the last filter. Double-clicking the empty part of
+    /// the list asks for a new filter, and with enough filters to fill the pane there was no empty part
+    /// left to aim at. The tree cannot scroll past its last row, so the room is made underneath it.</summary>
+    private readonly Panel _tailSpace = new() { Dock = DockStyle.Bottom, BackColor = SystemColors.Window, AllowDrop = true };
+
     private AppSettings _settings = new();
     private Font? _fBase;
     private Font _fReg = null!, _fBold = null!, _fItalic = null!, _fBoldItalic = null!;
@@ -70,6 +75,7 @@ public sealed class FilterTreeControl : UserControl
     private int _dragGrabLevel;
     private Point _dragPoint;
     private TreeNode? _pressed;
+    private TreeNode? _contextNode;     // the row the context menu was opened over, if any
     private Point _pressedAt;
     private readonly System.Windows.Forms.Timer _autoScroll = new() { Interval = 60 };
     private int _autoScrollStep;
@@ -78,6 +84,10 @@ public sealed class FilterTreeControl : UserControl
     public event Action? FiltersChanged;
     public event Action<Filter>? EditRequested;
     public event Action<Filter?>? AddRequested;
+
+    /// <summary>Raised to add a filter directly after this one, as its sibling - what the list's own menu
+    /// offers, since a filter is usually made next to the one that prompted it.</summary>
+    public event Action<Filter>? AddBelowRequested;
     public event Action<Filter, bool>? FindFilterRequested; // (filter, forward)
 
     /// <summary>Raised with a label for the menu ("Remove Filter") immediately before the list changes the
@@ -99,8 +109,17 @@ public sealed class FilterTreeControl : UserControl
         _tree.ContextMenuStrip = menu;
 
         Controls.Add(_tree);
+        Controls.Add(_tailSpace);
         Controls.Add(_header);
         Controls.Add(_searchBar);
+
+        // MouseDown rather than a double-click event, for the reason given in OnTreeMouseDown: it is the one
+        // report that always arrives.
+        _tailSpace.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left && e.Clicks == 2) AddRequested?.Invoke(null); };
+        _tailSpace.DragEnter += (_, e) => e.Effect = DragEffectFor(e);
+        _tailSpace.DragOver += (_, e) => e.Effect = DragEffectFor(e);
+        _tailSpace.DragDrop += (_, e) => OnDragDrop(_tailSpace, e);
+        SizeTailSpace();
 
         // Docking runs from the back of the child list forwards, so the filling box has to be added first
         // to be laid out last and take whatever the label and the button leave.
@@ -165,6 +184,8 @@ public sealed class FilterTreeControl : UserControl
         _searchClose.Size = new Size(_search.PreferredHeight, _search.PreferredHeight);
     }
 
+    private void SizeTailSpace() => _tailSpace.Height = _tree.ItemHeight;
+
     /// <summary>A panel with a hairline along its top, so the bar reads as its own surface rather than as
     /// the list running on past its last row. The list's scrollbar stops short of the bar, which leaves the
     /// close button looking unmoored without one.</summary>
@@ -182,6 +203,10 @@ public sealed class FilterTreeControl : UserControl
     {
         base.OnFontChanged(e);
         SizeSearchBar();
+        // The tree works its own row height out from the font, on a posted call when it already has a
+        // handle - so read it back afterwards rather than racing it.
+        if (IsHandleCreated) BeginInvoke(new Action(() => { if (!IsDisposed) SizeTailSpace(); }));
+        else SizeTailSpace();
     }
 
     private const int FocusBarWidth = 3;
@@ -214,7 +239,7 @@ public sealed class FilterTreeControl : UserControl
         if (w <= 0) return;
         Rectangle r;
         if (_search.Focused) r = new Rectangle(0, _searchBar.Top, w, _searchBar.Height);
-        else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height);
+        else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height + _tailSpace.Height);
         else return;
         using var b = new SolidBrush(_settings.SelectionBack);
         e.Graphics.FillRectangle(b, r);
@@ -235,6 +260,7 @@ public sealed class FilterTreeControl : UserControl
     {
         // FullRowSelect is off, so make the whole colored row clickable for selection.
         _collapseOnUp = null;
+        if (button == MouseButtons.Right) _contextNode = node;
         if (node is not null)
         {
             bool onContent = at.X >= ContentLeft(node);
@@ -1191,6 +1217,22 @@ public sealed class FilterTreeControl : UserControl
     /// front of it.</summary>
     internal void RevealForTesting(Filter f) { if (NodeFor(f) is { } n) RevealNode(n); }
 
+    /// <summary>The blank row kept below the last filter, and a double-click on it through the real handler.</summary>
+    internal Rectangle TailSpaceForTesting => _tailSpace.Bounds;
+
+    internal void DoubleClickTailSpaceForTesting()
+        => typeof(Control).GetMethod("OnMouseDown",
+               System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+           .Invoke(_tailSpace, [new MouseEventArgs(MouseButtons.Left, 2, 4, 4, 0)]);
+
+    /// <summary>The list's own menu, so a check can open it the way Windows does and read what it offers.</summary>
+    internal ContextMenuStrip FilterMenuForTesting => (ContextMenuStrip)_tree.ContextMenuStrip!;
+
+    internal void OpenFilterMenuForTesting()
+        => typeof(ToolStripDropDown).GetMethod("OnOpening",
+               System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+           .Invoke(FilterMenuForTesting, [new System.ComponentModel.CancelEventArgs()]);
+
     /// <summary>A press at this point with these modifiers, through the real handler.</summary>
     internal void MouseDownForTesting(Point at, Keys mods = Keys.None, MouseButtons button = MouseButtons.Left)
         => HandleMouseDown(_tree.GetNodeAt(0, at.Y), at, button, mods);
@@ -1597,7 +1639,11 @@ public sealed class FilterTreeControl : UserControl
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Add Filter…", null, (_, _) => AddRequested?.Invoke(null));
+        var add = new ToolStripMenuItem("Add Filter…", null, (_, _) =>
+        {
+            if (ContextFilter is { } f) AddBelowRequested?.Invoke(f); else AddRequested?.Invoke(null);
+        });
+        menu.Items.Add(add);
         menu.Items.Add("Add Child Filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
         var edit = new ToolStripMenuItem("Edit Filter…", null, (_, _) => RaiseEditRequest());
         var duplicate = new ToolStripMenuItem("Duplicate Filter", null, (_, _) => DuplicateSelected()) { ShortcutKeyDisplayString = "Ctrl+D" };
@@ -1619,12 +1665,17 @@ public sealed class FilterTreeControl : UserControl
         menu.Opening += (_, _) =>
         {
             int n = SelectedCount;
+            add.Text = ContextFilter is null ? "Add Filter…" : "Add Filter Below…";
             edit.Text = n > 1 ? $"Edit Appearance of {n} Filters…" : "Edit Filter…";
             duplicate.Text = n > 1 ? $"Duplicate {n} Filters" : "Duplicate Filter";
             remove.Text = n > 1 ? $"Remove {n} Filters" : "Remove Filter";
         };
         return menu;
     }
+
+    /// <summary>The filter the context menu is about: the row it was opened over, or - when it was asked
+    /// for from the keyboard, which reports no position at all - the one that is selected.</summary>
+    private Filter? ContextFilter => _tree.ContextMenuFromKeyboard ? SelectedFilter : _contextNode?.Tag as Filter;
 
     public void RemoveSelected()
     {
@@ -1865,6 +1916,16 @@ public sealed class FilterTreeControl : UserControl
 
     /// <summary>Selects the first filter (used by the screenshot/demo harness).</summary>
     public void SelectFirst() { if (_flat.Count > 0) _tree.SelectedNode = _flat[0]; }
+
+    /// <summary>Brings a filter into view and makes it the whole selection, so that the commands aimed at
+    /// "the current filter" - F4 above all - act on it the moment it appears.</summary>
+    public void RevealFilter(Filter filter)
+    {
+        if (NodeFor(filter) is not { } node) return;
+        SetCurrent(node);
+        SetSingleSelection(node);
+        RevealNode(node);
+    }
 
     /// <summary>Sets the filter-search text (used by the screenshot/demo harness).</summary>
     internal void SetSearchText(string text) { ShowSearch(); _search.Text = text; }

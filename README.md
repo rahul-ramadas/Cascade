@@ -114,7 +114,7 @@ a single file, no installer. It needs Windows and the .NET 10 Desktop Runtime, w
 - **Opening** — `Ctrl+O`, `F5` to reload, *Open from Clipboard*, recent files, a path on the command line, or drag a file onto the window. Dropping a `.cascade` or `.tat` loads its filters instead.
 - **Encodings** — auto-detect, UTF-8, UTF-16 LE/BE, Windows-1252 or the system default, changeable at any time.
 - **Copying** — selected lines with or without line numbers, or *Save Current Lines* to write out exactly what the filters are showing.
-- **Preferences** — font, size, line spacing, colours, tab size, markers, line numbers; exportable to carry between machines.
+- **Preferences** — font, size, line spacing, colours, tab size, markers, line numbers, which end of the list new filters join; exportable to carry between machines.
 - **Keyboard-complete and accessible** — every feature has a shortcut or a menu item, and the log view exposes each row to UI Automation.
 - **Survives being killed** — settings, state and filter files are written as you change them, not on the way out.
 

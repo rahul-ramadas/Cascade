@@ -13,6 +13,7 @@ public sealed class PreferencesDialog : DialogBase
     private readonly NumericUpDown _lineSpacing = new() { Minimum = 0, Maximum = 12 };
     private readonly CheckBox _lineNumbers = new() { Text = "Show line numbers", AutoSize = true };
     private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
+    private readonly CheckBox _newFiltersAtTop = new() { Text = "Add new filters at the top of the list", AutoSize = true };
     private readonly ComboBox _markers = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
     private readonly Button _fg = new() { FlatStyle = FlatStyle.Flat };
@@ -71,6 +72,7 @@ public sealed class PreferencesDialog : DialogBase
         Row("Markers:", _markers);
         Row("", _lineNumbers);
         Row("", _autoLoadFilters);
+        Row("", _newFiltersAtTop);
 
         var buttons = OkCancelRow(out var ok, out _);
         root.Controls.Add(buttons);
@@ -107,6 +109,7 @@ public sealed class PreferencesDialog : DialogBase
         _lineSpacing.Value = Math.Clamp(_s.ExtraLineSpacing, 0, 12);
         _lineNumbers.Checked = _s.ShowLineNumbers;
         _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
+        _newFiltersAtTop.Checked = _s.AddNewFiltersAtTop;
         _markers.SelectedIndex = (int)_s.MarkerVisibility;
     }
 
@@ -118,6 +121,7 @@ public sealed class PreferencesDialog : DialogBase
         _s.ExtraLineSpacing = (int)_lineSpacing.Value;
         _s.ShowLineNumbers = _lineNumbers.Checked;
         _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
+        _s.AddNewFiltersAtTop = _newFiltersAtTop.Checked;
         _s.MarkerVisibility = (MarkerVisibilityMode)_markers.SelectedIndex;
     }
 }

@@ -90,6 +90,7 @@ internal static class SelfTest
             ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
+            ok &= Timed("new filter", RunNewFilterChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
             ok &= Timed("tab stops", RunTabStopChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
@@ -2585,9 +2586,151 @@ internal static class SelfTest
     /// That is what the flash on every undo was: clear every node, recreate every node, then put the
     /// selection and the scroll position back - and each of those two restores scrolls the list. Flicker
     /// cannot be seen in a screenshot, so it is measured here instead, as rows built and repaints taken.</summary>
-    private static bool RunFilterSyncChecks()
+    /// <summary>Making a new filter: where it lands, that it can always be asked for, and that it is on
+    /// screen and selected the moment it exists.</summary>
+    private static bool RunNewFilterChecks()
     {
-        Line("-- keeping the filter list still --");
+        Line("-- adding a filter --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_newfilter_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllText(path, string.Concat(Enumerable.Range(0, 200).Select(i => $"line {i}\n")), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        bool ok;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var tree = new FilterTreeControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(320, 400),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(tree);
+            tree.Attach(doc);
+            host.Show();
+            Pump();
+            FitTreeToRows(host, tree, 12);
+
+            // ---- where a new filter goes ----
+            var filters = new FilterCollection();
+            var roots = new List<Filter>();
+            for (int i = 0; i < 40; i++)
+            {
+                var f = new Filter { Enabled = true, Match = new FilterMatch { Text = $"filter {i:00}" } };
+                filters.Roots.Add(f);
+                roots.Add(f);
+            }
+            var kid = new Filter { Match = new FilterMatch { Text = "kid" } };
+            filters.Roots.Add(kid);
+            filters.Move(kid, roots[3], 0);
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+
+            ok = Check("with nothing to go below, the preference sends it to the top",
+                       MainForm.NewFilterIndex(addAtTop: true, after: null, filters) == 0);
+            ok &= Check("or to the end",
+                        MainForm.NewFilterIndex(addAtTop: false, after: null, filters) == -1);
+            ok &= Check("below a filter means the next place among its own siblings",
+                        MainForm.NewFilterIndex(addAtTop: true, after: roots[3], filters) == 4);
+            ok &= Check("and asking for below beats the preference",
+                        MainForm.NewFilterIndex(addAtTop: false, after: roots[3], filters) == 4);
+            ok &= Check("below a nested filter counts among ITS siblings, not the roots",
+                        MainForm.NewFilterIndex(addAtTop: true, after: kid, filters) == 1);
+
+            // ---- there is always somewhere to double-click ----
+            int rowH = tree.RowHeightForTesting;
+            var tail = tree.TailSpaceForTesting;
+            ok &= Check($"the list keeps a filter's worth of blank space below it ({tail.Height} of {rowH})",
+                        tail.Height >= rowH);
+            ok &= Check($"which is below the list itself ({tail.Top} against {tree.TreeAreaForTesting.Bottom})",
+                        tail.Top >= tree.TreeAreaForTesting.Bottom);
+            ok &= Check($"and the list holds more filters than fit, so it has no blank row of its own " +
+                        $"({filters.Roots.Count} filters, room for {tree.TreeHeightForTesting / rowH})",
+                        filters.Roots.Count > tree.TreeHeightForTesting / rowH);
+
+            int asked = 0;
+            Filter? askedParent = null;
+            void CountAdds(Filter? p) { asked++; askedParent = p; }
+            tree.AddRequested += CountAdds;
+            tree.DoubleClickTailSpaceForTesting();
+            Pump();
+            ok &= Check($"double-clicking that space asks for a new top-level filter (raised {asked})",
+                        asked == 1 && askedParent is null);
+            tree.AddRequested -= CountAdds;
+
+            // ---- what the list's own menu offers ----
+            Filter? below = null;
+            void NoteBelow(Filter f) => below = f;
+            tree.AddBelowRequested += NoteBelow;
+            asked = 0;
+            tree.AddRequested += CountAdds;
+
+            var menu = tree.FilterMenuForTesting;
+            var addItem = (ToolStripMenuItem)menu.Items[0];
+            tree.ScrollToForTesting(roots[0]);
+            Pump();
+            tree.ClickFilterForTesting(roots[2], button: MouseButtons.Right);
+            tree.OpenFilterMenuForTesting();
+            ok &= Check($"right-clicking a filter offers to add one below it [{addItem.Text}]",
+                        addItem.Text == "Add Filter Below\u2026");
+            addItem.PerformClick();
+            ok &= Check("and that is the filter it means", ReferenceEquals(below, roots[2]));
+            ok &= Check("without asking for a plain one as well", asked == 0);
+
+            below = null;
+            tree.MouseDownForTesting(new Point(20, tree.TreeAreaForTesting.Height - 2), button: MouseButtons.Right);
+            tree.OpenFilterMenuForTesting();
+            // The fixture fills the list, so the point above is a row - what matters is the empty case, and
+            // the only place that is certain to be empty is the blank strip. Ask about no row at all.
+            tree.MouseDownForTesting(new Point(20, tree.TreeAreaForTesting.Height + rowH), button: MouseButtons.Right);
+            tree.OpenFilterMenuForTesting();
+            ok &= Check($"right-clicking clear of every filter offers a plain one [{addItem.Text}]",
+                        addItem.Text == "Add Filter\u2026");
+            addItem.PerformClick();
+            ok &= Check("and asks for it at the top level", asked == 1 && askedParent is null);
+            ok &= Check("not below anything", below is null);
+            tree.AddRequested -= CountAdds;
+            tree.AddBelowRequested -= NoteBelow;
+
+            // ---- a new filter is on screen and selected ----
+            // A row scrolled out of the list still reports a rectangle - with a top above the list, or below
+            // its bottom - so "on screen" has to be read as overlapping the list, not as having bounds.
+            bool OnScreen(Filter f)
+            {
+                var b = tree.RowBoundsForTesting(f);
+                return !b.IsEmpty && b.Bottom > 0 && b.Top < tree.TreeHeightForTesting;
+            }
+            tree.ScrollToForTesting(roots[30]);
+            Pump();
+            ok &= Check($"a filter scrolled out of the list really is out of sight " +
+                        $"({tree.RowBoundsForTesting(roots[0])})", !OnScreen(roots[0]));
+            tree.RevealFilter(roots[0]);
+            Pump();
+            ok &= Check("revealing it brings it back into view", OnScreen(roots[0]));
+            ok &= Check($"and selects it, so F4 acts on it at once [{string.Join(" ", tree.SelectedNamesForTesting)}]",
+                        tree.SelectedNamesForTesting is [var only] && only == roots[0].Match.ToDisplayString());
+            ok &= Check("and it is the current row too",
+                        ReferenceEquals(tree.SelectedFilter, roots[0]));
+        }
+        finally
+        {
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* best effort */ }
+        }
+
+        return ok;
+    }
+
+    private static bool RunFilterSyncChecks()
+    {        Line("-- keeping the filter list still --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_sync_" + Guid.NewGuid().ToString("N") + ".log");
         File.WriteAllText(path, string.Concat(Enumerable.Range(0, 200).Select(i => $"line {i}\n")), new UTF8Encoding(false));
 
