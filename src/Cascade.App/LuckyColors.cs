@@ -84,6 +84,22 @@ internal static class LuckyColors
     /// <summary>The pair at <paramref name="index"/>, which wraps.</summary>
     public static Pair At(int index) => All[((index % Count) + Count) % Count];
 
+    /// <summary>Where a colour already sits in the ring, or -1 when none of these looks like it. Start the
+    /// walk there and the first press offers something else, while the colour it started on is the last one
+    /// to come back round - which is what makes pressing the button once always do something visible.</summary>
+    public static int IndexOf(RgbColor back)
+    {
+        var lab = ToLab(back);
+        int nearest = -1;
+        double best = TooClose;
+        for (int i = 0; i < All.Length; i++)
+        {
+            double d = Difference(AllLab[i], lab);
+            if (d < best) { best = d; nearest = i; }
+        }
+        return nearest;
+    }
+
     /// <summary>How far round the set each press moves. Coprime with its size, so repeated presses visit
     /// every colour before repeating any; chosen by measuring every coprime stride and taking the one whose
     /// WORST pair of consecutive offers is furthest apart - 20.6, against 13.5 for a stride picked to look

@@ -183,6 +183,7 @@ public sealed class AppearanceDialog : DialogBase
         if (common.Background == StyleEdit.Set) _back = common.BackgroundValue;
         _bold.SelectedIndex = ChoiceFor(common.Bold, common.BoldValue);
         _italic.SelectedIndex = ChoiceFor(common.Italic, common.ItalicValue);
+        SeedLucky();
         UpdatePreview();
     }
 
@@ -262,6 +263,7 @@ public sealed class AppearanceDialog : DialogBase
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             Show(new RgbColor(dlg.Color.R, dlg.Color.G, dlg.Color.B));
+            SeedLucky();
             return;
         }
 
@@ -281,6 +283,11 @@ public sealed class AppearanceDialog : DialogBase
         UpdatePreview();
     }
 
+    /// <summary>Puts the walk where the colour on show already sits, so the next press moves off it. Only
+    /// when every filter being changed wears the same one - otherwise there is nothing to move off.</summary>
+    private void SeedLucky()
+        => _lucky = _setBack.CheckState == CheckState.Checked ? LuckyColors.IndexOf(_back) : -1;
+
     private void ShowPalette()
     {
         var free = LuckyColors.Free(_all, _filters);
@@ -294,6 +301,7 @@ public sealed class AppearanceDialog : DialogBase
         _fore = dlg.Picked.Fore;
         _setBack.CheckState = CheckState.Checked;
         _setFore.CheckState = CheckState.Checked;
+        SeedLucky();
         UpdatePreview();
     }
 
