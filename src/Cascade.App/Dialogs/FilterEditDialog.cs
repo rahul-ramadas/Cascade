@@ -225,6 +225,7 @@ public sealed class FilterEditDialog : DialogBase
 
         if (_filter.Style.Foreground is { } fg) { _fore = fg; _setFore.Checked = true; }
         if (_filter.Style.Background is { } bg) { _back = bg; _setBack.Checked = true; }
+        SeedLucky();
         _bold.CheckState = ToState(_filter.Style.Bold);
         _italic.CheckState = ToState(_filter.Style.Italic);
 
@@ -294,6 +295,7 @@ public sealed class FilterEditDialog : DialogBase
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             Show(new RgbColor(dlg.Color.R, dlg.Color.G, dlg.Color.B));
+            SeedLucky();
             return;
         }
 
@@ -339,7 +341,12 @@ public sealed class FilterEditDialog : DialogBase
         UpdateColorButtons();
     }
 
+    /// <summary>Puts the walk where the colour on show already sits, so the next press moves off it. Called
+    /// wherever a colour arrives from somewhere other than the button itself.</summary>
+    private void SeedLucky() => _lucky = _setBack.Checked ? LuckyColors.IndexOf(_back) : -1;
+
     internal void FeelLuckyForTesting() => FeelLucky();
+    internal void SaveForTesting() => Apply();
     internal (RgbColor Fore, RgbColor Back) ColorsForTesting => (_fore, _back);
     internal void SetStyleForTesting(bool? bold, bool? italic)
     {
@@ -371,6 +378,7 @@ public sealed class FilterEditDialog : DialogBase
         _fore = dlg.Picked.Fore;
         _setBack.Checked = true;
         _setFore.Checked = true;
+        SeedLucky();
         UpdateColorButtons();
     }
 

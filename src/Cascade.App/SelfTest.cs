@@ -3036,6 +3036,38 @@ internal static class SelfTest
             ok &= Check("and pressing it again changes them", dlg.ColorsForTesting.Back != first,
                         dlg.ColorsForTesting.Back.ToString());
         }
+
+        // The reported bug: take a colour from the button, keep it, come back - and the first press offered
+        // the colour the filter was already wearing, so nothing happened until it was pressed twice.
+        var kept = new Filter();
+        RgbColor saved;
+        using (var dlg = new FilterEditDialog(kept, isNew: true, taken))
+        {
+            dlg.FeelLuckyForTesting();
+            dlg.SaveForTesting();
+            saved = kept.Style.Background!.Value;
+        }
+        using (var dlg = new FilterEditDialog(kept, isNew: false, taken))
+        {
+            dlg.FeelLuckyForTesting();
+            ok &= Check("editing a filter again, one press moves off the colour it already has",
+                        dlg.ColorsForTesting.Back != saved,
+                        $"had {saved}, offered {dlg.ColorsForTesting.Back}");
+        }
+
+        // And it is only kept back until the ring has been all the way round, not dropped from it.
+        var wearing = LuckyColors.At(7);
+        var walker = new Filter { Style = { Background = wearing.Back, Foreground = wearing.Fore } };
+        using (var dlg = new FilterEditDialog(walker, isNew: false, Array.Empty<Filter>()))
+        {
+            var offers = new List<RgbColor>();
+            for (int i = 0; i < LuckyColors.Count; i++) { dlg.FeelLuckyForTesting(); offers.Add(dlg.ColorsForTesting.Back); }
+            int back2 = offers.IndexOf(wearing.Back);
+            ok &= Check($"and comes back to it only after the whole ring " +
+                        $"(press {back2 + 1} of {LuckyColors.Count})", back2 == LuckyColors.Count - 1);
+            ok &= Check($"offering every other colour exactly once on the way ({offers.Distinct().Count()})",
+                        offers.Distinct().Count() == LuckyColors.Count);
+        }
         return ok;
     }
 
