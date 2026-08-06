@@ -24,7 +24,8 @@ public sealed class AppearanceDialog : DialogBase
     private readonly Button _chipsBtn = new() { Text = "&Paint chips\u2026", AutoSize = true, Margin = new Padding(6, 3, 0, 3) };
 
     private readonly ComboBox _bold = new() { DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 24, 3) };
-    private readonly ComboBox _italic = new() { DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 0, 3) };
+    private readonly ComboBox _italic = new() { DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 24, 3) };
+    private readonly ComboBox _underline = new() { DropDownStyle = ComboBoxStyle.DropDownList, Margin = new Padding(0, 3, 0, 3) };
 
     private readonly TextBox _preview = new() { Dock = DockStyle.Fill, ReadOnly = true, TabStop = false, Font = Mono };
     private readonly Label _note = new() { AutoSize = false, AutoEllipsis = true, ForeColor = Color.Gray };
@@ -35,6 +36,10 @@ public sealed class AppearanceDialog : DialogBase
         new("Consolas", 9.75f, FontStyle.Bold),
         new("Consolas", 9.75f, FontStyle.Italic),
         new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Italic),
+        new("Consolas", 9.75f, FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Italic | FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Italic | FontStyle.Underline),
     ];
 
     private static Font Mono => MonoFaces[0];
@@ -78,13 +83,19 @@ public sealed class AppearanceDialog : DialogBase
         _back = defaults.Background;
         _foreBtn.Size = new Size(Dpi(72), Dpi(23));
         _backBtn.Size = new Size(Dpi(72), Dpi(23));
-        _bold.Width = _italic.Width = Dpi(150);
-        foreach (var choice in FlagChoices) { _bold.Items.Add(choice.Text); _italic.Items.Add(choice.Text); }
+        _bold.Width = _italic.Width = _underline.Width = Dpi(150);
+        foreach (var choice in FlagChoices)
+        {
+            _bold.Items.Add(choice.Text);
+            _italic.Items.Add(choice.Text);
+            _underline.Items.Add(choice.Text);
+        }
         _preview.AccessibleName = "Appearance preview";
         _setFore.AccessibleName = "Set text color";
         _setBack.AccessibleName = "Set background";
         _bold.AccessibleName = "Bold";
         _italic.AccessibleName = "Italic";
+        _underline.AccessibleName = "Underline";
 
         var root = new TableLayoutPanel
         {
@@ -117,7 +128,7 @@ public sealed class AppearanceDialog : DialogBase
 
         Row("Preview:", _preview);
         Row("Color:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _chipsBtn));
-        Row("Style:", Strip(Caption("Bo&ld"), _bold, Caption("&Italic"), _italic));
+        Row("Style:", Strip(Caption("Bo&ld"), _bold, Caption("&Italic"), _italic, Caption("&Underline"), _underline));
 
         var buttons = OkCancelRow(out var ok, out _);
         buttons.Dock = DockStyle.None;
@@ -159,6 +170,7 @@ public sealed class AppearanceDialog : DialogBase
         _setBack.CheckStateChanged += (_, _) => UpdatePreview();
         _bold.SelectedIndexChanged += (_, _) => UpdatePreview();
         _italic.SelectedIndexChanged += (_, _) => UpdatePreview();
+        _underline.SelectedIndexChanged += (_, _) => UpdatePreview();
         ok.Click += (_, _) => Apply();
 
         LoadFromFilters();
@@ -183,6 +195,7 @@ public sealed class AppearanceDialog : DialogBase
         if (common.Background == StyleEdit.Set) _back = common.BackgroundValue;
         _bold.SelectedIndex = ChoiceFor(common.Bold, common.BoldValue);
         _italic.SelectedIndex = ChoiceFor(common.Italic, common.ItalicValue);
+        _underline.SelectedIndex = ChoiceFor(common.Underline, common.UnderlineValue);
         SeedLucky();
         UpdatePreview();
     }
@@ -224,10 +237,11 @@ public sealed class AppearanceDialog : DialogBase
         var back = change.Background == StyleEdit.Set ? change.BackgroundValue : _defaults.Background;
         bool bold = change.Bold == StyleEdit.Set && change.BoldValue;
         bool italic = change.Italic == StyleEdit.Set && change.ItalicValue;
+        bool underline = change.Underline == StyleEdit.Set && change.UnderlineValue;
 
         _preview.ForeColor = ToColor(fore);
         _preview.BackColor = ToColor(back);
-        _preview.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0)];
+        _preview.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0)];
         _preview.Text = SampleText;
     }
 
@@ -235,7 +249,8 @@ public sealed class AppearanceDialog : DialogBase
         FromState(_setFore.CheckState), _fore,
         FromState(_setBack.CheckState), _back,
         FlagChoices[Math.Max(0, _bold.SelectedIndex)].Edit, FlagChoices[Math.Max(0, _bold.SelectedIndex)].Value,
-        FlagChoices[Math.Max(0, _italic.SelectedIndex)].Edit, FlagChoices[Math.Max(0, _italic.SelectedIndex)].Value);
+        FlagChoices[Math.Max(0, _italic.SelectedIndex)].Edit, FlagChoices[Math.Max(0, _italic.SelectedIndex)].Value,
+        FlagChoices[Math.Max(0, _underline.SelectedIndex)].Edit, FlagChoices[Math.Max(0, _underline.SelectedIndex)].Value);
 
     private void Apply() => Change = Read();
 
@@ -317,8 +332,11 @@ public sealed class AppearanceDialog : DialogBase
     internal void SetFlagForTesting(bool bold, StyleEdit edit, bool value)
         => (bold ? _bold : _italic).SelectedIndex = ChoiceFor(edit, value);
 
-    internal (CheckState Fore, CheckState Back, int Bold, int Italic) StateForTesting =>
-        (_setFore.CheckState, _setBack.CheckState, _bold.SelectedIndex, _italic.SelectedIndex);
+    internal void SetUnderlineForTesting(StyleEdit edit, bool value)
+        => _underline.SelectedIndex = ChoiceFor(edit, value);
+
+    internal (CheckState Fore, CheckState Back, int Bold, int Italic, int Underline) StateForTesting =>
+        (_setFore.CheckState, _setBack.CheckState, _bold.SelectedIndex, _italic.SelectedIndex, _underline.SelectedIndex);
 
     internal (string Fore, string Back) SwatchTextForTesting => (_foreBtn.Text, _backBtn.Text);
 

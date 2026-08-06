@@ -11,20 +11,24 @@ public sealed class FilterStyle
     public RgbColor? Background { get; set; }
     public bool? Bold { get; set; }
     public bool? Italic { get; set; }
+    public bool? Underline { get; set; }
 
-    public bool IsEmpty => Foreground is null && Background is null && Bold is null && Italic is null;
+    public bool IsEmpty => Foreground is null && Background is null && Bold is null && Italic is null
+                           && Underline is null;
 
     public FilterStyle Clone() => new()
     {
         Foreground = Foreground,
         Background = Background,
         Bold = Bold,
-        Italic = Italic
+        Italic = Italic,
+        Underline = Underline
     };
 }
 
 /// <summary>A fully-resolved style with no unset attributes, ready for rendering.</summary>
-public readonly record struct ResolvedStyle(RgbColor Foreground, RgbColor Background, bool Bold, bool Italic);
+public readonly record struct ResolvedStyle(RgbColor Foreground, RgbColor Background, bool Bold, bool Italic,
+                                            bool Underline = false);
 
 /// <summary>Resolves a filter's effective style using per-property inheritance up the ancestor chain
 /// (regardless of whether ancestors are enabled), falling back to the supplied defaults.</summary>
@@ -33,7 +37,7 @@ public static class StyleResolver
     public static ResolvedStyle Resolve(Filter filter, ResolvedStyle defaults)
     {
         RgbColor fg = defaults.Foreground, bg = defaults.Background;
-        bool bold = defaults.Bold, italic = defaults.Italic;
+        bool bold = defaults.Bold, italic = defaults.Italic, underline = defaults.Underline;
 
         for (Filter? n = filter; n is not null; n = n.Parent)
             if (n.Style.Foreground is { } c) { fg = c; break; }
@@ -43,8 +47,10 @@ public static class StyleResolver
             if (n.Style.Bold is { } b) { bold = b; break; }
         for (Filter? n = filter; n is not null; n = n.Parent)
             if (n.Style.Italic is { } b) { italic = b; break; }
+        for (Filter? n = filter; n is not null; n = n.Parent)
+            if (n.Style.Underline is { } b) { underline = b; break; }
 
-        return new ResolvedStyle(fg, bg, bold, italic);
+        return new ResolvedStyle(fg, bg, bold, italic, underline);
     }
 }
 
@@ -67,7 +73,8 @@ public readonly record struct StyleChange(
     StyleEdit Foreground, RgbColor ForegroundValue,
     StyleEdit Background, RgbColor BackgroundValue,
     StyleEdit Bold, bool BoldValue,
-    StyleEdit Italic, bool ItalicValue)
+    StyleEdit Italic, bool ItalicValue,
+    StyleEdit Underline = StyleEdit.Leave, bool UnderlineValue = false)
 {
     /// <summary>Touches nothing.</summary>
     public static StyleChange Nothing =>
@@ -84,8 +91,10 @@ public readonly record struct StyleChange(
         var (back, backValue) = Common(all.Select(f => f.Style.Background));
         var (bold, boldValue) = Common(all.Select(f => f.Style.Bold));
         var (italic, italicValue) = Common(all.Select(f => f.Style.Italic));
+        var (under, underValue) = Common(all.Select(f => f.Style.Underline));
         return new StyleChange(fore, foreValue ?? default, back, backValue ?? default,
-                               bold, boldValue ?? false, italic, italicValue ?? false);
+                               bold, boldValue ?? false, italic, italicValue ?? false,
+                               under, underValue ?? false);
     }
 
     private static (StyleEdit Edit, T? Value) Common<T>(IEnumerable<T?> values) where T : struct
@@ -114,6 +123,8 @@ public readonly record struct StyleChange(
         { style.Bold = bold; changed = true; }
         if (Wanted(Italic, ItalicValue, style.Italic) is var italic && !Nullable.Equals(style.Italic, italic))
         { style.Italic = italic; changed = true; }
+        if (Wanted(Underline, UnderlineValue, style.Underline) is var under && !Nullable.Equals(style.Underline, under))
+        { style.Underline = under; changed = true; }
         return changed;
     }
 

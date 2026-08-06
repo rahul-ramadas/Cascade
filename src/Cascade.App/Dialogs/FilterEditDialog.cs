@@ -24,6 +24,10 @@ public sealed class FilterEditDialog : DialogBase
         new("Consolas", 9.75f, FontStyle.Bold),
         new("Consolas", 9.75f, FontStyle.Italic),
         new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Italic),
+        new("Consolas", 9.75f, FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Italic | FontStyle.Underline),
+        new("Consolas", 9.75f, FontStyle.Bold | FontStyle.Italic | FontStyle.Underline),
     ];
 
     private static Font Mono => MonoFaces[0];
@@ -53,7 +57,8 @@ public sealed class FilterEditDialog : DialogBase
     private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(16, 3, 0, 3) };
     private readonly Button _chipsBtn = new() { Text = "&Paint chips\u2026", AutoSize = true, Margin = new Padding(6, 3, 0, 3) };
     private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(32, 6, 24, 3) };
-    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 0, 3) };
+    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 24, 3) };
+    private readonly QuietCheckBox _underline = new() { Text = "&Underline", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 0, 3) };
 
     private readonly IReadOnlyList<Filter> _siblings;
     /// <summary>Where this filter will hang, which decides what it inherits. A filter being added is not in
@@ -129,7 +134,7 @@ public sealed class FilterEditDialog : DialogBase
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
         // Colour and style are one idea - what a matching line looks like - and the note below covers both.
         // Both buttons offer a colour, so they belong with the swatches rather than after the style ticks.
-        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _chipsBtn, _bold, _italic));
+        Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _chipsBtn, _bold, _italic, _underline));
 
         // The error shares the button row rather than having one of its own: that row is as tall as the
         // buttons whatever else is in it, so a bad pattern cannot push them down the dialog.
@@ -170,6 +175,7 @@ public sealed class FilterEditDialog : DialogBase
         _setBack.CheckedChanged += (_, _) => UpdateColorButtons();
         _bold.CheckStateChanged += (_, _) => UpdatePreview();
         _italic.CheckStateChanged += (_, _) => UpdatePreview();
+        _underline.CheckStateChanged += (_, _) => UpdatePreview();
         _typeText.CheckedChanged += (_, _) => UpdateTypeEnabled();
         _typeMarker.CheckedChanged += (_, _) => UpdateTypeEnabled();
         _text.TextChanged += (_, _) => ValidateRegex();
@@ -228,6 +234,7 @@ public sealed class FilterEditDialog : DialogBase
         SeedLucky();
         _bold.CheckState = ToState(_filter.Style.Bold);
         _italic.CheckState = ToState(_filter.Style.Italic);
+        _underline.CheckState = ToState(_filter.Style.Underline);
 
         UpdateColorButtons();
         UpdateTypeEnabled();
@@ -261,16 +268,17 @@ public sealed class FilterEditDialog : DialogBase
         var back = _setBack.Checked ? _back : inherited.Background;
         bool bold = _bold.CheckState is CheckState.Indeterminate ? inherited.Bold : _bold.Checked;
         bool italic = _italic.CheckState is CheckState.Indeterminate ? inherited.Italic : _italic.Checked;
+        bool underline = _underline.CheckState is CheckState.Indeterminate ? inherited.Underline : _underline.Checked;
 
         _text.ForeColor = Color.FromArgb(fore.R, fore.G, fore.B);
         _text.BackColor = Color.FromArgb(back.R, back.G, back.B);
-        _text.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0)];
+        _text.Font = MonoFaces[(bold ? 1 : 0) | (italic ? 2 : 0) | (underline ? 4 : 0)];
     }
 
     private static RgbColor ToRgb(Color c) => new(c.R, c.G, c.B);
 
-    internal (Color Fore, Color Back, bool Bold, bool Italic) PreviewForTesting =>
-        (_text.ForeColor, _text.BackColor, _text.Font.Bold, _text.Font.Italic);
+    internal (Color Fore, Color Back, bool Bold, bool Italic, bool Underline) PreviewForTesting =>
+        (_text.ForeColor, _text.BackColor, _text.Font.Bold, _text.Font.Italic, _text.Font.Underline);
 
     /// <summary>The system picker, with the pattern box following the colour as it is chosen. Cancelling
     /// puts back exactly what was there, including whether the box was ticked at all - picking a colour
@@ -348,10 +356,11 @@ public sealed class FilterEditDialog : DialogBase
     internal void FeelLuckyForTesting() => FeelLucky();
     internal void SaveForTesting() => Apply();
     internal (RgbColor Fore, RgbColor Back) ColorsForTesting => (_fore, _back);
-    internal void SetStyleForTesting(bool? bold, bool? italic)
+    internal void SetStyleForTesting(bool? bold, bool? italic, bool? underline = null)
     {
         _bold.CheckState = ToState(bold);
         _italic.CheckState = ToState(italic);
+        _underline.CheckState = ToState(underline);
     }
     internal void SetColorsForTesting(RgbColor? fore, RgbColor? back)
     {
@@ -415,5 +424,6 @@ public sealed class FilterEditDialog : DialogBase
         _filter.Style.Background = _setBack.Checked ? _back : null;
         _filter.Style.Bold = FromState(_bold.CheckState);
         _filter.Style.Italic = FromState(_italic.CheckState);
+        _filter.Style.Underline = FromState(_underline.CheckState);
     }
 }

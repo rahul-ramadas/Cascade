@@ -105,7 +105,7 @@ internal static class UiShots
         doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xC0, 0, 0), Bold = true } });
         doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
         doc.Filters.Add(new Filter { Enabled = true, Description = "info", Match = { Text = "INFO" }, Style = { Foreground = new RgbColor(0x60, 0x60, 0x60) } });
-        doc.Filters.Add(new Filter { Enabled = true, Description = "payments", Match = { Text = "payment" }, Style = { Foreground = new RgbColor(0, 0, 0xC0) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "payments", Match = { Text = "payment" }, Style = { Foreground = new RgbColor(0, 0, 0xC0), Underline = true } });
         doc.Filters.Add(new Filter { Enabled = true, Description = "orders", Match = { Text = "order" }, Style = { Foreground = new RgbColor(0, 0x88, 0) } });
         doc.ApplyFilters();
         WaitIdle(doc);
@@ -162,7 +162,7 @@ internal static class UiShots
         doc.Open(path);
         doc.WaitForIndex();
         doc.Filters.Add(new Filter { Enabled = true, Description = "errors", Match = { Text = "ERROR" }, Style = { Foreground = new RgbColor(0xC0, 0, 0), Bold = true } });
-        doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A) } });
+        doc.Filters.Add(new Filter { Enabled = true, Description = "warnings", Match = { Text = "WARN" }, Style = { Background = new RgbColor(0xFF, 0xF1, 0x9A), Underline = true } });
         doc.ApplyFilters();
         WaitIdle(doc);
         doc.Markers.Toggle(2, 0);

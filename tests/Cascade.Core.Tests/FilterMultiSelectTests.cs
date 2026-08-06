@@ -202,6 +202,17 @@ public class FilterMultiSelectTests
         // Nothing to do is reported as nothing to do, so a dialog dismissed with OK costs no re-filtering.
         Assert.False(StyleChange.Nothing.ApplyTo(f));
         Assert.False(clearBold.ApplyTo(f));
+
+        // Underline is an attribute like any other: written when asked for, and left alone otherwise.
+        var underlineOnly = new StyleChange(
+            StyleEdit.Leave, default, StyleEdit.Leave, default,
+            StyleEdit.Leave, false, StyleEdit.Leave, false,
+            StyleEdit.Set, true);
+        Assert.True(underlineOnly.ApplyTo(f));
+        Assert.True(f.Style.Underline);
+        Assert.False(f.Style.Italic);
+        Assert.False(underlineOnly.ApplyTo(f));
+        Assert.False(StyleChange.Nothing.ApplyTo(f));
     }
 
     [Fact]

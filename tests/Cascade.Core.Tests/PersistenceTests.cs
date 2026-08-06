@@ -88,6 +88,39 @@ public class PersistenceTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Every attribute a filter's style can carry has to survive a save and a load. Driven by
+    /// reflection over <see cref="FilterStyle"/> rather than by a list, so an attribute added later cannot
+    /// be quietly left out of the file - which is exactly how underline could have gone missing.</summary>
+    [Fact]
+    public void Cascade_round_trip_preserves_every_style_attribute()
+    {
+        var props = typeof(FilterStyle).GetProperties()
+            .Where(p => p.CanRead && p.CanWrite).ToArray();
+        Assert.True(props.Length >= 5, $"only {props.Length} style attributes found");
+
+        var f = new Filter { Enabled = true, Match = { Text = "styled" } };
+        f.Style.Foreground = new RgbColor(9, 8, 7);
+        f.Style.Background = new RgbColor(6, 5, 4);
+        foreach (var p in props.Where(p => p.PropertyType == typeof(bool?)))
+            p.SetValue(f.Style, true);
+        // ...and one turned deliberately OFF, since "off" and "inherit" are different answers.
+        f.Style.Italic = false;
+
+        var filters = new FilterCollection();
+        filters.Add(f);
+
+        string path = Path.Combine(Path.GetTempPath(), "cascade_" + Guid.NewGuid().ToString("N") + ".cascade");
+        try
+        {
+            CascadeFile.Save(path, filters, new ColumnSpec());
+            var loaded = CascadeFile.Load(path).Filters.Roots[0].Style;
+            foreach (var p in props)
+                Assert.Equal(p.GetValue(f.Style), p.GetValue(loaded));
+            Assert.True(loaded.Underline);
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>Everything the header can be used to change has to come back, or the work of laying the
     /// columns out is lost the moment the file is closed. The filter file is where all of it lives.</summary>
     [Fact]

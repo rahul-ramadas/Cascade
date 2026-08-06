@@ -45,7 +45,8 @@ public sealed class FilterCollection
                 x.Match.CaseSensitive != y.Match.CaseSensitive || x.Match.Regex != y.Match.Regex ||
                 x.Match.MarkerIndex != y.Match.MarkerIndex) return false;
             if (x.Style.Foreground != y.Style.Foreground || x.Style.Background != y.Style.Background ||
-                x.Style.Bold != y.Style.Bold || x.Style.Italic != y.Style.Italic) return false;
+                x.Style.Bold != y.Style.Bold || x.Style.Italic != y.Style.Italic ||
+                x.Style.Underline != y.Style.Underline) return false;
             if (!SameStructure(x.Children, y.Children)) return false;
         }
         return true;

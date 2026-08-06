@@ -45,7 +45,8 @@ public sealed class FilterTreeControl : UserControl
 
     private AppSettings _settings = new();
     private Font? _fBase;
-    private Font _fReg = null!, _fBold = null!, _fItalic = null!, _fBoldItalic = null!;
+    // One face per combination of bold, italic and underline, indexed by those three bits.
+    private readonly Font[] _faces = new Font[8];
 
     private CascadeDocument? _doc;
     private bool _building;
@@ -868,7 +869,8 @@ public sealed class FilterTreeControl : UserControl
         var rs = StyleResolver.Resolve(f, defaults);
         Color bg = ToColor(rs.Background);
         Color fg = ToColor(rs.Foreground);
-        FontStyle style = (rs.Bold ? FontStyle.Bold : 0) | (rs.Italic ? FontStyle.Italic : 0);
+        FontStyle style = (rs.Bold ? FontStyle.Bold : 0) | (rs.Italic ? FontStyle.Italic : 0)
+                        | (rs.Underline ? FontStyle.Underline : 0);
 
         // While a filter search is active, matching filters keep their colors (with the matched term bold,
         // drawn below); non-matching filters are shown colorless and dimmed so the matches stand out.
@@ -900,7 +902,7 @@ public sealed class FilterTreeControl : UserControl
             g.FillRectangle(b, fill, bounds.Top, Math.Max(0, rightEdge - fill), h);
         }
 
-        int textHeight = TextRenderer.MeasureText(g, "Xg", _fReg, new Size(int.MaxValue, h), TextFormatFlags.NoPadding).Height;
+        int textHeight = TextRenderer.MeasureText(g, "Xg", Pick(FontStyle.Regular), new Size(int.MaxValue, h), TextFormatFlags.NoPadding).Height;
         int textY = bounds.Top + Math.Max(0, (h - textHeight) / 2);
         string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + e.Node.Text;
 
@@ -982,8 +984,8 @@ public sealed class FilterTreeControl : UserControl
             g.FillRectangle(b, e.Node!.Bounds.Left, bounds.Top,
                             Math.Max(0, _tree.ClientSize.Width - e.Node.Bounds.Left), bounds.Height);
 
-        int textHeight = TextRenderer.MeasureText(g, "Xg", _fItalic, new Size(int.MaxValue, bounds.Height), TextFormatFlags.NoPadding).Height;
-        TextRenderer.DrawText(g, e.Node.Text, _fItalic,
+        int textHeight = TextRenderer.MeasureText(g, "Xg", Pick(FontStyle.Italic), new Size(int.MaxValue, bounds.Height), TextFormatFlags.NoPadding).Height;
+        TextRenderer.DrawText(g, e.Node.Text, Pick(FontStyle.Italic),
             new Point(ContentLeft(e.Node), bounds.Top + Math.Max(0, (bounds.Height - textHeight) / 2)),
             Fade(_settings.Foreground, bg), TextFlags);
 
@@ -994,18 +996,17 @@ public sealed class FilterTreeControl : UserControl
     private void EnsureFonts()
     {
         if (_fBase is not null && _fBase.Equals(_tree.Font)) return;
-        _fReg?.Dispose(); _fBold?.Dispose(); _fItalic?.Dispose(); _fBoldItalic?.Dispose();
+        for (int i = 0; i < _faces.Length; i++) _faces[i]?.Dispose();
         _fBase = _tree.Font;
-        _fReg = new Font(_fBase, FontStyle.Regular);
-        _fBold = new Font(_fBase, FontStyle.Bold);
-        _fItalic = new Font(_fBase, FontStyle.Italic);
-        _fBoldItalic = new Font(_fBase, FontStyle.Bold | FontStyle.Italic);
+        for (int i = 0; i < _faces.Length; i++)
+            _faces[i] = new Font(_fBase,
+                ((i & 1) != 0 ? FontStyle.Bold : 0) | ((i & 2) != 0 ? FontStyle.Italic : 0) |
+                ((i & 4) != 0 ? FontStyle.Underline : 0));
     }
 
-    private Font Pick(FontStyle style) =>
-        style.HasFlag(FontStyle.Bold) && style.HasFlag(FontStyle.Italic) ? _fBoldItalic :
-        style.HasFlag(FontStyle.Bold) ? _fBold :
-        style.HasFlag(FontStyle.Italic) ? _fItalic : _fReg;
+    private Font Pick(FontStyle style)
+        => _faces[(style.HasFlag(FontStyle.Bold) ? 1 : 0) | (style.HasFlag(FontStyle.Italic) ? 2 : 0) |
+                  (style.HasFlag(FontStyle.Underline) ? 4 : 0)];
 
     /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is the load-bearing one: TextRenderer draws
     /// through GDI, which knows nothing about the GDI+ clip these columns are set up with, so without it
