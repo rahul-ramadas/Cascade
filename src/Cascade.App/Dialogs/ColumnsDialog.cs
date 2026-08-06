@@ -100,9 +100,21 @@ public sealed class ColumnsDialog : DialogBase
 
         Row("", _refresh);
 
-        var buttonsHost = new FlowLayoutPanel { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(Dpi(10)) };
+        // Both buttons carry the same margin: a flow panel positions each control by its own TOP margin,
+        // and Cancel's default 3 was leaving OK sitting three pixels above it. The inset from the right is
+        // Cancel's own margin rather than the panel's padding - MEASURED, a right-to-left flow panel ends
+        // its row at Width - Padding.Left - Padding.Right, so padding there insets the row twice over.
+        var buttonsHost = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(0, Dpi(10), 0, Dpi(10))
+        };
         var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, 0, 0) };
-        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)) };
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, Dpi(12), 0) };
         buttonsHost.Controls.Add(cancel);
         buttonsHost.Controls.Add(ok);
         AcceptButton = ok;

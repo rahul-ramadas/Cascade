@@ -1013,15 +1013,20 @@ public sealed class MainForm : Form
     /// which is the point of being able to select part of one - and otherwise the whole caret line.</summary>
     private void NewFilterFromSelection()
     {
-        if (_grid.SelectedText is { Length: > 0 } part)
-        {
-            CreateFilterFrom(SeedPatternFromLine(part));
-            return;
-        }
         long line = _grid.CaretLine;
-        if (line < 0) { MessageBox.Show(this, "Select a line in the text view first.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
-        CreateFilterFromLine(line);
+        string? seed = NewFilterSeed(_grid.SelectedText, line >= 0 ? _doc.GetLineText(line) : null);
+        if (seed is null) AddFilter(null);
+        else CreateFilterFrom(seed);
     }
+
+    /// <summary>What a filter started with Ctrl+N arrives matching: the part of a line that is picked out,
+    /// else the whole caret line, else nothing at all. Nothing is on the caret until something has been
+    /// clicked, which is how a file opens - and an empty filter is more use there than being told to go and
+    /// select a line first.</summary>
+    internal static string? NewFilterSeed(string? selected, string? caretLine)
+        => selected is { Length: > 0 } part ? SeedPatternFromLine(part)
+         : caretLine is { } whole ? SeedPatternFromLine(whole)
+         : null;
 
     /// <summary>Double-clicking a line in the log. The part of it that was picked out if there was one,
     /// otherwise the whole line - the click that began the double-click has already put the caret there.</summary>
