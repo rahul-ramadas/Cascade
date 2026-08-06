@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Globalization;
 using System.Text;
 using System.Windows.Forms;
+using System.Windows.Forms.VisualStyles;
 using Cascade.Core.Columns;
 
 namespace Cascade.App;
@@ -132,6 +133,7 @@ public sealed class ColumnsDialog : DialogBase
         _modeDelim.CheckedChanged += (_, _) => UpdateEnabledState();
         _modeTemplate.CheckedChanged += (_, _) => UpdateEnabledState();
         _enabled.CheckedChanged += (_, _) => UpdateEnabledState();
+        _grid.CellPainting += DrawTickGreyedWhenOff;
         _autoDetect.Click += (_, _) => { _template.Text = DetectTemplate(_sample); _modeTemplate.Checked = true; RefreshColumns(); };
         _refresh.Click += (_, _) => RefreshColumns();
         ok.Click += (_, _) => Apply();
@@ -146,6 +148,7 @@ public sealed class ColumnsDialog : DialogBase
     internal bool NameIsEditableForTesting => !_grid.Columns["name"]!.ReadOnly;
     internal void SetCellForTesting(int row, string column, object? value) => _grid.Rows[row].Cells[column].Value = value;
     internal void ApplyForTesting() => Apply();
+    internal void SetSplittingForTesting(bool on) => _enabled.Checked = on;
 
     private void LoadFromSpec()
     {
@@ -167,6 +170,36 @@ public sealed class ColumnsDialog : DialogBase
         _delimPreset.Enabled = _delimiter.Enabled = _collapse.Enabled = _maxSplits.Enabled = on && !tmpl;
         _template.Enabled = _autoDetect.Enabled = on && tmpl;
         _modeDelim.Enabled = _modeTemplate.Enabled = _refresh.Enabled = _grid.Enabled = on;
+
+        // A disabled DataGridView draws exactly as an enabled one - white rows, black text, a blue selection
+        // - so it has to be greyed by hand, or the one control on this dialog that still looks live is the
+        // one nothing can be done to.
+        Color back = on ? SystemColors.Window : SystemColors.Control;
+        Color fore = on ? SystemColors.WindowText : SystemColors.GrayText;
+        _grid.BackgroundColor = back;
+        _grid.DefaultCellStyle.BackColor = back;
+        _grid.DefaultCellStyle.ForeColor = fore;
+        _grid.DefaultCellStyle.SelectionBackColor = on ? SystemColors.Highlight : back;
+        _grid.DefaultCellStyle.SelectionForeColor = on ? SystemColors.HighlightText : fore;
+        _grid.ColumnHeadersDefaultCellStyle.ForeColor = fore;
+        // The header is drawn by the theme unless this is off, and the theme ignores the style above.
+        _grid.EnableHeadersVisualStyles = on;
+        _grid.Invalidate();
+    }
+
+    /// <summary>Draws the Visible ticks greyed while the splitting is off. A DataGridView paints its check
+    /// boxes live whatever its Enabled state, and a row of bright blue ticks is the last thing that should
+    /// still catch the eye on a list nothing can be done to.</summary>
+    private void DrawTickGreyedWhenOff(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        if (_grid.Enabled || e.RowIndex < 0 || e.ColumnIndex != _grid.Columns["visible"]!.Index) return;
+        var g = e.Graphics!;
+        e.PaintBackground(e.CellBounds, false);
+        var state = Convert.ToBoolean(e.Value ?? false) ? CheckBoxState.CheckedDisabled : CheckBoxState.UncheckedDisabled;
+        var size = CheckBoxRenderer.GetGlyphSize(g, state);
+        CheckBoxRenderer.DrawCheckBox(g, new Point(e.CellBounds.Left + (e.CellBounds.Width - size.Width) / 2,
+                                                   e.CellBounds.Top + (e.CellBounds.Height - size.Height) / 2), state);
+        e.Handled = true;
     }
 
     private void RefreshColumns()

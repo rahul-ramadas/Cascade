@@ -1147,8 +1147,13 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) == DialogResult.OK) LoadFiltersFrom(dlg.FileName);
     }
 
+    /// <summary>Reads a filter set in, replacing whatever is on screen. THE one funnel for every way of
+    /// doing that - the menu, the recent list, importing a .tat, a dropped file and the startup auto-load -
+    /// which is why the offer to save what is being thrown away belongs here rather than at each caller.
+    /// Re-opening the file already open needs no special case: it saves, then reads the same file back.</summary>
     private void LoadFiltersFrom(string path)
     {
+        if (!OfferToSaveFilters()) return;
         try
         {
             if (path.EndsWith(".tat", StringComparison.OrdinalIgnoreCase))
@@ -1236,13 +1241,16 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
-    private void SaveFilters(bool saveAs)
+    /// <summary>Writes the filters out, asking where to put them when there is nowhere yet. Returns whether
+    /// they actually reached disk: saying "yes, save" and then dismissing the file dialog must not let the
+    /// thing that asked go ahead and discard them anyway.</summary>
+    private bool SaveFilters(bool saveAs)
     {
         string? path = _filterFilePath;
         if (saveAs || path is null || !path.EndsWith(".cascade", StringComparison.OrdinalIgnoreCase))
         {
             using var dlg = new SaveFileDialog { Filter = "Cascade filters (*.cascade)|*.cascade", FileName = Path.GetFileNameWithoutExtension(path) ?? "filters" };
-            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            if (dlg.ShowDialog(this) != DialogResult.OK) return false;
             path = dlg.FileName;
         }
         try
@@ -1256,8 +1264,10 @@ public sealed class MainForm : Form
             RefreshRecentMenus();
             UpdateTitle();
             UpdateStatus();
+            return true;
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        return false;
     }
 
     // ---- view ----
@@ -1829,8 +1839,9 @@ public sealed class MainForm : Form
         var r = AnswerSavePromptForTesting?.Invoke()
                 ?? MessageBox.Show(this, "Save changes to filters?", "Cascade", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
         if (r == DialogResult.Cancel) return false;
-        if (r == DialogResult.Yes) SaveFilters(false);
-        return true;
+        // "Yes" that did not reach disk - the file dialog was dismissed, or the write failed - is not
+        // permission to throw the changes away.
+        return r != DialogResult.Yes || SaveFilters(false);
     }
 
     /// <summary>When unsaved filter changes are worth asking about. Static so the rule can be read without a
