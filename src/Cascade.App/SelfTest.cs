@@ -616,6 +616,32 @@ internal static class SelfTest
             }
             doc.Columns.Columns[1].Visible = true;
 
+            // The buttons are one row, so they belong at one height - a flow panel positions each control
+            // by its own top margin, and a default margin on one of them is enough to knock it out of line.
+            using (var dlg = new ColumnsDialog(doc.Columns, doc.GetLineText(0)))
+            {
+                dlg.StartPosition = FormStartPosition.Manual;
+                dlg.Location = new Point(0, 0);
+                dlg.Opacity = 0;
+                dlg.Show();
+                Pump();
+                Rectangle Where(Control c) => dlg.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                var okBtn = AllControls(dlg).OfType<Button>().First(b => b.Text == "OK");
+                var cancelBtn = AllControls(dlg).OfType<Button>().First(b => b.Text == "Cancel");
+                var list = AllControls(dlg).OfType<DataGridView>().First();
+                Rectangle okR = Where(okBtn), cancelR = Where(cancelBtn), listR = Where(list);
+                ok &= Check($"OK sits at the same height as Cancel (OK {okR}, Cancel {cancelR})",
+                            okR.Top == cancelR.Top && okR.Height == cancelR.Height);
+                ok &= Check($"and to its left, with a gap ({okR.Right} to {cancelR.Left})",
+                            okR.Right < cancelR.Left && cancelR.Left - okR.Right <= dlg.LogicalToDeviceUnits(12));
+                ok &= Check($"and the row ends where the list above it does ({cancelR.Right} vs {listR.Right})",
+                            Math.Abs(cancelR.Right - listR.Right) <= 1,
+                            $"client {dlg.ClientSize}, row pad {cancelBtn.Parent!.Padding}, " +
+                            $"Cancel margin {cancelBtn.Margin}, grid host pad {list.Parent!.Padding}");
+                dlg.Close();
+                Pump();
+            }
+
             // --- what turning columns on with nothing set up offers ---
 
             string detected = ColumnsDialog.DetectTemplate(
@@ -4523,6 +4549,16 @@ internal static class SelfTest
         string huge = MainForm.SeedPatternFromLine(new string('y', FilterEditDialog.MaxPatternLength + 5_000));
         ok &= Check($"an absurd line is cut to what the box can hold ({huge.Length})",
                     huge.Length == FilterEditDialog.MaxPatternLength);
+
+        // What Ctrl+N starts the filter with. The last of these is the one that matters: a file opens with
+        // nothing on the caret, and offering an empty filter beats telling the reader to go and click first.
+        ok &= Check("the part picked out of a line wins",
+                    MainForm.NewFilterSeed("req-abc123", "the whole line") == "req-abc123");
+        ok &= Check("the whole caret line when nothing is picked out",
+                    MainForm.NewFilterSeed(null, "  the whole line  ") == "the whole line");
+        ok &= Check("an empty selection counts as none", MainForm.NewFilterSeed("", "a line") == "a line");
+        ok &= Check("and nothing at all when the caret is on no line, so an empty filter is offered",
+                    MainForm.NewFilterSeed(null, null) is null);
         return ok;
     }
 
