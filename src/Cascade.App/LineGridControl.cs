@@ -1705,27 +1705,51 @@ public sealed class LineGridControl : Control
 
     private void ShowColumnMenu(Point at)
     {
+        var menu = BuildColumnMenu(ColumnAt(at.X));
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(this, at);
+    }
+
+    /// <summary>The header's menu for the column at <paramref name="index"/> (-1 past the last one).
+    ///
+    /// Ticking a column off must NOT put the menu away: turning three of them off should be one visit, not
+    /// three. So no item click closes it by itself and every entry that is a COMMAND closes it explicitly.
+    /// Written that way round because it then does not depend on whether WinForms raises Click before or
+    /// after it tries to close - either order ends with the menu gone exactly once.</summary>
+    private ContextMenuStrip BuildColumnMenu(int index)
+    {
         var spec = _doc!.Columns;
-        int index = ColumnAt(at.X);
         // A check margin and no image one: the list at the top is a set of ticks saying which columns are
         // shown, and turning the image margin off takes away the very place a tick is drawn.
         var menu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = true };
+        menu.Closing += (_, e) => { if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked) e.Cancel = true; };
 
         // Every column, ticked or not - a hidden column has no header to right-click, so this list is the
         // only way back to one.
+        var ticks = new List<ToolStripMenuItem>();
+        void SyncTicks()
+        {
+            // The last column standing may not be hidden, so a tick is not always honoured; and every row's
+            // "can this one go?" changes as the others come and go.
+            for (int i = 0; i < ticks.Count; i++)
+            {
+                ticks[i].Checked = spec.Columns[i].Visible;
+                ticks[i].Enabled = !spec.Columns[i].Visible || VisibleColumnIndices().Count > 1;
+            }
+        }
+
         for (int i = 0; i < spec.Columns.Count; i++)
         {
             int which = i;
-            var def = spec.Columns[i];
-            var item = new ToolStripMenuItem(def.Name.Length > 0 ? def.Name : $"Column {i + 1}")
+            var item = new ToolStripMenuItem(spec.Columns[i].Name.Length > 0 ? spec.Columns[i].Name : $"Column {i + 1}")
             {
-                Checked = def.Visible,
-                CheckOnClick = true,
-                Enabled = !def.Visible || VisibleColumnIndices().Count > 1
+                CheckOnClick = true
             };
-            item.Click += (_, _) => SetColumnVisible(which, item.Checked);
+            item.Click += (_, _) => { SetColumnVisible(which, item.Checked); SyncTicks(); };
+            ticks.Add(item);
             menu.Items.Add(item);
         }
+        SyncTicks();
 
         if (index >= 0)
         {
@@ -1741,7 +1765,7 @@ public sealed class LineGridControl : Control
             {
                 var a = value;
                 var item = new ToolStripMenuItem(text) { Checked = spec.Columns[index].Align == a };
-                item.Click += (_, _) => SetColumnAlign(index, a);
+                item.Click += (_, _) => { menu.Close(); SetColumnAlign(index, a); };
                 align.DropDownItems.Add(item);
             }
             menu.Items.Add(align);
@@ -1750,15 +1774,37 @@ public sealed class LineGridControl : Control
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(Entry("&Fit All Columns to Window", FitColumnsToWindow));
         menu.Items.Add(Entry("&Columns…", () => ColumnSettingsRequested?.Invoke()));
-        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
-        menu.Show(this, at);
+        return menu;
 
-        static ToolStripMenuItem Entry(string text, Action run, bool enabled = true)
+        ToolStripMenuItem Entry(string text, Action run, bool enabled = true)
         {
             var item = new ToolStripMenuItem(text) { Enabled = enabled };
-            item.Click += (_, _) => run();
+            item.Click += (_, _) => { menu.Close(); run(); };
             return item;
         }
+    }
+
+    /// <summary>The header menu as it would be shown over one column, so a check can read what it offers
+    /// and press its entries.</summary>
+    internal ContextMenuStrip ColumnMenuForTesting(int index) => BuildColumnMenu(index);
+
+    /// <summary>Whether a menu would stay up when one of its items is clicked. Raises the real Closing
+    /// event, which is where the decision is made.</summary>
+    internal static bool StaysOpenOnItemClickForTesting(ContextMenuStrip menu)
+    {
+        var e = new ToolStripDropDownClosingEventArgs(ToolStripDropDownCloseReason.ItemClicked);
+        typeof(ToolStripDropDown).GetMethod("OnClosing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(menu, [e]);
+        return e.Cancel;
+    }
+
+    /// <summary>...and that it still goes away when something actually asks it to.</summary>
+    internal static bool ClosesWhenAskedForTesting(ContextMenuStrip menu)
+    {
+        var e = new ToolStripDropDownClosingEventArgs(ToolStripDropDownCloseReason.CloseCalled);
+        typeof(ToolStripDropDown).GetMethod("OnClosing", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .Invoke(menu, [e]);
+        return !e.Cancel;
     }
 
     // ---- seams, so the gestures above can be checked without a mouse ----

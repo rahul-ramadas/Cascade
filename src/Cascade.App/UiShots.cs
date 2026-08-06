@@ -67,8 +67,17 @@ internal static class UiShots
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
         ShotFindBar(outDir, "find-badregex", "", badPattern: "charge(declined");
 
-        var cols = new ColumnSpec();
-        ShotDialog(new ColumnsDialog(cols, "[2026-07-31T09:31:17][api-gateway][3][2FA8][315C][http][Handler][INFO][TFLAG] message text"), outDir, "columns");
+        // Set up as a real one would be, so the grid in it shows the names that can be typed over rather
+        // than a blank block that says nothing about the dialog.
+        var cols = new ColumnSpec
+        {
+            Enabled = true,
+            Mode = ColumnSplitMode.Template,
+            Template = "[[Time]][[Service]][[Level]] [Message]"
+        };
+        cols.SyncColumnsFromTemplate();
+        cols.Columns[2].Width = 90;
+        ShotDialog(new ColumnsDialog(cols, "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text"), outDir, "columns");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog(null), outDir, "about");

@@ -534,6 +534,70 @@ internal static class SelfTest
                             shot.Width == host.ClientSize.Width && grid.RowsPaintedForTesting > 0,
                             $"{grid.RowsPaintedForTesting} rows painted");
 
+            // --- the header's own menu ---
+
+            using (var menu = grid.ColumnMenuForTesting(2))
+            {
+                var ticks = menu.Items.OfType<ToolStripMenuItem>().Take(4).ToArray();
+                ok &= Check($"the menu lists every column, hidden ones included " +
+                            $"[{string.Join(", ", ticks.Select(t => t.Text))}]",
+                            ticks.Length == 4 && ticks.All(t => t.Checked));
+
+                ticks[1].PerformClick();
+                ok &= Check("ticking one off hides that column", !doc.Columns.Columns[1].Visible);
+                ok &= Check("and only that one", doc.Columns.Columns.Count(c => c.Visible) == 3);
+                ok &= Check("and the menu stays up, so the next one is one click away",
+                            LineGridControl.StaysOpenOnItemClickForTesting(menu));
+
+                ticks[2].PerformClick();
+                ok &= Check("so a second column can be turned off without opening it again",
+                            !doc.Columns.Columns[2].Visible && doc.Columns.Columns.Count(c => c.Visible) == 2);
+                ticks[1].PerformClick();
+                ok &= Check("and back on again", doc.Columns.Columns[1].Visible);
+
+                // Down to one column, and then a press on the one still standing. It cannot go - and the
+                // list must not be left showing a tick that was refused, which is what a menu that closes
+                // itself never had to worry about.
+                ticks[1].PerformClick();
+                ticks[3].PerformClick();
+                ok &= Check($"one column is left ({doc.Columns.Columns.Count(c => c.Visible)})",
+                            doc.Columns.Columns.Count(c => c.Visible) == 1 && doc.Columns.Columns[0].Visible);
+                ticks[0].PerformClick();
+                ok &= Check("pressing the last one standing does not hide it",
+                            doc.Columns.Columns[0].Visible && doc.Columns.Columns.Count(c => c.Visible) == 1);
+                ok &= Check("and its tick is not left showing a change that was refused",
+                            ticks.Select((t, i) => t.Checked == doc.Columns.Columns[i].Visible).All(x => x),
+                            string.Join(", ", ticks.Select((t, i) => $"{t.Text}:{t.Checked}/{doc.Columns.Columns[i].Visible}")));
+
+                // A command is a command: choosing one puts the menu away as any menu does.
+                ok &= Check("but the menu does go away when something asks it to",
+                            LineGridControl.ClosesWhenAskedForTesting(menu));
+            }
+            for (int i = 0; i < 4; i++) grid.SetColumnVisible(i, true);
+            Pump();
+
+            // --- renaming from the dialog, which is the only way to reach a hidden column's name ---
+
+            doc.Columns.Columns[1].Visible = false;
+            using (var dlg = new ColumnsDialog(doc.Columns, doc.GetLineText(0)))
+            {
+                ok &= Check("the columns dialog offers the name for typing", dlg.NameIsEditableForTesting);
+                dlg.SetCellForTesting(1, "name", "  Service  ");
+                dlg.ApplyForTesting();
+                ok &= Check($"and what is typed becomes the column's name (\"{dlg.Result.Columns[1].Name}\")",
+                            dlg.Result.Columns[1].Name == "Service");
+                ok &= Check("a hidden column can be renamed there, which the header cannot do at all",
+                            !dlg.Result.Columns[1].Visible);
+                ok &= Check("and the columns beside it are left alone",
+                            dlg.Result.Columns[0].Name == doc.Columns.Columns[0].Name &&
+                            dlg.Result.Columns[2].Name == doc.Columns.Columns[2].Name);
+                dlg.SetCellForTesting(1, "name", "   ");
+                dlg.ApplyForTesting();
+                ok &= Check("and a name cannot be emptied from there either, as on the header",
+                            dlg.Result.Columns[1].Name == "Service");
+            }
+            doc.Columns.Columns[1].Visible = true;
+
             // --- what turning columns on with nothing set up offers ---
 
             string detected = ColumnsDialog.DetectTemplate(
