@@ -78,6 +78,10 @@ internal static class UiShots
         cols.SyncColumnsFromTemplate();
         cols.Columns[2].Width = 90;
         ShotDialog(new ColumnsDialog(cols, "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text"), outDir, "columns");
+        // ...and with the splitting turned off, where the list has to read as being out of reach too.
+        var colsOff = cols.Clone();
+        colsOff.Enabled = false;
+        ShotDialog(new ColumnsDialog(colsOff, "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text"), outDir, "columns-off");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog(null), outDir, "about");
