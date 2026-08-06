@@ -553,8 +553,25 @@ internal static class SelfTest
                 ticks[2].PerformClick();
                 ok &= Check("so a second column can be turned off without opening it again",
                             !doc.Columns.Columns[2].Visible && doc.Columns.Columns.Count(c => c.Visible) == 2);
+
+                // The entries below the list act on the column the menu was opened over - column 2, which
+                // has just been hidden. Renaming or fitting one nobody can see does nothing, and a menu that
+                // closed itself never had to say so.
+                var forColumn = menu.Items.OfType<ToolStripMenuItem>()
+                    .Where(i => (i.Text ?? "").Contains("\"level\"", StringComparison.OrdinalIgnoreCase)).ToArray();
+                ok &= Check($"the menu offers commands for the column it was opened over " +
+                            $"[{string.Join(", ", forColumn.Select(i => i.Text))}]", forColumn.Length == 3);
+                ok &= Check("which are greyed out once that column is hidden",
+                            forColumn.All(i => !i.Enabled),
+                            string.Join(", ", forColumn.Select(i => $"{i.Text}:{i.Enabled}")));
+
                 ticks[1].PerformClick();
                 ok &= Check("and back on again", doc.Columns.Columns[1].Visible);
+                ticks[2].PerformClick();
+                ok &= Check("bringing the column back makes its commands usable again",
+                            doc.Columns.Columns[2].Visible && forColumn.All(i => i.Enabled),
+                            string.Join(", ", forColumn.Select(i => $"{i.Text}:{i.Enabled}")));
+                ticks[2].PerformClick();
 
                 // Down to one column, and then a press on the one still standing. It cannot go - and the
                 // list must not be left showing a tick that was refused, which is what a menu that closes
@@ -604,7 +621,7 @@ internal static class SelfTest
             string detected = ColumnsDialog.DetectTemplate(
                 "[2026-08-04T09:31:17][api-gateway][INFO ] a message");
             ok &= Check($"the fields of a bracketed line are read off it and named for what is in them ({detected})",
-                        detected == "[[Time]][[Field2]][[Level]] [message]");
+                        detected == "[[Time]][[Field2]][[Level]] [Message]");
             ok &= Check("a line with nothing to split on offers nothing rather than an empty header",
                         ColumnsDialog.DetectTemplate("plain text with no fields").Length == 0);
             return ok;
