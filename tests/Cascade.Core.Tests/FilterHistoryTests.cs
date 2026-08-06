@@ -72,6 +72,7 @@ public class FilterHistoryTests
         Differs(() => c.Roots[0].Style.Background = new RgbColor(1, 2, 3));
         Differs(() => c.Roots[0].Style.Bold = true);
         Differs(() => c.Roots[0].Style.Italic = true);
+        Differs(() => c.Roots[0].Style.Underline = true);
         Differs(() => c.Add(F("c")));
         Differs(() => c.Remove(c.Roots[1]));
         Differs(() => c.Reorder(c.Roots[0], +1));

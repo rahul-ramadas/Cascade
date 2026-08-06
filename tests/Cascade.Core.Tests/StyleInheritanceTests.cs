@@ -54,4 +54,23 @@ public class StyleInheritanceTests
         var r = StyleResolver.Resolve(f, Defaults);
         Assert.Equal(Defaults, r);
     }
+
+    [Fact]
+    public void Underline_inherits_and_is_overridden_like_the_other_styles()
+    {
+        var parent = new Filter { Style = { Underline = true } };
+        var child = new Filter();
+        parent.Children.Add(child); child.Parent = parent;
+
+        Assert.True(StyleResolver.Resolve(child, Defaults).Underline);
+        Assert.False(StyleResolver.Resolve(new Filter(), Defaults).Underline);
+
+        // ...and independently of the other flags, which is the whole point of per-attribute inheritance.
+        child.Style.Underline = false;
+        child.Style.Bold = true;
+        var r = StyleResolver.Resolve(child, Defaults);
+        Assert.False(r.Underline);
+        Assert.True(r.Bold);
+        Assert.True(StyleResolver.Resolve(parent, Defaults).Underline);
+    }
 }

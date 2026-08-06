@@ -49,7 +49,12 @@ public sealed class LineGridControl : Control
     private CascadeDocument? _doc;
     private AppSettings _settings = new();
 
-    private Font _fontRegular = null!, _fontBold = null!, _fontItalic = null!, _fontBoldItalic = null!;
+    // One font per combination of bold, italic and underline, indexed by those three bits. An array
+    // rather than a field each: three flags is eight faces.
+    private readonly Font[] _fonts = new Font[8];
+    private Font FontRegular => _fonts[0];
+    private Font FontBold => _fonts[1];
+    private Font FontItalic => _fonts[2];
     private FontFamily? _fontFamily;
     private int _rowHeight = 16;
     private int _charWidth = 8;
@@ -260,7 +265,7 @@ public sealed class LineGridControl : Control
     /// slightly different place from the glyphs on a bold or italic filter row.</summary>
     private Font FontForRow(long row, string text)
     {
-        if (_doc is null) return _fontRegular;
+        if (_doc is null) return FontRegular;
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
         var eval = _doc.EvaluateText(text, _doc.RowToLine(row));
         return SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
@@ -557,7 +562,7 @@ public sealed class LineGridControl : Control
 
     public void RebuildFonts()
     {
-        _fontRegular?.Dispose(); _fontBold?.Dispose(); _fontItalic?.Dispose(); _fontBoldItalic?.Dispose();
+        for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
         float size = _settings.EffectiveFontSize;
@@ -565,20 +570,20 @@ public sealed class LineGridControl : Control
         try { family = new FontFamily(_settings.FontFamily); }
         catch { family = FontFamily.GenericMonospace; }
         _fontFamily = ReferenceEquals(family, FontFamily.GenericMonospace) ? null : family;
-        _fontRegular = new Font(family, size, FontStyle.Regular);
-        _fontBold = new Font(family, size, FontStyle.Bold);
-        _fontItalic = new Font(family, size, FontStyle.Italic);
-        _fontBoldItalic = new Font(family, size, FontStyle.Bold | FontStyle.Italic);
+        for (int i = 0; i < _fonts.Length; i++)
+            _fonts[i] = new Font(family, size,
+                ((i & 1) != 0 ? FontStyle.Bold : 0) | ((i & 2) != 0 ? FontStyle.Italic : 0) |
+                ((i & 4) != 0 ? FontStyle.Underline : 0));
         // Font.Height is the typeface's own line spacing, which for a monospaced face already includes
         // whatever gap its designer wanted between lines - so anything added here is the reader's choice,
         // not a correction. Two pixels used to be added unasked, costing a line in every eleven on screen.
-        _rowHeight = Math.Max(_fontRegular.Height + Math.Max(0, _settings.ExtraLineSpacing), 8);
-        _charWidth = Math.Max(1, TextRenderer.MeasureText("0", _fontRegular, new Size(1000, 100),
+        _rowHeight = Math.Max(FontRegular.Height + Math.Max(0, _settings.ExtraLineSpacing), 8);
+        _charWidth = Math.Max(1, TextRenderer.MeasureText("0", FontRegular, new Size(1000, 100),
             TextFormatFlags.NoPadding).Width);
         // Asked of the shapes, not of the name: "Consolas" is fixed-pitch and "Segoe UI" is not, but a
         // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
-        _monospaced = TextRenderer.MeasureText("iiiiiiiiii", _fontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
-                   == TextRenderer.MeasureText("WWWWWWWWWW", _fontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        _monospaced = TextRenderer.MeasureText("iiiiiiiiii", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
+                   == TextRenderer.MeasureText("WWWWWWWWWW", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
         _naturalKey = null;   // the widths the content asks for are measured in this font
         Invalidate();
     }
@@ -641,7 +646,7 @@ public sealed class LineGridControl : Control
             long row = _firstRow + i;
             if (row >= rows) break;
             string text = Expand(_doc.GetLineText(_doc.RowToLine(row)));
-            widest = Math.Max(widest, TextRenderer.MeasureText(text, _fontRegular,
+            widest = Math.Max(widest, TextRenderer.MeasureText(text, FontRegular,
                 new Size(int.MaxValue, _rowHeight),
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 8);
         }
@@ -804,7 +809,7 @@ public sealed class LineGridControl : Control
     internal long CharOriginForTesting => _charOriginRow;
     internal int ViewportHeightForTesting => ViewportHeight;
     internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
-    internal Font FontForTesting => _fontRegular;
+    internal Font FontForTesting => FontRegular;
     internal FontFamily? FontFamilyForTesting => _fontFamily;
 
     /// <summary>Top of a row as painted, so a check can aim at a wrapped row's second segment.</summary>
@@ -816,6 +821,10 @@ public sealed class LineGridControl : Control
     }
 
     internal int RowHeightForTesting => _rowHeight;
+
+    /// <summary>The face a row is actually drawn in, so a check can tell a style apart from something
+    /// merely painted to look like one.</summary>
+    internal Font FontForRowForTesting(long row) => FontForRow(row, DisplayText(row));
 
     /// <summary>Clicks at an explicit y, rather than at a row's middle - the point being to land somewhere
     /// a fixed row height would have put a different row.</summary>
@@ -1006,7 +1015,7 @@ public sealed class LineGridControl : Control
             g.Clip = clip;
 
             if (_doc.IsLineTruncated(line))
-                TextRenderer.DrawText(g, " […]", _fontItalic,
+                TextRenderer.DrawText(g, " […]", FontItalic,
                     new Point(ClientSize.Width - RightGutterWidth - 40, y), Color.Gray);
 
             if (row == _caretRow && Focused)
@@ -1036,9 +1045,7 @@ public sealed class LineGridControl : Control
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
     private Font SelectFont(ResolvedStyle s) =>
-        s is { Bold: true, Italic: true } ? _fontBoldItalic :
-        s.Bold ? _fontBold :
-        s.Italic ? _fontItalic : _fontRegular;
+        _fonts[(s.Bold ? 1 : 0) | (s.Italic ? 2 : 0) | (s.Underline ? 4 : 0)];
 
     private void DrawColumnHeader(Graphics g, int gutter, int contentW)
     {
@@ -1062,7 +1069,7 @@ public sealed class LineGridControl : Control
             if (_colGesture == ColumnGesture.Reorder && i == _colIndex && _colMoved)
                 using (var b = new SolidBrush(Color.FromArgb(60, _settings.SelectionBack)))
                     g.FillRectangle(b, x, top, w, _rowHeight - 1);
-            TextRenderer.DrawText(g, def.Name, _fontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
+            TextRenderer.DrawText(g, def.Name, FontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
                 Color.FromArgb(80, 80, 80), CellFlags(ColumnAlign.Left, x, w, gutter, right));
             // A hairline on every edge: without one there is nothing to aim the resize pointer at.
             using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
@@ -1328,7 +1335,7 @@ public sealed class LineGridControl : Control
         _colNatural = new int[n];
 
         for (int i = 0; i < n; i++)
-            _colNatural[i] = TextRenderer.MeasureText(spec.Columns[i].Name, _fontBold,
+            _colNatural[i] = TextRenderer.MeasureText(spec.Columns[i].Name, FontBold,
                 new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
                 + CellPadding;
 
@@ -1348,7 +1355,7 @@ public sealed class LineGridControl : Control
                 if (!spec.Columns[i].Visible) continue;
                 int src = spec.Columns[i].Source;
                 if (src < 0 || src >= values.Count) continue;
-                int w = TextRenderer.MeasureText(text.AsSpan(values[src].Start, values[src].Length), _fontRegular,
+                int w = TextRenderer.MeasureText(text.AsSpan(values[src].Start, values[src].Length), FontRegular,
                     new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
                     + CellPadding;
                 if (w > _colNatural[i]) _colNatural[i] = w;
@@ -1652,7 +1659,7 @@ public sealed class LineGridControl : Control
             Text = _doc.Columns.Columns[index].Name,
             Bounds = rect,
             BorderStyle = BorderStyle.FixedSingle,
-            Font = _fontRegular
+            Font = FontRegular
         };
         _renameBox.KeyDown += (_, ke) =>
         {
@@ -1903,7 +1910,7 @@ public sealed class LineGridControl : Control
         // segments below the first would otherwise keep the row's own fill - or its selection colour.
         using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, x, y, lnw, height);
         var color = selected ? _settings.SelectionBack : _settings.LineNumberColor;
-        TextRenderer.DrawText(g, (line + 1).ToString(), _fontRegular, new Rectangle(x, y, lnw - 6, _rowHeight),
+        TextRenderer.DrawText(g, (line + 1).ToString(), FontRegular, new Rectangle(x, y, lnw - 6, _rowHeight),
             color, TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
     }
 
@@ -2034,7 +2041,7 @@ public sealed class LineGridControl : Control
         if (disposing)
         {
             _tipTimer.Dispose(); _tips.Dispose();
-            _fontRegular?.Dispose(); _fontBold?.Dispose(); _fontItalic?.Dispose(); _fontBoldItalic?.Dispose();
+            foreach (var f in _fonts) f?.Dispose();
             _fontFamily?.Dispose();
         }
         base.Dispose(disposing);

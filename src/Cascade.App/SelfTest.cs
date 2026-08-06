@@ -71,6 +71,7 @@ internal static class SelfTest
             ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("cell selection", RunColumnSelectionChecks);
+            ok &= Timed("underline", RunUnderlineChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
@@ -1643,6 +1644,97 @@ internal static class SelfTest
         {
             host?.Close();
             host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Underline is a style a filter can set, like bold and italic. What proves it is on screen is
+    /// a long unbroken run of the filter's own colour across a scanline - glyphs never draw one, so the
+    /// same measurement over a line coloured but NOT underlined is the control that makes it mean
+    /// something.</summary>
+    private static bool RunUnderlineChecks()
+    {
+        Line("-- underline --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_under_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(path, [
+            "AAA this line has no filter of its own at all",
+            "BBB this line is given a colour and nothing else",
+            "CCC this line is given the same colour and a rule",
+            "DDD this line is given the same colour, a rule and weight",
+        ]);
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            var ink = new RgbColor(0xC0, 0x00, 0x00);
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "BBB" }, Style = { Foreground = ink } });
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "CCC" }, Style = { Foreground = ink, Underline = true } });
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "DDD" }, Style = { Foreground = ink, Underline = true, Bold = true } });
+            doc.ApplyFilters();
+            for (int i = 0; i < 100 && doc.IsBusy; i++) { Thread.Sleep(10); Pump(); }
+
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(700, 200),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            grid.RefreshView();
+            Pump();
+
+            using var picture = Capture(host);
+            int gutter = grid.GutterWidthForTesting;
+
+            // The longest unbroken run of the filter's colour anywhere in the row.
+            int LongestRun(long row)
+            {
+                int top = grid.RowTopForTesting(row), height = grid.RowHeightForTesting;
+                int best = 0;
+                for (int y = Math.Max(0, top); y < Math.Min(picture.Height, top + height); y++)
+                {
+                    int run = 0;
+                    for (int x = gutter; x < picture.Width; x++)
+                    {
+                        var c = picture.GetPixel(x, y);
+                        bool inky = Math.Abs(c.R - ink.R) < 60 && Math.Abs(c.G - ink.G) < 60 && Math.Abs(c.B - ink.B) < 60;
+                        run = inky ? run + 1 : 0;
+                        if (run > best) best = run;
+                    }
+                }
+                return best;
+            }
+
+            int plain = LongestRun(0), coloured = LongestRun(1), under = LongestRun(2), both = LongestRun(3);
+            Line($"   (longest run of the filter's colour: plain {plain}, coloured {coloured}, " +
+                 $"underlined {under}, bold+underlined {both})");
+
+            bool ok = Check($"an unstyled line has none of the filter's colour at all ({plain}px)", plain <= 2);
+            ok &= Check($"a coloured line draws it only as glyphs ({coloured}px)", coloured < 40);
+            ok &= Check($"an underlined one draws a rule right across its text ({under}px)",
+                        under > coloured * 3 && under > 100);
+            ok &= Check($"and underline combines with bold rather than replacing it ({both}px)",
+                        both > coloured * 3 && both > 100);
+
+            // The style has to be a REAL font attribute, or a check that only looks at pixels could be
+            // satisfied by something drawn over the text.
+            ok &= Check("and the row is drawn in an underlined face",
+                        grid.FontForRowForTesting(2).Underline && !grid.FontForRowForTesting(1).Underline);
+            ok &= Check("bold and underlined at once", grid.FontForRowForTesting(3) is { Bold: true, Underline: true });
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
@@ -3739,6 +3831,7 @@ internal static class SelfTest
                     state.Bold == 0);
         ok &= Check($"and one none of them sets starts on \"inherit\" (italic choice {state.Italic})",
                     state.Italic == 3);
+        ok &= Check($"...as does underline (choice {state.Underline})", state.Underline == 3);
 
         var untouched = dlg.ReadForTesting();
         ok &= Check("opening it and pressing OK changes nothing at all",
@@ -3747,6 +3840,7 @@ internal static class SelfTest
         // Now ask for one text colour across all three, and turn bold off everywhere.
         dlg.SetColorStateForTesting(foreground: true, CheckState.Checked, green);
         dlg.SetFlagForTesting(bold: true, StyleEdit.Set, false);
+        dlg.SetUnderlineForTesting(StyleEdit.Set, true);
         dlg.ApplyForTesting();
         Pump();
         var change = dlg.Change;
@@ -3756,6 +3850,7 @@ internal static class SelfTest
                     $"[{string.Join(" ", all.Select(f => f.Style.Foreground?.ToString() ?? "-"))}]",
                     all.All(f => f.Style.Foreground == green));
         ok &= Check("so does the style", all.All(f => f.Style.Bold == false));
+        ok &= Check("and underline, which is a style like the others", all.All(f => f.Style.Underline == true));
         ok &= Check($"what was left alone is still each filter's own " +
                     $"[{string.Join(" ", all.Select(f => f.Style.Background?.ToString() ?? "-"))}]",
                     all.All(f => f.Style.Background == blue) && all.All(f => f.Style.Italic is null));
@@ -5504,9 +5599,9 @@ internal static class SelfTest
         dlg.Show();
         Pump();
 
-        static string Say((Color Fore, Color Back, bool Bold, bool Italic) p) =>
+        static string Say((Color Fore, Color Back, bool Bold, bool Italic, bool Underline) p) =>
             $"#{p.Fore.R:x2}{p.Fore.G:x2}{p.Fore.B:x2} on #{p.Back.R:x2}{p.Back.G:x2}{p.Back.B:x2}" +
-            $"{(p.Bold ? " bold" : "")}{(p.Italic ? " italic" : "")}";
+            $"{(p.Bold ? " bold" : "")}{(p.Italic ? " italic" : "")}{(p.Underline ? " underlined" : "")}";
         static bool Is(Color c, RgbColor want) => c.R == want.R && c.G == want.G && c.B == want.B;
 
         var p = dlg.PreviewForTesting;
@@ -5524,6 +5619,11 @@ internal static class SelfTest
         Pump();
         p = dlg.PreviewForTesting;
         ok &= Check("and a style turned off beats the parent having it on", !p.Bold && p.Italic, Say(p));
+
+        dlg.SetStyleForTesting(bold: false, italic: true, underline: true);
+        Pump();
+        p = dlg.PreviewForTesting;
+        ok &= Check("and underline is a style of its own", p.Underline && p.Italic && !p.Bold, Say(p));
 
         // With nothing above it there is nothing to inherit, so the view's own colours show through.
         using var orphan = new FilterEditDialog(new Filter { Match = { Text = "disk" } }, isNew: true,

@@ -66,6 +66,7 @@ public static class CascadeFile
         Bg = f.Style.Background?.ToHex(),
         Bold = f.Style.Bold,
         Italic = f.Style.Italic,
+        Underline = f.Style.Underline,
         Children = f.Children.Count > 0 ? f.Children.Select(ToDto).ToList() : null
     };
 
@@ -87,6 +88,7 @@ public static class CascadeFile
         if (RgbColor.TryParseHex(d.Bg, out var bg)) f.Style.Background = bg;
         f.Style.Bold = d.Bold;
         f.Style.Italic = d.Italic;
+        f.Style.Underline = d.Underline;
         if (d.Children is not null)
             foreach (var c in d.Children)
             {
@@ -175,6 +177,7 @@ public static class CascadeFile
         public string? Bg { get; set; }
         public bool? Bold { get; set; }
         public bool? Italic { get; set; }
+        public bool? Underline { get; set; }
         public List<FilterDto>? Children { get; set; }
     }
 
