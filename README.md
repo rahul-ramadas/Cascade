@@ -111,7 +111,7 @@ a single file, no installer. It needs Windows and the .NET 10 Desktop Runtime, w
 
 ## And the rest
 
-- **Opening** — `Ctrl+O`, `F5` to reload, *Open from Clipboard*, recent files, or a path on the command line.
+- **Opening** — `Ctrl+O`, `F5` to reload, *Open from Clipboard*, recent files, a path on the command line, or drag a file onto the window. Dropping a `.cascade` or `.tat` loads its filters instead.
 - **Encodings** — auto-detect, UTF-8, UTF-16 LE/BE, Windows-1252 or the system default, changeable at any time.
 - **Copying** — selected lines with or without line numbers, or *Save Current Lines* to write out exactly what the filters are showing.
 - **Preferences** — font, size, line spacing, colours, tab size, markers, line numbers; exportable to carry between machines.
@@ -147,6 +147,7 @@ a single file, no installer. It needs Windows and the .NET 10 Desktop Runtime, w
 | `Alt+↑ ↓ ← →` | Move, nest and un-nest |
 | `F4` / `Shift+F4` | Next / previous line matching the current filter |
 | `Ctrl+F`, then `Enter` / `Shift+Enter` / `F3` | Search the list and walk the matches |
+| Double-click a filter / the empty space below | Edit it / add a new one |
 
 **Global**
 

@@ -96,6 +96,7 @@ internal static class SelfTest
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
             ok &= Timed("closing", RunClosingChecks);
+            ok &= Timed("file drop", RunFileDropChecks);
             ok &= Timed("the menus", RunMenuActionChecks);
             ok &= Timed("resources", RunResourceChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
@@ -2963,13 +2964,35 @@ internal static class SelfTest
             var row = tree.RowBoundsForTesting(other);
             int mid = row.Top + row.Height / 2;
             ok &= Check("double-clicking a filter's text asks to edit it",
-                        ReferenceEquals(tree.DoubleClickForTesting(new Point(row.Left + 2, mid)), other));
+                        ReferenceEquals(tree.DoubleClickForTesting(new Point(row.Left + 2, mid)).Edit, other));
             ok &= Check("so does double-clicking the empty space out to its right",
-                        ReferenceEquals(tree.DoubleClickForTesting(new Point(tree.TreeWidthForTesting - 4, mid)), other));
+                        ReferenceEquals(tree.DoubleClickForTesting(new Point(tree.TreeWidthForTesting - 4, mid)).Edit, other));
             ok &= Check("double-clicking the checkbox does not",
-                        tree.DoubleClickForTesting(new Point(row.Left - 2, mid)) is null);
+                        tree.DoubleClickForTesting(new Point(row.Left - 2, mid)).Edit is null);
             ok &= Check("nor does double-clicking left of it",
-                        tree.DoubleClickForTesting(new Point(0, mid)) is null);
+                        tree.DoubleClickForTesting(new Point(0, mid)).Edit is null);
+
+            // ---- double-clicking below the last filter ----
+            // The list is 5 filters in a pane with room for far more, so there is real empty space under it.
+            int lastBottom = tree.VisibleFiltersForTesting.Select(f => tree.RowBoundsForTesting(f).Bottom).Max();
+            int belowY = lastBottom + tree.RowHeightForTesting;
+            ok &= Check($"there is empty space under the last filter to aim at ({belowY} of {tree.TreeHeightForTesting})",
+                        belowY < tree.TreeHeightForTesting);
+            var below = tree.DoubleClickForTesting(new Point(tree.TreeWidthForTesting / 2, belowY));
+            ok &= Check("double-clicking below the last filter asks for a new one", below.Add);
+            ok &= Check("and does not also ask to edit one", below.Edit is null);
+            ok &= Check("while double-clicking a filter asks only to edit it",
+                        !tree.DoubleClickForTesting(new Point(row.Left + 2, mid)).Add);
+
+            // Through the list's own event, not the seam: the empty part of the list is not a node, so the
+            // tree's NodeMouseDoubleClick - where this used to be handled - never fires there.
+            int asked = 0;
+            void CountAdds(Filter? _) => asked++;
+            tree.AddRequested += CountAdds;
+            tree.RaiseDoubleClickEventForTesting(new Point(tree.TreeWidthForTesting / 2, belowY));
+            Pump();
+            tree.AddRequested -= CountAdds;
+            ok &= Check($"the list's own double-click event asks for one too (raised {asked})", asked == 1);
 
             // The real message sequence, because the tree's own handling of it is what used to leave the
             // tick and the filter disagreeing: it flipped the box and reported nothing.
@@ -4917,6 +4940,123 @@ internal static class SelfTest
 
         return ok;
     }
+
+    /// <summary>Dropping a log in from Explorer replaces the one on screen and keeps the filters - one filter
+    /// set, several files to try it against. A drop target is registered per window and a child that has not
+    /// asked for drops refuses them rather than passing them up, so which controls opt in is part of the
+    /// behaviour and is checked here too.</summary>
+    private static bool RunFileDropChecks()
+    {
+        Line("-- dropping files on the window --");
+
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_st_drop_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string logA = Path.Combine(dir, "a.log"), logB = Path.Combine(dir, "b.log");
+        File.WriteAllLines(logA, Enumerable.Range(1, 40).Select(i => $"alpha line {i}"));
+        File.WriteAllLines(logB, Enumerable.Range(1, 90).Select(i => $"bravo line {i}"));
+
+        string filterFile = Path.Combine(dir, "two.cascade");
+        var saved = new FilterCollection();
+        saved.Roots.Add(new Filter { Match = { Text = "alpha" }, Enabled = true });
+        saved.Roots.Add(new Filter { Match = { Text = "bravo" }, Enabled = true });
+        CascadeFile.Save(filterFile, saved);
+
+        bool ok;
+        try
+        {
+            using var form = new MainForm(new AppSettings(), new MachineState(), new[] { logA })
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 700),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+            Pump();
+
+            var doc = form.DocForTesting;
+            var grid = form.GridForTesting;
+            var tree = form.FilterTreeForTesting;
+            ok = Check($"the first file is open ({Path.GetFileName(doc.FilePath)})", doc.FilePath == logA);
+            ok &= Check("the window accepts drops", form.AllowDrop);
+            ok &= Check("and so does the log view, which is what covers it", grid.AllowDrop);
+
+            ok &= Check("a dragged file is offered as a copy",
+                        EffectOfDragOver(grid, Files(logB)) == DragDropEffects.Copy);
+            ok &= Check("a drag carrying no file is refused",
+                        EffectOfDragOver(grid, new DataObject(DataFormats.Text, "not a file")) == DragDropEffects.None);
+            ok &= Check("so is a folder", EffectOfDragOver(grid, Files(dir)) == DragDropEffects.None);
+            ok &= Check("so is a path that is not there",
+                        EffectOfDragOver(grid, Files(Path.Combine(dir, "gone.log"))) == DragDropEffects.None);
+
+            // The point of the gesture: the file changes, the filters do not.
+            Drop(grid, Files(filterFile));
+            Pump();
+            int filtersBefore = doc.Filters.Roots.Count;
+            ok &= Check($"dropping a filter file loads it ({filtersBefore} filters)", filtersBefore == 2);
+
+            Drop(grid, Files(logB));
+            Pump();
+            doc.WaitForIndex();
+            Pump();
+            ok &= Check($"dropping a log replaces the one on screen ({Path.GetFileName(doc.FilePath)})", doc.FilePath == logB);
+            ok &= Check($"with the new file's lines ({doc.CompletedLineCount})", doc.CompletedLineCount == 90);
+            ok &= Check($"and the filters left alone ({doc.Filters.Roots.Count})", doc.Filters.Roots.Count == 2);
+            ok &= Check("which the list still shows", tree.VisibleFiltersForTesting.Count == 2);
+
+            // Both at once, which is how a filter set and the file to try it on tend to arrive.
+            doc.Filters.Roots.Clear();
+            tree.Rebuild();
+            Drop(grid, Files(logA, filterFile));
+            Pump();
+            doc.WaitForIndex();
+            Pump();
+            ok &= Check($"dropping a log and a filter file together does both " +
+                        $"({Path.GetFileName(doc.FilePath)}, {doc.Filters.Roots.Count} filters)",
+                        doc.FilePath == logA && doc.Filters.Roots.Count == 2);
+
+            // The filter pane is a drop target of its own, for reordering filters, so it has to answer for
+            // files itself rather than letting them fall through to the window.
+            ok &= Check("the filter pane offers a copy for a file",
+                        tree.DragEffectForTesting(DragArgs(Files(logB))) == DragDropEffects.Copy);
+            ok &= Check("and refuses a drag it has no use for",
+                        tree.DragEffectForTesting(DragArgs(new DataObject(DataFormats.Text, "no"))) == DragDropEffects.None);
+            tree.DropOnTreeForTesting(DragArgs(Files(logB)));
+            Pump();
+            doc.WaitForIndex();
+            Pump();
+            ok &= Check($"and opens a file dropped on it ({Path.GetFileName(doc.FilePath)})", doc.FilePath == logB);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+
+        return ok;
+    }
+
+    private static DataObject Files(params string[] paths) => new(DataFormats.FileDrop, paths);
+
+    private static DragEventArgs DragArgs(IDataObject data)
+        => new(data, 0, 0, 0, DragDropEffects.All, DragDropEffects.None);
+
+    /// <summary>What the control would do with this drag, asked the way Windows asks: DragOver is what
+    /// decides the cursor while the pointer is over it.</summary>
+    private static DragDropEffects EffectOfDragOver(Control target, IDataObject data)
+    {
+        var e = DragArgs(data);
+        RaiseDragEvent(target, "OnDragOver", e);
+        return e.Effect;
+    }
+
+    private static void Drop(Control target, IDataObject data) => RaiseDragEvent(target, "OnDragDrop", DragArgs(data));
+
+    /// <summary>Drag events cannot be staged from a test - a real one comes from the shell through OLE - so
+    /// the control is asked to raise its own, which runs the handlers the app attached to it.</summary>
+    private static void RaiseDragEvent(Control target, string method, DragEventArgs e)
+        => typeof(Control).GetMethod(method, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+           .Invoke(target, [e]);
 
     /// <summary>An Alt key has to be unique within its own menu. Where two items claim the same letter
     /// Windows cycles between them rather than running either, so the key must be pressed twice and then

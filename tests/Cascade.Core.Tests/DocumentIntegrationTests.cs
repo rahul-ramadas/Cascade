@@ -19,6 +19,84 @@ public class DocumentIntegrationTests
         throw new TimeoutException("Filtering did not become idle in time.");
     }
 
+    private static string WriteLines(string word, int count)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < count; i++) sb.Append(word).Append(" line ").Append(i).Append('\n');
+        return Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+    }
+
+    [Fact]
+    public async Task Opening_another_file_does_not_wait_for_the_old_one_to_be_let_go()
+    {
+        // Letting go of a mapping makes the kernel hand back every resident page one at a time - MEASURED at
+        // 973 ms for a 15.8 GB log - and it used to run on the thread that draws, so the window sat frozen
+        // for a second every time another file was opened. The gate stands in for that wait.
+        string a = WriteLines("alpha", 40), b = WriteLines("bravo", 90);
+        using var held = new ManualResetEventSlim(false);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(a);
+            doc.WaitForIndex();
+
+            doc.ReleaseDelayForTesting = () => held.Wait(TimeSpan.FromSeconds(10));
+            var sw = Stopwatch.StartNew();
+            doc.Open(b);
+            sw.Stop();
+            doc.WaitForIndex();
+
+            Assert.True(sw.ElapsedMilliseconds < 2000,
+                        $"opening waited for the old file to be released ({sw.ElapsedMilliseconds} ms)");
+            Assert.False(doc.ReleasePending.IsCompleted, "the old mapping should still be being let go");
+
+            // And the new file is completely usable while that is still going on.
+            Assert.Equal(90, doc.CompletedLineCount);
+            Assert.StartsWith("bravo", doc.GetLineText(0), StringComparison.Ordinal);
+
+            held.Set();
+            await doc.ReleasePending.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            held.Set();
+            File.Delete(a);
+            File.Delete(b);
+        }
+    }
+
+    [Fact]
+    public void Opening_a_file_does_not_inherit_the_last_one_s_filtering()
+    {
+        // The first pass over a file starts from "every line visible" and narrows, so the reader sees their
+        // lines straight away. That is decided by whether a pass is already running, which belongs to the
+        // file being let go - inherited, a newly opened file would be treated as already filtered.
+        string a = WriteLines("alpha", 40), b = WriteLines("bravo", 90);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(a);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var f = new Filter { Enabled = true, Match = { Text = "line 1" } };
+            filters.Add(f);
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.True(doc.CurrentPassSeededFromEverything, "the first pass over a file seeds from everything");
+
+            f.Match.Text = "line 2";
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.False(doc.CurrentPassSeededFromEverything, "a later change carries on from the last result");
+
+            doc.Open(b);
+            WaitFilter(doc);
+            Assert.True(doc.CurrentPassSeededFromEverything, "a new file starts over");
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
     [Fact]
     public void Filter_find_reports_progress_and_honors_cancellation()
     {

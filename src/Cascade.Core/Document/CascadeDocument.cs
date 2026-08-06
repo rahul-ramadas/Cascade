@@ -186,7 +186,7 @@ public sealed class CascadeDocument : IDisposable
 
     public void Open(string path, Encoding? forcedEncoding = null)
     {
-        DisposeCurrent();
+        DisposeCurrent(releaseAsync: true);
 
         FilePath = path;
         _src = new MemoryMappedTextSource(path);
@@ -231,6 +231,11 @@ public sealed class CascadeDocument : IDisposable
             Updated?.Invoke();
             return;
         }
+        // A filter that has just been deleted or edited can never be asked about again, so its results are
+        // dropped here rather than being kept for the life of the file. It has to happen on the way through
+        // every filter change, not inside Restart: removing the last filter takes the Stop path below, which
+        // is exactly the change that makes the most cached results dead.
+        _filterService.RetainCachedResults(CurrentSnapshot);
         if (CurrentSnapshot.HasAnyEnabled)
         {
             // The pass reuses (and updates in place) the existing visible set. When no filters were active the
@@ -572,7 +577,20 @@ public sealed class CascadeDocument : IDisposable
     public void WaitForIndex() => _indexTask.Wait();
     public bool IsFilterIdle => _filterService?.IsIdle ?? true;
 
-    private void DisposeCurrent()
+    /// <summary>Whether the pass now running was told to start from "every line visible" - true only when
+    /// the view it is replacing was unfiltered, which includes a file that has just been opened.</summary>
+    internal bool CurrentPassSeededFromEverything => _generation?.SeedAllVisible ?? false;
+
+    /// <summary>Completes once the file let go of by the last <see cref="Open"/> has really been unmapped.
+    /// Only tests need to wait for it; the app never does.</summary>
+    internal Task ReleasePending { get; private set; } = Task.CompletedTask;
+
+    /// <summary>Test seam: runs on the release worker before the mapping is let go, so a test can hold it
+    /// open and prove the window was not waiting for it. Per document, not shared: the test suite runs
+    /// several classes at once and a static hook would stall whatever else happened to be opening a file.</summary>
+    internal Action? ReleaseDelayForTesting;
+
+    private void DisposeCurrent(bool releaseAsync = false)
     {
         // Stop any background find first so it cannot read the memory-mapped file after we free it.
         try { _findCts?.Cancel(); } catch { /* ignore */ }
@@ -582,7 +600,22 @@ public sealed class CascadeDocument : IDisposable
         try { _indexCts.Cancel(); } catch { /* ignore */ }
         try { _indexTask.Wait(1000); } catch { /* ignore */ }
         _filterService?.Dispose();
-        _src?.Dispose();
+        // The generation belongs to the file being let go: the next one must not inherit it, or the first
+        // pass over the new file would think it was replacing a view that is already filtered.
+        _generation = null;
+
+        var source = _src;
+        _src = null!;
+        if (!releaseAsync) { source?.Dispose(); return; }
+        // Unmapping a large log makes the kernel hand back every resident page - MEASURED at 973 ms for a
+        // 15.8 GB file - and everything that could read it has just been stopped above. So the wait goes to
+        // a worker: opening another file is the one time this happens with a window still on screen.
+        var delay = ReleaseDelayForTesting;
+        ReleasePending = Task.Run(() =>
+        {
+            delay?.Invoke();
+            source?.Dispose();
+        });
     }
 
     /// <summary>True once the file has been let go. Releasing the mapping of a large log is slow, so what
@@ -591,6 +624,9 @@ public sealed class CascadeDocument : IDisposable
 
     public void Dispose()
     {
+        // Deliberately synchronous: the window is already down by the time this runs, and the process
+        // cannot finish exiting until the address space is torn down anyway.
+        try { ReleasePending.Wait(5000); } catch { /* a release that will not finish must not block exit */ }
         DisposeCurrent();
         _indexCts.Dispose();
         IsDisposed = true;

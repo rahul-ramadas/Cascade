@@ -675,4 +675,53 @@ public class FilterMatchCacheTests
         }
         finally { File.Delete(path); }
     }
+
+    /// <summary>Removing every filter at once - the Remove All command - is the change that makes the most
+    /// cached results dead, and it is the one that used to keep them: with nothing enabled there is no pass
+    /// to start, and the pruning lived inside starting one.</summary>
+    [Fact]
+    public void Removing_every_filter_frees_everything_cached_for_them()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out var filters, out _);
+            Assert.True(doc.FilterCacheCount > 0);
+
+            filters.Roots.Clear();
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            Assert.Equal(0, doc.FilterCacheCount);
+            Assert.Equal(0, doc.FilterCacheBytes);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Disabling every filter reaches the same "nothing to run" state as removing them, but the
+    /// filters are still there - so their results must survive, or turning them back on would rescan.</summary>
+    [Fact]
+    public void Disabling_every_filter_keeps_their_results()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out var filters, out var flat);
+            int settled = doc.FilterCacheCount;
+
+            foreach (var f in flat) f.Enabled = false;
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            Assert.Equal(settled, doc.FilterCacheCount);
+
+            // And they really are still usable: switching one back on is served without a scan.
+            long hits = doc.FilterCacheHits;
+            flat[0].Enabled = true;
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.True(doc.FilterCacheHits > hits, "turning a filter back on should be served from the cache");
+        }
+        finally { File.Delete(path); }
+    }
 }

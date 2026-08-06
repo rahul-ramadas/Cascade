@@ -203,6 +203,13 @@ public sealed class MainForm : Form
         _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
 
+        // A log dragged in from Explorer replaces the one on screen and keeps the filters. Every area that
+        // covers the window has to accept the drop for itself; the filter pane answers for its own, since
+        // it is already a drop target for reordering filters.
+        AcceptFileDrops(this);
+        AcceptFileDrops(_grid);
+        _filterTree.FilesDropped += OpenDroppedFiles;
+
         _refreshTimer.Tick += (_, _) =>
         {
             if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _grid.InvalidateMatchMap(); _filterTree.RefreshCounts(); }
@@ -778,6 +785,45 @@ public sealed class MainForm : Form
     {
         using var dlg = new OpenFileDialog { Title = "Open file", Filter = "All files (*.*)|*.*" };
         if (dlg.ShowDialog(this) == DialogResult.OK) OpenFile(dlg.FileName, null);
+    }
+
+    // ---- dropping files on the window ----
+
+    /// <summary>Lets <paramref name="target"/> accept files dragged in from Explorer. A drop target is
+    /// registered per window, and a child that has not asked for drops simply refuses them rather than
+    /// passing them up - so every area a file might plausibly be aimed at has to opt in by name.</summary>
+    private void AcceptFileDrops(Control target)
+    {
+        target.AllowDrop = true;
+        target.DragEnter += (_, e) => e.Effect = EffectForDrop(e);
+        target.DragOver += (_, e) => e.Effect = EffectForDrop(e);
+        target.DragDrop += (_, e) => { if (DroppedPaths(e) is { Length: > 0 } paths) OpenDroppedFiles(paths); };
+    }
+
+    private static DragDropEffects EffectForDrop(DragEventArgs e)
+        => DroppedPaths(e) is { Length: > 0 } ? DragDropEffects.Copy : DragDropEffects.None;
+
+    /// <summary>The existing files being dragged, or null when the drag is not carrying any. Folders are
+    /// left out: there is nothing sensible to open.</summary>
+    internal static string[]? DroppedPaths(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) != true) return null;
+        return e.Data.GetData(DataFormats.FileDrop) is string[] paths
+            ? Array.FindAll(paths, File.Exists)
+            : null;
+    }
+
+    internal static bool IsFilterFile(string path)
+        => path.EndsWith(".cascade", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".tat", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A dropped log replaces the one on screen, keeping the filters - which is the whole point of
+    /// the gesture: one filter set, several files to try it against. Dropped filters are loaded first, so
+    /// that dropping both together opens the file with them already applied.</summary>
+    internal void OpenDroppedFiles(string[] paths)
+    {
+        if (Array.Find(paths, IsFilterFile) is { } filters) LoadFiltersFrom(filters);
+        if (Array.Find(paths, p => !IsFilterFile(p)) is { } log) OpenFile(log, null);
     }
 
     private void OpenFile(string path, Encoding? enc)
