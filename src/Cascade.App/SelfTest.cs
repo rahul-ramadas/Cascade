@@ -2644,26 +2644,45 @@ internal static class SelfTest
             ok &= Check("below a nested filter counts among ITS siblings, not the roots",
                         MainForm.NewFilterIndex(addAtTop: true, after: kid, filters) == 1);
 
-            // ---- there is always somewhere to double-click ----
+            // ---- somewhere to double-click ----
+            // The list cannot be made to scroll past its last filter: a native tree clamps that, MEASURED.
+            // The blank space it leaves at the bottom is only the remainder of the pane's height, so with
+            // room to spare there is a whole row of it and with the filters filling the pane there is none.
             int rowH = tree.RowHeightForTesting;
-            var tail = tree.TailSpaceForTesting;
-            ok &= Check($"the list keeps a filter's worth of blank space below it ({tail.Height} of {rowH})",
-                        tail.Height >= rowH);
-            ok &= Check($"which is below the list itself ({tail.Top} against {tree.TreeAreaForTesting.Bottom})",
-                        tail.Top >= tree.TreeAreaForTesting.Bottom);
-            ok &= Check($"and the list holds more filters than fit, so it has no blank row of its own " +
-                        $"({filters.Roots.Count} filters, room for {tree.TreeHeightForTesting / rowH})",
-                        filters.Roots.Count > tree.TreeHeightForTesting / rowH);
+            var few = new FilterCollection();
+            for (int i = 0; i < 3; i++)
+                few.Roots.Add(new Filter { Enabled = true, Match = new FilterMatch { Text = $"few {i}" } });
+            doc.SetFilters(few);
+            tree.Rebuild();
+            Pump();
+            ok &= Check($"a list with room to spare has blank space of its own to aim at " +
+                        $"({tree.TreeHeightForTesting - few.Roots.Count * rowH} px)",
+                        tree.TreeHeightForTesting - few.Roots.Count * rowH >= rowH);
 
             int asked = 0;
             Filter? askedParent = null;
             void CountAdds(Filter? p) { asked++; askedParent = p; }
             tree.AddRequested += CountAdds;
-            tree.DoubleClickTailSpaceForTesting();
+            tree.RaiseDoubleClickEventForTesting(new Point(tree.TreeWidthForTesting / 2, tree.TreeHeightForTesting - 2));
             Pump();
-            ok &= Check($"double-clicking that space asks for a new top-level filter (raised {asked})",
+            ok &= Check($"double-clicking it asks for a new top-level filter (raised {asked})",
                         asked == 1 && askedParent is null);
             tree.AddRequested -= CountAdds;
+
+            // Opening the search bar makes the list shorter; closing it gives every pixel back.
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            Pump();
+            int listBefore = tree.TreeAreaForTesting.Height;
+            tree.ShowSearch();
+            Pump();
+            int listOpen = tree.TreeAreaForTesting.Height;
+            tree.HideSearch();
+            Pump();
+            ok &= Check($"opening the search bar takes room from the list ({listBefore} -> {listOpen})",
+                        listOpen < listBefore);
+            ok &= Check($"and closing it gives all of it back ({listOpen} -> {tree.TreeAreaForTesting.Height})",
+                        tree.TreeAreaForTesting.Height == listBefore);
 
             // ---- what the list's own menu offers ----
             Filter? below = null;
