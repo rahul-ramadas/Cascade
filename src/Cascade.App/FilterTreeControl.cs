@@ -43,11 +43,6 @@ public sealed class FilterTreeControl : UserControl
     };
     private readonly FilterListHeader _header = new() { Dock = DockStyle.Top };
 
-    /// <summary>A row's worth of blank list kept below the last filter. Double-clicking the empty part of
-    /// the list asks for a new filter, and with enough filters to fill the pane there was no empty part
-    /// left to aim at. The tree cannot scroll past its last row, so the room is made underneath it.</summary>
-    private readonly Panel _tailSpace = new() { Dock = DockStyle.Bottom, BackColor = SystemColors.Window, AllowDrop = true };
-
     private AppSettings _settings = new();
     private Font? _fBase;
     private Font _fReg = null!, _fBold = null!, _fItalic = null!, _fBoldItalic = null!;
@@ -109,17 +104,8 @@ public sealed class FilterTreeControl : UserControl
         _tree.ContextMenuStrip = menu;
 
         Controls.Add(_tree);
-        Controls.Add(_tailSpace);
         Controls.Add(_header);
         Controls.Add(_searchBar);
-
-        // MouseDown rather than a double-click event, for the reason given in OnTreeMouseDown: it is the one
-        // report that always arrives.
-        _tailSpace.MouseDown += (_, e) => { if (e.Button == MouseButtons.Left && e.Clicks == 2) AddRequested?.Invoke(null); };
-        _tailSpace.DragEnter += (_, e) => e.Effect = DragEffectFor(e);
-        _tailSpace.DragOver += (_, e) => e.Effect = DragEffectFor(e);
-        _tailSpace.DragDrop += (_, e) => OnDragDrop(_tailSpace, e);
-        SizeTailSpace();
 
         // Docking runs from the back of the child list forwards, so the filling box has to be added first
         // to be laid out last and take whatever the label and the button leave.
@@ -184,7 +170,12 @@ public sealed class FilterTreeControl : UserControl
         _searchClose.Size = new Size(_search.PreferredHeight, _search.PreferredHeight);
     }
 
-    private void SizeTailSpace() => _tailSpace.Height = _tree.ItemHeight;
+    /// <summary>Rebuilds the flat row list from the tree.</summary>
+    private void Reflatten()
+    {
+        _flat.Clear();
+        FlattenInto(_tree.Nodes);
+    }
 
     /// <summary>A panel with a hairline along its top, so the bar reads as its own surface rather than as
     /// the list running on past its last row. The list's scrollbar stops short of the bar, which leaves the
@@ -203,10 +194,6 @@ public sealed class FilterTreeControl : UserControl
     {
         base.OnFontChanged(e);
         SizeSearchBar();
-        // The tree works its own row height out from the font, on a posted call when it already has a
-        // handle - so read it back afterwards rather than racing it.
-        if (IsHandleCreated) BeginInvoke(new Action(() => { if (!IsDisposed) SizeTailSpace(); }));
-        else SizeTailSpace();
     }
 
     private const int FocusBarWidth = 3;
@@ -239,7 +226,7 @@ public sealed class FilterTreeControl : UserControl
         if (w <= 0) return;
         Rectangle r;
         if (_search.Focused) r = new Rectangle(0, _searchBar.Top, w, _searchBar.Height);
-        else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height + _tailSpace.Height);
+        else if (_tree.Focused) r = new Rectangle(0, _tree.Top, w, _tree.Height);
         else return;
         using var b = new SolidBrush(_settings.SelectionBack);
         e.Graphics.FillRectangle(b, r);
@@ -416,7 +403,12 @@ public sealed class FilterTreeControl : UserControl
     }
 
     /// <summary>Double-clicking below the last filter asks for a new one - the empty part of the list is not
-    /// about any filter in particular, so it can only mean "another one".</summary>
+    /// about any filter in particular, so it can only mean "another one".
+    ///
+    /// How much empty part there is cannot be arranged: a native tree will not scroll past its last item
+    /// (MEASURED - asking for that item to be the first visible one is clamped to the top of the last page,
+    /// and widening its scrollbar range by hand changes nothing), so the space is whatever is left over,
+    /// <c>height % rowHeight</c>, and there is none at all when the filters fill the pane.</summary>
     private void HandleDoubleClickAt(Point at)
     {
         if (_tree.GetNodeAt(0, at.Y) is { } node) HandleDoubleClick(node, at.X);
@@ -449,7 +441,7 @@ public sealed class FilterTreeControl : UserControl
         _tree.Nodes.Clear();
         _flat.Clear();
         foreach (var f in _doc.Filters.Roots) _tree.Nodes.Add(BuildNode(f));
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         _tree.EndUpdate();
         _building = false;
 
@@ -495,8 +487,7 @@ public sealed class FilterTreeControl : UserControl
         try { SyncLevel(_tree.Nodes, _doc.Filters.Roots); }
         finally { _tree.EndUpdate(); _building = false; }
 
-        _flat.Clear();
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         if (_collapsed.Count > 0) _collapsed.IntersectWith(_flat.Select(n => (n.Tag as Filter)?.Id ?? ""));
         ReconcileSelection();
         MeasureDescriptions();
@@ -1126,8 +1117,7 @@ public sealed class FilterTreeControl : UserControl
         finally { _tree.EndUpdate(); _building = false; }
 
         _dragNode = _ghost;
-        _flat.Clear();
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         _tree.Invalidate();
     }
 
@@ -1216,14 +1206,6 @@ public sealed class FilterTreeControl : UserControl
     /// <summary>Brings a filter into view the way the list's own search does, opening anything folded in
     /// front of it.</summary>
     internal void RevealForTesting(Filter f) { if (NodeFor(f) is { } n) RevealNode(n); }
-
-    /// <summary>The blank row kept below the last filter, and a double-click on it through the real handler.</summary>
-    internal Rectangle TailSpaceForTesting => _tailSpace.Bounds;
-
-    internal void DoubleClickTailSpaceForTesting()
-        => typeof(Control).GetMethod("OnMouseDown",
-               System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
-           .Invoke(_tailSpace, [new MouseEventArgs(MouseButtons.Left, 2, 4, 4, 0)]);
 
     /// <summary>The list's own menu, so a check can open it the way Windows does and read what it offers.</summary>
     internal ContextMenuStrip FilterMenuForTesting => (ContextMenuStrip)_tree.ContextMenuStrip!;
@@ -1419,8 +1401,7 @@ public sealed class FilterTreeControl : UserControl
         }
         finally { _tree.EndUpdate(); _building = false; }
 
-        _flat.Clear();
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         _tree.Invalidate();
     }
 
@@ -1476,8 +1457,7 @@ public sealed class FilterTreeControl : UserControl
             _building = false;
         }
 
-        _flat.Clear();
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         _tree.SelectedNode = _dragNode;
         _tree.Invalidate();
     }
@@ -1699,8 +1679,7 @@ public sealed class FilterTreeControl : UserControl
             _building = true;
             _tree.BeginUpdate();
             foreach (var n in nodes) n.Remove();
-            _flat.Clear();
-            FlattenInto(_tree.Nodes);
+            Reflatten();
             _tree.EndUpdate();
             _building = false;
 
@@ -1777,8 +1756,7 @@ public sealed class FilterTreeControl : UserControl
         // A filter nested under a collapsed parent would simply vanish, so open it (and remember that it is
         // open, since _building suppresses the AfterExpand handler that normally tracks this).
         if (parentNode?.Tag is Filter parent) { _collapsed.Remove(parent.Id); parentNode.Expand(); }
-        _flat.Clear();
-        FlattenInto(_tree.Nodes);
+        Reflatten();
         _tree.EndUpdate();
         _building = false;
 
