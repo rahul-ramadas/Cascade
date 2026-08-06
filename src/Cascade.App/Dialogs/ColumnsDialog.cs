@@ -61,7 +61,9 @@ public sealed class ColumnsDialog : DialogBase
             };
         };
 
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Column", Name = "name", ReadOnly = true, AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+        // The name is editable here as well as on the header itself: the header can only be reached for a
+        // column that is currently shown, and this is where a hidden one is brought back.
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Column name", Name = "name", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
         _grid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "Visible", Name = "visible", Width = Dpi(70) });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Width (0=auto)", Name = "width", Width = Dpi(120) });
 
@@ -127,6 +129,12 @@ public sealed class ColumnsDialog : DialogBase
 
     public ColumnSpec Result => _working;
 
+    // ---- seams, so the grid can be driven without a mouse ----
+
+    internal bool NameIsEditableForTesting => !_grid.Columns["name"]!.ReadOnly;
+    internal void SetCellForTesting(int row, string column, object? value) => _grid.Rows[row].Cells[column].Value = value;
+    internal void ApplyForTesting() => Apply();
+
     private void LoadFromSpec()
     {
         _enabled.Checked = _working.Enabled;
@@ -151,6 +159,8 @@ public sealed class ColumnsDialog : DialogBase
 
     private void RefreshColumns()
     {
+        _grid.EndEdit();
+        ApplyGridToWorking();
         CommitEditorsToWorking();
         if (_modeTemplate.Checked)
         {
@@ -194,10 +204,20 @@ public sealed class ColumnsDialog : DialogBase
 
     private void Apply()
     {
+        _grid.EndEdit();   // OK can be pressed with a name still half-typed
         CommitEditorsToWorking();
+        ApplyGridToWorking();
+    }
+
+    /// <summary>Writes the grid back onto the columns. Shared by OK and by re-reading the sample, so a name
+    /// typed here is not lost the moment either is pressed.</summary>
+    private void ApplyGridToWorking()
+    {
         for (int i = 0; i < _grid.Rows.Count && i < _working.Columns.Count; i++)
         {
             var def = _working.Columns[i];
+            string name = Convert.ToString(_grid.Rows[i].Cells["name"].Value)?.Trim() ?? "";
+            if (name.Length > 0) def.Name = name;   // as on the header: a name cannot be emptied
             def.Visible = Convert.ToBoolean(_grid.Rows[i].Cells["visible"].Value ?? true);
             int width = int.TryParse(Convert.ToString(_grid.Rows[i].Cells["width"].Value), out int w) ? Math.Max(0, w) : 0;
             // Only when it was actually typed over: a width dragged in the header is kept in characters,
