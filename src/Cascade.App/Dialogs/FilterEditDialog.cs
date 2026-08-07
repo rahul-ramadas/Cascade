@@ -56,9 +56,10 @@ public sealed class FilterEditDialog : DialogBase
     private readonly Button _backBtn = new() { FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 3, 0, 3) };
     private readonly Button _luckyBtn = new() { Text = "I'm feeling luck&y", AutoSize = true, Margin = new Padding(16, 3, 0, 3) };
     private readonly Button _chipsBtn = new() { Text = "&Paint chips\u2026", AutoSize = true, Margin = new Padding(6, 3, 0, 3) };
-    private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, Margin = new Padding(32, 6, 24, 3) };
-    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 24, 3) };
-    private readonly QuietCheckBox _underline = new() { Text = "&Underline", AutoSize = true, ThreeState = true, Margin = new Padding(0, 6, 0, 3) };
+    // These three rest on "inherited", so the press that follows should be the one being asked for.
+    private readonly QuietCheckBox _bold = new() { Text = "Bo&ld", AutoSize = true, ThreeState = true, TurnsOnFirst = true, Margin = new Padding(32, 6, 24, 3) };
+    private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, TurnsOnFirst = true, Margin = new Padding(0, 6, 24, 3) };
+    private readonly QuietCheckBox _underline = new() { Text = "&Underline", AutoSize = true, ThreeState = true, TurnsOnFirst = true, Margin = new Padding(0, 6, 0, 3) };
 
     private readonly IReadOnlyList<Filter> _siblings;
     /// <summary>Where this filter will hang, which decides what it inherits. A filter being added is not in
@@ -197,6 +198,10 @@ public sealed class FilterEditDialog : DialogBase
         _text.SelectionStart = start;
         _text.SelectionLength = length;
     }
+
+    /// <summary>Test seam: the bold, italic and underline boxes, so a check can press one and watch the
+    /// state it lands on.</summary>
+    internal IReadOnlyList<QuietCheckBox> StyleBoxesForTesting => [_bold, _italic, _underline];
 
     protected override void OnLoad(EventArgs e)
     {
