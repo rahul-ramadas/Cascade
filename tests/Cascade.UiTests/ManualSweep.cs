@@ -81,6 +81,7 @@ public class ManualSweep : IDisposable
                 // is up the main window reports no title, so the next stage finds nothing to drive.
                 try
                 {
+                    ReleaseKeys();
                     ParkPointer();
                     DismissDialogs();
                     _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
@@ -186,14 +187,14 @@ public class ManualSweep : IDisposable
             var dlg = _app.FindDialog("Go To Line");
             if (dlg is null) return -1;
             var box = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
-            if (box is null) { Keyboard.Press(VirtualKeyShort.ESCAPE); return -1; }
+            if (box is null) { Keyboard.Type(VirtualKeyShort.ESCAPE); return -1; }
             box.Focus();
             Keyboard.Pressing(VirtualKeyShort.CONTROL);
             Keyboard.Type(VirtualKeyShort.KEY_A);
             Keyboard.Release(VirtualKeyShort.CONTROL);
             Keyboard.Type(typed);
             Thread.Sleep(200);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(1500);
             return CaretLine();
         }
@@ -261,7 +262,7 @@ public class ManualSweep : IDisposable
         {
             _app.ClickMenuOrThrow("Filters", "Presets");
             Thread.Sleep(400);
-            Keyboard.Press(VirtualKeyShort.ESCAPE);
+            Keyboard.Type(VirtualKeyShort.ESCAPE);
             Thread.Sleep(300);
             // Make one from the pane instead.
             var hint = _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
@@ -271,13 +272,13 @@ public class ManualSweep : IDisposable
             Mouse.MoveTo(new Point(hr.Left + hr.Width / 2, hr.Top + 40));
             Mouse.Click(MouseButton.Right);
             Thread.Sleep(800);
-            Keyboard.Press(VirtualKeyShort.DOWN);
+            Keyboard.Type(VirtualKeyShort.DOWN);
             Thread.Sleep(200);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(1200);
             Keyboard.Type("round trip");
             Thread.Sleep(300);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(1200);
         }
         names = SafePresetNames();
@@ -346,7 +347,7 @@ public class ManualSweep : IDisposable
         Thread.Sleep(1200);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(600);
     }
 
@@ -397,9 +398,9 @@ public class ManualSweep : IDisposable
         string undo = edit?.FirstOrDefault(m => (m.Name ?? "").StartsWith("Undo", StringComparison.Ordinal))?.Name ?? "";
         Say($"Edit menu undo item: '{undo}'");
         Check("the undo item names what it will take back", undo.Length > "Undo".Length, undo);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
 
         if (!ClickFilterRow(BigFixture.MidFilter)) ClickFilterRow(BigFixture.HugeFilter);
@@ -453,7 +454,7 @@ public class ManualSweep : IDisposable
               _app.DescribePresets());
 
         // F2 renames.
-        Keyboard.Press(VirtualKeyShort.F2);
+        Keyboard.Type(VirtualKeyShort.F2);
         Thread.Sleep(1200);
         ShotScreen("preset-rename");
         Keyboard.Pressing(VirtualKeyShort.CONTROL);
@@ -461,7 +462,7 @@ public class ManualSweep : IDisposable
         Keyboard.Release(VirtualKeyShort.CONTROL);
         Keyboard.Type("renamed one");
         Thread.Sleep(300);
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(1200);
         Say($"after rename: {string.Join(" | ", SafePresetNames())}");
         Check("F2 renames a preset", SafePresetNames().Any(n => n.Contains("renamed one")),
@@ -470,7 +471,7 @@ public class ManualSweep : IDisposable
         // Delete removes it.
         Mouse.Click(onLabel);
         Thread.Sleep(400);
-        Keyboard.Press(VirtualKeyShort.DELETE);
+        Keyboard.Type(VirtualKeyShort.DELETE);
         Thread.Sleep(1200);
         Say($"after delete: {string.Join(" | ", SafePresetNames())}");
         Check("Delete removes it", !SafePresetNames().Any(n => n.Contains("renamed one")),
@@ -529,10 +530,10 @@ public class ManualSweep : IDisposable
 
         _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(300);
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
         string first = $"line {_app.CaretLine()}";
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(1500);
         string second = $"line {_app.CaretLine()}";
         Check("Enter goes forwards", second != first, $"{first} -> {second}");
@@ -551,7 +552,7 @@ public class ManualSweep : IDisposable
             regex.IsChecked = true;
             _app.SetText(edit, BigFixture.RegexTerm);
             Thread.Sleep(400);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(4000);
             Say($"regex search: {Tally()}");
             Check("a regex search finds something", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
@@ -559,14 +560,14 @@ public class ManualSweep : IDisposable
             // ...and one that cannot match must say so, or the regex is not really being used.
             _app.SetText(edit, BigFixture.ImpossibleRegexTerm);
             Thread.Sleep(400);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(6000);
             Say($"impossible regex: {Tally()}");
             Check("and one that cannot match says so", Tally() == "No matches", Tally());
             regex.IsChecked = false;
         }
         Shot("backwards");
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(600);
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");   // back as the stage found it
         Thread.Sleep(3000);
@@ -595,7 +596,7 @@ public class ManualSweep : IDisposable
         Check("typing alone marks what is on screen", typed > plain + 500, $"{plain} -> {typed}");
         Shot("highlight-typed");
 
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(2500);
         int found = MarkedPixels(current: true);
         Check("the line the search landed on is marked more strongly", found > 30, $"{found} strong pixels");
@@ -607,7 +608,7 @@ public class ManualSweep : IDisposable
         // to invalidate the view - a click, a scroll, anything. Nothing is touched between these two grabs.
         var map = MapElement();
         using var withHits = map is null ? null : Grab(map);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);   // closes the bar and drops the term in one gesture
+        Keyboard.Type(VirtualKeyShort.ESCAPE);   // closes the bar and drops the term in one gesture
         Thread.Sleep(800);
         int cleared = MarkedPixels();
         Check("Esc takes the marks away with the bar", cleared < 200, $"{cleared} marked pixels");
@@ -630,9 +631,9 @@ public class ManualSweep : IDisposable
         var wrap = view?.FirstOrDefault(m => (m.Name ?? "") == "Word Wrap");
         Check("Word Wrap is offered", wrap is not null, string.Join("|", view?.Select(m => m.Name) ?? Array.Empty<string>()));
         Check("and is available while there are no columns", wrap?.IsEnabled ?? false);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
     }
 
@@ -782,7 +783,7 @@ public class ManualSweep : IDisposable
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
         string at = $"line {_app.CaretLine()}";
-        for (int i = 0; i < 3; i++) { Keyboard.Press(VirtualKeyShort.DOWN); Thread.Sleep(150); }
+        for (int i = 0; i < 3; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Thread.Sleep(150); }
         Check("the caret still moves while wrapped", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         // Clicking the lower half of a wrapped row must land on that row, not the one below.
@@ -1122,7 +1123,7 @@ public class ManualSweep : IDisposable
         Shot("find-typing");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(300);
         while ((Tally().Length == 0 || Tally().Contains('+') || Tally() == "Searching\u2026") && sw.ElapsedMilliseconds < 30000)
             Thread.Sleep(100);
@@ -1132,7 +1133,7 @@ public class ManualSweep : IDisposable
         Shot("find-found");
 
         string at = $"line {_app.CaretLine()}";
-        for (int i = 0; i < 10; i++) { Keyboard.Press(VirtualKeyShort.RETURN); Thread.Sleep(70); }
+        for (int i = 0; i < 10; i++) { Keyboard.Type(VirtualKeyShort.RETURN); Thread.Sleep(70); }
         Thread.Sleep(1000);
         Say($"after ten repeats: {$"line {_app.CaretLine()}"} (was {at}), {Tally()}");
         Check("ten repeats moved the caret on", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
@@ -1159,28 +1160,28 @@ public class ManualSweep : IDisposable
         // History.
         _app.SetText(edit, "");
         Thread.Sleep(200);
-        Keyboard.Press(VirtualKeyShort.DOWN);
+        Keyboard.Type(VirtualKeyShort.DOWN);
         Thread.Sleep(800);
         Say($"after Down in an empty box: '{_app.TextOf(edit)}'");
         Check("Down recalls the most recent term", _app.TextOf(edit).Length > 0, _app.TextOf(edit));
         ShotScreen("find-history");
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
 
         // Esc is one gesture on purpose: the bar goes, and the term, marks and counts go with it. A search
         // still running with nothing on screen to say so is the state the bar exists to remove.
         _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(200);
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(600);
         Check("Esc closes the bar", _app.FindBar() is null or { IsOffscreen: true });
         Check("and takes the counts with it", Tally().Length == 0, Tally());
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
-        for (int i = 0; i < 4; i++) { Keyboard.Press(VirtualKeyShort.DOWN); Thread.Sleep(250); }
+        for (int i = 0; i < 4; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Thread.Sleep(250); }
 
         // Hiding and showing must move the split. The date is on every line, so half the hits are on lines
         // the enabled filter is not showing.
@@ -1191,7 +1192,7 @@ public class ManualSweep : IDisposable
         {
             _app.SetText(box, BigFixture.EveryLineDate);
             Thread.Sleep(300);
-            Keyboard.Press(VirtualKeyShort.RETURN);
+            Keyboard.Type(VirtualKeyShort.RETURN);
             Thread.Sleep(6000);
         }
         string dim = Tally();
@@ -1209,7 +1210,7 @@ public class ManualSweep : IDisposable
         Thread.Sleep(4000);
         Check("and showing them again changes it back", Tally() != hidden, $"{hidden} -> {Tally()}");
 
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
         Thread.Sleep(800);
         Check("Esc puts the term away", Tally().Length == 0, Tally());
         Shot("find-cleared");
@@ -1266,17 +1267,17 @@ public class ManualSweep : IDisposable
                        .SelectMany(w => w.FindAllDescendants(cf => cf.ByControlType(ControlType.MenuItem)))
                        .FirstOrDefault(m => (m.Name ?? "").Contains("Save", StringComparison.OrdinalIgnoreCase));
         Check("right-clicking the empty pane offers to save a preset", save is not null, DescribeTopLevel());
-        if (save is null) { Keyboard.Press(VirtualKeyShort.ESCAPE); return; }
+        if (save is null) { Keyboard.Type(VirtualKeyShort.ESCAPE); return; }
 
         // Chosen with the keyboard: it opens a modal dialog, and a UIA Invoke that does that never returns.
-        Keyboard.Press(VirtualKeyShort.DOWN);
+        Keyboard.Type(VirtualKeyShort.DOWN);
         Thread.Sleep(200);
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(1500);
         ShotScreen("presets-naming");
         Keyboard.Type(PresetName);
         Thread.Sleep(400);
-        Keyboard.Press(VirtualKeyShort.RETURN);
+        Keyboard.Type(VirtualKeyShort.RETURN);
         Thread.Sleep(1800);
         Say($"presets now: {string.Join(" | ", SafePresetNames())}");
         Check("the preset appears in the list", SafePresetNames().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
@@ -1421,10 +1422,20 @@ public class ManualSweep : IDisposable
         {
             if (FilterTextBox() is null && _app.FindDialog("Add Filter") is null && _app.FindDialog("Edit Filter") is null)
                 return;
-            Keyboard.Press(VirtualKeyShort.ESCAPE);
+            Keyboard.Type(VirtualKeyShort.ESCAPE);
             Thread.Sleep(700);
         }
         Check("no dialog was left standing over the window", false, DescribeTopLevel());
+    }
+
+    /// <summary>Lets go of every key this rig holds down. <c>Keyboard.Press</c> sends key-DOWN and nothing
+    /// else, so a modifier held across a stage that threw stays down for the rest of the DESKTOP session,
+    /// not just the run - and a stuck Escape silently cancels every drag-and-drop, in this app and in every
+    /// other. That is why the rig types keys rather than pressing them, and why this runs after each stage.</summary>
+    private static void ReleaseKeys()
+    {
+        foreach (var key in new[] { VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT, VirtualKeyShort.ALT, VirtualKeyShort.ESCAPE })
+            try { Keyboard.Release(key); } catch { /* best effort */ }
     }
 
     private string CopyToClipboard()
