@@ -206,3 +206,7 @@ dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj   # engine tests
 
 .NET 10 SDK. `src/Cascade.Core` is a UI-agnostic engine (mapping, indexing, filtering, find, markers,
 columns, persistence, updating) with no reference to WinForms; `src/Cascade.App` is the GUI.
+
+## License
+
+[MIT](LICENSE) © 2026 Rahul Ramadas.
