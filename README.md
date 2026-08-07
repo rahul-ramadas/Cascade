@@ -105,9 +105,15 @@ raw line, so turning columns on can never change what you see.
 
 ## Install
 
-Download `Cascade-<version>-win-x64.exe` from the [latest release](../../releases/latest) and run it —
-a single file, no installer. It needs Windows and the .NET 10 Desktop Runtime, writes nothing but
-`%APPDATA%\Cascade`, touches no registry keys, and updates itself.
+Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run it — a single file, no
+installer. That link always points at the newest build, so it works from a terminal too:
+
+```powershell
+curl.exe -L -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
+```
+
+It needs Windows and the .NET 10 Desktop Runtime, writes nothing but `%APPDATA%\Cascade`, touches no
+registry keys, and updates itself.
 
 ## And the rest
 
