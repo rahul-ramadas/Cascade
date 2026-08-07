@@ -30,17 +30,15 @@ match and dims — or hides — everything else.
 
 ![The filter list](docs/images/filter-list.png)
 
-A filter is a substring, a .NET regular expression, or *marked by marker N*, with a colour, a
-description and an optional case-sensitivity flag. Filters are **includes** (show these lines) or
-**excludes** (but not these).
+A filter is a substring, a .NET regular expression, or *marked by marker N*, dressed with colours, bold,
+italic and underline, a description and an optional case-sensitivity flag. Filters are **includes** (show
+these lines) or **excludes** (but not these), and every row carries a **live count** that climbs while
+the file is still being scanned.
 
-- A filter matches a line only if its own pattern **and every ancestor's** match — whether or not those
-  ancestors are switched on. *Parent off, children on* therefore scopes a whole branch without
-  flooding the view with it.
-- A line is shown when an enabled include matches it and no enabled exclude does. Its colour comes from
-  the deepest match, and any property you leave unset is inherited from the nearest ancestor that sets
-  one.
-- Every row carries a **live count** that climbs while the file is still being scanned.
+Nesting is the point: a filter matches a line only if its own pattern **and every ancestor's** match,
+whether or not those ancestors are switched on — so *parent off, children on* scopes a whole branch
+without flooding the view with it. A line is shown when an enabled include matches it and no enabled
+exclude does; its colour comes from the deepest match, and anything left unset is inherited.
 
 ![The filter editor](docs/images/filter-edit.png)
 
@@ -49,8 +47,12 @@ and drag a group as one, with undo and redo a hundred steps deep. `Ctrl+E` searc
 without hiding or reordering it, and `F4` walks the matches of one filter without changing what's on
 screen.
 
-**Presets** name a combination of filters — *the payment incident*, *the slow queries* — and switch it on
-with a tick. Tick two and you get both.
+### Presets
+
+![Presets](docs/images/presets.png)
+
+A preset names a combination of filters — *the payment incident*, *the slow queries*. The tick says
+which are in effect, the highlight says which one the commands act on, and ticking two gives you both.
 
 ### Dim or hide
 
@@ -65,41 +67,39 @@ are always the file's own, and the line you were on keeps its place through the 
 
 ![The find bar, with every occurrence marked, beside the minimap](docs/images/find.png)
 
-**Find** is a bar above the log rather than a dialog over it, so the search and its results are on
-screen at once. Literal or regex, forwards or backwards, and every occurrence in view is marked as you
-type. It counts as it sweeps — `Match 12 of 348` — keeping what you can see apart from what the filters
-are hiding, and in filtered mode it only ever lands on a line you can actually see.
+**Find** is a bar above the log rather than a dialog over it, so the search and its results are on screen
+at once. Literal or regex, every occurrence in view marked as you type, and a count that fills in as it
+sweeps — `Match 12 of 348` — keeping what you can see apart from what the filters are hiding.
 
 **The minimap** stands in for the scrollbar: the log zoomed out to a pixel a line, in the colours the
-filters gave it, with empty stretches compressed so that a rare match is still worth a pixel. Drag it
-to scroll, click to jump; your markers and search hits ride alongside. `Ctrl+M` brings back a plain
+filters gave it, with empty stretches compressed so that a rare match is still worth a pixel. Drag it to
+scroll, click to jump; your markers and search hits ride alongside. `Ctrl+M` brings back a plain
 scrollbar.
 
 **Markers** are eight colours you apply by hand — `Ctrl+1`…`Ctrl+8` to set, `1`…`8` to walk them. They
 are a filter type too, so lines you picked out yourself can be treated as a category.
 
-**Hover a line** and Cascade names the filters that matched it, including the ones you had switched
-off — usually the one you were about to go looking for.
-
-Drag inside a line to select part of it; `Ctrl+N` turns the selection into a filter, which is the
-quickest way to chase a request id you just spotted. `Alt+Z` wraps long lines.
+**Hover a line** and Cascade names the filters that matched it, including the ones you had switched off
+— usually the one you were about to go looking for. Drag inside a line to select part of it; `Ctrl+N`
+turns that into a filter, which is the quickest way to chase a request id you just spotted. `Alt+Z`
+wraps long lines.
 
 ### Columns
 
 ![Columns](docs/images/columns.png)
 
-Split each line for display, on a delimiter or with a bracket template that names the fields:
+`Ctrl+Shift+C` splits each line for display, on a delimiter or with a bracket template that names the
+fields — and **View > Split Into Columns** reads those fields off the current line for you:
 
 ```
 [timestamp] [[service]] [[level]] [[request]] [message]
 ```
 
-**View > Split Into Columns** reads the fields off the current line for you. Everything else happens on
-the header itself: drag an edge to resize (snapping to whole characters in a fixed-pitch font),
-double-click an edge to fit a column to its content, carry a header sideways to reorder, double-click a
-name to rename it, and right-click for the tick list that shows and hides columns. Anything left to size
-itself shares out the width of the window, so no space goes to waste. Filtering always runs on the whole
-raw line, so turning columns on can never change what you see.
+Everything else happens on the header: drag an edge to resize (snapping to whole characters in a
+fixed-pitch font), double-click an edge to fit a column to its content, carry a header sideways to
+reorder, double-click a name to rename it, right-click for the tick list that shows and hides columns.
+Anything left to size itself shares out the width of the window. Filtering always runs on the whole raw
+line, so turning columns on can never change what you see.
 
 ---
 
@@ -152,7 +152,7 @@ registry keys, and updates itself.
 | `Shift+↑ ↓` / `Ctrl+↑ ↓` / `Ctrl+Space` / `Ctrl+A` | Extend, move through, add to, or take the whole selection |
 | `Alt+↑ ↓ ← →` | Move, nest and un-nest |
 | `F4` / `Shift+F4` | Next / previous line matching the current filter |
-| `Ctrl+F`, then `Enter` / `Shift+Enter` / `F3` | Search the list and walk the matches |
+| `Ctrl+E`, then `Enter` / `Shift+Enter` / `F3` | Search the list and walk the matches |
 | Double-click a filter / the empty space below | Edit it / add a new one |
 
 **Global**
@@ -165,7 +165,7 @@ registry keys, and updates itself.
 | `Ctrl+G` / `Ctrl+H` | Go to line / show only filtered lines |
 | `Ctrl+N` | New filter from the selection or the current line |
 | `Ctrl+E` | Search the filter list |
-| `Ctrl+M` / `Alt+Z` | Minimap or plain scrollbar / word wrap |
+| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / columns |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |
@@ -193,14 +193,11 @@ Or, as the first argument: `--help`, `--version`, `--selftest`, `--screens <dir>
 
 Everything you rely on is here — the filter list with its checkboxes and counts, includes and excludes,
 substring and regex matching, colours per filter, the eight markers, `Ctrl+H`, find, encodings, zoom, a
-dockable filter list, recent files and `.tat` import. Deliberately different:
-
-- **Filters nest**, and saving is `.cascade`, since the old format cannot express a hierarchy or
-  per-property style inheritance. Flat `.tat` sets import unchanged.
-- **No plug-ins**, no live tail, and no `/Config:`, `/Line:` or `/Clipboard`.
-- **Copy is plain text**, optionally with line numbers — there is no HTML/colour clipboard format.
-- **No `A`–`Z` filter cycling or `Space` for the next matching line** — `F4` on the selected filter and
-  the filter-list search do that job.
+dockable filter list, recent files and `.tat` import. Deliberately different: **filters nest**, so saving
+is `.cascade` (the old format cannot express a hierarchy or per-property style inheritance, but flat
+`.tat` sets import unchanged); copy is plain text, optionally with line numbers; and there are no
+plug-ins, no live tail, no `A`–`Z` filter cycling and no `/Config:`, `/Line:` or `/Clipboard` — `F4` and
+the filter-list search do the cycling job.
 
 ## Building
 
