@@ -1,10 +1,26 @@
 name: CI
 
+# Everything that can reach the binary or the tests triggers a run. Only files that cannot are ignored,
+# and a run is skipped just when every file a push touches is one of them. That deliberately keeps
+# .editorconfig (it decides which analyzer rules are errors, and warnings are errors here),
+# Directory.Build.props, global.json, Cascade.slnx (SolutionTests asserts on it), scripts/ and this
+# workflow itself triggering CI. Use "Run workflow" on the Actions tab to force a run regardless.
+# The two lists must stay identical; GitHub Actions does not support YAML anchors.
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - docs/**
+      - .gitignore
   pull_request:
     branches: [master]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+      - docs/**
+      - .gitignore
   workflow_dispatch:
 
 # Least privilege by default; only the release job gets write access.
