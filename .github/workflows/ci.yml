@@ -157,11 +157,9 @@ jobs:
           --results-directory artifacts/test-results
 
       - name: Package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/package | Out-Null
-          Copy-Item artifacts/publish/Cascade.exe "artifacts/package/Cascade-$env:VERSION-win-x64.exe"
+          Copy-Item artifacts/publish/Cascade.exe artifacts/package/Cascade.exe
 
       - uses: actions/upload-artifact@v7
         with:
@@ -199,8 +197,12 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+        # The asset keeps a fixed name so that
+        # https://github.com/<owner>/<repo>/releases/latest/download/Cascade.exe always fetches the newest
+        # build - that URL needs the exact filename, so a version in it means no fixed download command can
+        # ever exist. The version is in the tag, the release title, and the executable's own metadata.
         run: |
-          gh release create "v$VERSION" dist/*.exe \
+          gh release create "v$VERSION" dist/Cascade.exe \
             --repo "$REPO" \
             --target "$SHA" \
             --title "Cascade v$VERSION" \
