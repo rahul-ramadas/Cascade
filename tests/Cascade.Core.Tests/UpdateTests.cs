@@ -324,6 +324,46 @@ public class UpdateTests : IDisposable
         Assert.Null(svc.PendingVersion);
         Assert.Contains("no network", svc.LastError);
         Assert.Equal("running build", File.ReadAllText(_exe));
+        Assert.True(svc.CheckFinished);
+    }
+
+    [Fact]
+    public async Task The_reason_a_check_failed_is_kept_whole()
+    {
+        // The message that matters is usually the innermost one; reporting only the outer one is how a
+        // check ends up described as simply not having worked.
+        var source = new FakeSource
+        {
+            Failure = new UpdateCheckException("GitHub could not be reached",
+                          new HttpRequestException("An error occurred while sending the request",
+                              new IOException("No such host is known (api.github.com:443)")))
+        };
+        var svc = Service(source);
+
+        await svc.RunAsync(CancellationToken.None);
+
+        Assert.Contains("GitHub could not be reached", svc.LastError);
+        Assert.Contains("An error occurred while sending the request", svc.LastError);
+        Assert.Contains("No such host is known", svc.LastError);
+    }
+
+    [Fact]
+    public void The_same_message_twice_over_is_only_said_once()
+    {
+        // Wrapping an exception in one of the same message is common and reads as a stutter.
+        var repeated = new InvalidOperationException("the same thing", new InvalidOperationException("the same thing"));
+        Assert.Equal("the same thing", UpdateService.Describe(repeated));
+    }
+
+    [Fact]
+    public async Task A_check_is_not_reported_as_finished_until_it_is()
+    {
+        var source = new FakeSource { Latest = Release(Current) };
+        var svc = Service(source);
+
+        Assert.False(svc.CheckFinished);
+        await svc.RunAsync(CancellationToken.None);
+        Assert.True(svc.CheckFinished);
     }
 
     [Fact]
@@ -337,6 +377,8 @@ public class UpdateTests : IDisposable
 
         Assert.Equal(0, source.LatestCalls);
         Assert.Equal("running build", File.ReadAllText(_exe));
+        Assert.Null(svc.LastError);                   // standing aside is not a failure
+        Assert.Contains("Another Cascade", svc.LastNote);
     }
 
     [Fact]
@@ -361,6 +403,9 @@ public class UpdateTests : IDisposable
         private readonly Task _loop;
         public string Prefix { get; }
         public string? SeenAuthorization, SeenUserAgent, SeenAssetAccept;
+        public readonly List<string?> Authorizations = [];
+        /// <summary>Answer 401 to anything that carries a credential, as a stale token would be met.</summary>
+        public bool RefuseCredentials;
         public byte[] Asset = Encoding.UTF8.GetBytes("MZ fake executable payload");
         public long ReportedSize = -1;   // -1 means "report the real length"
         public string Json = "";
@@ -386,9 +431,19 @@ public class UpdateTests : IDisposable
                 try { ctx = await _listener.GetContextAsync(); } catch { return; }
 
                 string path = ctx.Request.Url!.AbsolutePath;
-                if (path.StartsWith("/repos/", StringComparison.Ordinal) && path.EndsWith("/releases/latest", StringComparison.Ordinal))
+                string? auth = ctx.Request.Headers["Authorization"];
+                lock (Authorizations) Authorizations.Add(auth);
+
+                if (RefuseCredentials && auth is not null)
                 {
-                    SeenAuthorization = ctx.Request.Headers["Authorization"];
+                    ctx.Response.StatusCode = 401;
+                    byte[] said = Encoding.UTF8.GetBytes("""{ "message": "Bad credentials" }""");
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.OutputStream.Write(said);
+                }
+                else if (path.StartsWith("/repos/", StringComparison.Ordinal) && path.EndsWith("/releases/latest", StringComparison.Ordinal))
+                {
+                    SeenAuthorization = auth;
                     SeenUserAgent = ctx.Request.Headers["User-Agent"];
                     byte[] body = Encoding.UTF8.GetBytes(Json);
                     ctx.Response.ContentType = "application/json";
@@ -471,13 +526,77 @@ public class UpdateTests : IDisposable
     }
 
     [Fact]
-    public async Task An_unreadable_repository_simply_yields_no_release()
+    public async Task An_unreadable_repository_says_why()
     {
         using var stub = new StubGitHub();   // every unknown path answers 404, like a private repo does
         using var http = new HttpClient();
         var src = new GitHubReleaseSource(http, "owner/repo", _ => Task.FromResult<string?>(null),
                                           stub.Prefix + "/nope");
 
-        Assert.Null(await src.GetLatestAsync(CancellationToken.None));
+        // Returning null here would leave the About box saying only that nothing happened. The status, the
+        // address and a hint about what to do are exactly what a bug report needs.
+        var ex = await Assert.ThrowsAsync<UpdateCheckException>(() => src.GetLatestAsync(CancellationToken.None));
+        Assert.Contains("404", ex.Message);
+        Assert.Contains("releases/latest", ex.Message);
+        Assert.Contains("private", ex.Message);
+    }
+
+    [Fact]
+    public async Task With_no_credential_the_request_goes_out_anonymously()
+    {
+        // What a public repository looks like from a machine that has never signed in to GitHub.
+        using var stub = new StubGitHub();
+        stub.Json = ReleaseJson("v2026.9.4", "Cascade.exe", 777, stub.Asset.Length);
+        using var http = new HttpClient();
+        var src = new GitHubReleaseSource(http, "owner/repo", _ => Task.FromResult<string?>(null), stub.Prefix);
+
+        var release = await src.GetLatestAsync(CancellationToken.None);
+
+        Assert.NotNull(release);
+        Assert.Null(stub.SeenAuthorization);
+        Assert.Null(src.Note);
+    }
+
+    [Fact]
+    public async Task A_credential_that_is_refused_does_not_stop_a_public_download()
+    {
+        // A stale token in the user's credential store must not be the reason a public release cannot be
+        // fetched. The credential is offered, refused, and the request goes out again without it.
+        using var stub = new StubGitHub { RefuseCredentials = true };
+        stub.Json = ReleaseJson("v2026.9.4", "Cascade.exe", 777, stub.Asset.Length);
+        using var http = new HttpClient();
+        var src = new GitHubReleaseSource(http, "owner/repo", _ => Task.FromResult<string?>("stale-token"), stub.Prefix);
+
+        var release = await src.GetLatestAsync(CancellationToken.None);
+
+        Assert.NotNull(release);
+        Assert.Equal(["Bearer stale-token", null], stub.Authorizations);
+        Assert.Contains("refused", src.Note);
+        Assert.Contains("401", src.Note);
+
+        // ...and the same for the download, which is a second request on the same source.
+        string dest = Path.Combine(_dir, "anonymous.bin");
+        await src.DownloadAssetAsync(release!, dest, CancellationToken.None);
+        Assert.Equal(stub.Asset, File.ReadAllBytes(dest));
+    }
+
+    [Fact]
+    public async Task A_release_asset_with_no_version_in_its_name_is_installed_just_the_same()
+    {
+        // The asset is about to be renamed Cascade.exe on GitHub so that a fixed curl command can fetch the
+        // latest build. That is the same name as the running executable, so it is worth pinning down that
+        // the asset's name is never used as a filename: the download goes to a path derived from the exe.
+        using var stub = new StubGitHub();
+        stub.Json = ReleaseJson("v2026.9.4", "Cascade.exe", 777, stub.Asset.Length);
+        using var http = new HttpClient();
+        var src = new GitHubReleaseSource(http, "owner/repo", _ => Task.FromResult<string?>(null), stub.Prefix);
+
+        var release = await src.GetLatestAsync(CancellationToken.None);
+        Assert.Equal("Cascade.exe", release!.AssetName);
+
+        await src.DownloadAssetAsync(release, UpdateInstaller.PartPath(_exe), CancellationToken.None);
+
+        Assert.Equal(stub.Asset, File.ReadAllBytes(UpdateInstaller.PartPath(_exe)));
+        Assert.Equal("running build", File.ReadAllText(_exe));   // the running image is untouched
     }
 }

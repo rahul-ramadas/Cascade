@@ -94,21 +94,35 @@ public sealed class AboutDialog : DialogBase
         rows.Add(new("Location", AppInfo.ExePath));
         rows.Add(new("Settings", AppSettings.FilePath));
         rows.Add(new("State", MachineState.FilePath));
-        rows.Add(new("Updates", UpdateStatusText(updater)));
+        rows.AddRange(UpdateRows(updater));
         return rows;
     }
 
-    /// <summary>Says plainly whether an update is waiting, and why one is not, rather than staying silent
-    /// about a check that has been failing for weeks.</summary>
-    private static string UpdateStatusText(UpdateService? updater)
+    /// <summary>
+    /// Says plainly where updating stands, and gives the whole reason when a check failed rather than
+    /// staying silent about one that has been failing for weeks. The reason gets a row of its own because it
+    /// is a sentence, not a value - it wraps, it is coloured, and it can be selected into a bug report.
+    /// </summary>
+    internal static List<Row> UpdateRows(UpdateService? updater)
+        => updater is null
+            ? [new Row("Updates", AppInfo.IsDevBuild ? "Disabled for local builds" : "Disabled")]
+            : UpdateRows(updater.CheckFinished, updater.PendingVersion, updater.LastError, updater.LastNote);
+
+    /// <summary>The wording, worked out from plain values so it can be checked in every state without an
+    /// update service and a network behind it.</summary>
+    internal static List<Row> UpdateRows(bool finished, Version? pending, string? error, string? note)
     {
-        if (updater is null)
-            return AppInfo.IsDevBuild ? "Disabled for local builds" : "Disabled";
-        if (updater.PendingVersion is { } v)
-            return $"Version {v} will be installed when Cascade closes";
-        if (updater.LastError is { Length: > 0 } err)
-            return "Last check failed: " + err;
-        return $"Up to date (checked at startup)";
+        var rows = new List<Row>
+        {
+            new("Updates",
+                pending is { } v ? $"Version {v} is installed and starts up next time"
+                : !finished ? "Checking with GitHub\u2026"
+                : error is { Length: > 0 } ? "The last check did not get through"
+                : "Up to date, as of the check at startup")
+        };
+        if (error is { Length: > 0 }) rows.Add(new Row("Reason", error, IsProblem: true));
+        if (note is { Length: > 0 }) rows.Add(new Row("Note", note));
+        return rows;
     }
 
     /// <summary>
