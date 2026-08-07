@@ -38,7 +38,8 @@ public sealed class FilterService : IDisposable
         internal bool Seeded;
 
         /// <summary>Per-filter accumulators (indexed by filter index) filled while this pass runs, so its work
-        /// is remembered and later enable/disable changes need no pass at all. Null when not caching.</summary>
+        /// is remembered and later enable/disable changes need no pass at all. A find reads these as they fill,
+        /// under the service's lock, so it need not scan the file itself. Null when not caching.</summary>
         internal FilterMatchCache.SetBuilder?[]? CacheBuild;
         internal List<FilterSnapshot.CacheableFilter>? CacheFilters;
         internal bool CacheStored;
@@ -53,6 +54,19 @@ public sealed class FilterService : IDisposable
     }
 
     private const int Block = 1 << 15; // 32,768 lines per ordered block
+
+    /// <summary>What the pass that is running now can say about a filter's next match.</summary>
+    public enum PassAnswer
+    {
+        /// <summary>No pass is recording that filter; ask somewhere else.</summary>
+        Unavailable,
+        /// <summary>The line is the true answer - the sweep has covered everything between it and the start.</summary>
+        Found,
+        /// <summary>There is no match in that direction, and the sweep has looked everywhere it could be.</summary>
+        Exhausted,
+        /// <summary>The sweep has not reached the answer yet.</summary>
+        NotYet,
+    }
 
     private readonly MemoryMappedTextSource _src;
     private readonly LineIndex _index;
@@ -74,6 +88,7 @@ public sealed class FilterService : IDisposable
     private Generation? _current;
     private long _processed;
     private long _genId;
+    private long _linesScanned;
     private CancellationTokenSource _cts = new();
     private volatile bool _disposed;
 
@@ -99,14 +114,33 @@ public sealed class FilterService : IDisposable
     /// <paramref name="seedAllVisible"/> marks every line visible first (the previous view was unfiltered).</summary>
     public Generation Restart(FilterSnapshot snapshot, bool seedAllVisible = false)
     {
+        // The accumulators are prepared here rather than on the worker so that a find arriving in the same
+        // breath as the filter change already has something to read, instead of concluding that nothing is
+        // working this filter out and starting a second pass of its own.
+        FilterMatchCache.SetBuilder?[]? builders = null;
+        List<FilterSnapshot.CacheableFilter>? cacheFilters = null;
+        if (snapshot.TryGetCacheableFilters(out var cacheable) && cacheable.Count > 0)
+        {
+            long lines = _completedCount();
+            builders = new FilterMatchCache.SetBuilder?[snapshot.FilterCount];
+            foreach (var f in cacheable) builders[f.Index] = new FilterMatchCache.SetBuilder(lines);
+            cacheFilters = cacheable;
+        }
+
         Generation gen;
         lock (_lock)
         {
             _cts.Cancel();
             _cts = new CancellationTokenSource();
-            gen = new Generation(snapshot, FilteredView.CreateExplicit(_visible), ++_genId) { SeedAllVisible = seedAllVisible };
+            gen = new Generation(snapshot, FilteredView.CreateExplicit(_visible), ++_genId)
+            {
+                SeedAllVisible = seedAllVisible,
+                CacheBuild = builders,
+                CacheFilters = cacheFilters,
+            };
             _current = gen;
             _processed = 0;
+            Monitor.PulseAll(_lock);
         }
         _wake.Set();
         return gen;
@@ -127,6 +161,14 @@ public sealed class FilterService : IDisposable
     /// <summary>How many filter changes were served entirely from cached results, with no pass over the file.</summary>
     public long CacheHits { get; private set; }
 
+    /// <summary>Lines evaluated against the filters since this file was opened, by any caller. A find that
+    /// has to work results out for itself adds to this, so it says whether one is duplicating a pass.</summary>
+    public long LinesScanned => Interlocked.Read(ref _linesScanned);
+
+    /// <summary>Test seam: runs on the filter worker after each block, so a test can hold a pass at a known
+    /// frontier and exercise what happens while one is still in flight.</summary>
+    internal Action<long>? AfterBlockForTesting;
+
     /// <summary>The lines <paramref name="filter"/> matched during the last full pass, when those results
     /// still cover the whole file. Answering "where is the next match" from this is a bit scan rather than a
     /// re-read of the file. False when nothing usable is cached for it.</summary>
@@ -140,6 +182,56 @@ public sealed class FilterService : IDisposable
         return _cache.TryGet(key, lines, out set);
     }
 
+    /// <summary>Where <paramref name="filter"/>'s next match lies, according to the pass that is running now.
+    /// A pass already works out which lines every filter it evaluates matches; until it finishes those results
+    /// are only half-built, but the part it has swept is final - so a find can read them instead of starting a
+    /// second whole-file scan alongside it. The sweep runs upwards from line 0, which is why a backward search
+    /// cannot be answered until it has passed the line the search started from: a later match could still turn
+    /// up before it.</summary>
+    public PassAnswer AskCurrentPass(FilterSnapshot snapshot, Filter filter, long from, bool forward,
+        long lines, out long hit, out long covered)
+    {
+        hit = -1;
+        covered = 0;
+        if (lines <= 0) return PassAnswer.Exhausted;
+        if (!snapshot.TryGetIndex(filter, out int index)) return PassAnswer.Unavailable;
+
+        lock (_lock)
+        {
+            var gen = _current;
+            if (gen is null || !ReferenceEquals(gen.Snapshot, snapshot)) return PassAnswer.Unavailable;
+            var builders = gen.CacheBuild;
+            if (builders is null || index >= builders.Length || builders[index] is not { } builder)
+                return PassAnswer.Unavailable;
+
+            covered = Math.Min(_processed, lines);
+            if (forward)
+            {
+                if (from >= lines) return PassAnswer.Exhausted;
+                hit = builder.Next(Math.Max(0, from), covered);
+                if (hit >= 0) return PassAnswer.Found;
+                return covered >= lines ? PassAnswer.Exhausted : PassAnswer.NotYet;
+            }
+
+            if (from < 0) return PassAnswer.Exhausted;
+            if (covered <= from) return PassAnswer.NotYet;
+            hit = builder.Previous(Math.Min(from, lines - 1), covered);
+            return hit >= 0 ? PassAnswer.Found : PassAnswer.Exhausted;
+        }
+    }
+
+    /// <summary>Blocks until the current pass moves on, is replaced, or <paramref name="ct"/> is cancelled.
+    /// The timeout is only a backstop - every change pulses.</summary>
+    public void WaitForPassProgress(CancellationToken ct)
+    {
+        using var registration = ct.Register(static state =>
+        {
+            var self = (FilterService)state!;
+            lock (self._lock) Monitor.PulseAll(self._lock);
+        }, this);
+        lock (_lock) Monitor.Wait(_lock, 100);
+    }
+
     /// <summary>Cancels the current generation (if any) and goes idle. Use when there are no enabled
     /// filters so <see cref="IsIdle"/> reports true at once and the UI can clear its "busy" state and
     /// progress bar immediately, instead of leaving an orphaned pass running to completion.</summary>
@@ -151,6 +243,7 @@ public sealed class FilterService : IDisposable
             _cts = new CancellationTokenSource();
             _current = null;
             _processed = 0;
+            Monitor.PulseAll(_lock);
         }
         _wake.Set();
     }
@@ -214,11 +307,11 @@ public sealed class FilterService : IDisposable
                 {
                     if (!ReferenceEquals(gen, _current)) return;
                     _processed = _completedCount();
+                    Monitor.PulseAll(_lock);
                 }
                 Progress?.Invoke(gen);
                 return;
             }
-            StartCacheBuild(gen);
         }
 
         while (!ct.IsCancellationRequested)
@@ -254,8 +347,10 @@ public sealed class FilterService : IDisposable
                 {
                     if (!ReferenceEquals(gen, _current)) return;
                     _processed = start + len;
+                    Monitor.PulseAll(_lock);
                 }
                 Progress?.Invoke(gen);
+                AfterBlockForTesting?.Invoke(start + len);
             }
         }
     }
@@ -285,25 +380,14 @@ public sealed class FilterService : IDisposable
         _visible.ReplaceAll(shown, lines);
         _visible.Publish();
         lock (gen.CountsSync) Array.Copy(counts, gen.Counts, counts.Length);
-        gen.CacheStored = true;   // nothing new to remember
+        lock (_lock)
+        {
+            gen.CacheStored = true;   // nothing new to remember
+            gen.CacheBuild = null;    // and nothing for a find to read - the cache has it all
+            gen.CacheFilters = null;
+        }
         CacheHits++;
         return true;
-    }
-
-    /// <summary>Prepares accumulators so this pass also remembers each filter's results for next time.
-    /// Indexing need not be finished: opening a file with filters already applied starts evaluation at 0%
-    /// indexed, and that pass is the one most worth remembering. The pass must start at line 0 though - a set
-    /// missing the head of the file could never be reused - and only complete results are ever stored.</summary>
-    private void StartCacheBuild(Generation gen)
-    {
-        lock (_lock) { if (_processed != 0) return; }
-        if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return;
-
-        var builders = new FilterMatchCache.SetBuilder?[gen.Counts.Length];
-        long lines = _completedCount();
-        foreach (var filter in filters) builders[filter.Index] = new FilterMatchCache.SetBuilder(lines);
-        gen.CacheBuild = builders;
-        gen.CacheFilters = filters;
     }
 
     /// <summary>Stores the accumulated results once the pass has covered the whole file.</summary>
@@ -313,13 +397,17 @@ public sealed class FilterService : IDisposable
         if (!_indexComplete() || processed < _completedCount()) return;
 
         gen.CacheStored = true;
-        foreach (var filter in gen.CacheFilters)
+        lock (_lock)
         {
-            var builder = gen.CacheBuild[filter.Index];
-            if (builder is not null) _cache.Store(filter.Key, builder.Build(processed));
+            foreach (var filter in gen.CacheFilters)
+            {
+                var builder = gen.CacheBuild[filter.Index];
+                if (builder is not null) _cache.Store(filter.Key, builder.Build(processed));
+            }
+            gen.CacheBuild = null;
+            gen.CacheFilters = null;
+            Monitor.PulseAll(_lock);   // a find reading this pass must go and look in the cache instead
         }
-        gen.CacheBuild = null;
-        gen.CacheFilters = null;
     }
 
     private void ProcessBlock(Generation gen, long start, int len, CancellationToken ct)
@@ -327,7 +415,8 @@ public sealed class FilterService : IDisposable
         bool[] shown = ArrayPool<bool>.Shared.Rent(len);
         try
         {
-            long[] blockCounts = ScanBlock(gen.Snapshot, start, len, shown, gen.CacheBuild, gen.CacheFilters, ct);
+            long[] blockCounts = ScanBlock(gen.Snapshot, start, len, shown, gen.CacheBuild, gen.CacheFilters,
+                                           shareBuilders: true, ct);
 
             // Update the visible set IN PLACE for this block: lines that still match keep their place, lines
             // that stopped matching are dropped, new matches are added. Then publish the refreshed rank index
@@ -344,13 +433,15 @@ public sealed class FilterService : IDisposable
     /// <summary>Evaluates one block of lines in parallel: fills <paramref name="shown"/> (when asked), feeds
     /// each filter's matching lines to <paramref name="builders"/> (when caching) and returns the per-filter
     /// match counts. Shared by the live filtering pass and by <see cref="PrimeCache"/>, so a find computes
-    /// results exactly the same way enabling the filter would.</summary>
+    /// results exactly the same way enabling the filter would. <paramref name="shareBuilders"/> publishes the
+    /// results under the lock, which the pass needs because a find may be reading them as they are written.</summary>
     private long[] ScanBlock(FilterSnapshot snapshot, long start, int len, bool[]? shown,
         FilterMatchCache.SetBuilder?[]? builders, List<FilterSnapshot.CacheableFilter>? cacheFilters,
-        CancellationToken ct)
+        bool shareBuilders, CancellationToken ct)
     {
         long[] blockCounts = new long[snapshot.FilterCount];
         object mergeLock = new();
+        Interlocked.Add(ref _linesScanned, len);
 
         // When caching, each 64-line group records which filters deep-matched its lines. Groups own whole
         // words, so they can be written in parallel without any synchronisation.
@@ -419,16 +510,22 @@ public sealed class FilterService : IDisposable
             // Hand this block's per-filter results to the sets being built.
             if (deepBits is not null && builders is not null && cacheFilters is not null)
             {
-                long firstWord = start / 64;   // blocks are word-aligned
-                foreach (var filter in cacheFilters)
+                if (shareBuilders) lock (_lock) Feed();
+                else Feed();
+
+                void Feed()
                 {
-                    var builder = builders[filter.Index];
-                    if (builder is null) continue;
-                    int baseIndex = filter.Index * groups;
-                    for (int g = 0; g < groups; g++)
+                    long firstWord = start / 64;   // blocks are word-aligned
+                    foreach (var filter in cacheFilters)
                     {
-                        ulong word = deepBits[baseIndex + g];
-                        if (word != 0) builder.AddWord(firstWord + g, word);
+                        var builder = builders[filter.Index];
+                        if (builder is null) continue;
+                        int baseIndex = filter.Index * groups;
+                        for (int g = 0; g < groups; g++)
+                        {
+                            ulong word = deepBits[baseIndex + g];
+                            if (word != 0) builder.AddWord(firstWord + g, word);
+                        }
                     }
                 }
             }
@@ -443,8 +540,9 @@ public sealed class FilterService : IDisposable
 
     /// <summary>Computes and stores every cacheable filter's matching lines for <paramref name="snapshot"/>
     /// using the same parallel, automaton-driven scan a filter change uses - but without touching the
-    /// visible view. This is what makes "find this filter's next match" cost the same as switching the
-    /// filter on once, and nothing at all after that.</summary>
+    /// visible view. Only reached when no pass is working the filter out already, so it runs at full width:
+    /// narrowing it was measured to leave a concurrent pass no faster (the scan is bound by memory bandwidth,
+    /// not by cores) while making the search itself markedly slower.</summary>
     public void PrimeCache(FilterSnapshot snapshot, CancellationToken ct, Action<double>? onProgress = null)
     {
         if (!_indexComplete()) return;                       // partial coverage is never stored
@@ -459,7 +557,7 @@ public sealed class FilterService : IDisposable
         {
             ct.ThrowIfCancellationRequested();
             int len = (int)Math.Min(Block, lines - start);
-            ScanBlock(snapshot, start, len, null, builders, filters, ct);
+            ScanBlock(snapshot, start, len, null, builders, filters, shareBuilders: false, ct);
             onProgress?.Invoke((start + len) / (double)lines);
         }
 
@@ -471,7 +569,7 @@ public sealed class FilterService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        lock (_lock) _cts.Cancel();
+        lock (_lock) { _cts.Cancel(); Monitor.PulseAll(_lock); }
         _wake.Set();
         _thread.Join(2000);
         _wake.Dispose();

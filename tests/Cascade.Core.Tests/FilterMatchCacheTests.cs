@@ -542,8 +542,8 @@ public class FilterMatchCacheTests
     }
 
     [Theory]
-    [InlineData(3)]      // sparse
-    [InlineData(5_000)]  // dense enough to switch representation
+    [InlineData(3)]      // dense: past one match in 32 lines the builder switches to a bit per line
+    [InlineData(5_000)]  // sparse: a sorted list of matching lines
     public void Set_builder_round_trips_matches(int matchEvery)
     {
         const long lines = 300_000;
@@ -567,6 +567,69 @@ public class FilterMatchCacheTests
             Assert.Equal(line % matchEvery == 0, set.Contains(line));
         Assert.False(set.Contains(-1));
         Assert.False(set.Contains(lines));
+    }
+
+    [Theory]
+    [InlineData(3)]        // dense storage
+    [InlineData(5_000)]    // sparse storage
+    [InlineData(0)]        // nothing matches at all
+    public void Half_built_results_can_be_scanned_for_the_next_match(int matchEvery)
+    {
+        // A find reads a pass that is still running, so the builder has to answer "where is the next match"
+        // over the part of the file swept so far - and never about a line beyond it, however much it happens
+        // to know. Checked against a brute-force walk of the same data.
+        const long lines = 300_000;
+        var builder = new FilterMatchCache.SetBuilder(lines);
+        var expected = new List<long>();
+        for (long word = 0; word < (lines + 63) / 64; word++)
+        {
+            ulong bits = 0;
+            for (int b = 0; b < 64; b++)
+            {
+                long line = word * 64 + b;
+                if (line < lines && matchEvery > 0 && line % matchEvery == 0) { bits |= 1UL << b; expected.Add(line); }
+            }
+            builder.AddWord(word, bits);
+        }
+
+        long Reference(long from, bool forward, long covered)
+        {
+            if (forward)
+            {
+                foreach (long l in expected) if (l >= from && l < covered) return l;
+                return -1;
+            }
+            long best = -1;
+            foreach (long l in expected) { if (l > from || l >= covered) break; best = l; }
+            return best;
+        }
+
+        foreach (long covered in new long[] { 0, 1, 64, 65, 12_345, 199_999, lines })
+            foreach (long from in new long[] { -5, 0, 1, 63, 64, 100, 12_344, 12_345, 199_998, lines - 1, lines, lines + 10 })
+            {
+                Assert.Equal(Reference(from, true, covered), builder.Next(from, covered));
+                Assert.Equal(Reference(from, false, covered), builder.Previous(from, covered));
+            }
+    }
+
+    [Fact]
+    public void Scanning_a_half_built_set_never_reports_a_line_the_pass_has_not_reached()
+    {
+        // The builder grows a word at a time and its storage runs ahead of the sweep in whole words, so the
+        // extent has to be honoured exactly or a find would answer with a line the pass has not settled.
+        var builder = new FilterMatchCache.SetBuilder(64);
+        builder.AddWord(0, 1UL << 10);      // line 10
+        builder.AddWord(9, 1UL << 3);       // line 579
+
+        Assert.Equal(10, builder.Next(0, 64));
+        Assert.Equal(-1, builder.Next(11, 64));          // 579 is known but not yet covered
+        Assert.Equal(-1, builder.Next(11, 579));         // covered stops one short of it
+        Assert.Equal(579, builder.Next(11, 580));
+        Assert.Equal(10, builder.Previous(1000, 64));    // clamped to the covered extent
+        Assert.Equal(579, builder.Previous(1000, 580));
+        Assert.Equal(-1, builder.Previous(9, 64));
+        Assert.Equal(-1, builder.Next(0, 0));
+        Assert.Equal(-1, builder.Previous(0, 0));
     }
 
     [Fact]

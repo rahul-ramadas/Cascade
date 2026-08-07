@@ -312,6 +312,51 @@ public class MatchingEngineTests
     }
 
     [Fact]
+    public void A_chain_only_snapshot_answers_exactly_as_the_whole_filter_set_does()
+    {
+        // Working out one filter's matches needs its own predicate and its ancestors' and nothing else, so a
+        // find that has to compute them can leave the rest of the list out of the scan. That is only sound if
+        // the answer and the key it is cached under are identical either way.
+        var filters = new FilterCollection();
+        Filter Add(string text, bool enabled, Filter? parent = null)
+        {
+            var f = new Filter { Enabled = enabled, Match = { Type = FilterMatchType.Text, Text = text } };
+            filters.Add(f, parent);
+            return f;
+        }
+
+        for (int i = 0; i < 10; i++) Add($"noise{i}", enabled: true);
+        var outer = Add("outer", enabled: false);
+        var middle = Add("middle", enabled: false, parent: outer);
+        var target = Add("inner", enabled: false, parent: middle);
+        Add("sibling", enabled: true, parent: middle);
+        Add("below", enabled: true, parent: target);
+
+        var whole = FilterSnapshot.Build(filters, forceEnabled: target);
+        var chain = FilterSnapshot.BuildForChain(filters, target);
+
+        Assert.True(whole.TryGetCacheKey(target, out string wholeKey));
+        Assert.True(chain.TryGetCacheKey(target, out string chainKey));
+        Assert.Equal(wholeKey, chainKey);
+
+        // Only the chain takes part, so only the chain is scanned and only the chain is recorded.
+        Assert.Equal(3, chain.FilterCount);
+        Assert.True(chain.TryGetCacheableFilters(out var cacheable));
+        Assert.Equal(3, cacheable.Count);
+        Assert.Contains(cacheable, c => c.Key == chainKey);
+
+        string[] lines =
+        {
+            "outer middle inner", "outer middle", "middle inner", "inner", "outer inner middle",
+            "noise3 outer middle inner below", "nothing at all", "OUTER MIDDLE INNER",
+        };
+        foreach (string line in lines)
+            Assert.Equal(whole.DeepMatches(line, 0, null, target), chain.DeepMatches(line, 0, null, target));
+        Assert.True(chain.DeepMatches("outer middle inner", 0, null, target));
+        Assert.False(chain.DeepMatches("middle inner", 0, null, target));
+    }
+
+    [Fact]
     public void Enabling_fewer_filters_builds_a_smaller_automaton()
     {
         // Guards the optimization itself: the hit bitset widens with the number of patterns in the automaton,
