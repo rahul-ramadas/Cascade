@@ -295,45 +295,6 @@ public sealed class FindBar : UserControl
         ApplyHeight();
     }
 
-    /// <summary>A label that redraws in one go. The count changes with every keypress that walks to the next
-    /// match, and a plain label clears itself before drawing, which on a strip this wide reads as a flash.</summary>
-    private sealed class SteadyLabel : Label
-    {
-        private string _message = "";
-
-        public SteadyLabel() => DoubleBuffered = true;
-
-        /// <summary>The text to show. Deliberately not <see cref="Control.Text"/>: assigning that sends
-        /// WM_SETTEXT, which was measured to repaint the whole bar behind this label - so the term box, the
-        /// options and the buttons were all being cleared and redrawn on every keypress that walked to the
-        /// next match. Invalidating this label alone costs the bar nothing.</summary>
-        [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-        internal string Message
-        {
-            get => _message;
-            set
-            {
-                if (_message == value) return;
-                _message = value;
-                AccessibleName = value;   // so it still reads out, Text being left empty
-                Invalidate();
-            }
-        }
-
-        internal int Paints;
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            Paints++;
-            base.OnPaint(e);
-            TextRenderer.DrawText(e.Graphics, _message, Font, ClientRectangle, ForeColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
-                TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding);
-        }
-
-        internal bool RedrawsInOneGo => GetStyle(ControlStyles.OptimizedDoubleBuffer);
-    }
-
     /// <summary>Enter searches for what is in the box. Handled here rather than left to the form because
     /// ProcessCmdKey runs on the focused control first, so this sees the key before anything else can.</summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
