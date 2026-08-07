@@ -94,6 +94,7 @@ internal static class SelfTest
             ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("style boxes", RunStyleBoxChecks);
+            ok &= Timed("about box", RunAboutBoxChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("new filter", RunNewFilterChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
@@ -6167,6 +6168,103 @@ internal static class SelfTest
         ok &= Check("and one press of it is bold", dlg.PreviewForTesting.Bold);
 
         dlg.Close();
+        Pump();
+        return ok;
+    }
+
+    /// <summary>The About box is two columns of text that have to read as one line each. A label centres its
+    /// caption in the cell and a text box draws its own at the top of its box, so the two drifted apart -
+    /// which is only visible in the pixels, never in the layout. It also has to be able to say something
+    /// long, because the reason an update check failed is exactly what a bug report needs.</summary>
+    private static bool RunAboutBoxChecks()
+    {
+        Line("-- the about box --");
+
+        const string LongProblem =
+            "Last check failed: GitHub answered 403 Forbidden for https://api.github.com/repos/owner/name/" +
+            "releases/latest. The saved credential was refused and the anonymous retry ran out of requests.";
+
+        AboutDialog.Row[] rows =
+        [
+            new("Version", "2026.8.60"),
+            new("Location", @"C:\Users\someone\AppData\Local\Programs\Cascade\Cascade.exe"),
+            new("Updates", "Up to date"),
+            new("Last error", LongProblem, IsProblem: true)
+        ];
+
+        using var about = new AboutDialog(rows)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        about.Show();
+        Pump();
+
+        // Where a control's caption really starts, in the coordinates of the row it shares with the other
+        // column. Each control is rendered on its own rather than reading them off a picture of the whole
+        // dialog: DrawToBitmap on a Form includes the window frame, so client coordinates would not line up
+        // with the picture, and the error only shows as a difference between two rows.
+        // What counts as ink is measured against that control's OWN darkest pixel rather than a fixed
+        // threshold - a red message and a grey label cross a fixed one at different points in their
+        // antialiasing, which is worth several pixels and would read as a misalignment that is not there.
+        static int InkTop(Control c)
+        {
+            using var bmp = new Bitmap(Math.Max(1, c.Width), Math.Max(1, c.Height));
+            c.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+            var paper = SystemColors.Control;
+            int Away(Color p) => Math.Abs(p.R - paper.R) + Math.Abs(p.G - paper.G) + Math.Abs(p.B - paper.B);
+
+            int darkest = 0;
+            for (int y = 0; y < bmp.Height; y++)
+                for (int x = 0; x < bmp.Width; x++)
+                    darkest = Math.Max(darkest, Away(bmp.GetPixel(x, y)));
+            if (darkest < 100) return -1;
+
+            for (int y = 0; y < bmp.Height; y++)
+                for (int x = 0; x < bmp.Width; x++)
+                    if (Away(bmp.GetPixel(x, y)) >= darkest / 2) return c.Top + y;
+            return -1;
+        }
+
+        bool ok = true;
+        var pairs = about.RowsForTesting.ToList();
+        ok &= Check($"every row of the box is there ({pairs.Count})", pairs.Count == rows.Length);
+
+        var offsets = new List<int>();
+        foreach (var (label, value) in pairs)
+        {
+            int a = InkTop(label), b = InkTop(value);
+            offsets.Add(a < 0 || b < 0 ? 99 : b - a);
+            Line($"   ({label.Text}: label at {label.Top} ink at {a}, " +
+                 $"value at {value.Top} ({value.Height}px tall) ink at {b})");
+        }
+        ok &= Check("the label and the value of a row are written on the same line",
+                    offsets.Count > 0 && offsets.TrueForAll(d => Math.Abs(d) <= 1),
+                    "offsets " + string.Join(", ", offsets));
+
+        // A long message has to be readable, not clipped at the edge of the dialog. Its box is the one that
+        // stands more than one line tall, and the row it is in has to be tall enough to hold it.
+        var problem = pairs[^1].Value;
+        int oneLine = pairs[0].Value.Height;
+        ok &= Check($"a long message wraps rather than being cut off ({problem.Height}px against {oneLine}px)",
+                    problem.Height >= oneLine * 2);
+        ok &= Check("and all of it is really there", problem.Text == LongProblem);
+        ok &= Check("and it is coloured as the problem it is", problem.ForeColor == Color.Firebrick,
+                    problem.ForeColor.ToString());
+        ok &= Check("while an ordinary value is not", pairs[0].Value.ForeColor != Color.Firebrick);
+
+        // Selectable, so it can be pasted into a bug report - but out of the tab order, so the box does not
+        // open with a value highlighted.
+        ok &= Check("values can be selected and copied",
+                    pairs.TrueForAll(p => p.Value is TextBox { ReadOnly: true, TabStop: false }));
+
+        int cap = about.LogicalToDeviceUnits(620);
+        ok &= Check($"and one long line does not stretch the box off the screen ({problem.Width}px)",
+                    problem.Width <= cap && about.Width <= Screen.PrimaryScreen!.WorkingArea.Width,
+                    $"value column capped at {cap}px, dialog {about.Width}px");
+
+        about.Close();
         Pump();
         return ok;
     }
