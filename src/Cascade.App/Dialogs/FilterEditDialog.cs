@@ -40,7 +40,11 @@ public sealed class FilterEditDialog : DialogBase
     private readonly QuietCheckBox _regex = new() { Text = "&Regular expression", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly QuietCheckBox _caseSensitive = new() { Text = "&Case sensitive", AutoSize = true, Margin = new Padding(0, 3, 24, 3) };
     private readonly QuietCheckBox _excluding = new() { Text = "&Excluding filter (hides matching lines)", AutoSize = true, Margin = new Padding(0, 3, 0, 3) };
-    private readonly Label _note = new() { AutoSize = false, AutoEllipsis = true };
+    // A SteadyLabel, not a Label: this line changes on every keystroke of a half-written regex, and
+    // assigning Label.Text was measured to relayout and repaint the entire dialog each time. It ellipsises
+    // itself, so AutoEllipsis (which works off Text) has nothing to do; the tip carries the full wording.
+    private readonly SteadyLabel _note = new() { AutoSize = false, AutoEllipsis = false };
+    private readonly ToolTip _noteTip = new();
 
     /// <summary>What is inherited, in the place a bad pattern complains from. The two never both apply: a
     /// pattern that will not compile is the more urgent thing to say, and the note is always true anyway.
@@ -191,7 +195,9 @@ public sealed class FilterEditDialog : DialogBase
     internal bool TextHasFocusForTesting => ActiveControl == _text;
     internal int PatternWidthForTesting => _text.Width;
     internal (int Start, int Length) TextSelectionForTesting => (_text.SelectionStart, _text.SelectionLength);
-    internal string NoteForTesting => _note.Text;
+    internal string NoteForTesting => _note.Message;
+    internal int NotePaintsForTesting => _note.Paints;
+    internal bool NoteRedrawsInOneGoForTesting => _note.RedrawsInOneGo;
     internal void FocusTextForTesting(int start, int length)
     {
         ActiveControl = _text;
@@ -406,7 +412,9 @@ public sealed class FilterEditDialog : DialogBase
         }
         bool bad = message.Length > 0;
         _note.ForeColor = bad ? Color.Firebrick : Color.Gray;
-        _note.Text = bad ? message : InheritNote;
+        string wording = bad ? message : InheritNote;
+        _note.Message = wording;
+        if (_noteTip.GetToolTip(_note) != wording) _noteTip.SetToolTip(_note, wording);
     }
 
     private void Apply()
@@ -430,5 +438,11 @@ public sealed class FilterEditDialog : DialogBase
         _filter.Style.Bold = FromState(_bold.CheckState);
         _filter.Style.Italic = FromState(_italic.CheckState);
         _filter.Style.Underline = FromState(_underline.CheckState);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _noteTip.Dispose();
+        base.Dispose(disposing);
     }
 }

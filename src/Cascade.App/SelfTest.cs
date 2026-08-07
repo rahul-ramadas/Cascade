@@ -80,6 +80,7 @@ internal static class SelfTest
             ok &= Timed("find bar", RunFindBarChecks);
             ok &= Timed("find bar layout", RunFindBarLayoutChecks);
             ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
+            ok &= Timed("filter dialog repaint", RunFilterDialogRepaintChecks);
             ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("find bar room", RunFindBarRoomChecks);
             ok &= Timed("status bar", RunStatusBarChecks);
@@ -5231,6 +5232,65 @@ internal static class SelfTest
     /// <summary>Walking matches with the Enter key held down changes the count about thirty times a second.
     /// Only the count itself may be redrawn for that: repainting the row it sits in would erase the term,
     /// the options and the buttons and put them straight back, which is what a flicker is.</summary>
+    /// <summary>The hint under the fields is rewritten on every keystroke of a half-written regex, because
+    /// .NET puts the pattern into its own complaint. It must redraw itself and leave the dialog alone.</summary>
+    private static bool RunFilterDialogRepaintChecks()
+    {
+        Line("-- the regex complaint changing does not disturb the filter dialog --");
+
+        using var dlg = new FilterEditDialog(new Filter { Match = { Text = "" } }, isNew: true)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0,
+        };
+        dlg.Show();
+        Pump();
+
+        var dialogBody = dlg.Controls[0];
+        int bodyPaints = 0;
+        dialogBody.Paint += (_, _) => bodyPaints++;
+
+        // The same call WinForms makes for Alt+R, so the option is ticked the way a user ticks it.
+        typeof(Control).GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(dlg, new object[] { 'R' });
+        Pump();
+
+        const int steps = 12;
+
+        // A control run first: pump exactly as often with the pattern untouched, so what follows measures
+        // the complaint changing rather than whatever the message loop does anyway.
+        bodyPaints = 0;
+        for (int i = 0; i < steps; i++) Pump();
+        int idlePaints = bodyPaints;
+
+        bodyPaints = 0;
+        int notesBefore = dlg.NotePaintsForTesting;
+        var wordings = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < steps; i++)
+        {
+            dlg.SetTextForTesting("abc[" + new string('x', i));   // the set never closes, so it stays broken
+            Pump();
+            wordings.Add(dlg.NoteForTesting);
+        }
+        int notePaints = dlg.NotePaintsForTesting - notesBefore;
+
+        bool ok = Check("a half-written pattern is reported as broken",
+                        dlg.NoteForTesting.StartsWith("Invalid regex", StringComparison.Ordinal),
+                        dlg.NoteForTesting);
+        ok &= Check($"and the complaint really does change with every keystroke ({wordings.Count} of {steps})",
+                    wordings.Count == steps);
+        ok &= Check($"the complaint itself redraws as it changes ({notePaints} times over {steps})",
+                    notePaints > 0);
+        ok &= Check($"but the dialog around it is left alone (body repainted {bodyPaints} times while the " +
+                    $"complaint changed, {idlePaints} while it did not)", bodyPaints <= idlePaints);
+        ok &= Check("and the complaint redraws in one go", dlg.NoteRedrawsInOneGoForTesting);
+
+        dlg.Close();
+        Pump();
+        return ok;
+    }
+
     private static bool RunFindBarRepaintChecks()
     {
         Line("-- the count changing does not disturb the bar --");
