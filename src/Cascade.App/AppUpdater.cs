@@ -30,7 +30,7 @@ internal static class AppUpdater
     public const string LogVariable = "CASCADE_UPDATE_LOG";
 
     private const string DefaultRepo = "rahul-ramadas/Cascade";
-    private const string DefaultApi = "https://api.github.com";
+    internal const string DefaultApi = "https://api.github.com";
     private const int VerifyTimeoutMs = 20_000;
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
@@ -77,18 +77,22 @@ internal static class AppUpdater
     }
 
     /// <summary>
-    /// The user's git credential is only ever sent to GitHub itself. CASCADE_UPDATE_API can point the
-    /// updater anywhere, so without this check anyone able to set that variable could collect a token that
-    /// carries the scopes of the user's git, not of this app.
+    /// The user's git credential is only ever sent to GitHub itself, over HTTPS. CASCADE_UPDATE_API can
+    /// point the updater anywhere, so without this check anyone able to set that variable could collect a
+    /// token that carries the scopes of the user's git, not of this app - either by naming their own host,
+    /// or by naming GitHub over http and reading it off the wire.
     /// </summary>
-    private static Task<string?> TokenFor(string api, CancellationToken ct)
-    {
-        bool isGitHub = Uri.TryCreate(api, UriKind.Absolute, out var uri)
-                        && uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase);
-        return isGitHub
+    internal static bool MayUseGitCredential(string api) =>
+        Uri.TryCreate(api, UriKind.Absolute, out var uri)
+        && uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        && uri.Host.Equals("api.github.com", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The stub server the end-to-end tests run against is plain http on loopback, so it takes its
+    /// token from the environment instead - never the user's own.</summary>
+    private static Task<string?> TokenFor(string api, CancellationToken ct) =>
+        MayUseGitCredential(api)
             ? GitCredentialToken.GetAsync("github.com", ct)
             : Task.FromResult(Environment.GetEnvironmentVariable(GitCredentialToken.EnvironmentVariable));
-    }
 
     /// <summary>
     /// Proves a downloaded file is a working build before it is allowed to replace the running one. First
