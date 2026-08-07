@@ -1284,6 +1284,10 @@ public sealed class FilterTreeControl : UserControl
         SendMessage(_tree.Handle, WM_LBUTTONDBLCLK, (IntPtr)MK_LBUTTON, lParam);
     }
 
+    /// <summary>Whether the list has the mouse captured, i.e. whether the next click anywhere in the window
+    /// would be delivered here rather than where it was aimed.</summary>
+    internal bool ListHoldsMouseForTesting => _tree.Capture;
+
     /// <summary>Raises the LIST'S OWN second-click MouseDown, which is all a TreeView reports when a
     /// double-click lands on empty space - MEASURED: no MouseDoubleClick, no DoubleClick, no
     /// NodeMouseDoubleClick. Injected window messages raise none of them either, because a TreeView reports

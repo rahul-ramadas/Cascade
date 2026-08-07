@@ -95,6 +95,13 @@ internal sealed class BufferedTreeView : TreeView
         InContentDoubleClick = HitAt(m.LParam) != TreeViewHitTestLocations.PlusMinus;
         try { base.WndProc(ref m); }
         finally { InContentDoubleClick = false; }
+
+        // TreeView captures the mouse here so it is sure of getting the button-up even if that lands off
+        // the control - but it raises MouseDown FIRST, and ours opens the filter editor. The up is then
+        // delivered while this window is disabled by the modal dialog, so it never arrives, and the tree
+        // holds the capture indefinitely: the user's next click goes to the list wherever it was aimed,
+        // and is swallowed. There is nothing left to wait for once the button is up.
+        if ((MouseButtons & MouseButtons.Left) == 0) Capture = false;
     }
 
     private TreeViewHitTestLocations HitAt(IntPtr lParam)
