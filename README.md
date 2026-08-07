@@ -118,7 +118,7 @@ registry keys, and updates itself.
 ## And the rest
 
 - **Opening** — `Ctrl+O`, `F5` to reload, *Open from Clipboard*, recent files, a path on the command line, or drag a file onto the window. Dropping a `.cascade` or `.tat` loads its filters instead.
-- **Encodings** — auto-detect, UTF-8, UTF-16 LE/BE, Windows-1252 or the system default, changeable at any time.
+- **Encodings** — a byte-order mark is honoured, otherwise UTF-8 is assumed. When a file has neither — a code page, or UTF-16 written without a mark — *View ▸ Encoding* reads it again as UTF-8, UTF-16 LE/BE, UTF-32 LE/BE, Windows-1252 or your system code page. A tick shows which is in effect, *Auto-detect* names what it found, and the choice survives a reload.
 - **Copying** — selected lines with or without line numbers, or *Save Current Lines* to write out exactly what the filters are showing.
 - **Preferences** — font, size, line spacing, colours, tab size, markers, line numbers, which end of the list new filters join; exportable to carry between machines.
 - **Keyboard-complete and accessible** — every feature has a shortcut or a menu item, and the log view exposes each row to UI Automation.

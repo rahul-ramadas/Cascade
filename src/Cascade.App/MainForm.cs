@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Drawing;
+using System.Globalization;
 using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
@@ -7,6 +8,7 @@ using Cascade.Core.Document;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
+using Cascade.Core.Text;
 using Cascade.Core.Updating;
 
 namespace Cascade.App;
@@ -50,7 +52,12 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
     private ToolStripMenuItem _miColumns = null!;
+    private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
+
+    /// <summary>The encoding the reader chose for the file that is open, or null while it is being worked
+    /// out from the file itself. Kept so that reloading does not quietly go back to guessing.</summary>
+    private Encoding? _forcedEncoding;
 
     private FindBar _findBar = null!;
     private FindQuery? _lastQuery;
@@ -127,6 +134,26 @@ public sealed class MainForm : Form
         : _grid.Focused ? "log"
         : ActiveControl?.Name is { Length: > 0 } n ? n : ActiveControl?.GetType().Name ?? "(nothing)";
     internal void CloseFindForTesting() => CloseFind();
+
+    /// <summary>Opens a log the way File ▸ Open does, so a check exercises the whole path (including what
+    /// opening another file does to the chosen encoding).</summary>
+    internal void OpenForTesting(string path) => OpenFile(path, null);
+
+    /// <summary>What the Encoding menu says right now, one entry per line: the item's name, Auto-detect's
+    /// hint in brackets, <c>*</c> for the one in effect. Opens the drop-down the way Windows does, so the
+    /// check reads what a reader would see rather than the field behind it.</summary>
+    internal string EncodingMenuForTesting()
+    {
+        typeof(ToolStripDropDownItem).GetMethod("OnDropDownShow",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(_miEncoding, [EventArgs.Empty]);
+        return string.Join("\n", _miEncoding.DropDownItems.OfType<ToolStripMenuItem>().Select(i =>
+            (i.Text ?? "").Replace("&", "", StringComparison.Ordinal)
+            + (i.ShortcutKeyDisplayString is { Length: > 0 } hint ? $" [{hint}]" : "")
+            + (i.Checked ? " *" : "")
+            + (i.Enabled ? "" : " (unavailable)")));
+    }
+
     internal void SetStatusProgressForTesting(double fraction)
     {
         _progress.Visible = true;
@@ -562,18 +589,69 @@ public sealed class MainForm : Form
         return m;
     }
 
+    /// <summary>How the bytes on disk are turned into text. Every item is ticked or not, so the menu says
+    /// which one is in effect - and "Auto-detect" names what it worked out, since that is the answer a
+    /// reader actually wants and no other item can carry it.</summary>
     private ToolStripMenuItem BuildEncodingMenu()
     {
-        var m = new ToolStripMenuItem("&Encoding");
-        void Item(string text, Func<Encoding?> enc) =>
-            m.DropDownItems.Add(text, null, (_, _) => ReopenWithEncoding(enc()));
-        Item("Auto-detect", () => null);
-        Item("UTF-8", () => new UTF8Encoding(false));
-        Item("UTF-16 LE", () => new UnicodeEncoding(false, false));
-        Item("UTF-16 BE", () => new UnicodeEncoding(true, false));
-        Item("Windows-1252", () => { try { return Encoding.GetEncoding(1252); } catch { return null; } });
-        Item("System default", () => Encoding.Default);
-        return m;
+        _miEncoding = new ToolStripMenuItem("&Encoding");
+        _miEncoding.DropDownItems.Add(new ToolStripMenuItem("&Auto-detect", null, (_, _) => ReopenWithEncoding(null)));
+
+        var offered = new HashSet<int>();
+        void Item(string text, int codePage)
+        {
+            // The system default is Windows-1252 on most machines, and two items for one encoding would
+            // both be ticked by the same choice - which reads as the menu being confused about itself.
+            if (!offered.Add(codePage)) return;
+            var enc = CodePage(codePage);
+            _miEncoding.DropDownItems.Add(new ToolStripMenuItem(text, null, (_, _) => { if (enc is not null) ReopenWithEncoding(enc); })
+            {
+                Tag = enc,
+                // A code page this machine has no provider for cannot be chosen, and saying so plainly is
+                // better than an item that silently falls back to guessing.
+                Enabled = enc is not null,
+            });
+        }
+        Item("UTF-&8", 65001);
+        Item("UTF-16 &LE", 1200);
+        Item("UTF-16 &BE", 1201);
+        Item("&UTF-32 LE", 12000);
+        Item("UTF-32 B&E", 12001);
+        Item("&Windows-1252", 1252);
+        Item($"&System default ({SystemCodePage})", SystemCodePage);
+        // Worked out as the menu opens, rather than kept in step from every place a file can be opened.
+        _miEncoding.DropDownOpening += (_, _) => SyncEncodingMenu();
+        SyncEncodingMenu();
+        return _miEncoding;
+    }
+
+    /// <summary>The code page Windows uses for programs that are not Unicode. <see cref="Encoding.Default"/>
+    /// cannot answer this - it is always UTF-8 on .NET Core, so the item used to be a second copy of the
+    /// UTF-8 one.</summary>
+    private static int SystemCodePage => CultureInfo.CurrentCulture.TextInfo.ANSICodePage;
+
+    private static Encoding? CodePage(int codePage)
+    {
+        try { return Encoding.GetEncoding(codePage); }
+        catch (NotSupportedException) { return null; }
+        catch (ArgumentException) { return null; }
+    }
+
+    /// <summary>Ticks whichever entry is in effect, and says beside "Auto-detect" what it detected. That
+    /// goes in the right-aligned hint rather than in the item's own text, so the item is still called the
+    /// same thing whatever file is open.</summary>
+    private void SyncEncodingMenu()
+    {
+        bool auto = true;
+        foreach (ToolStripMenuItem item in _miEncoding.DropDownItems)
+        {
+            var enc = item.Tag as Encoding;
+            item.Checked = auto ? _forcedEncoding is null : _forcedEncoding?.CodePage == enc?.CodePage;
+            if (auto)
+                item.ShortcutKeyDisplayString = string.IsNullOrEmpty(_doc.FilePath) || _forcedEncoding is not null
+                    ? "" : EncodingDetector.DisplayName(_doc.Encoding);
+            auto = false;
+        }
     }
 
     private void BuildStatusBar()
@@ -833,6 +911,8 @@ public sealed class MainForm : Form
         {
             Cursor = Cursors.WaitCursor;
             _doc.Open(path, enc);
+            _forcedEncoding = enc;
+            SyncEncodingMenu();
             _grid.Attach(_doc, _settings);
             _filterTree.Attach(_doc);
             _presets.Attach(_doc);
@@ -850,7 +930,9 @@ public sealed class MainForm : Form
         finally { Cursor = Cursors.Default; }
     }
 
-    private void Reload() { if (!string.IsNullOrEmpty(_doc.FilePath) && File.Exists(_doc.FilePath)) OpenFile(_doc.FilePath, null); }
+    /// <summary>Reads the file again from disk, keeping the encoding the reader chose - going back to
+    /// guessing would undo their choice without saying so.</summary>
+    private void Reload() { if (!string.IsNullOrEmpty(_doc.FilePath) && File.Exists(_doc.FilePath)) OpenFile(_doc.FilePath, _forcedEncoding); }
 
     private void ReopenWithEncoding(Encoding? enc) { if (!string.IsNullOrEmpty(_doc.FilePath) && File.Exists(_doc.FilePath)) OpenFile(_doc.FilePath, enc); }
 

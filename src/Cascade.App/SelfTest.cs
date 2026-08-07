@@ -84,6 +84,7 @@ internal static class SelfTest
             ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("find bar room", RunFindBarRoomChecks);
             ok &= Timed("status bar", RunStatusBarChecks);
+            ok &= Timed("encoding menu", RunEncodingMenuChecks);
             ok &= Timed("line spacing", RunLineSpacingChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
             ok &= Timed("filter drag", RunFilterDragChecks);
@@ -5486,6 +5487,108 @@ internal static class SelfTest
             Pump();
             try { File.Delete(log); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>The Encoding menu. It is the only way to read a file whose bytes say nothing about how they
+    /// were written - a code page, or UTF-16 with no mark - so what matters is that choosing an entry really
+    /// re-reads the file, that the menu says which one is in effect, and that the choice survives a reload.
+    /// </summary>
+    private static bool RunEncodingMenuChecks()
+    {
+        Line("-- the encoding menu --");
+
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_enc_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        // "café" is one byte in Windows-1252 and two in UTF-8, so the same bytes read one way or the other
+        // are visibly different text - which is what makes every check below an observation, not a guess.
+        string cp1252 = Path.Combine(dir, "cp1252.log");
+        string utf16 = Path.Combine(dir, "utf16le.log");
+        File.WriteAllBytes(cp1252, Encoding.GetEncoding(1252).GetBytes("INFO café ready\nWARN naïve façade\n"));
+        var u16 = new UnicodeEncoding(false, true);
+        File.WriteAllBytes(utf16, [.. u16.GetPreamble(), .. u16.GetBytes("INFO café ready\nWARN naïve façade\n")]);
+
+        MainForm? form = null;
+        try
+        {
+            string[] args = [cp1252];
+            form = new MainForm(new AppSettings(), new MachineState(), args)
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            Settle(doc);
+
+            string menu = form.EncodingMenuForTesting();
+            Line("   " + menu.Replace("\n", " | ", StringComparison.Ordinal));
+
+            bool ok = Check("exactly one encoding is ticked", Ticked(menu).Count == 1, menu);
+            ok &= Check("with nothing chosen, the ticked one is Auto-detect",
+                        Ticked(menu).Contains("Auto-detect"), menu);
+            ok &= Check("and Auto-detect says what it worked out",
+                        menu.Contains("Auto-detect [UTF-8]", StringComparison.Ordinal), menu);
+            // Guessed wrong, unavoidably: nothing in the bytes says which code page they are.
+            ok &= Check("a code-page file guessed as UTF-8 comes out damaged",
+                        doc.GetLineText(0).Contains('\uFFFD', StringComparison.Ordinal), doc.GetLineText(0));
+
+            ok &= Check("choosing Windows-1252 re-reads the file",
+                        form.ClickMenuForTesting("View", "Encoding", "Windows-1252")
+                        && Settle(doc) && doc.GetLineText(0) == "INFO café ready", doc.GetLineText(0));
+            menu = form.EncodingMenuForTesting();
+            ok &= Check("and the tick moves to it", Ticked(menu).SequenceEqual(["Windows-1252"]), menu);
+            ok &= Check("Auto-detect stops claiming to be in effect",
+                        !menu.Contains("Auto-detect [", StringComparison.Ordinal), menu);
+
+            ok &= Check("reloading keeps the chosen encoding",
+                        form.ClickMenuForTesting("File", "Reload")
+                        && Settle(doc) && doc.GetLineText(0) == "INFO café ready", doc.GetLineText(0));
+            ok &= Check("and so does the tick",
+                        Ticked(form.EncodingMenuForTesting()).SequenceEqual(["Windows-1252"]));
+
+            ok &= Check("going back to Auto-detect guesses again",
+                        form.ClickMenuForTesting("View", "Encoding", "Auto-detect")
+                        && Settle(doc) && doc.GetLineText(0).Contains('\uFFFD', StringComparison.Ordinal),
+                        doc.GetLineText(0));
+
+            // A mark leaves nothing to guess at, and the menu has to say which encoding that turned out to be.
+            form.OpenForTesting(utf16);
+            Settle(doc);
+            menu = form.EncodingMenuForTesting();
+            ok &= Check("a marked file is detected and read", doc.GetLineText(0) == "INFO café ready", doc.GetLineText(0));
+            ok &= Check("and Auto-detect names the encoding it found",
+                        menu.Contains("Auto-detect [UTF-16 LE]", StringComparison.Ordinal), menu);
+            ok &= Check("opening another file goes back to detecting", Ticked(menu).Contains("Auto-detect"), menu);
+
+            // The mark says UTF-16, so this is the case where deferring to it left the menu doing nothing.
+            ok &= Check("and a choice still overrules the mark",
+                        form.ClickMenuForTesting("View", "Encoding", "Windows-1252")
+                        && Settle(doc) && doc.GetLineText(0) != "INFO café ready", doc.GetLineText(0));
+            return ok;
+
+            static List<string> Ticked(string menu) =>
+                [.. menu.Split('\n').Where(l => l.EndsWith(" *", StringComparison.Ordinal))
+                        .Select(l => l[..^2] is var name && name.IndexOf(" [", StringComparison.Ordinal) is var b && b > 0
+                                     ? name[..b] : name)];
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Waits for a freshly opened document to finish indexing, pumping so the window keeps up.</summary>
+    private static bool Settle(CascadeDocument doc)
+    {
+        for (int i = 0; i < 200 && !doc.IsIndexComplete; i++) { Thread.Sleep(10); Pump(); }
+        Pump();
+        return doc.IsIndexComplete;
     }
 
     /// <summary>The bar appears above the log, so the room for it has to come off the TOP: the log is
