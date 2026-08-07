@@ -6264,6 +6264,37 @@ internal static class SelfTest
                     problem.Width <= cap && about.Width <= Screen.PrimaryScreen!.WorkingArea.Width,
                     $"value column capped at {cap}px, dialog {about.Width}px");
 
+        // What the Updates rows say in each state updating can be in. A check that has not finished must not
+        // be reported as "up to date" - that is a guess dressed up as a fact - and a failure has to hand over
+        // the whole reason, which is the one thing a bug report needs and the one thing it used to swallow.
+        static string Said(List<AboutDialog.Row> rows)
+            => string.Join(" | ", rows.Select(r => $"{r.Label}: {r.Value}"));
+
+        var running = AboutDialog.UpdateRows(finished: false, pending: null, error: null, note: null);
+        ok &= Check("a check still running says so", running.Count == 1 && running[0].Value.StartsWith("Checking", StringComparison.Ordinal),
+                    Said(running));
+
+        var clean = AboutDialog.UpdateRows(finished: true, pending: null, error: null, note: null);
+        ok &= Check("a check that found nothing newer says it is up to date",
+                    clean.Count == 1 && clean[0].Value.Contains("Up to date", StringComparison.Ordinal), Said(clean));
+
+        var waiting = AboutDialog.UpdateRows(finished: true, pending: new Version(2026, 8, 61), null, null);
+        ok &= Check("an installed update says when it takes effect",
+                    waiting.Count == 1 && waiting[0].Value.Contains("2026.8.61", StringComparison.Ordinal)
+                        && waiting[0].Value.Contains("next time", StringComparison.Ordinal), Said(waiting));
+
+        var failed = AboutDialog.UpdateRows(finished: true, pending: null, error: LongProblem, note: "carried on anonymously");
+        ok &= Check("a failed check gives the reason a row of its own, marked as a problem",
+                    failed.Count == 3 && failed[1].Value == LongProblem && failed[1].IsProblem, Said(failed));
+        ok &= Check("and does not claim to be up to date at the same time",
+                    !failed[0].Value.Contains("Up to date", StringComparison.Ordinal), failed[0].Value);
+        ok &= Check("and a note is shown as a note, not as a problem",
+                    failed[2].Label == "Note" && !failed[2].IsProblem, Said(failed));
+
+        var quiet = AboutDialog.UpdateRows(finished: true, pending: null, error: null, note: "another copy is doing it");
+        ok &= Check("standing aside for another copy is not reported as a failure",
+                    quiet.Count == 2 && quiet.TrueForAll(r => !r.IsProblem), Said(quiet));
+
         about.Close();
         Pump();
         return ok;

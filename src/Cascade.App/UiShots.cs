@@ -85,6 +85,21 @@ internal static class UiShots
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog((Cascade.Core.Updating.UpdateService?)null), outDir, "about");
+        // A failed check is the state nobody ever sees while it is being written, and the reason for it is
+        // the whole point of the row - so it gets a picture of its own.
+        ShotDialog(new AboutDialog([
+                new AboutDialog.Row("Version", "2026.8.61"),
+                new AboutDialog.Row("Runtime", ".NET 10.0.10 (x64)"),
+                new AboutDialog.Row("Updates", "The last check did not get through"),
+                new AboutDialog.Row("Reason",
+                    "GitHub answered 403 Forbidden to a request to look for the latest release " +
+                    "(https://api.github.com/repos/rahul-ramadas/Cascade/releases/latest) - API rate limit " +
+                    "exceeded. This is usually the hourly request limit for unauthenticated callers.",
+                    IsProblem: true),
+                new AboutDialog.Row("Note",
+                    "The GitHub credential git had for this machine was refused (401 Unauthorized); " +
+                    "the check carried on without it.")
+            ]), outDir, "about-error");
 
         ShotMainForm(outDir, file, tat);
         ShotGridStates(outDir);

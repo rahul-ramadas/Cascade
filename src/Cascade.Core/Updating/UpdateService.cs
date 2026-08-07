@@ -33,6 +33,8 @@ public sealed class UpdateService
 
     private volatile Version? _pendingVersion;
     private volatile string? _lastError;
+    private volatile string? _lastNote;
+    private volatile bool _finished;
 
     /// <param name="verify">Proves a downloaded file is a working build before it is allowed to replace the
     /// running one. The application runs it with <c>--version</c>; tests substitute their own.</param>
@@ -51,6 +53,14 @@ public sealed class UpdateService
     /// <summary>Why the last check produced nothing, or null if it succeeded or has not run.</summary>
     public string? LastError => _lastError;
 
+    /// <summary>Something worth knowing that did not stop the check - a refused credential, or another copy
+    /// of Cascade doing the work. Null when there is nothing to say.</summary>
+    public string? LastNote => _lastNote;
+
+    /// <summary>False while the startup check is still running. Without it the About box would report "up to
+    /// date" for a check that has not finished, which is a guess dressed up as a fact.</summary>
+    public bool CheckFinished => _finished;
+
     /// <summary>Re-reads what is on disk, which another instance may have replaced. Only ever raises the
     /// notice: once a newer build is installed it cannot become un-installed.</summary>
     public void RefreshPending()
@@ -66,15 +76,41 @@ public sealed class UpdateService
     /// </summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        RefreshPending();
-        using var gate = InstallLock.TryAcquire(_options.ExePath);
-        if (gate is null) return;
+        try
+        {
+            RefreshPending();
+            using var gate = InstallLock.TryAcquire(_options.ExePath);
+            if (gate is null)
+            {
+                _lastNote = "Another Cascade running from this folder is looking after updates.";
+                return;
+            }
 
-        try { await UpdateAsync(ct).ConfigureAwait(false); }
-        catch (OperationCanceledException) { /* shutting down; the next launch sweeps up */ }
-        catch (Exception ex) { _lastError = ex.Message; }
+            try { await UpdateAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { /* shutting down; the next launch sweeps up */ }
+            catch (Exception ex) { _lastError = Describe(ex); }
 
-        RefreshPending();
+            RefreshPending();
+            _lastNote ??= _source.Note;
+        }
+        finally { _finished = true; }
+    }
+
+    /// <summary>
+    /// An exception chain read out as one sentence. The message that matters is usually the innermost one -
+    /// "No such host is known" under "An error occurred while sending the request" - and reporting only the
+    /// outer one is how a check ends up described as simply not having worked.
+    /// </summary>
+    internal static string Describe(Exception ex)
+    {
+        var said = new List<string>();
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            string m = e.Message.Trim();
+            if (m.Length == 0 || said.Contains(m)) continue;
+            said.Add(m);
+        }
+        return said.Count == 0 ? ex.GetType().Name : string.Join(" \u2013 ", said);
     }
 
     private async Task UpdateAsync(CancellationToken ct)
@@ -92,7 +128,11 @@ public sealed class UpdateService
         }
 
         var release = await _source.GetLatestAsync(ct).ConfigureAwait(false);
-        if (release is null) { _lastError = "No release information available."; return; }
+        if (release is null)
+        {
+            _lastError = "The latest GitHub release has no Windows executable attached to it.";
+            return;
+        }
 
         if (!_options.Force && release.Version <= installed) { _lastError = null; return; }
 
