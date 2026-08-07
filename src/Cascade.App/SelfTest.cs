@@ -97,6 +97,7 @@ internal static class SelfTest
             ok &= Timed("colour preview", RunColorPreviewChecks);
             ok &= Timed("style boxes", RunStyleBoxChecks);
             ok &= Timed("about box", RunAboutBoxChecks);
+            ok &= Timed("update credential", RunUpdateCredentialChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("new filter", RunNewFilterChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
@@ -6729,6 +6730,39 @@ internal static class SelfTest
         for (int i = 1; i < values.Count; i++)
             if (values[i] <= values[i - 1]) return false;
         return true;
+    }
+
+    /// <summary>The credential the updater borrows is the user's own git token, carrying the scopes of their
+    /// git rather than of this app. CASCADE_UPDATE_API decides where the updater talks, so it decides where
+    /// that token would be sent - which makes this rule the whole of its protection.</summary>
+    private static bool RunUpdateCredentialChecks()
+    {
+        Line("-- the git credential only leaves for github, over https --");
+
+        bool ok = Check("the address the app ships with may have it",
+                        AppUpdater.MayUseGitCredential(AppUpdater.DefaultApi), AppUpdater.DefaultApi);
+        ok &= Check("and that address is https", AppUpdater.DefaultApi.StartsWith("https://", StringComparison.Ordinal),
+                    AppUpdater.DefaultApi);
+
+        // The right host over plain http would put the token on the wire in clear.
+        ok &= Check("the same host over http may not", !AppUpdater.MayUseGitCredential("http://api.github.com"));
+
+        // Each of these reads as api.github.com at a glance and none of them is.
+        ok &= Check("nor a host that merely starts with it",
+                    !AppUpdater.MayUseGitCredential("https://api.github.com.example.org"));
+        ok &= Check("nor github worn as a user name",
+                    !AppUpdater.MayUseGitCredential("https://api.github.com@example.org"));
+        ok &= Check("nor anywhere else at all", !AppUpdater.MayUseGitCredential("https://example.org"));
+
+        // The end-to-end tests point the updater at a loopback stub, which is exactly why the credential
+        // cannot simply always be offered: that stub is somebody else's process.
+        ok &= Check("nor the loopback stub the tests use",
+                    !AppUpdater.MayUseGitCredential("http://127.0.0.1:52000"));
+
+        ok &= Check("case is not a way round it", AppUpdater.MayUseGitCredential("HTTPS://API.GITHUB.COM"));
+        ok &= Check("and something that is not an address is refused",
+                    !AppUpdater.MayUseGitCredential("api.github.com"));
+        return ok;
     }
 
     /// <summary>The filter search bar: a thing you open on Ctrl+E, use, and dismiss - not a permanent box
