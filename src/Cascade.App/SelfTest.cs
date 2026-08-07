@@ -1313,22 +1313,26 @@ internal static class SelfTest
                         $"{slots} slots of {map.RowPixelsForTesting}px");
             if (slots <= 50) return false;
 
-            // ---- one pixel per row, in that row's own colour ----
+            // ---- one rate the whole way down, in the rows' own colours ----
             ok &= Check("it starts at the top of the file", map.TopRowForTesting == 0, map.TopRowForTesting.ToString());
-            ok &= Check("and the first rows are one to a pixel",
-                        map.RowAtForTesting(0) == 0 && map.RowAtForTesting(1) == 1 && map.RowAtForTesting(20) == 20,
-                        $"{map.RowAtForTesting(0)},{map.RowAtForTesting(1)},{map.RowAtForTesting(20)}");
+            int step = map.RowsPerPixelForTesting;
+            ok &= Check("and every pixel stands for the same number of rows",
+                        step > 1 && step <= 32 && Enumerable.Range(0, slots).All(s => map.RowAtForTesting(s) == (long)s * step),
+                        $"{step} rows a pixel; pixel 1 holds row {map.RowAtForTesting(1)}, pixel 20 holds {map.RowAtForTesting(20)}");
             ok &= Check("a matching row takes its filter's background",
                         map.ColourAtForTesting(5) == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb(),
                         Color.FromArgb(map.ColourAtForTesting(5)).ToString());
 
             // A filter with a text colour and no background of its own: the row would be invisible without
-            // falling back to it.
+            // falling back to it. And it is a single line among tens of thousands, so this is also what
+            // proves the rarest colour in a pixel wins - thirty-one plain rows do not vote it away.
             grid.ScrollToRow(25_000);
             map.RebuildForTesting();
             int rareSlot = map.SlotOfForTesting(25_000);
-            ok &= Check("the lone match is somewhere on the map", rareSlot >= 0 && map.RowAtForTesting(rareSlot) == 25_000,
-                        $"slot {rareSlot} holds row {map.RowAtForTesting(rareSlot)}");
+            var rareRows = map.RowsAtForTesting(rareSlot);
+            ok &= Check("the lone match is somewhere on the map",
+                        rareSlot >= 0 && rareRows.From <= 25_000 && rareRows.To > 25_000,
+                        $"slot {rareSlot} holds rows {rareRows.From}-{rareRows.To - 1}");
             ok &= Check("and takes its filter's text colour when it sets no background",
                         map.ColourAtForTesting(rareSlot) == Color.FromArgb(0xEE, 0x22, 0x22).ToArgb(),
                         Color.FromArgb(map.ColourAtForTesting(rareSlot)).ToString());
@@ -1345,17 +1349,142 @@ internal static class SelfTest
             ok &= Check("and the rows behind the pixels never go backwards",
                         Enumerable.Range(1, slots - 1).All(s => map.RowAtForTesting(s) >= map.RowAtForTesting(s - 1)));
 
-            // With every unmatched row hidden there is nothing to compress, so it is one pixel a row again.
+            // Hiding the unmatched rows used to leave nothing to compress, so the map held one row per pixel
+            // and reached ten thousand rows across two hundred - the mode that needed it most got none of it.
             doc.Filters.ShowOnlyFilteredLines = true;
             grid.RefreshView();
             grid.ScrollToRow(0);
             map.RebuildForTesting();
-            ok &= Check("with only matching lines shown it is one row per pixel again",
-                        map.SpanForTesting <= map.SlotCountForTesting,
+            ok &= Check("with only matching lines shown the rows are compressed too",
+                        map.SpanForTesting > map.SlotCountForTesting * 4,
                         $"{map.SpanForTesting} rows across {map.SlotCountForTesting} pixels");
             ok &= Check("and every pixel is coloured", Enumerable.Range(0, map.SlotCountForTesting).All(s => map.ColourAtForTesting(s) != 0));
             doc.Filters.ShowOnlyFilteredLines = false;
             grid.RefreshView();
+            Pump();
+
+            // ---- the rarest colour in a pixel wins ----
+            // A pixel stands for many rows but can only be one colour, and the one worth showing is the one
+            // you would otherwise miss. SPECIAL matches a single line inside the COMMON block, so its pixel
+            // holds thirty-one COMMON rows and one of it - and it is SPECIAL that has to come through.
+            var special = new Filter { Enabled = true, Match = new FilterMatch { Text = "line 5000" }, Style = { Background = new RgbColor(0x11, 0xCC, 0x33) } };
+            collection.Roots.Insert(0, special);   // topmost wins the colour, so the row really is SPECIAL
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            grid.ScrollToRow(5_000);
+            map.RebuildForTesting();
+            int specialSlot = map.SlotOfForTesting(5_000);
+            var specialRows = map.RowsAtForTesting(specialSlot);
+            ok &= Check("the pixel holding the lone SPECIAL row is mostly COMMON rows",
+                        specialRows.To - specialRows.From > 8,
+                        $"rows {specialRows.From}-{specialRows.To - 1}");
+            ok &= Check("and it shows SPECIAL, not the colour of the many",
+                        map.ColourAtForTesting(specialSlot) == Color.FromArgb(0x11, 0xCC, 0x33).ToArgb(),
+                        Color.FromArgb(map.ColourAtForTesting(specialSlot)).ToString());
+            ok &= Check("while the pixels either side are COMMON",
+                        map.ColourAtForTesting(specialSlot - 1) == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb() &&
+                        map.ColourAtForTesting(specialSlot + 1) == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb(),
+                        $"{Color.FromArgb(map.ColourAtForTesting(specialSlot - 1))} / {Color.FromArgb(map.ColourAtForTesting(specialSlot + 1))}");
+
+            // ---- the colours are remembered, and never stale ----
+            // Scrolling slides the remembered colours along rather than reading the file again, so the one
+            // thing that can go wrong is a pixel keeping a colour that belongs to another row. SPECIAL is
+            // deliberately still on: a row nothing matched never asks the remembered colours at all, so
+            // sliding them wrongly inside one solid block puts blue where blue belongs and nothing notices.
+            // It takes a second colour in view for the fault to have anywhere to show.
+            grid.ScrollToRow(5_000);
+            map.RebuildForTesting();
+            int beforeSliding = map.ColoursResolvedForTesting;
+            grid.ScrollToRow(5_400);
+            map.RebuildForTesting();
+            int resolvedSliding = map.ColoursResolvedForTesting - beforeSliding;
+            var slid = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            ok &= Check("the map really is showing more than one colour",
+                        slid.Distinct().Count() >= 2, $"{slid.Distinct().Count()} colours across {slid.Length} pixels");
+            int beforeCold = map.ColoursResolvedForTesting;
+            map.InvalidateSummary();
+            map.RebuildForTesting();
+            int resolvedCold = map.ColoursResolvedForTesting - beforeCold;
+            var fresh = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            int firstWrong = Enumerable.Range(0, Math.Min(slid.Length, fresh.Length)).FirstOrDefault(i => slid[i] != fresh[i], -1);
+            Line($"   (map cache: {resolvedSliding} rows read after the scroll, {resolvedCold} from cold, " +
+                 $"{slid.Distinct().Count()} colours across {slid.Length} pixels)");
+            ok &= Check("what it remembered is what a fresh read gives",
+                        slid.Length == fresh.Length && firstWrong < 0,
+                        firstWrong < 0 ? $"{slid.Length} pixels agree"
+                                       : $"pixel {firstWrong}: {Color.FromArgb(slid[firstWrong])} vs {Color.FromArgb(fresh[firstWrong])}");
+            ok &= Check("and sliding it read far fewer rows than starting over",
+                        resolvedSliding * 4 < resolvedCold,
+                        $"{resolvedSliding} rows read after a 400-row scroll, {resolvedCold} from cold");
+
+            collection.Roots.Remove(special);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            Pump();
+
+            // ---- two common filters share the map rather than one hiding the other ----
+            // Every pixel of a compressed map holds rows of both, so always giving way to the same one paints
+            // the whole map in it and the other might as well not be enabled. Found on a real window: a map
+            // with [api-gateway] and [order-service] on was one flat colour, identical 700,000 rows apart.
+            // The two have to be of COMPARABLE weight (here roughly 30% against 70% of the COMMON block) or
+            // the rarer simply wins outright and this proves nothing.
+            var alsoCommon = new Filter
+            {
+                Enabled = true,
+                Match = new FilterMatch { Text = "[012]$", Regex = true },
+                Style = { Background = new RgbColor(0xEE, 0x99, 0x11) }
+            };
+            collection.Roots.Insert(0, alsoCommon);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            grid.ScrollToRow(3_000);
+            map.RebuildForTesting();
+            var mixed = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            int bluePixels = mixed.Count(c => c == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb());
+            int amberPixels = mixed.Count(c => c == Color.FromArgb(0xEE, 0x99, 0x11).ToArgb());
+            ok &= Check("both of two common filters reach the map, neither hiding the other",
+                        bluePixels > mixed.Length / 10 && amberPixels > mixed.Length / 10,
+                        $"{bluePixels} pixels of one, {amberPixels} of the other, across {mixed.Length}");
+            // ...and it is the file they follow, not the map: the same rows keep the same colour when the
+            // window moves, or the pattern would crawl about under the eye on every scroll.
+            var wasAt = Enumerable.Range(0, map.SlotCountForTesting)
+                                  .ToDictionary(s => map.RowAtForTesting(s), map.ColourAtForTesting);
+            grid.ScrollToRow(3_400);
+            map.RebuildForTesting();
+            int restained = Enumerable.Range(0, map.SlotCountForTesting)
+                                      .Count(s => wasAt.TryGetValue(map.RowAtForTesting(s), out int was) && was != map.ColourAtForTesting(s));
+            ok &= Check("and scrolling does not repaint the rows that did not move",
+                        restained == 0, $"{restained} pixels changed colour without their rows changing");
+            collection.Roots.Remove(alsoCommon);
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            Pump();
+
+            // ---- the rate is the least that fits ----
+            // Compressing harder than the file needs throws away detail for nothing; refusing to compress
+            // past the cap keeps a pixel something that can be aimed at.
+            ok &= Check("a file that fits outright is not compressed at all",
+                        MiniMapControl.RowsPerPixelFor(100, 700) == 1 && MiniMapControl.RowsPerPixelFor(700, 700) == 1,
+                        $"{MiniMapControl.RowsPerPixelFor(100, 700)}, {MiniMapControl.RowsPerPixelFor(700, 700)}");
+            ok &= Check("one that nearly fits is compressed only as much as it has to be",
+                        MiniMapControl.RowsPerPixelFor(1_400, 700) == 2 && MiniMapControl.RowsPerPixelFor(6_300, 700) == 9,
+                        $"{MiniMapControl.RowsPerPixelFor(1_400, 700)}, {MiniMapControl.RowsPerPixelFor(6_300, 700)}");
+            ok &= Check("and one past its reach stops at the cap",
+                        MiniMapControl.RowsPerPixelFor(22_400, 700) == 32 && MiniMapControl.RowsPerPixelFor(4_000_000, 700) == 32,
+                        $"{MiniMapControl.RowsPerPixelFor(22_400, 700)}, {MiniMapControl.RowsPerPixelFor(4_000_000, 700)}");
+
+            // Nothing enabled means no row can have a colour, so there is nothing to read at all.
+            var nothing = new FilterCollection();
+            doc.SetFilters(nothing);
+            WaitForFiltering(doc);
+            map.InvalidateSummary();
+            int resolvedBefore = map.ColoursResolvedForTesting;
+            map.RebuildForTesting();
+            ok &= Check("with no filters on it reads no lines whatever",
+                        map.ColoursResolvedForTesting == resolvedBefore,
+                        $"{map.ColoursResolvedForTesting - resolvedBefore} rows read");
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
             Pump();
 
             // ---- the window stays centred on the view ----
@@ -1366,7 +1495,9 @@ internal static class SelfTest
             long settled = map.TopRowForTesting;
             var before = map.ViewportForTesting;
             long behindBefore = map.RowAtForTesting(map.SlotCountForTesting / 2);
-            grid.ScrollToRow(5_020);
+            // Worth whole pixels of the map: the window sits on a fixed grid of the file, so a scroll of
+            // fewer rows than one pixel stands for rightly leaves it exactly where it is.
+            grid.ScrollToRow(5_000 + map.RowsPerPixelForTesting * 10L);
             map.RebuildForTesting();
             ok &= Check("a scroll carries the window with it", map.TopRowForTesting > settled,
                         $"{settled} -> {map.TopRowForTesting}");
@@ -1375,6 +1506,8 @@ internal static class SelfTest
             ok &= Check("and the picture moves under it",
                         map.RowAtForTesting(map.SlotCountForTesting / 2) != behindBefore,
                         $"row {behindBefore} -> {map.RowAtForTesting(map.SlotCountForTesting / 2)}");
+            ok &= Check("while a scroll of less than a pixel leaves it alone",
+                        StillAfterTinyScroll(grid, map), "the window moved for a sub-pixel scroll");
             grid.ScrollToRow(30_000);
             map.RebuildForTesting();
             int at = map.SlotOfForTesting(30_000), of = map.SlotCountForTesting;
@@ -1384,8 +1517,8 @@ internal static class SelfTest
                         map.ViewportForTesting.Height.ToString());
 
             // ---- the end of the file ----
-            // There is no file left below the window there, so it has to be filled from the bottom up
-            // instead. Otherwise the map empties out just as you reach the end of what you are reading.
+            // The window has to stop against the end rather than running past it, or the map empties out
+            // just as you reach the end of what you are reading.
             grid.ScrollToRow(0);
             map.RebuildForTesting();
             int full = map.SlotCountForTesting;
@@ -1393,9 +1526,9 @@ internal static class SelfTest
             map.RebuildForTesting();
             ok &= Check("at the end of the file the map is still full", map.SlotCountForTesting == full,
                         $"{map.SlotCountForTesting} of {full} pixels");
-            ok &= Check("and its last pixel is the last row",
-                        map.RowAtForTesting(map.SlotCountForTesting - 1) == lines - 1,
-                        map.RowAtForTesting(map.SlotCountForTesting - 1).ToString());
+            var lastRows = map.RowsAtForTesting(map.SlotCountForTesting - 1);
+            ok &= Check("and its last pixel holds the last row", lastRows.To == lines,
+                        $"rows {lastRows.From}-{lastRows.To - 1} of {lines}");
             var end = map.ViewportForTesting;
             ok &= Check("so the rectangle is at the bottom", end.Top + end.Height >= map.Height - map.RowPixelsForTesting * 2,
                         $"{end.Top}+{end.Height} of {map.Height}");
@@ -1547,9 +1680,12 @@ internal static class SelfTest
             long wanted = map.RowAtForTesting(target);
             map.ClickForTesting(target * map.RowPixelsForTesting);
             Pump();
+            // Within a pixel or two of what was aimed at: the rectangle has a minimum height, so on a short
+            // view it stands for more of the map than the view really covers.
             ok &= Check("clicking a pixel goes to the row behind it",
-                        Math.Abs(grid.FirstVisibleRow + grid.VisibleRows / 2 - wanted) <= 2,
-                        $"wanted {wanted}, got {grid.FirstVisibleRow + grid.VisibleRows / 2}");
+                        Math.Abs(grid.FirstVisibleRow + grid.VisibleRows / 2 - wanted) <= 2L * map.RowsPerPixelForTesting,
+                        $"wanted {wanted}, got {grid.FirstVisibleRow + grid.VisibleRows / 2}, " +
+                        $"{map.RowsPerPixelForTesting} rows a pixel");
 
             // ---- markers and the selection ----
             ok &= RunMapMarkChecks(doc, grid, map, host);
@@ -1558,7 +1694,9 @@ internal static class SelfTest
             grid.ScrollToRow(0);
             map.RebuildForTesting();
             string tip = map.TipTextForTesting(5);
-            ok &= Check("hovering a pixel names its line and filter", tip.Contains("Line 6") && tip.Contains("COMMON"),
+            var tipRows = map.RowsAtForTesting(5);
+            ok &= Check("hovering a pixel names the lines it stands for and their filter",
+                        tip.Contains($"Line {tipRows.From + 1:N0}\u2013{tipRows.To:N0}") && tip.Contains("COMMON"),
                         tip.Replace("\n", " | "));
             grid.ScrollToRow(20_000);
             map.RebuildForTesting();
@@ -1566,6 +1704,93 @@ internal static class SelfTest
             ok &= Check("and a compressed stretch says there is nothing in it", blank.Contains("nothing matching"),
                         blank.Replace("\n", " | "));
 
+            // ---- a file the map can hold is shown whole ----
+            ok &= RunMapWholeFileChecks();
+
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Scrolling by fewer rows than one pixel of the map stands for must not move the window: the
+    /// pixels sit on a fixed grid of the file, and re-dividing the rows between them for every line scrolled
+    /// is what makes a map crawl about while you read.</summary>
+    private static bool StillAfterTinyScroll(LineGridControl grid, MiniMapControl map)
+    {
+        long was = map.TopRowForTesting;
+        long from = grid.FirstVisibleRow;
+        grid.ScrollToRow(from + Math.Max(1, map.RowsPerPixelForTesting / 4));
+        map.RebuildForTesting();
+        bool still = map.TopRowForTesting == was;
+        grid.ScrollToRow(from);
+        map.RebuildForTesting();
+        return still;
+    }
+
+    /// <summary>A file small enough for the map to hold is shown whole: compressed only as much as it takes
+    /// to fit, anchored at the top, and never a window - so the map and the scrollbar agree about where you
+    /// are, and scrolling the log never moves the map at all.</summary>
+    private static bool RunMapWholeFileChecks()    {
+        const int lines = 3_000;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_mapfit_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++) sb.Append("HIT line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(600, 400),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            Pump();
+
+            var collection = new FilterCollection();
+            collection.Roots.Add(new Filter { Enabled = true, Match = new FilterMatch { Text = "HIT" }, Style = { Background = new RgbColor(0x22, 0x44, 0xEE) } });
+            doc.SetFilters(collection);
+            WaitForFiltering(doc);
+            Pump();
+
+            var map = grid.MatchMapForTesting;
+            if (map is null) return Check("the map is there to check", false);
+            grid.ScrollToRow(0);
+            map.RebuildForTesting();
+            int step = map.RowsPerPixelForTesting, slots = map.SlotCountForTesting;
+            bool ok = Check("a file the map can hold is compressed, but not to the cap",
+                            step > 1 && step < 32, $"{step} rows a pixel across {slots} pixels");
+            ok &= Check("and all of it is on the map", (long)step * slots >= lines && map.SpanForTesting >= lines,
+                        $"{map.SpanForTesting} rows of {lines} across {slots} pixels");
+            ok &= Check("so it starts at the first row", map.TopRowForTesting == 0, map.TopRowForTesting.ToString());
+
+            // Nothing left to scroll to: the whole file is already drawn, so the picture must not move.
+            long[] atTop = map.RowsForTesting();
+            grid.ScrollToRow(lines);
+            map.RebuildForTesting();
+            ok &= Check("and scrolling to the end leaves it exactly where it was",
+                        map.TopRowForTesting == 0 && map.RowsForTesting().SequenceEqual(atTop),
+                        $"top {map.TopRowForTesting}, {map.RowsForTesting().Zip(atTop).Count(p => p.First != p.Second)} pixels moved");
+            var end = map.ViewportForTesting;
+            ok &= Check("only the rectangle moves, to the bottom",
+                        end.Top + end.Height >= map.Height - map.RowPixelsForTesting * 2,
+                        $"{end.Top}+{end.Height} of {map.Height}");
             return ok;
         }
         finally
@@ -1580,8 +1805,7 @@ internal static class SelfTest
     /// <summary>Marks down the map's left edge, and every marked line in the file down the scrollbar's
     /// trough - which is the only place a mark outside the map's window can appear.</summary>
     private static bool RunMapMarkChecks(CascadeDocument doc, LineGridControl grid, MiniMapControl map, Form host)
-    {
-        grid.ScrollToRow(0);
+    {        grid.ScrollToRow(0);
         grid.RefreshView();
         Pump();
 
@@ -5260,12 +5484,16 @@ internal static class SelfTest
                 var (top, height) = map.ViewportForTesting;
                 int px = Math.Max(1, map.RowPixelsForTesting);
                 int firstY = map.SlotOfForTesting(firstAfter) * px, lastY = map.SlotOfForTesting(lastAfter) * px;
-                Line($"   (map window {top}..{top + height}px, rows {firstAfter}..{lastAfter} at {firstY}..{lastY}px)");
+                Line($"   (map window {top}..{top + height}px, rows {firstAfter}..{lastAfter} at {firstY}..{lastY}px, " +
+                     $"{map.RowsPerPixelForTesting} rows a pixel)");
                 ok &= Check("the map's window starts at the row the log now starts at",
                             Math.Abs(firstY - top) <= px);
                 ok &= Check("and ends where the log ends", Math.Abs(lastY - (top + height)) <= 2 * px);
-                ok &= Check("so the rows the bar covered are outside it",
-                            map.SlotOfForTesting(firstBefore) * px < top);
+                // The rows the bar took are fewer than one pixel of the map, so "not inside the window" is
+                // the strongest claim the scale can carry.
+                ok &= Check("so the rows the bar covered are not inside it",
+                            map.SlotOfForTesting(firstBefore) * px <= top,
+                            $"row {firstBefore} at {map.SlotOfForTesting(firstBefore) * px}px, window starts {top}px");
             }
 
             // Putting it away hands the rows back at the top, so the log goes back with them.
