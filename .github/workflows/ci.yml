@@ -88,11 +88,14 @@ jobs:
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       # CalVer: <year>.<month>.<run number>. Always increasing, never needs bumping by hand.
+      # The offset carries the numbering past v2026.8.59, the last release made before the repository was
+      # recreated to drop a rewritten history - that reset GITHUB_RUN_NUMBER to 1, and a version lower than
+      # one already released would read as a downgrade to the updater and never install.
       - name: Compute version
         id: version
         run: |
           $now = [datetime]::UtcNow
-          $version = "$($now.Year).$($now.Month).$($env:GITHUB_RUN_NUMBER)"
+          $version = "$($now.Year).$($now.Month).$([int]$env:GITHUB_RUN_NUMBER + 60)"
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Version: $version"
 
