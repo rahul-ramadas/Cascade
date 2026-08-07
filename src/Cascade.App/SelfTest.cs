@@ -93,6 +93,7 @@ internal static class SelfTest
             ok &= Timed("appearance", RunAppearanceChecks);
             ok &= Timed("lucky colours", RunLuckyColorChecks);
             ok &= Timed("colour preview", RunColorPreviewChecks);
+            ok &= Timed("style boxes", RunStyleBoxChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("new filter", RunNewFilterChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
@@ -6094,6 +6095,77 @@ internal static class SelfTest
                     $"{dlg.FormBorderStyle}, maximise {dlg.MaximizeBox}");
 
         orphan.Close();
+        dlg.Close();
+        Pump();
+        return ok;
+    }
+
+    /// <summary>Bold, italic and underline rest on "don't care", so the press that follows has to be the one
+    /// being asked for. Windows' own three-state cycle offers "cleared" first, which from "don't care" is
+    /// nobody's intention - it takes three presses to turn something on and land back where you started.</summary>
+    private static bool RunStyleBoxChecks()
+    {
+        Line("-- bold, italic and underline --");
+
+        var defaults = new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false);
+        using var dlg = new FilterEditDialog(new Filter { Match = { Text = "declined" } }, isNew: true,
+                                             Array.Empty<Filter>(), null, defaults)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0
+        };
+        dlg.Show();
+        Pump();
+
+        static string Say(CheckState s) => s switch
+        {
+            CheckState.Checked => "set",
+            CheckState.Unchecked => "cleared",
+            _ => "don't care"
+        };
+        CheckState[] wanted = [CheckState.Checked, CheckState.Unchecked, CheckState.Indeterminate, CheckState.Checked];
+
+        bool ok = true;
+        foreach (var box in dlg.StyleBoxesForTesting)
+        {
+            string name = box.Text.Replace("&", "", StringComparison.Ordinal).ToLowerInvariant();
+            ok &= Check($"{name} starts out inheriting", box.CheckState == CheckState.Indeterminate,
+                        Say(box.CheckState));
+
+            var walk = new List<CheckState>();
+            for (int i = 0; i < wanted.Length; i++) { box.PressForTesting(); Pump(); walk.Add(box.CheckState); }
+            ok &= Check($"and pressing {name} goes set, cleared, don't care, and round again",
+                        walk.SequenceEqual(wanted), string.Join(" -> ", walk.Select(Say)));
+        }
+
+        // The Alt key and the mouse must agree, or a filter says one thing to the hand and another to the
+        // keyboard. This is the same call WinForms makes for Alt+letter, so it is the real dispatch.
+        var underline = dlg.StyleBoxesForTesting[2];
+        underline.CheckState = CheckState.Indeterminate;
+        Pump();
+        var altU = typeof(Control).GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var byKey = new List<CheckState>();
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            altU.Invoke(dlg, ['u']);
+            Pump();
+            byKey.Add(underline.CheckState);
+        }
+        ok &= Check("and Alt+U walks the same way as a click", byKey.SequenceEqual(wanted),
+                    string.Join(" -> ", byKey.Select(Say)));
+
+        // Nothing above it, so "don't care" resolves to the view's own plain text - which is what makes the
+        // first press worth having: one press is the whole difference between plain and bold.
+        underline.CheckState = CheckState.Indeterminate;
+        var bold = dlg.StyleBoxesForTesting[0];
+        bold.CheckState = CheckState.Indeterminate;
+        Pump();
+        ok &= Check("a filter that leaves bold alone previews as it would draw", !dlg.PreviewForTesting.Bold);
+        bold.PressForTesting();
+        Pump();
+        ok &= Check("and one press of it is bold", dlg.PreviewForTesting.Bold);
+
         dlg.Close();
         Pump();
         return ok;
