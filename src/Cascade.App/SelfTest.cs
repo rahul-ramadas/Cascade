@@ -4096,6 +4096,12 @@ internal static class SelfTest
             ok &= Check($"double-clicking a filter with children does not fold it " +
                         $"({(openBefore ? "open" : "shut")} -> {(tree.IsExpandedForTesting(parent) ? "open" : "shut")})",
                         tree.IsExpandedForTesting(parent) == openBefore);
+
+            // The tree grabs the mouse on a double-click to be sure of the button-up, but it raises
+            // MouseDown first and ours opens the filter editor - so the up lands on a disabled window and
+            // never arrives. Left holding the mouse, the list swallows the user's next click wherever it
+            // was aimed, which reads as the log view ignoring the first click after cancelling the editor.
+            ok &= Check("and leaves the mouse free for the next click", !tree.ListHoldsMouseForTesting);
             return ok;
         }
         finally
