@@ -109,7 +109,7 @@ Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run i
 installer. That link always points at the newest build, so it works from a terminal too:
 
 ```powershell
-curl.exe -L -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
+curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
 ```
 
 It needs Windows and the .NET 10 Desktop Runtime, writes nothing but `%APPDATA%\Cascade`, touches no
