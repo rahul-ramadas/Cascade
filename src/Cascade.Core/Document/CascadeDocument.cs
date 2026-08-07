@@ -178,6 +178,24 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>How many filters currently have results cached.</summary>
     public int FilterCacheCount => _filterService?.CacheCount ?? 0;
 
+    /// <summary>Lines the filter engine has evaluated since this file was opened. A find that has to work a
+    /// filter's matches out for itself adds to this, so it says whether one is duplicating a running pass.</summary>
+    public long FilterLinesScanned => _filterService?.LinesScanned ?? 0;
+
+    /// <summary>Test seam: runs on the filter worker after each block, so a test can hold a pass at a known
+    /// frontier and exercise what happens while one is still in flight. Survives <see cref="Open"/>.</summary>
+    internal Action<long>? FilterCheckpointForTesting
+    {
+        get => _filterCheckpoint;
+        set
+        {
+            _filterCheckpoint = value;
+            if (_filterService is not null) _filterService.AfterBlockForTesting = value;
+        }
+    }
+
+    private Action<long>? _filterCheckpoint;
+
     /// <summary>File lines below this value are fully resolved in the current view: every visible line before
     /// it has been discovered, so <see cref="RowForLine"/> is authoritative for them. Because a filter pass
     /// updates the visible set in place, this is the whole file as soon as one pass has covered it — only the
@@ -210,6 +228,7 @@ public sealed class CascadeDocument : IDisposable
         _filterService = new FilterService(_src, _index, _src.Length, Markers, _enc.Encoding,
             () => CompletedLineCount, () => IsIndexComplete);
         _filterService.Progress += _ => Updated?.Invoke();
+        _filterService.AfterBlockForTesting = _filterCheckpoint;
 
         ApplyFilters();
 
@@ -504,17 +523,28 @@ public sealed class CascadeDocument : IDisposable
             if (_filterService.TryGetMatchSet(snapshot, filter, out var set))
                 return VisibleMatch(set, from, forward, count);
 
-            // Nothing cached for it yet (typically because the filter is switched off). Compute it exactly
-            // as switching it on would - the same automaton, the same parallel block scan - and remember the
-            // result, so this costs one pass once and nothing on every later find.
-            var findSnapshot = FilterSnapshot.Build(Filters, forceEnabled: filter);
+            // A pass may be running right now and already working this filter out. Reading its half-built
+            // results costs nothing and waits only until its sweep reaches the answer; scanning the file
+            // again alongside it would double the work the machine is doing and finish no sooner.
+            if (TryFindInRunningPass(snapshot, filter, from, forward, count, onProgress, ct, out long streamed))
+                return streamed;
+
+            // That pass may have finished while we were reading it, which puts its results in the cache.
+            if (_filterService.TryGetMatchSet(snapshot, filter, out set))
+                return VisibleMatch(set, from, forward, count);
+
+            // Nothing to go on - typically the filter is switched off, so no pass evaluates it. Compute it
+            // exactly as switching it on would, over its own chain of predicates and nothing else, and
+            // remember the result: this costs one pass once and nothing on every later find.
+            var findSnapshot = FilterSnapshot.BuildForChain(Filters, filter);
             _filterService.PrimeCache(findSnapshot, ct, onProgress);
             if (_filterService.TryGetMatchSet(findSnapshot, filter, out var primed))
                 return VisibleMatch(primed, from, forward, count);
         }
 
-        // Fallback for the cases the cache cannot serve: marker filters, a file still being indexed, or a
-        // cache already at its memory budget.
+        // Fallback for the one case the cache cannot serve: a marker somewhere in the filter's own chain,
+        // whose results change independently of the filters and so must never be reused. A file still being
+        // indexed comes here too, since a set missing the tail of the file could not be stored.
         const int ProgressEvery = 64 * 1024;
         var reader = new LineReader(_src, _enc.Encoding);
         if (forward)
@@ -555,6 +585,47 @@ public sealed class CascadeDocument : IDisposable
             at = forward ? hit + 1 : hit - 1;
         }
         return -1;
+    }
+
+    /// <summary>Answers from the filtering pass that is running, waiting for its sweep to reach the answer.
+    /// False when no pass is working this filter out, which leaves the caller to compute it. The sweep runs
+    /// upwards, so a forward search is answered the moment it crosses the first match below the caret, while
+    /// a backward one has to wait for it to pass the caret - either way, never for the whole pass.</summary>
+    private bool TryFindInRunningPass(FilterSnapshot snapshot, Filter filter, long from, bool forward,
+        long count, Action<double>? onProgress, CancellationToken ct, out long line)
+    {
+        line = -1;
+        long at = from;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var answer = _filterService!.AskCurrentPass(snapshot, filter, at, forward, count,
+                                                        out long hit, out long covered);
+            switch (answer)
+            {
+                case FilterService.PassAnswer.Unavailable:
+                    return false;
+
+                case FilterService.PassAnswer.Exhausted:
+                    return true;
+
+                case FilterService.PassAnswer.Found:
+                    if (IsLineVisible(hit)) { line = hit; return true; }
+                    at = forward ? hit + 1 : hit - 1;
+                    if (at < 0 || at >= count) return true;
+                    break;
+
+                default:
+                    // Nothing below the frontier matched, so the next look can start there: the search origin
+                    // only ever moves the way the search is going, which keeps the total scanning linear.
+                    if (forward) at = Math.Max(at, covered);
+                    onProgress?.Invoke(forward
+                        ? (covered - from) / (double)Math.Max(1, count - from)
+                        : covered / (double)Math.Max(1, from + 1));
+                    _filterService.WaitForPassProgress(ct);
+                    break;
+            }
+        }
     }
 
     /// <summary>Runs <see cref="FindLineMatchingFilter"/> on a background thread so the window stays

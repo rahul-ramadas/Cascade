@@ -263,6 +263,317 @@ public class DocumentIntegrationTests
         finally { File.Delete(path); }
     }
 
+    // ---- a filtering pass held still, so streaming behaviour can be tested without racing it ----
+
+    private const int StreamLines = 200_000;                        // seven 32,768-line blocks
+    private static readonly long[] StreamHits = { 100, 40_000, 150_000 };   // blocks 0, 1 and 4
+
+    /// <summary>A log whose TARGET lines sit in known blocks, so a test can say which of them a pass that has
+    /// been let through a given number of blocks can possibly have reached.</summary>
+    private static string WriteStreamLog(params long[] hidden)
+    {
+        var sb = new StringBuilder();
+        for (int i = 0; i < StreamLines; i++)
+        {
+            if (Array.IndexOf(StreamHits, (long)i) >= 0) sb.Append("TARGET ");
+            if (Array.IndexOf(hidden, (long)i) >= 0) sb.Append("SKIP ");
+            sb.Append("line ").Append(i).Append('\n');
+        }
+        return Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+    }
+
+    /// <summary>Opens a file and holds its filtering pass still after every block, so a test can say exactly
+    /// how far it has got and what a find running alongside it can therefore know.</summary>
+    private sealed class HeldPass : IDisposable
+    {
+        private readonly SemaphoreSlim _gate = new(0);
+        private readonly List<long> _reached = new();
+        private readonly string _path;
+
+        public HeldPass(string path, FilterCollection filters)
+        {
+            _path = path;
+            Doc = new CascadeDocument();
+            Doc.Open(path);
+            Doc.WaitForIndex();
+            Doc.FilterCheckpointForTesting = frontier =>
+            {
+                lock (_reached) _reached.Add(frontier);
+                _gate.Wait(TimeSpan.FromSeconds(20));
+            };
+            Doc.SetFilters(filters);
+            WaitFor(() => BlocksDone >= 1, "the pass never finished its first block");
+        }
+
+        public CascadeDocument Doc { get; }
+
+        public int BlocksDone { get { lock (_reached) return _reached.Count; } }
+
+        public void ReleaseBlocks(int count)
+        {
+            int want = BlocksDone + count;
+            _gate.Release(count);
+            WaitFor(() => BlocksDone >= want || Doc.IsFilterIdle, $"the pass never reached block {want}");
+        }
+
+        public void ReleaseAll()
+        {
+            Doc.FilterCheckpointForTesting = null;
+            _gate.Release(1000);
+            WaitFilter(Doc);
+        }
+
+        public void Dispose()
+        {
+            Doc.FilterCheckpointForTesting = null;
+            _gate.Release(1000);
+            Doc.Dispose();
+            _gate.Dispose();
+            File.Delete(_path);
+        }
+    }
+
+    private static void WaitFor(Func<bool> done, string what, int timeoutMs = 20000)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            if (done()) return;
+            Thread.Sleep(2);
+        }
+        throw new TimeoutException(what);
+    }
+
+    private static FilterCollection StreamFilters(out Filter target, bool hideSkipped = false)
+    {
+        var filters = new FilterCollection { ShowOnlyFilteredLines = hideSkipped };
+        target = new Filter { Enabled = true, Match = { Text = "TARGET" } };
+        filters.Add(target);
+        if (hideSkipped) filters.Add(new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "SKIP" } });
+        else filters.Add(new Filter { Enabled = true, Match = { Text = "line" } });   // matches everything
+        return filters;
+    }
+
+    [Fact]
+    public async Task Filter_find_during_a_pass_reads_that_pass_instead_of_scanning_the_file_again()
+    {
+        // Reported: open a very large file, enable every filter, then press F4 while filtering is still
+        // running - the search crawls and the filtering slows down with it. The running pass is already
+        // working out which lines each filter matches, but the find ignored it and started a second
+        // whole-file scan of its own on every core. MEASURED on a 15.8 GB, 66 M-line log with 30 filters:
+        // the pass alone cost 32.2 s of CPU, with the find alongside it 63.1 s (and 46% more wall time),
+        // and the find took 2,237 ms to report a hit that was on line 0.
+        using var held = new HeldPass(WriteStreamLog(), StreamFilters(out var target));
+        var doc = held.Doc;
+
+        long frontier = doc.FilterProcessedLineCount;
+        Assert.InRange(frontier, 1, StreamLines - 1);      // held mid-file, which is the whole point
+        long scanned = doc.FilterLinesScanned;
+
+        // The answer is already inside the swept region, so it costs nothing at all.
+        Assert.Equal(100, doc.FindLineMatchingFilter(target, 0, forward: true, CancellationToken.None));
+        Assert.Equal(scanned, doc.FilterLinesScanned);
+        Assert.Equal(frontier, doc.FilterProcessedLineCount);
+
+        // The next one is not, so the find has to wait - but only until the sweep passes it, not until the
+        // pass has finished. It must not go off and scan the file on its own to avoid waiting.
+        var find = Task.Run(() => doc.FindLineMatchingFilter(target, 200, forward: true, CancellationToken.None));
+        await Task.Delay(250);
+        Assert.False(find.IsCompleted, "the find answered while the pass was held, so it scanned the file itself");
+        Assert.Equal(scanned, doc.FilterLinesScanned);
+
+        held.ReleaseBlocks(1);                             // block 1 contains line 40,000
+        Assert.Equal(40_000, await find.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(doc.FilterProcessedLineCount < 150_000,
+                    $"the find waited for the whole pass (frontier {doc.FilterProcessedLineCount:N0})");
+        // Everything the engine has read is the pass's own sweep - the find added not one line to it.
+        Assert.Equal(doc.FilterProcessedLineCount, doc.FilterLinesScanned);
+    }
+
+    [Fact]
+    public async Task Filter_find_backwards_during_a_pass_waits_for_the_sweep_to_pass_the_caret()
+    {
+        // The sweep runs upwards, so "the last match before line X" is not settled until it has gone past X -
+        // a later one can still turn up. Answering from what has been swept so far would report 100 here,
+        // when the true answer is 40,000.
+        using var held = new HeldPass(WriteStreamLog(), StreamFilters(out var target));
+        var doc = held.Doc;
+        long scanned = doc.FilterLinesScanned;
+
+        var find = Task.Run(() => doc.FindLineMatchingFilter(target, 149_999, forward: false, CancellationToken.None));
+        await Task.Delay(250);
+        Assert.False(find.IsCompleted, "answered before the sweep reached the line the search started from");
+
+        held.ReleaseBlocks(4);                             // frontier 163,840, i.e. past 149,999
+        Assert.Equal(40_000, await find.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal(doc.FilterProcessedLineCount, doc.FilterLinesScanned);
+        Assert.True(doc.FilterProcessedLineCount < StreamLines, "the find waited for the whole pass");
+
+        // And once the sweep is past 150,000 the nearer match is the right answer.
+        held.ReleaseAll();
+        Assert.Equal(150_000, doc.FindLineMatchingFilter(target, 149_999 + 1, forward: false, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Filter_find_during_a_pass_skips_matches_the_view_is_hiding()
+    {
+        // A line can deep-match the filter and still be hidden by an enabled exclude. That has to hold while
+        // the results are still streaming in, not just once the pass has finished.
+        using var held = new HeldPass(WriteStreamLog(hidden: 100), StreamFilters(out var target, hideSkipped: true));
+        var doc = held.Doc;
+        long scanned = doc.FilterLinesScanned;
+
+        Assert.False(doc.IsLineVisible(100), "line 100 should be hidden by the exclude");
+        var find = Task.Run(() => doc.FindLineMatchingFilter(target, 0, forward: true, CancellationToken.None));
+        await Task.Delay(250);
+        Assert.False(find.IsCompleted, "the hidden match was skipped but the find did not wait for the next one");
+        Assert.Equal(scanned, doc.FilterLinesScanned);
+
+        held.ReleaseBlocks(1);
+        Assert.Equal(40_000, await find.WaitAsync(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public async Task Filter_find_during_a_pass_reports_no_more_matches_only_once_it_has_looked_everywhere()
+    {
+        // "No more matches" is a promise about the whole file, so it must never be answered from the part of
+        // it the sweep happens to have covered.
+        var filters = new FilterCollection();
+        var absent = new Filter { Enabled = true, Match = { Text = "absent-text" } };
+        filters.Add(absent);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "line" } });
+
+        using var held = new HeldPass(WriteStreamLog(), filters);
+        var doc = held.Doc;
+
+        var find = Task.Run(() => doc.FindLineMatchingFilter(absent, 0, forward: true, CancellationToken.None));
+        await Task.Delay(250);
+        Assert.False(find.IsCompleted, "reported the end of the file after looking at one block of it");
+
+        held.ReleaseAll();
+        Assert.Equal(-1, await find.WaitAsync(TimeSpan.FromSeconds(10)));
+        // The pass finished while the find was reading it and handed over through the cache - one pass, no more.
+        Assert.Equal(StreamLines, doc.FilterLinesScanned);
+    }
+
+    [Fact]
+    public async Task Filter_find_waiting_on_a_pass_can_still_be_called_off()
+    {
+        // The status bar offers Esc while a find runs, and a new search supersedes the last one. Neither can
+        // work if waiting for the sweep is not interruptible.
+        using var held = new HeldPass(WriteStreamLog(), StreamFilters(out var target));
+        var doc = held.Doc;
+        using var cts = new CancellationTokenSource();
+
+        var find = Task.Run(() => doc.FindLineMatchingFilter(target, 200, forward: true, cts.Token), CancellationToken.None);
+        await Task.Delay(200);
+        Assert.False(find.IsCompleted);
+
+        var sw = Stopwatch.StartNew();
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => find.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(sw.ElapsedMilliseconds < 2000, $"took {sw.ElapsedMilliseconds} ms to stop");
+    }
+
+    [Fact]
+    public void Filter_find_gives_the_same_answers_whether_or_not_a_pass_is_running()
+    {
+        // The whole point of reading a running pass is that it is indistinguishable from reading a finished
+        // one. The expected answers come from the data, so they owe nothing to either path.
+        static long Expected(long start, bool forward)
+        {
+            if (forward)
+            {
+                foreach (long hit in StreamHits) if (hit >= start) return hit;
+                return -1;
+            }
+            for (int i = StreamHits.Length - 1; i >= 0; i--) if (StreamHits[i] <= start) return StreamHits[i];
+            return -1;
+        }
+
+        string path = WriteStreamLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(StreamFilters(out var target));   // the pass starts here and runs alongside
+
+            long[] starts = { 0, 99, 100, 101, 39_999, 40_000, 40_001, 149_999, 150_000, StreamLines - 1 };
+            foreach (long start in starts)
+                foreach (bool forward in new[] { true, false })
+                    Assert.Equal(Expected(start, forward),
+                                 doc.FindLineMatchingFilter(target, start, forward, CancellationToken.None));
+
+            WaitFilter(doc);
+            foreach (long start in starts)
+                foreach (bool forward in new[] { true, false })
+                    Assert.Equal(Expected(start, forward),
+                                 doc.FindLineMatchingFilter(target, start, forward, CancellationToken.None));
+
+            // Twenty searches, and between them they cost the file exactly one pass.
+            Assert.Equal(StreamLines, doc.FilterLinesScanned);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Priming_a_switched_off_filter_records_its_own_chain_and_nothing_else()
+    {
+        // A find on a filter no pass is evaluating has to work it out itself. It only ever needs that filter's
+        // own chain of predicates - its deep match, and the key it is stored under, depend on nothing else -
+        // so it must not drag every other filter in the list through the scan with it.
+        var filters = new FilterCollection();
+        for (int i = 0; i < 5; i++)
+            filters.Add(new Filter { Enabled = true, Match = { Text = $"line {i}" } });
+        var outer = new Filter { Enabled = false, Match = { Text = "TARGET" } };
+        var inner = new Filter { Enabled = false, Match = { Text = "line 40000" } };
+        filters.Add(outer);
+        filters.Add(inner, outer);
+
+        using var held = new HeldPass(WriteStreamLog(), filters);
+        var doc = held.Doc;
+        Assert.Equal(0, doc.FilterCacheCount);           // the held pass has stored nothing yet
+
+        Assert.Equal(40_000, doc.FindLineMatchingFilter(inner, 0, forward: true, CancellationToken.None));
+        Assert.Equal(2, doc.FilterCacheCount);           // TARGET and TARGET>line 40000, and none of the five
+    }
+
+    [Fact]
+    public void A_marker_filter_elsewhere_in_the_list_no_longer_spoils_every_other_find()
+    {
+        // Marker membership changes independently of the filters, so nothing whose chain involves one can be
+        // remembered. Working from a snapshot of the whole filter set made that condemn every filter in the
+        // list: one marker filter anywhere and no find could ever be cached. Its own chain is all a filter
+        // needs, and this one's has no marker in it.
+        var filters = new FilterCollection();
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } });
+        var target = new Filter { Enabled = false, Match = { Text = "TARGET" } };
+        filters.Add(target);
+
+        string path = WriteStreamLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.Markers.Toggle(7, 1);
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.Equal(0, doc.FilterCacheCount);       // the marker pass itself can never be remembered
+
+            Assert.Equal(100, doc.FindLineMatchingFilter(target, 0, forward: true, CancellationToken.None));
+            Assert.Equal(1, doc.FilterCacheCount);
+
+            // And having been worked out once it is a bit scan from then on.
+            long scanned = doc.FilterLinesScanned;
+            Assert.Equal(40_000, doc.FindLineMatchingFilter(target, 101, forward: true, CancellationToken.None));
+            Assert.Equal(scanned, doc.FilterLinesScanned);
+        }
+        finally { File.Delete(path); }
+    }
+
+
     [Fact]
     public void SetFilters_before_a_file_is_open_does_not_throw()
     {

@@ -231,6 +231,20 @@ public sealed class FilterSnapshot
     /// the user has it switched off. Used by "find this filter's next match", which has to compute exactly
     /// what enabling the filter would compute without changing what the view shows.</summary>
     public static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled)
+        => Build(filters, forceEnabled, null);
+
+    /// <summary>Builds a snapshot holding <paramref name="target"/> and its ancestors and nothing else, all
+    /// taking part in evaluation. A filter's deep match - and the key it is cached under - depends on nothing
+    /// but that chain, so the result is interchangeable with one worked out from the whole filter set while
+    /// costing a handful of predicates per line instead of every filter in the list.</summary>
+    public static FilterSnapshot BuildForChain(FilterCollection filters, Filter target)
+    {
+        var chain = new HashSet<Filter>();
+        for (Filter? f = target; f is not null; f = f.Parent) chain.Add(f);
+        return Build(filters, target, chain);
+    }
+
+    private static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, HashSet<Filter>? chain)
     {
         bool anyEnabled = false, anyInclude = false, anyMarker = false;
         int counter = 0;
@@ -286,18 +300,22 @@ public sealed class FilterSnapshot
                 if (f.Kind == FilterKind.Include) anyInclude = true;
             }
 
-            var children = new Node[f.Children.Count];
-            for (int i = 0; i < f.Children.Count; i++) children[i] = Convert(f.Children[i], depth + 1, node.CacheKey, node.Cacheable);
-            node.Children = children;
+            var kept = new List<Node>(f.Children.Count);
+            foreach (var child in f.Children)
+                if (chain is null || chain.Contains(child)) kept.Add(Convert(child, depth + 1, node.CacheKey, node.Cacheable));
+            node.Children = kept.ToArray();
 
             node.SubtreeHasEnabled = enabled;
-            foreach (var c in children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
+            foreach (var c in node.Children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
             if (node.Type == FilterMatchType.Marker && node.SubtreeHasEnabled) anyMarker = true;
             return node;
         }
 
-        var roots = new Node[filters.Roots.Count];
-        for (int i = 0; i < filters.Roots.Count; i++) roots[i] = Convert(filters.Roots[i], 0, "", true);
+        var rootFilters = new List<Filter>(filters.Roots.Count);
+        foreach (var root in filters.Roots)
+            if (chain is null || chain.Contains(root)) rootFilters.Add(root);
+        var roots = new Node[rootFilters.Count];
+        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], 0, "", true);
 
         // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
         // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character

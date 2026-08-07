@@ -310,6 +310,77 @@ public sealed class FilterMatchCache
             Array.Copy(_sparse, exact, _sparseCount);
             return new MatchSet(null, exact, _sparseCount, covered, _matches, exact.LongLength * 4);
         }
+
+        /// <summary>The first matching line in <c>[from, covered)</c>, or -1. Half-built results are worth
+        /// reading: a find can take its answer from the pass that is running rather than starting one of its
+        /// own. Only the caller knows how far that pass has swept, so the extent is passed in.</summary>
+        public long Next(long from, long covered)
+        {
+            if (from < 0) from = 0;
+            if (from >= covered) return -1;
+
+            if (_dense is ulong[] dense)
+            {
+                long w = from >> 6;
+                if (w >= dense.LongLength) return -1;   // nothing has matched this far up yet
+                ulong word = dense[w] & (ulong.MaxValue << (int)(from & 63));
+                while (true)
+                {
+                    if (word != 0)
+                    {
+                        long line = (w << 6) + BitOperations.TrailingZeroCount(word);
+                        return line < covered ? line : -1;
+                    }
+                    if (++w >= dense.LongLength) return -1;
+                    word = dense[w];
+                }
+            }
+
+            int lo = 0, hi = _sparseCount - 1, found = -1;   // words arrive in order, so this list ascends
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse[mid] >= from) { found = mid; hi = mid - 1; } else lo = mid + 1;
+            }
+            if (found < 0) return -1;
+            long hit = _sparse[found];
+            return hit < covered ? hit : -1;
+        }
+
+        /// <summary>The last matching line at or before <paramref name="from"/> within <c>[0, covered)</c>,
+        /// or -1.</summary>
+        public long Previous(long from, long covered)
+        {
+            if (from >= covered) from = covered - 1;
+            if (from < 0) return -1;
+
+            if (_dense is ulong[] dense)
+            {
+                long w = from >> 6;
+                ulong word;
+                if (w >= dense.LongLength) { w = dense.LongLength - 1; word = w < 0 ? 0 : dense[w]; }
+                else
+                {
+                    int bit = (int)(from & 63);
+                    word = dense[w] & (bit == 63 ? ulong.MaxValue : (1UL << (bit + 1)) - 1);
+                }
+                while (w >= 0)
+                {
+                    if (word != 0) return (w << 6) + (63 - BitOperations.LeadingZeroCount(word));
+                    if (--w < 0) return -1;
+                    word = dense[w];
+                }
+                return -1;
+            }
+
+            int lo = 0, hi = _sparseCount - 1, found = -1;
+            while (lo <= hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse[mid] <= from) { found = mid; lo = mid + 1; } else hi = mid - 1;
+            }
+            return found < 0 ? -1 : _sparse[found];
+        }
     }
 
     /// <summary>
