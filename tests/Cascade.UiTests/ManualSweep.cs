@@ -75,9 +75,12 @@ public class ManualSweep : IDisposable
             catch (Exception ex) { Check($"{name} ran to the end", false, ex.Message); }
             finally
             {
-                // Whatever a stage did to the window, the next one starts from the same place.
+                // Whatever a stage did to the window, the next one starts from the same place - and above
+                // all with no modal dialog standing over it, since one of those makes every stage after it
+                // quietly do nothing.
                 try
                 {
+                    DismissDialogs();
                     _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
                     Thread.Sleep(700);
                     _app.Activate();
@@ -193,19 +196,25 @@ public class ManualSweep : IDisposable
             return CaretLine();
         }
 
-        long deep = Go("20000000");
-        Say($"Go To 20,000,000 landed on {deep}");
-        Check("Go To Line reaches a line twenty million down", deep == 20_000_000, deep.ToString());
-        Check("and it is on screen, not merely selected",
-              deep >= _app.FirstVisibleLine() && deep < _app.FirstVisibleLine() + 200,
+        // Deep into the file, but worked out from the fixture rather than named: the sweep used to run on a
+        // 33-million-line trace and asked for line 20,000,000 of a file that now has four million.
+        long deepWanted = BigFixture.Lines * 3L / 4;
+        long deep = Go(deepWanted.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Say($"Go To {deepWanted:N0} landed on {deep}");
+        // Only matching lines may be on show, in which case a number that is not one of them lands on the
+        // nearest that is - so "near enough, and below" is the honest claim, not equality.
+        Check($"Go To Line reaches a line {deepWanted:N0} down", deep >= deepWanted && deep < deepWanted + 1000,
+              deep.ToString());
+        // CaretLine only answers for a row that is on screen, so a real number IS the proof it got there.
+        Check("and it is on screen, not merely selected", deep > 0,
               $"caret {deep}, top of view {_app.FirstVisibleLine()}");
         Shot("goto-deep");
 
         // A number past the end of the file must land at the end rather than nowhere.
-        long past = Go("99999999");
-        Say($"Go To 99,999,999 landed on {past}");
-        Check("a line number past the end stops at the last line", past is > 33_000_000 and <= 33_180_857,
-              past.ToString());
+        long past = Go((BigFixture.Lines * 10L).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Say($"Go To {BigFixture.Lines * 10L:N0} landed on {past}");
+        Check("a line number past the end stops at the last line",
+              past > BigFixture.Lines - 100 && past <= BigFixture.Lines, past.ToString());
 
         // With only matching lines on show, a hidden number cannot be gone to - it lands on the nearest
         // line that is shown, which for line 1 is whatever the top of the file has become.
@@ -240,12 +249,9 @@ public class ManualSweep : IDisposable
         Shot("zoom-reset");
     }
 
-    private long CaretLine()
-    {
-        string s = $"line {_app.CaretLine()}";
-        int at = s.IndexOf(':') + 1, slash = s.IndexOf('/');
-        return slash > at && long.TryParse(s[at..slash].Replace(",", "").Trim(), out long v) ? v : -1;
-    }
+    /// <summary>The line the caret is on. It used to be read out of the status bar's "Ln: X / Total", and
+    /// when that went the parsing stayed behind and answered -1 to everything.</summary>
+    private long CaretLine() => _app.CaretLine();
 
     private void PresetRoundTrip()    {
         var names = SafePresetNames();
@@ -292,25 +298,23 @@ public class ManualSweep : IDisposable
         Narrow(1000, 820);
 
         CtrlF();
-        var dlg = _app.FindDialog("Find");
-        if (dlg is null) { Check("the bar opened", false); return; }
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
+        var edit = _app.FindInput();
         _app.SetText(edit, "");
         Thread.Sleep(300);
         Keyboard.Type(BigFixture.EveryLineTerm);   // typed, as a user would
         Thread.Sleep(1500);
         int typed = MarkedPixels();
         Say($"marks while the bar is open: {typed}");
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(600);
 
-        int flat = MarkedPixels();
-        Check("the marks are there before wrapping", flat > 200, $"open {typed}, closed {flat}");
+        // The bar stays open throughout: Esc would close it and drop the marks with it, which is the one
+        // thing that would make "do the marks survive wrapping" unanswerable.
+        Check("the marks are there before wrapping", typed > 200, $"{typed} marked pixels");
         _app.ClickMenuOrThrow("View", "Word Wrap");
         Thread.Sleep(1800);
         int wrapped = MarkedPixels();
-        Say($"marked pixels flat {flat} -> wrapped {wrapped}");
-        Check("the marks survive wrapping", wrapped > 200, $"{flat} -> {wrapped}");
+        Say($"marked pixels flat {typed} -> wrapped {wrapped}");
+        Check("the marks survive wrapping", wrapped > 200, $"{typed} -> {wrapped}");
         Shot("wrap-with-marks");
 
         // Select text on a wrapped row's SECOND segment: the hit test has to know which segment it is on.
@@ -426,6 +430,17 @@ public class ManualSweep : IDisposable
         var item = list.FindAllChildren().FirstOrDefault();
         if (item is null) { Check("a preset item", false); return; }
 
+        // Starting from a preset that is NOT in effect, or "clicking its name did not put it in effect"
+        // cannot tell a working selection from one that applied it.
+        if (_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)))
+        {
+            _app.UntickPreset(names[0]);
+            Thread.Sleep(3000);
+        }
+        Check("the preset starts out of effect",
+              !_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)),
+              _app.DescribePresets());
+
         // Past the leading square: a press there is the tick box, and would switch the preset's filters on.
         var r = item.BoundingRectangle;
         var onLabel = new Point(r.Left + r.Height + 30, r.Top + r.Height / 2);
@@ -468,40 +483,47 @@ public class ManualSweep : IDisposable
         if (rows.Length < 6) { Check("rows to select in", false); return; }
         var r = rows[4].BoundingRectangle;
         int y = r.Top + r.Height / 2;
+
+        // Dragged, not double-clicked: a double-click opens the editor by itself, which would make Ctrl+N
+        // look as though it had worked whatever it did.
         Mouse.MoveTo(new Point(r.Left + 300, y));
-        Thread.Sleep(300);
-        Mouse.DoubleClick(MouseButton.Left);
+        Mouse.Down(MouseButton.Left);
+        Mouse.MoveTo(new Point(r.Left + 420, y));
+        Thread.Sleep(150);
+        Mouse.Up(MouseButton.Left);
         Thread.Sleep(500);
-        string word = CopyToClipboard();
-        Say($"selected word for the filter: '{Trim(word)}'");
+        string picked = CopyToClipboard();
+        Say($"selected text for the filter: '{Trim(picked)}'");
+        Check("there is a selection to carry", picked.Length > 0, $"'{Trim(picked)}'");
 
         Chord(VirtualKeyShort.KEY_N);
         Thread.Sleep(1800);
         ShotScreen("newfilter");
         Say($"after Ctrl+N: {DescribeTopLevel()}");
-        var box = _app.DesktopChildren()
-                      .SelectMany(w => w.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)))
-                      .FirstOrDefault(e => (e.Name ?? "") == "Filter text");
+        var box = FilterTextBox();
         Check("Ctrl+N opens the filter editor", box is not null, DescribeTopLevel());
         if (box is not null)
         {
             string prefilled = _app.TextOf(box);
             Say($"prefilled with: '{Trim(prefilled)}'");
-            Check("prefilled with the selection, not the whole line", prefilled == word.Trim(),
-                  $"'{Trim(prefilled)}' vs '{Trim(word)}'");
+            Check("prefilled with the selection, not the whole line", prefilled == picked.Trim(),
+                  $"'{Trim(prefilled)}' vs '{Trim(picked)}'");
         }
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(900);
+        DismissDialogs();
     }
 
     private void FindBackwardsAndRegex()
     {
+        // Every line on show for this stage: the sparse term and the regex both live on payment lines, and
+        // the enabled filter shows gateway ones - so in filtered mode find correctly refuses to move, and
+        // the stage would be measuring that instead of what it came to measure.
+        _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
+        Thread.Sleep(3000);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
         CtrlF();
-        var dlg = _app.FindDialog("Find");
-        if (dlg is null) { Check("the bar opened", false); return; }
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
+        var edit = _app.FindInput();
 
         _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(300);
@@ -520,7 +542,7 @@ public class ManualSweep : IDisposable
         Check("Shift+Enter goes back", $"line {_app.CaretLine()}" == first,
               $"{second} -> {$"line {_app.CaretLine()}"} (wanted {first})");
 
-        var regex = dlg.FindFirstDescendant(cf => cf.ByName("Regex"))?.AsCheckBox();
+        var regex = _app.FindBar()?.FindFirstDescendant(cf => cf.ByName("Regex"))?.AsCheckBox();
         Check("there is a regex option", regex is not null);
         if (regex is not null)
         {
@@ -530,7 +552,7 @@ public class ManualSweep : IDisposable
             Keyboard.Press(VirtualKeyShort.RETURN);
             Thread.Sleep(4000);
             Say($"regex search: {Tally()}");
-            Check("a regex search finds something", Tally().Contains("Match"), Tally());
+            Check("a regex search finds something", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
 
             // ...and one that cannot match must say so, or the regex is not really being used.
             _app.SetText(edit, BigFixture.ImpossibleRegexTerm);
@@ -544,10 +566,10 @@ public class ManualSweep : IDisposable
         Shot("backwards");
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(600);
+        _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");   // back as the stage found it
+        Thread.Sleep(3000);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(600);
     }
 
     /// <summary>The marks themselves, counted off the screen - nothing else can tell whether the term is
@@ -560,9 +582,8 @@ public class ManualSweep : IDisposable
         Check("nothing is marked to begin with", plain < 200, $"{plain} marked pixels");
 
         CtrlF();
-        var dlg = _app.FindDialog("Find");
-        if (dlg is null) { Check("the bar opened", false); return; }
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
+        var edit = _app.FindInput();
         _app.SetText(edit, "");
         Thread.Sleep(200);
         Keyboard.Type(BigFixture.EveryLineTerm);
@@ -578,23 +599,17 @@ public class ManualSweep : IDisposable
         Check("the line the search landed on is marked more strongly", found > 30, $"{found} strong pixels");
         Shot("highlight-found");
 
-        Keyboard.Press(VirtualKeyShort.ESCAPE);   // close the bar
-        Thread.Sleep(600);
-        Check("the marks outlive the bar", MarkedPixels() > 500, $"{MarkedPixels()} marked pixels");
-
-        _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        // The map has to let go of the marks on the same keypress that drops the term. It decides whether
+        // it has anything to redraw by comparing the hit count it last drew against the document's, so
+        // being repainted before the sweep was released left it holding them until something else happened
+        // to invalidate the view - a click, a scroll, anything. Nothing is touched between these two grabs.
         var map = MapElement();
         using var withHits = map is null ? null : Grab(map);
-        Keyboard.Press(VirtualKeyShort.ESCAPE);   // drop the term
+        Keyboard.Press(VirtualKeyShort.ESCAPE);   // closes the bar and drops the term in one gesture
         Thread.Sleep(800);
         int cleared = MarkedPixels();
-        Check("and Esc takes them away", cleared < 200, $"{cleared} marked pixels");
+        Check("Esc takes the marks away with the bar", cleared < 200, $"{cleared} marked pixels");
 
-        // The map has to let go of them on the same keypress. It decides whether it has anything to redraw
-        // by comparing the hit count it last drew against the document's, so being repainted before the
-        // sweep was released left it holding the marks until something else happened to invalidate the
-        // view - a click, a scroll, anything. Nothing is touched between these two grabs.
         if (map is not null && withHits is not null)
         {
             using var afterEsc = Grab(map);
@@ -712,26 +727,30 @@ public class ManualSweep : IDisposable
         Check("dragging inside a line copies just that text",
               dragged.Length > 0 && !dragged.Contains('\n'), $"'{Trim(dragged)}'");
 
+        // A double-click in the log does NOT select a word: that gesture was deliberately given to writing
+        // a filter for the line, carrying whatever was picked out. Leaving the dialog it opens standing is
+        // what used to wreck every stage after this one, so it is put away before anything else happens.
         Mouse.MoveTo(new Point(r.Left + 260, y));
         Thread.Sleep(400);
         Mouse.DoubleClick(MouseButton.Left);
-        Thread.Sleep(600);
-        Shot("selection-double");
-        string word = CopyToClipboard();
-        Say($"double-click copy: '{Trim(word)}'");
-        Check("double-click takes a word, not the line",
-              word.Length > 0 && !word.Contains('\n') && !word.Contains(' ') && word.Length < 60, $"'{Trim(word)}'");
+        Thread.Sleep(1500);
+        ShotScreen("selection-double");
+        var carried = FilterTextBox();
+        Say($"double-click opened the editor with: '{Trim(carried is null ? "" : _app.TextOf(carried))}'");
+        Check("double-clicking a line offers to make a filter from it", carried is not null, DescribeTopLevel());
+        if (carried is not null)
+            Check("carrying the text that was picked out", _app.TextOf(carried) == dragged.Trim(),
+                  $"'{Trim(_app.TextOf(carried))}' vs '{Trim(dragged)}'");
+        DismissDialogs();
 
-        Mouse.MoveTo(new Point(r.Left + 260, y));
-        Thread.Sleep(400);
-        Mouse.DoubleClick(MouseButton.Left);
-        Thread.Sleep(80);
-        Mouse.Click(MouseButton.Left);
+        // A plain click takes the whole line, which is the only way to select one now.
+        Mouse.Click(new Point(r.Left + 260, y));
         Thread.Sleep(600);
-        Shot("selection-triple");
+        Shot("selection-line");
         string line = CopyToClipboard();
-        Say($"triple-click copy: {line.Length} chars '{Trim(line)}'");
-        Check("triple-click takes the whole line", line.Length > word.Length, $"{line.Length} vs {word.Length}");
+        Say($"click copy: {line.Length} chars '{Trim(line)}'");
+        Check("a plain click takes the whole line", line.Length > dragged.Length,
+              $"{line.Length} vs {dragged.Length}");
     }
 
     private void WordWrap()
@@ -791,7 +810,7 @@ public class ManualSweep : IDisposable
         Check("there is a scrollbar", _app.VerticalScrollerName().Length > 0, _app.VerticalScrollerName());
         Say($"scrollbar scale: {_app.ScrollBarScale()}");
         long first = _app.FirstVisibleLine();
-        bool scrolled = _app.ScrollVerticalTo(150_000);
+        bool scrolled = _app.ScrollVerticalTo(Row(0.15));
         Check("and it scrolls the view", scrolled && _app.FirstVisibleLine() != first,
               $"{first} -> {_app.FirstVisibleLine()}");
         Shot("map");
@@ -841,22 +860,30 @@ public class ManualSweep : IDisposable
             // keeps the same amount of file on either side of you no matter where you scroll to. Both of
             // these rows are well inside the filtered view - past its end the map anchors to the bottom
             // instead, which is a different thing being tested below.
-            _app.ScrollVerticalTo(1_000_000);
+            // Every line on show for this one: with only matching lines shown and a single filter on, every
+            // row in the map is that filter's colour, so the map is a solid block and two places in the file
+            // are identical by construction - the check could only ever fail. Against the whole file the
+            // matches stand against a blank gutter, which is a pattern that really does vary by region.
+            _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
+            Thread.Sleep(3000);
+            _app.ScrollVerticalTo(Row(0.15));
             Thread.Sleep(900);
             long highLine = _app.FirstVisibleLine();
             using var atHigh = Grab(map);
-            _app.ScrollVerticalTo(8_000_000);
+            _app.ScrollVerticalTo(Row(0.85));
             Thread.Sleep(900);
             long lowLine = _app.FirstVisibleLine();
             using var atLow = Grab(map);
-            Say($"map across a 7-million-row jump ({highLine} -> {lowLine}): " +
+            Say($"map across a jump from 15% to 85% of the file ({highLine} -> {lowLine}): " +
                 $"{PictureDiff(atHigh, atLow):P0} of the pixels changed");
             Check("the map shows somewhere else entirely after a long scroll", PictureDiff(atHigh, atLow) > 0.10,
                   $"{PictureDiff(atHigh, atLow):P0} of the pixels changed, view {highLine} -> {lowLine}");
+            _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
+            Thread.Sleep(3000);
 
             // Clicking the map moves the view without the scrollbar going anywhere much: it is the fine
             // adjustment, and the file is far too long for a window of it to register on the whole scale.
-            _app.ScrollVerticalTo(15_000_000);
+            _app.ScrollVerticalTo(Row(0.5));
             Thread.Sleep(1200);
             var r = map.BoundingRectangle;
             long viewBefore = _app.FirstVisibleLine();
@@ -874,7 +901,7 @@ public class ManualSweep : IDisposable
                 // Halfway down the view, so the thumb is halfway down the trough and the press lands on it
                 // rather than paging.
                 var br = bar.BoundingRectangle;
-                _app.ScrollVerticalTo(8_300_000);
+                _app.ScrollVerticalTo(Row(0.5));
                 Thread.Sleep(1200);
                 DragIsLive("the scrollbar", bar, br.Left + br.Width / 2, br.Top + br.Height / 2,
                            br.Top + br.Height * 3 / 4);
@@ -1065,10 +1092,10 @@ public class ManualSweep : IDisposable
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
         CtrlF();
-        var dlg = _app.FindDialog("Find");
-        Check("Ctrl+F opens the bar", dlg is not null);
-        if (dlg is null) return;
-        var edit = dlg.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit))!;
+        var bar = _app.FindBar();
+        Check("Ctrl+F opens the bar", bar is not null, DescribePanes());
+        if (bar is null) return;
+        var edit = _app.FindInput();
         Check("with the keyboard in its box", Focused(edit), FocusedName());
 
         long top = _app.FirstVisibleLine();
@@ -1125,40 +1152,36 @@ public class ManualSweep : IDisposable
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(400);
 
-        // Esc chain.
+        // Esc is one gesture on purpose: the bar goes, and the term, marks and counts go with it. A search
+        // still running with nothing on screen to say so is the state the bar exists to remove.
         _app.SetText(edit, BigFixture.SparseTerm);
         Thread.Sleep(200);
         Keyboard.Press(VirtualKeyShort.RETURN);
         Thread.Sleep(3000);
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(600);
-        Check("Esc closes the bar", _app.FindDialog("Find") is null or { IsOffscreen: true });
-        Check("but the counts stay", Tally().Length > 0, Tally());
+        Check("Esc closes the bar", _app.FindBar() is null or { IsOffscreen: true });
+        Check("and takes the counts with it", Tally().Length == 0, Tally());
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
         Thread.Sleep(300);
         for (int i = 0; i < 4; i++) { Keyboard.Press(VirtualKeyShort.DOWN); Thread.Sleep(250); }
-        string moved = Tally();
-        Say($"counts after arrowing off a match: {moved}");
-        Check("the counts never read as a bare number",
-              moved.Length > 0 && !long.TryParse(moved.Replace(",", ""), out _), moved);
-        Shot("find-after-arrows");
 
         // Hiding and showing must move the split. The date is on every line, so half the hits are on lines
         // the enabled filter is not showing.
         CtrlF();
         Thread.Sleep(400);
-        var box = _app.FindDialog("Find")?.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
+        var box = _app.FindBar() is null ? null : _app.FindInput();
         if (box is not null)
         {
             _app.SetText(box, BigFixture.EveryLineDate);
             Thread.Sleep(300);
             Keyboard.Press(VirtualKeyShort.RETURN);
             Thread.Sleep(6000);
-            Keyboard.Press(VirtualKeyShort.ESCAPE);
-            Thread.Sleep(500);
         }
         string dim = Tally();
+        Check("the counts never read as a bare number",
+              dim.Length > 0 && !long.TryParse(dim.Replace(",", ""), out _), dim);
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
         Thread.Sleep(4000);
         string hidden = Tally();
@@ -1173,7 +1196,7 @@ public class ManualSweep : IDisposable
 
         Keyboard.Press(VirtualKeyShort.ESCAPE);
         Thread.Sleep(800);
-        Check("Esc again puts the term away", Tally().Length == 0, Tally());
+        Check("Esc puts the term away", Tally().Length == 0, Tally());
         Shot("find-cleared");
     }
 
@@ -1297,16 +1320,24 @@ public class ManualSweep : IDisposable
 
     private string Status() => _app.AllStatusText();
 
-    private string Tally()
+    /// <summary>How many rows the view is showing, off the status bar's Fil: field.
+    ///
+    /// Every scroll target has to be a fraction of this. The sweep used to name row numbers taken from a
+    /// 33-million-line trace; against any smaller file they all clamp to the end, and a check that meant
+    /// "scroll somewhere else" then quietly measured the end of the file twice.</summary>
+    private long ViewRows()
     {
-        foreach (var t in _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)))
-        {
-            string n = t.Name ?? "";
-            if (n.StartsWith("Match ", StringComparison.Ordinal) || n.EndsWith(" matches", StringComparison.Ordinal) || n.EndsWith(" lines", StringComparison.Ordinal) ||
-                n.Contains(" hidden") || n == "No matches" || n == "Searching\u2026") return n;
-        }
-        return "";
+        string s = _app.StatusText("Fil:");
+        int at = s.IndexOf(':') + 1;
+        return at > 0 && long.TryParse(s[at..].Replace(",", "").Trim(), out long v) && v > 0 ? v : BigFixture.Lines;
     }
+
+    /// <summary>A row that far through the view, whatever is on show.</summary>
+    private int Row(double fraction) => (int)(ViewRows() * fraction);
+
+    /// <summary>What the find bar says it has found. Read off the bar itself: scanning every Text element
+    /// for something ending in " lines" also matches the status bar's "Showing: all lines".</summary>
+    private string Tally() => _app.FindBar() is null ? "" : _app.FindBarMessage();
 
     private void WaitIndexed()
     {
@@ -1346,6 +1377,31 @@ public class ManualSweep : IDisposable
         Keyboard.Type(VirtualKeyShort.KEY_F);
         Keyboard.Release(VirtualKeyShort.CONTROL);
         Thread.Sleep(700);
+    }
+
+    /// <summary>The filter editor's pattern box, wherever the dialog is.</summary>
+    private AutomationElement? FilterTextBox()
+        => _app.DesktopChildren()
+               .SelectMany(w => w.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)))
+               .FirstOrDefault(e => (e.Name ?? "") == "Filter text");
+
+    /// <summary>
+    /// Puts away any modal dialog left standing, and says so if one had to be forced.
+    ///
+    /// This matters more than it looks: a modal dialog belongs to the main window, so while one is up every
+    /// later stage silently does nothing - menus will not open, shortcuts go to the dialog, and resizing
+    /// throws. One stray dialog once cost eleven stages, reported as eleven unrelated faults.
+    /// </summary>
+    private void DismissDialogs()
+    {
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            if (FilterTextBox() is null && _app.FindDialog("Add Filter") is null && _app.FindDialog("Edit Filter") is null)
+                return;
+            Keyboard.Press(VirtualKeyShort.ESCAPE);
+            Thread.Sleep(700);
+        }
+        Check("no dialog was left standing over the window", false, DescribeTopLevel());
     }
 
     private string CopyToClipboard()
