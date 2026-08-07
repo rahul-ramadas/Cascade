@@ -130,7 +130,7 @@ jobs:
           Write-Host "Published Cascade.exe size: $actualBytes bytes (threshold: $thresholdBytes bytes)."
 
           if ($actualBytes -gt $thresholdBytes) {
-            throw "Published Cascade.exe is $actualBytes bytes, exceeding the $thresholdBytes byte guardrail. The likely cause is the publish becoming self-contained; expected framework-dependent single-file output is about 573 KB, while accidental self-contained output is about 116 MB."
+            throw "Published Cascade.exe is $actualBytes bytes, over the 5 MB guardrail. The likely cause is the publish becoming self-contained: framework-dependent single-file output is around 1 MB and grows slowly with the code, while self-contained output is about 116 MB."
           }
 
       - name: Core tests
