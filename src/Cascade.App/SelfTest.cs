@@ -1313,6 +1313,12 @@ internal static class SelfTest
                         $"{slots} slots of {map.RowPixelsForTesting}px");
             if (slots <= 50) return false;
 
+            // Half a map, in rows. Anything nearer the start of the file than this has its window clamped
+            // against it, and a screen at another scaling puts the map at another height and so another
+            // row - which is how several of these checks quietly stopped meaning anything on the build
+            // machine while passing here.
+            long HalfMap() => (long)(map.SlotCountForTesting / 2) * map.RowsPerPixelForTesting;
+
             // ---- one rate the whole way down, in the rows' own colours ----
             ok &= Check("it starts at the top of the file", map.TopRowForTesting == 0, map.TopRowForTesting.ToString());
             int step = map.RowsPerPixelForTesting;
@@ -1392,13 +1398,16 @@ internal static class SelfTest
             // deliberately still on: a row nothing matched never asks the remembered colours at all, so
             // sliding them wrongly inside one solid block puts blue where blue belongs and nothing notices.
             // It takes a second colour in view for the fault to have anywhere to show.
-            grid.ScrollToRow(5_000);
+            grid.ScrollToRow(HalfMap() + 4_000);
             map.RebuildForTesting();
+            long cacheTop = map.TopRowForTesting;
             int beforeSliding = map.ColoursResolvedForTesting;
-            grid.ScrollToRow(5_400);
+            grid.ScrollToRow(HalfMap() + 4_400);
             map.RebuildForTesting();
             int resolvedSliding = map.ColoursResolvedForTesting - beforeSliding;
             var slid = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            ok &= Check("the window really slid, so there is something to have kept",
+                        map.TopRowForTesting > cacheTop, $"top {cacheTop} -> {map.TopRowForTesting}");
             ok &= Check("the map really is showing more than one colour",
                         slid.Distinct().Count() >= 2, $"{slid.Distinct().Count()} colours across {slid.Length} pixels");
             int beforeCold = map.ColoursResolvedForTesting;
@@ -1437,7 +1446,7 @@ internal static class SelfTest
             collection.Roots.Insert(0, alsoCommon);
             doc.SetFilters(collection);
             WaitForFiltering(doc);
-            grid.ScrollToRow(3_000);
+            grid.ScrollToRow(HalfMap() + 3_000);
             map.RebuildForTesting();
             var mixed = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
             int bluePixels = mixed.Count(c => c == Color.FromArgb(0x22, 0x44, 0xEE).ToArgb());
@@ -1447,12 +1456,15 @@ internal static class SelfTest
                         $"{bluePixels} pixels of one, {amberPixels} of the other, across {mixed.Length}");
             // ...and it is the file they follow, not the map: the same rows keep the same colour when the
             // window moves, or the pattern would crawl about under the eye on every scroll.
+            long mixedTop = map.TopRowForTesting;
             var wasAt = Enumerable.Range(0, map.SlotCountForTesting)
                                   .ToDictionary(s => map.RowAtForTesting(s), map.ColourAtForTesting);
-            grid.ScrollToRow(3_400);
+            grid.ScrollToRow(HalfMap() + 3_400);
             map.RebuildForTesting();
             int restained = Enumerable.Range(0, map.SlotCountForTesting)
                                       .Count(s => wasAt.TryGetValue(map.RowAtForTesting(s), out int was) && was != map.ColourAtForTesting(s));
+            ok &= Check("and the window moved, so the rows were really re-divided",
+                        map.TopRowForTesting > mixedTop, $"top {mixedTop} -> {map.TopRowForTesting}");
             ok &= Check("and scrolling does not repaint the rows that did not move",
                         restained == 0, $"{restained} pixels changed colour without their rows changing");
             collection.Roots.Remove(alsoCommon);
@@ -1490,14 +1502,20 @@ internal static class SelfTest
             // ---- the window stays centred on the view ----
             // The rectangle holds still and the picture moves under it. Letting it drift instead means the
             // context runs out ahead of you exactly as you scroll towards it.
-            grid.ScrollToRow(5_000);
+            // Park at least half a map into the file, worked out from the map's own scale: closer to the
+            // start than that and the window is rightly clamped against it, which on a screen at a
+            // different scaling is a different row entirely.
+            long halfMap = HalfMap();
+            grid.ScrollToRow(halfMap + 5_000);
             map.RebuildForTesting();
             long settled = map.TopRowForTesting;
             var before = map.ViewportForTesting;
             long behindBefore = map.RowAtForTesting(map.SlotCountForTesting / 2);
+            ok &= Check("the window is clear of the start of the file, so it has somewhere to move from",
+                        settled > 0, $"top {settled}, half a map is {halfMap} rows");
             // Worth whole pixels of the map: the window sits on a fixed grid of the file, so a scroll of
             // fewer rows than one pixel stands for rightly leaves it exactly where it is.
-            grid.ScrollToRow(5_000 + map.RowsPerPixelForTesting * 10L);
+            grid.ScrollToRow(halfMap + 5_000 + map.RowsPerPixelForTesting * 10L);
             map.RebuildForTesting();
             ok &= Check("a scroll carries the window with it", map.TopRowForTesting > settled,
                         $"{settled} -> {map.TopRowForTesting}");
@@ -1680,12 +1698,14 @@ internal static class SelfTest
             long wanted = map.RowAtForTesting(target);
             map.ClickForTesting(target * map.RowPixelsForTesting);
             Pump();
-            // Within a pixel or two of what was aimed at: the rectangle has a minimum height, so on a short
-            // view it stands for more of the map than the view really covers.
+            // Within the rectangle's own height: it has a minimum, so on a short view it stands for more of
+            // the map than the view really covers, and that is what the click is centred on.
+            long slack = (long)Math.Max(2, map.ViewportForTesting.Height / Math.Max(1, map.RowPixelsForTesting))
+                         * map.RowsPerPixelForTesting;
             ok &= Check("clicking a pixel goes to the row behind it",
-                        Math.Abs(grid.FirstVisibleRow + grid.VisibleRows / 2 - wanted) <= 2L * map.RowsPerPixelForTesting,
+                        Math.Abs(grid.FirstVisibleRow + grid.VisibleRows / 2 - wanted) <= slack,
                         $"wanted {wanted}, got {grid.FirstVisibleRow + grid.VisibleRows / 2}, " +
-                        $"{map.RowsPerPixelForTesting} rows a pixel");
+                        $"{map.RowsPerPixelForTesting} rows a pixel, {slack} rows of slack");
 
             // ---- markers and the selection ----
             ok &= RunMapMarkChecks(doc, grid, map, host);
@@ -1788,9 +1808,12 @@ internal static class SelfTest
                         map.TopRowForTesting == 0 && map.RowsForTesting().SequenceEqual(atTop),
                         $"top {map.TopRowForTesting}, {map.RowsForTesting().Zip(atTop).Count(p => p.First != p.Second)} pixels moved");
             var end = map.ViewportForTesting;
+            // Against how much of the map the file actually fills, not the control's height: a file that
+            // fits leaves whatever does not divide evenly blank at the bottom.
+            int drawn = map.SlotCountForTesting * map.RowPixelsForTesting;
             ok &= Check("only the rectangle moves, to the bottom",
-                        end.Top + end.Height >= map.Height - map.RowPixelsForTesting * 2,
-                        $"{end.Top}+{end.Height} of {map.Height}");
+                        end.Top + end.Height >= drawn - map.RowPixelsForTesting * 2,
+                        $"{end.Top}+{end.Height} of {drawn} drawn ({map.Height} tall)");
             return ok;
         }
         finally
@@ -5488,7 +5511,10 @@ internal static class SelfTest
                      $"{map.RowsPerPixelForTesting} rows a pixel)");
                 ok &= Check("the map's window starts at the row the log now starts at",
                             Math.Abs(firstY - top) <= px);
-                ok &= Check("and ends where the log ends", Math.Abs(lastY - (top + height)) <= 2 * px);
+                // Covers the last row the log shows. Not "ends exactly there": the rectangle has a minimum
+                // height, which on a compressed map is several pixels more than the view really spans.
+                ok &= Check("and covers the rest of what the log is showing", top + height >= lastY - px,
+                            $"window ends {top + height}px, last row at {lastY}px");
                 // The rows the bar took are fewer than one pixel of the map, so "not inside the window" is
                 // the strongest claim the scale can carry.
                 ok &= Check("so the rows the bar covered are not inside it",
