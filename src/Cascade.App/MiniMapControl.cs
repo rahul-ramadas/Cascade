@@ -12,25 +12,33 @@ namespace Cascade.App;
 /// colour that row is painted in the text area. Nothing is invented here - a filter you have given no colour
 /// shows as nothing, which is the honest answer.
 ///
-/// A pixel per row means the map holds only as many rows as it is tall, so it shows a <b>window</b> of the
-/// file rather than the whole of it, centred on the view. That is the same trade Wireshark makes with its
-/// scrollbar overlay, and it is why the scrollbar beside it keeps the whole-file scale.
+/// A pixel per row would hold only as many rows as the map is tall - nine hundred rows of thirty million -
+/// so rows are <b>compressed at a fixed rate</b>: one pixel stands for however many rows it takes to fit the
+/// file, up to <see cref="MaxRowsPerPixel"/>. The rate is the same everywhere on the map, so distance down
+/// the map stays distance through the file and a click lands where it was aimed.
 ///
-/// With unmatched lines on screen (dim mode) that window would be nearly empty - a filter set matching half a
-/// percent of a file leaves four coloured pixels in nine hundred - so a <b>run of unmatched rows is
-/// compressed</b> to a fraction of its height while every matched row keeps its own pixel. The view then
-/// reaches thirty times further without losing a single match, or the size of a burst of them. The price is
-/// that the vertical scale is no longer linear: distance on the map is not distance in the file. The
-/// scrollbar next door is the linear one.
+/// Where a pixel covers several rows the <b>exception among them wins</b>. A lone error in a screenful of
+/// ordinary lines is exactly what the map exists to show, so it must not be outvoted by its neighbours;
+/// anything coloured beats a row nothing matched. Colours of comparable weight share the pixels out between
+/// them in proportion, or a filter that is merely common would paint the whole map and hide the rest.
+///
+/// KNOWN LIMIT: a colour spread evenly enough to land in nearly every pixel, while staying under about a
+/// fifth of the matched rows in each, is the exception everywhere and takes the whole map. Telling that
+/// apart from a real exception needs a pass that knows how much of the map each colour reaches, which is
+/// not worth its cost until using this says otherwise.
+///
+/// Past that rate the file is bigger than the map can reach and it shows a <b>window</b> centred on the view.
+/// The scrollbar beside it keeps the whole-file scale.
 /// </summary>
 internal sealed class MiniMapControl : Control
 {
     /// <summary>Logical width. Wide enough to hit with a mouse and to read a colour off.</summary>
     public const int LogicalWidth = 18;
 
-    /// <summary>Unmatched rows skipped per pixel of gap. Only matched rows are worth a pixel each; this is
-    /// how much of the space between them the map is prepared to spend.</summary>
-    private const int GapRows = 32;
+    /// <summary>The most rows one pixel may stand for. Past about a screenful a pixel stops being something
+    /// that can be aimed at: a click cannot land on the screen it meant, and the viewport rectangle has
+    /// nothing left to say about how much of the file is on show.</summary>
+    private const int MaxRowsPerPixel = 32;
 
     private const int EdgeLane = 3;           // logical; marks down the left, find hits down the right
     private const int MinViewportHeight = 8;  // a compressed stretch would otherwise leave it a hairline
@@ -43,11 +51,25 @@ internal sealed class MiniMapControl : Control
 
     private long[] _rowAt = Array.Empty<long>();   // the row behind each pixel row
     private int[] _colour = Array.Empty<int>();    // 0 where nothing is painted
+    private int[] _scanline = Array.Empty<int>();
     private Bitmap? _picture;
     private int _rowPixels = 1;
+    private int _step = 1;                         // rows behind one pixel
     private int _slots;                            // pixel rows in use
     private long _top;                             // first row the window shows
     private long _span = 1;                        // rows the window covered when it was last built
+
+    // Resolving a colour decodes and matches a line, and the summary is rebuilt on every scroll, so the
+    // answers are kept for the rows the map is over and slid along as it moves.
+    private const int Unknown = 0;
+    private const int Blank = 1;                   // a real colour is always opaque, so this cannot collide
+    private int[] _cache = Array.Empty<int>();
+    private ulong[] _words = Array.Empty<ulong>();
+    private long _cacheBase = -1;
+    private long _cacheBaseLine = -1;
+    private int _cacheGeneration = -1;
+    private bool _cacheFilteredMode;
+    private long _cacheRows = -1;
 
     private int _builtGeneration = -1;
     private long _builtRows = -1;
@@ -67,6 +89,7 @@ internal sealed class MiniMapControl : Control
     private int _tipSlot = -1;
     private Point _tipPoint;
     private int _paints;
+    private int _resolved;
 
     public MiniMapControl(LineGridControl grid)
     {
@@ -89,7 +112,7 @@ internal sealed class MiniMapControl : Control
     }
 
     /// <summary>Throws away the summary so the next paint rebuilds it.</summary>
-    public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; Invalidate(); }
+    public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; _cacheRows = -1; Invalidate(); }
 
     protected override void OnResize(EventArgs e)
     {
@@ -102,6 +125,7 @@ internal sealed class MiniMapControl : Control
     internal void RebuildForTesting() { _builtGeneration = -1; EnsureSummary(); }
     internal int SlotCountForTesting => _slots;
     internal int RowPixelsForTesting => _rowPixels;
+    internal int RowsPerPixelForTesting => _step;
     internal long TopRowForTesting => _top;
     internal long SpanForTesting => _span;
     internal long RowAtForTesting(int slot) => slot >= 0 && slot < _slots ? _rowAt[slot] : -1;
@@ -122,6 +146,10 @@ internal sealed class MiniMapControl : Control
     /// control draws it whether or not it was invalidated, so a screenshot always looks up to date even when
     /// the real window has been sitting stale for minutes.</summary>
     internal int PaintsForTesting => _paints;
+
+    /// <summary>Rows whose colour a build had to read the file for. Everything else came from the last
+    /// build, which is what keeps a drag affordable.</summary>
+    internal int ColoursResolvedForTesting => _resolved;
 
     // ---- geometry ----
 
@@ -148,39 +176,13 @@ internal sealed class MiniMapControl : Control
         return true;
     }
 
-    /// <summary>Starts the window half a map above the view, measured in the pixels the fill will actually
-    /// spend rather than in rows. Guessing from the last build's span cannot work: a build that crosses
-    /// into a compressed stretch reaches many times further than the one before it, so the guess and the
-    /// correction chase each other and the view can settle hard against an edge.</summary>
+    /// <summary>Starts the window half a map above the view. The rate is the same the whole way down, so
+    /// this is arithmetic rather than a walk.</summary>
     private void Recentre(long rows, int slots)
     {
-        if (_grid.Document is not { } doc || rows <= 0) return;
+        if (rows <= 0) return;
         long viewTop = Math.Clamp(_grid.FirstVisibleRow, 0, rows - 1);
-        _top = BackFrom(doc, viewTop, slots / 2);
-    }
-
-    /// <summary>Where the map has to begin for <paramref name="from"/> to land <paramref name="pixels"/>
-    /// down it: the fill's own gap rule walked backwards, without resolving any colours.</summary>
-    private static long BackFrom(CascadeDocument doc, long from, int pixels)
-    {
-        long row = from;
-        int spent = 0;
-        while (spent < pixels && row > 0)
-        {
-            long stop = PrevStop(doc, row);
-            if (stop < row)
-            {
-                long gap = row - stop;
-                int cost = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
-                if (spent + cost >= pixels) return Math.Max(0, row - (pixels - spent) * gap / cost);
-                spent += cost;
-                row = Math.Max(0, stop);
-                continue;
-            }
-            spent++;
-            row--;
-        }
-        return Math.Max(0, row);
+        _top = Math.Max(0, viewTop - (long)(slots / 2) * _step);
     }
 
     private void EnsureSummary()
@@ -201,7 +203,16 @@ internal sealed class MiniMapControl : Control
             _rowPixels = Math.Max(_rowPixels, height / (int)Math.Max(1, rows));
             slots = Math.Max(1, height / _rowPixels);
         }
+        // The least compression that fits the file, and no more - so a file the map can hold is shown whole
+        // and never scrolls, and only a file past its reach becomes a window.
+        _step = RowsPerPixelFor(rows, slots);
         TrackView(rows, slots);
+
+        long reach = (long)slots * _step;
+        // Pinned to a fixed grid of the file, so scrolling slides the picture by whole pixels instead of
+        // re-dividing every row between them - which is also what lets a pixel's colour be settled from the
+        // rows behind it alone, and stay settled.
+        _top = rows <= reach ? 0 : Math.Clamp(_top, 0, rows - reach) / _step * _step;
 
         // The selection is drawn over the picture rather than into it, so moving the caret needs a repaint
         // but not a rebuild - which matters, because holding an arrow key asks for one per keypress.
@@ -220,110 +231,140 @@ internal sealed class MiniMapControl : Control
 
         if (_rowAt.Length < slots) { _rowAt = new long[slots]; _colour = new int[slots]; }
 
-        _top = Math.Clamp(_top, 0, Math.Max(0, rows - 1));
+        PrepareCache(doc, slots, rows);
         _slots = rows <= 0 ? 0 : Fill(doc, rows, slots);
-        // Ran out of file before the map was full: anchor to the end instead, so the last row of the file is
-        // the last pixel. Otherwise the map empties out as you reach the bottom.
-        if (_slots < slots && _top > 0 && rows > 0)
-        {
-            _slots = FillBackward(doc, rows, slots);
-            _top = _slots > 0 ? _rowAt[0] : 0;
-        }
-        _span = Math.Max(1, (_slots > 0 ? _rowAt[_slots - 1] + 1 : _top + 1) - _top);
+        _span = Math.Max(1, Math.Min(rows, _top + (long)_slots * _step) - _top);
         _builtTop = _top;
         RedrawPicture(width, height);
     }
 
-    /// <summary>Walks rows forward into pixel slots: one slot per matched row, and one slot per
-    /// <see cref="GapRows"/> unmatched rows in between. Returns how many slots were filled.</summary>
+    /// <summary>Keeps the resolved colours for the rows the map is over, sliding them along as it moves so a
+    /// scroll of a few rows costs a few lookups instead of a whole mapful.</summary>
+    private void PrepareCache(CascadeDocument doc, int slots, long rows)
+    {
+        int want = slots * _step;
+        if (_cache.Length < want) _cache = new int[want];
+        // A row only means the same line while the filters and the visible set hold still. Checking the line
+        // behind the base row catches a pass that shuffled rows without changing how many there are.
+        long baseLine = _cacheBase >= 0 && _cacheBase < rows ? doc.RowToLine(_cacheBase) : -1;
+        if (_cacheGeneration != doc.FilterGeneration || _cacheFilteredMode != doc.FilteredMode ||
+            _cacheRows != rows || _cacheBaseLine != baseLine)
+        {
+            Array.Clear(_cache);
+            _cacheGeneration = doc.FilterGeneration;
+            _cacheFilteredMode = doc.FilteredMode;
+            _cacheRows = rows;
+            _cacheBase = _top;
+            _cacheBaseLine = _top < rows ? doc.RowToLine(_top) : -1;
+            return;
+        }
+        long delta = _top - _cacheBase;
+        if (delta == 0) return;
+        int len = _cache.Length;
+        if (delta > 0 && delta < len)
+        {
+            Array.Copy(_cache, (int)delta, _cache, 0, len - (int)delta);
+            Array.Clear(_cache, len - (int)delta, (int)delta);
+        }
+        else if (delta < 0 && -delta < len)
+        {
+            Array.Copy(_cache, 0, _cache, (int)-delta, len + (int)delta);
+            Array.Clear(_cache, 0, (int)-delta);
+        }
+        else Array.Clear(_cache);
+        _cacheBase = _top;
+        _cacheBaseLine = _top < rows ? doc.RowToLine(_top) : -1;
+    }
+
+    /// <summary>Fills each pixel from the rows behind it. Returns how many were filled.</summary>
     private int Fill(CascadeDocument doc, long rows, int slots)
     {
         var settings = _grid.Settings;
         var defaults = Defaults(settings);
+        Span<int> colours = stackalloc int[MaxRowsPerPixel];
+        Span<int> counts = stackalloc int[MaxRowsPerPixel];
+        // With nothing enabled no row can have a colour, so the whole file is blank without reading a line.
+        bool anyColour = doc.CurrentSnapshot.HasAnyEnabled;
+        long lastRow = Math.Min(rows, _top + (long)slots * _step);
+        long firstWord = _top >> 6;
+        var matched = anyColour ? ReadMatchedRows(doc, firstWord, lastRow) : ReadOnlySpan<ulong>.Empty;
+
         int at = 0;
-        long row = _top;
-        while (at < slots && row < rows)
+        for (; at < slots; at++)
         {
-            long stop = NextStop(doc, rows, row);
-            if (stop > row)
+            long from = _top + (long)at * _step;
+            if (from >= rows) break;
+            long to = Math.Min(rows, from + _step);
+            _rowAt[at] = from;
+            _colour[at] = 0;
+            if (!anyColour) continue;
+
+            int kinds = 0;
+            for (long row = from; row < to; row++)
             {
-                // Nothing matches between here and there, so the whole stretch is worth a few pixels - at a
-                // fixed rate, so that one enormous gap does not quietly rescale the whole map.
-                long gap = stop - row;
-                int wanted = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
-                int pixels = Math.Min(wanted, slots - at);
-                for (int i = 0; i < pixels; i++)
-                {
-                    _rowAt[at] = row + gap * i / wanted;
-                    _colour[at] = 0;
-                    at++;
-                }
-                if (pixels < wanted) break;   // the map filled up part way through the gap
-                row = stop;
-                continue;
+                if (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0) continue;
+                int argb = ColourOfRow(doc, row, defaults, settings);
+                if (argb == 0) continue;
+                int k = 0;
+                while (k < kinds && colours[k] != argb) k++;
+                if (k == kinds) { colours[kinds] = argb; counts[kinds] = 1; kinds++; }
+                else counts[k]++;
             }
-            _rowAt[at] = row;
-            _colour[at] = ColourOf(doc, doc.RowToLine(row), defaults, settings);
-            at++;
-            row++;
+
+            // One pixel, one colour. The exception among the rows behind it is what the map exists to show,
+            // so a colour far rarer than the rest takes the pixel outright; colours of comparable weight
+            // share the pixels out between them in proportion instead, because always yielding to the same
+            // one would paint a whole map in it and hide that the other was ever there.
+            if (kinds == 1) _colour[at] = colours[0];
+            else if (kinds > 1) _colour[at] = PickColour(colours, counts, kinds, from);
         }
         return at;
     }
 
-    /// <summary>The same walk from the end of the file backwards, for when there is not enough file left
-    /// below the window to fill it. Returns how many slots were filled, packed to the start.</summary>
-    private int FillBackward(CascadeDocument doc, long rows, int slots)
+    /// <summary>How much rarer than everything else a colour must be to take a pixel on its own.</summary>
+    private const int RareShare = 4;
+
+    private static int PickColour(ReadOnlySpan<int> colours, ReadOnlySpan<int> counts, int kinds, long from)
     {
-        var settings = _grid.Settings;
-        var defaults = Defaults(settings);
-        int at = slots - 1;
-        long row = rows - 1;
-        while (at >= 0 && row >= 0)
+        int least = 0, second = -1, total = counts[0];
+        for (int k = 1; k < kinds; k++)
         {
-            long stop = PrevStop(doc, row);
-            if (stop < row)
-            {
-                long gap = row - stop;
-                int wanted = (int)Math.Max(1, Math.Min(int.MaxValue, gap / GapRows));
-                int pixels = Math.Min(wanted, at + 1);
-                for (int i = 0; i < pixels; i++)
-                {
-                    _rowAt[at] = row - gap * i / wanted;
-                    _colour[at] = 0;
-                    at--;
-                }
-                if (pixels < wanted) break;
-                row = stop;
-                continue;
-            }
-            _rowAt[at] = row;
-            _colour[at] = ColourOf(doc, doc.RowToLine(row), defaults, settings);
-            at--;
-            row--;
+            total += counts[k];
+            if (counts[k] < counts[least]) { second = least; least = k; }
+            else if (second < 0 || counts[k] < counts[second]) second = k;
         }
-        if (at < 0) return slots;
-        int filled = slots - at - 1;
-        Array.Copy(_rowAt, at + 1, _rowAt, 0, filled);
-        Array.Copy(_colour, at + 1, _colour, 0, filled);
-        return filled;
+        if ((long)counts[least] * RareShare <= counts[second]) return colours[least];
+
+        // Keyed on the row rather than on the pixel's place in the map, so scrolling slides the pattern
+        // along with the file instead of reshuffling it under the eye.
+        int at = (int)(Scatter(from) % (uint)total);
+        for (int k = 0; k < kinds; k++)
+        {
+            if (at < counts[k]) return colours[k];
+            at -= counts[k];
+        }
+        return colours[least];
     }
 
-    /// <summary>Where the walk stops next going down: the next matched row, or the end of the file.
-    ///
-    /// The caret deliberately does NOT stop it. Stopping here would split the stretch it sits in, and the
-    /// two halves round to a different number of pixels than the whole did - so every arrow key re-laid out
-    /// everything below the caret and the map shivered. The caret is drawn from the rows a pixel stands for
-    /// instead, so it still shows up wherever it is without having a pixel to itself.</summary>
-    private static long NextStop(CascadeDocument doc, long rows, long row)
+    private static uint Scatter(long value)
     {
-        long nextLine = doc.NextMatchedLine(doc.RowToLine(row));
-        return nextLine < 0 ? rows : Math.Min(rows, doc.RowAtOrAfterLine(nextLine));
+        ulong x = (ulong)value * 0x9E3779B97F4A7C15UL;
+        x ^= x >> 29;
+        x *= 0xBF58476D1CE4E5B9UL;
+        return (uint)(x ^ (x >> 32));
     }
 
-    private static long PrevStop(CascadeDocument doc, long row)
+    /// <summary>Which of the rows the map is over the filters match, one bit each - read in one go, because
+    /// asking a line at a time is a rank and a select apiece. Empty means every row matches, which is the
+    /// answer in filtered mode and whenever nothing is being hidden.</summary>
+    private ReadOnlySpan<ulong> ReadMatchedRows(CascadeDocument doc, long firstWord, long lastRow)
     {
-        long prevLine = doc.PrevMatchedLine(doc.RowToLine(row));
-        return prevLine < 0 ? -1 : doc.RowForLine(prevLine);
+        if (doc.FilteredMode || doc.MatchedWords is not { } read) return ReadOnlySpan<ulong>.Empty;
+        int words = (int)(((lastRow + 63) >> 6) - firstWord);
+        if (words <= 0) return ReadOnlySpan<ulong>.Empty;
+        if (_words.Length < words) _words = new ulong[words];
+        read(firstWord, _words.AsSpan(0, words));
+        return _words.AsSpan(0, words);
     }
 
     private static ResolvedStyle Defaults(AppSettings settings) => new(
@@ -344,50 +385,64 @@ internal sealed class MiniMapControl : Control
         return fg.ToArgb() != settings.Foreground.ToArgb() ? fg.ToArgb() : 0;
     }
 
-    /// <summary>The slot standing for a row: the last one whose own row is at or before it, so it is the
-    /// pixel that row is actually drawn on even where a stretch was compressed and one pixel covers thirty.
-    /// The rows increase across the slots but not evenly, so this is a search.</summary>
-    private int SlotOf(long row)
+    /// <summary>Rows to a pixel: the least compression that fits <paramref name="rows"/> into
+    /// <paramref name="slots"/> pixels, and never more than <see cref="MaxRowsPerPixel"/>.</summary>
+    internal static int RowsPerPixelFor(long rows, int slots)
+        => rows <= slots ? 1 : (int)Math.Min(MaxRowsPerPixel, (rows + slots - 1) / Math.Max(1, slots));
+
+    private int ColourOfRow(CascadeDocument doc, long row, ResolvedStyle defaults, AppSettings settings)
     {
-        if (_slots <= 0) return -1;
-        if (row <= _rowAt[0]) return 0;
-        if (row >= _rowAt[_slots - 1]) return _slots - 1;
-        int lo = 0, hi = _slots - 1;
-        while (lo < hi)
-        {
-            int mid = (lo + hi + 1) >> 1;
-            if (_rowAt[mid] <= row) lo = mid; else hi = mid - 1;
-        }
-        return lo;
+        int at = (int)(row - _cacheBase);
+        if (at < 0 || at >= _cache.Length) { _resolved++; return ColourOf(doc, doc.RowToLine(row), defaults, settings); }
+        int cached = _cache[at];
+        if (cached != Unknown) return cached == Blank ? 0 : cached;
+        _resolved++;
+        int argb = ColourOf(doc, doc.RowToLine(row), defaults, settings);
+        _cache[at] = argb == 0 ? Blank : argb;
+        return argb;
     }
 
-    /// <summary>The rows a slot stands for, which is more than one wherever a stretch was compressed.</summary>
+    /// <summary>The slot standing for a row. One rate the whole way down, so this is division.</summary>
+    private int SlotOf(long row)
+        => _slots <= 0 ? -1 : (int)Math.Clamp((row - _top) / _step, 0, _slots - 1);
+
+    /// <summary>The rows a slot stands for.</summary>
     private (long From, long To) RowsAt(int slot)
-        => (_rowAt[slot], slot + 1 < _slots ? Math.Max(_rowAt[slot] + 1, _rowAt[slot + 1]) : _rowAt[slot] + 1);
+    {
+        long from = _rowAt[slot];
+        long limit = _builtRows > 0 ? _builtRows : from + _step;
+        return (from, Math.Max(from + 1, Math.Min(limit, from + _step)));
+    }
 
     // ---- painting ----
 
     private void RedrawPicture(int width, int height)
     {
-        _picture?.Dispose();
-        _picture = null;
-        if (_slots <= 0) return;
+        if (_slots <= 0) { _picture?.Dispose(); _picture = null; return; }
 
         var settings = _grid.Settings;
         int backArgb = settings.GutterBack.ToArgb();
         int dividerArgb = Blend(settings.Foreground, settings.GutterBack, 0.30).ToArgb();
         int left = Divider;
 
-        var picture = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        // Painted over rather than replaced: a drag rebuilds this many times a second, and a fresh bitmap
+        // each time is a hundred kilobytes of garbage per frame.
+        if (_picture is null || _picture.Width != width || _picture.Height != height)
+        {
+            _picture?.Dispose();
+            _picture = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        }
+        var picture = _picture;
         var data = picture.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         try
         {
-            var row = new int[width];
+            if (_scanline.Length < width) _scanline = new int[width];
+            var row = _scanline;
             for (int y = 0; y < height; y++)
             {
                 int slot = y / _rowPixels;
                 int argb = slot < _slots && _colour[slot] != 0 ? _colour[slot] : backArgb;
-                Array.Fill(row, argb);
+                Array.Fill(row, argb, 0, width);
                 // A rule down the left, or a coloured row runs straight into the text beside it and there is
                 // no telling where one ends and the other starts.
                 for (int x = 0; x < left && x < width; x++) row[x] = dividerArgb;
@@ -395,7 +450,6 @@ internal sealed class MiniMapControl : Control
             }
         }
         finally { picture.UnlockBits(data); }
-        _picture = picture;
     }
 
     internal static Color Blend(Color c, Color back, double t) => Color.FromArgb(
@@ -626,17 +680,24 @@ internal sealed class MiniMapControl : Control
     private string SlotTipText(int slot)
     {
         if (slot < 0 || slot >= _slots || _grid.Document is not { } doc) return "";
-        long row = _rowAt[slot];
-        long line = doc.RowToLine(row);
+        var (from, to) = RowsAt(slot);
+        long line = doc.RowToLine(from);
         var sb = new StringBuilder();
         sb.Append("Line ").Append((line + 1).ToString("N0"));
-        if (_colour[slot] == 0)
-        {
-            var (from, to) = RowsAt(slot);
-            if (to > from + 1) sb.Append('\u2013').Append(doc.RowToLine(to - 1).ToString("N0"));
-            return sb.Append("  (nothing matching)").ToString();
-        }
-        string tip = FilterTipText.Build(doc.FiltersMatching(line));
+        if (to > from + 1) sb.Append('\u2013').Append((doc.RowToLine(to - 1) + 1).ToString("N0"));
+        if (_colour[slot] == 0) return sb.Append("  (nothing matching)").ToString();
+        string tip = FilterTipText.Build(doc.FiltersMatching(LineColoured(doc, from, to, _colour[slot])));
         return tip.Length == 0 ? sb.ToString() : sb.Append('\n').Append(tip).ToString();
+    }
+
+    /// <summary>The line the pixel took its colour from, so the tip names the filter it is actually showing
+    /// rather than whichever filter happens to own the first row behind it.</summary>
+    private long LineColoured(CascadeDocument doc, long from, long to, int argb)
+    {
+        var settings = _grid.Settings;
+        var defaults = Defaults(settings);
+        for (long row = from; row < to; row++)
+            if (ColourOfRow(doc, row, defaults, settings) == argb) return doc.RowToLine(row);
+        return doc.RowToLine(from);
     }
 }

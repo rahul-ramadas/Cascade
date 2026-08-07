@@ -77,9 +77,11 @@ public class ManualSweep : IDisposable
             {
                 // Whatever a stage did to the window, the next one starts from the same place - and above
                 // all with no modal dialog standing over it, since one of those makes every stage after it
-                // quietly do nothing.
+                // quietly do nothing. A hover tip counts: it is a top-level window of its own, and while one
+                // is up the main window reports no title, so the next stage finds nothing to drive.
                 try
                 {
+                    ParkPointer();
                     DismissDialogs();
                     _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
                     Thread.Sleep(700);
@@ -862,8 +864,15 @@ public class ManualSweep : IDisposable
             // instead, which is a different thing being tested below.
             // Every line on show for this one: with only matching lines shown and a single filter on, every
             // row in the map is that filter's colour, so the map is a solid block and two places in the file
-            // are identical by construction - the check could only ever fail. Against the whole file the
-            // matches stand against a blank gutter, which is a pattern that really does vary by region.
+            // are identical by construction - the check could only ever fail.
+            // A SECOND filter as well, for the same reason: a pixel of the map stands for many rows now, so
+            // one filter matching a third of the file colours every pixel of it and two places in the file
+            // are again identical whatever the map is doing. Two filters give it a pattern to vary.
+            if (ClickFilterRow(BigFixture.BusyFilter))
+            {
+                _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
+                WaitFiltered();
+            }
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             Thread.Sleep(3000);
             _app.ScrollVerticalTo(Row(0.15));
@@ -880,6 +889,12 @@ public class ManualSweep : IDisposable
                   $"{PictureDiff(atHigh, atLow):P0} of the pixels changed, view {highLine} -> {lowLine}");
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             Thread.Sleep(3000);
+            // Put the second filter back off: the stages after this one share the window.
+            if (ClickFilterRow(BigFixture.BusyFilter))
+            {
+                _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
+                WaitFiltered();
+            }
 
             // Clicking the map moves the view without the scrollbar going anywhere much: it is the fine
             // adjustment, and the file is far too long for a window of it to register on the whole scale.
@@ -1384,6 +1399,14 @@ public class ManualSweep : IDisposable
         => _app.DesktopChildren()
                .SelectMany(w => w.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)))
                .FirstOrDefault(e => (e.Name ?? "") == "Filter text");
+
+    /// <summary>Takes the pointer off the window so a hover tip cannot outlive the stage that raised it.</summary>
+    private void ParkPointer()
+    {
+        var w = _app.Window.BoundingRectangle;
+        Mouse.Position = new Point(w.Left + 4, w.Top + 4);
+        Thread.Sleep(400);
+    }
 
     /// <summary>
     /// Puts away any modal dialog left standing, and says so if one had to be forced.

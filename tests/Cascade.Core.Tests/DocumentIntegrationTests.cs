@@ -677,4 +677,53 @@ public class DocumentIntegrationTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void MatchedWords_reads_the_same_answer_as_asking_line_by_line()
+    {
+        // Summarising the whole file wants to know where the matches are, and asking one line at a time is a
+        // rank and a select apiece. This reads them 64 to a word, so it has to agree exactly - including in
+        // the ragged words at either end of the range.
+        const int lines = 5_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++) sb.Append(i % 7 == 3 ? "HIT" : "miss").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "HIT" } });
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            var read = doc.MatchedWords;
+            Assert.NotNull(read);
+            foreach (long firstWord in new long[] { 0, 1, 13, 60 })
+            {
+                var words = new ulong[20];
+                read!(firstWord, words);
+                for (int bit = 0; bit < words.Length * 64; bit++)
+                {
+                    long line = firstWord * 64 + bit;
+                    bool said = (words[bit >> 6] >> (bit & 63) & 1) != 0;
+                    bool truth = line < lines && line % 7 == 3;
+                    Assert.True(said == truth, $"line {line} from word {firstWord}: read {said}, expected {truth}");
+                }
+            }
+
+            // With nothing hidden there is no set to read, and the caller is meant to take that as "all of it"
+            // rather than as "none of it".
+            doc.Filters.Roots.Clear();
+            doc.ApplyFilters();
+            WaitFilter(doc);
+            Assert.Null(doc.MatchedWords);
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
 }

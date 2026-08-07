@@ -155,6 +155,11 @@ public sealed class CascadeDocument : IDisposable
     /// the whole file a band at a time costs the same as summarising one line.</summary>
     public long MatchedLinesInRange(long from, long toExclusive) => MatchView.CountInRange(from, toExclusive);
 
+    /// <summary>Reads which lines the filters match, 64 to a word, or null when every line does. A summary
+    /// that has to know where the matches are wants this rather than a lookup a line at a time: one read
+    /// covers thousands of lines, where <see cref="NextMatchedLine"/> is a rank and a select apiece.</summary>
+    public VisibleWordReader? MatchedWords => MatchView.VisibleWords;
+
     /// <summary>The cached set of lines deep-matching <paramref name="filter"/>, when there is one. Only a
     /// summary of the whole file needs this; everything else asks about one line at a time.</summary>
     public FilterMatchCache.MatchSet? MatchSetFor(Filter filter)
