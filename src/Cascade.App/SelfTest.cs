@@ -2494,8 +2494,7 @@ internal static class SelfTest
             Directory.CreateDirectory(dir);
             Environment.SetEnvironmentVariable("CASCADE_HANG_SECONDS", "1");
             Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", dir);
-            Environment.SetEnvironmentVariable("CASCADE_HANG_DUMP", "stacks");   // seconds, not minutes, to write
-            var settings = new AppSettings { HangWatchdog = true };
+            var settings = new AppSettings { HangWatchdog = true };   // and the shipping dump kind, not a cheap one
 
             form = new MainForm(settings, new MachineState(), Array.Empty<string>())
             {
@@ -2517,6 +2516,13 @@ internal static class SelfTest
 
             // Not answering: no pumping at all, on the thread that owns the window. The real thing.
             Thread.Sleep(1500);
+
+            // A dump of a process holding a large file takes a second or so to write, so the artefacts do
+            // not all appear at once - the report says so until the dump is finished with.
+            for (int i = 0; i < 150 && Directory.GetFiles(dir, "cascade_hang_*.txt")
+                                                .All(f => File.ReadAllText(f).Contains("still being taken", StringComparison.Ordinal));
+                 i++)
+                Thread.Sleep(100);
 
             string[] dumps = Directory.GetFiles(dir, "*.dmp");
             string[] reports = Directory.GetFiles(dir, "cascade_hang_*.txt");
@@ -2549,10 +2555,69 @@ internal static class SelfTest
             ok &= Check("and the window says so when it comes back",
                         form.StatusForTesting.Contains("Hang recorded", StringComparison.Ordinal),
                         form.StatusForTesting);
+
+            // The dump a machine will not allow is the whole reason this has a fallback: thread stacks are a
+            // fraction of the size and still name the thread that stopped.
+            HangWatchdog.RefuseDumpForTesting = flags => flags == HangWatchdog.FlagsForTesting(DumpDetail.Heap);
+            int dumpsBefore = Directory.GetFiles(dir, "*.dmp").Length;
+            Thread.Sleep(1500);
+            for (int i = 0; i < 100 && Directory.GetFiles(dir, "*.dmp").Length == dumpsBefore; i++)
+            { Pump(); Thread.Sleep(50); }
+            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+
+            string[] afterFallback = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
+            ok &= Check($"a refused heap dump falls back to thread stacks ({Directory.GetFiles(dir, "*.dmp").Length} dumps)",
+                        Directory.GetFiles(dir, "*.dmp").Length == dumpsBefore + 1 && afterFallback.Length == 2);
+            if (afterFallback.Length == 2)
+            {
+                string fell = File.ReadAllText(afterFallback[1]);
+                Line("   | " + (fell.Split('\n').FirstOrDefault(l => l.Contains("dump ", StringComparison.Ordinal)) ?? "").Trim());
+                ok &= Check("and says so rather than pretending it got what it asked for",
+                            fell.Contains("refused", StringComparison.Ordinal) &&
+                            fell.Contains("thread stacks only", StringComparison.Ordinal));
+            }
+
+            // A dump that cannot be taken at all - which is what security software does to this on some
+            // machines - must leave a report saying WHY, or the reader has a hang and no evidence at all.
+            HangWatchdog.RefuseDumpForTesting = _ => true;
+            int before = Directory.GetFiles(dir, "*.dmp").Length;
+            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+            Thread.Sleep(1500);
+            for (int i = 0; i < 60 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length < 3; i++)
+            { Pump(); Thread.Sleep(50); }
+            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+
+            string[] afterRefusal = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
+            ok &= Check($"a third stall is recorded even when no dump can be taken ({afterRefusal.Length} reports)",
+                        afterRefusal.Length == 3 && Directory.GetFiles(dir, "*.dmp").Length == before);
+            if (afterRefusal.Length == 3)
+            {
+                string refused = File.ReadAllText(afterRefusal[2]);
+                Line("   | " + (refused.Split('\n').FirstOrDefault(l => l.Contains("dump ", StringComparison.Ordinal)) ?? "").Trim());
+                ok &= Check("and the report says no dump was written",
+                            refused.Contains("NO DUMP WRITTEN", StringComparison.Ordinal));
+                ok &= Check("and carries what Windows gave as the reason, in words and in numbers",
+                            System.Text.RegularExpressions.Regex.IsMatch(refused, @"NO DUMP WRITTEN: \S.*\(\d+\)"),
+                            refused.Split('\n').FirstOrDefault(l => l.Contains("NO DUMP", StringComparison.Ordinal))?.Trim()
+                            ?? "(no such line)");
+            }
+            ok &= Check("the reason is explained rather than left as a number",
+                        HangWatchdog.Explain(112).Contains("(112)", StringComparison.Ordinal) &&
+                        HangWatchdog.Explain(112).Contains("no room", StringComparison.Ordinal),
+                        HangWatchdog.Explain(112));
+            ok &= Check("and the one security software causes is named for what it is",
+                        HangWatchdog.Explain(299).Contains("security software", StringComparison.Ordinal),
+                        HangWatchdog.Explain(299));
+            // dbghelp reports its failures as HRESULTs, so the one error that really turns up here reads as
+            // a large negative number unless it is unwrapped.
+            ok &= Check("and an HRESULT from dbghelp reads as the error it wraps",
+                        HangWatchdog.Explain(unchecked((int)0x8007012B)).Contains("(299)", StringComparison.Ordinal),
+                        HangWatchdog.Explain(unchecked((int)0x8007012B)));
             return ok;
         }
         finally
         {
+            HangWatchdog.RefuseDumpForTesting = null;
             try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
             try { probe?.Dispose(); } catch { /* ignore */ }
             Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", oldOn);
