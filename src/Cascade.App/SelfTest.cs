@@ -2469,11 +2469,17 @@ internal static class SelfTest
         MainForm? form = null;
         try
         {
+            // Every one of these is read back below, so the group has to start from nothing: a run launched
+            // with the watchdog already switched on would otherwise be checking the environment it inherited
+            // rather than what the app defaults to.
             Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", null);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_SECONDS", null);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", null);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DUMP", null);
             var off = new AppSettings();
             bool ok = Check("nobody is watched unless they ask", !HangWatchdog.IsWanted(off));
-            ok &= Check("and the limit is the five seconds Windows itself calls not responding",
-                        HangWatchdog.SecondsToWait(off) == 5, $"{HangWatchdog.SecondsToWait(off)}s");
+            ok &= Check("and the limit is shorter than a freeze anyone would sit through",
+                        HangWatchdog.SecondsToWait(off) == 2, $"{HangWatchdog.SecondsToWait(off)}s");
             ok &= Check("a dump leaves the mapped log out unless told otherwise",
                         HangWatchdog.WantedDetail() == DumpDetail.Heap);
 
@@ -2504,11 +2510,17 @@ internal static class SelfTest
             // Answering. Longer than the limit, so a heartbeat that never arrived would already have been
             // called a hang - which is what makes this the check on the wiring.
             for (int i = 0; i < 14; i++) { Pump(); Thread.Sleep(100); }
-            ok &= Check("a window that keeps answering is left alone", Directory.GetFiles(dir).Length == 0,
+            string activity = Path.Combine(dir, "cascade_hang.log");
+            // "Nothing was recorded" only means something once it is clear something was watching.
+            ok &= Check("the watchdog says it is watching",
+                        File.Exists(activity) && File.ReadAllText(activity).Contains("watching", StringComparison.Ordinal),
+                        File.Exists(activity) ? File.ReadAllText(activity).Trim() : "(no log)");
+            ok &= Check("and a window that keeps answering is left alone",
+                        Directory.GetFiles(dir, "*.dmp").Length == 0 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length == 0,
                         string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));
 
             // Not answering: no pumping at all, on the thread that owns the window. The real thing.
-            Thread.Sleep(1800);
+            Thread.Sleep(1500);
 
             string[] dumps = Directory.GetFiles(dir, "*.dmp");
             string[] reports = Directory.GetFiles(dir, "cascade_hang_*.txt");

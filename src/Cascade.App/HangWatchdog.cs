@@ -32,7 +32,9 @@ internal enum DumpDetail
 /// </summary>
 internal sealed class HangWatchdog : IDisposable
 {
-    private const int SampleMs = 500;
+    // Worst-case detection is the limit plus one of these, so it is kept well under the limit itself - a
+    // stall has to still be going when the dump is taken, or the stacks are of whatever ran after it.
+    private const int SampleMs = 250;
     private const int MaxDumps = 3;
 
     private readonly Form _form;
@@ -72,7 +74,14 @@ internal sealed class HangWatchdog : IDisposable
         if (!IsWanted(settings)) return null;
         string dir = Folder;
         try { Directory.CreateDirectory(dir); } catch { return null; }
-        return new HangWatchdog(form, SecondsToWait(settings) * 1000, dir, WantedDetail());
+        int limitMs = SecondsToWait(settings) * 1000;
+        var detail = WantedDetail();
+        // Said out loud, because otherwise a session that recorded nothing cannot be told from one that was
+        // never watching - which is the difference between good news and a broken switch.
+        TryWrite(Path.Combine(dir, "cascade_hang.log"),
+                 $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} watching process {Environment.ProcessId}, " +
+                 $"limit {limitMs:N0} ms, {detail} dump\n");
+        return new HangWatchdog(form, limitMs, dir, detail);
     }
 
     /// <summary>Where dumps and reports are written.</summary>
@@ -89,8 +98,9 @@ internal sealed class HangWatchdog : IDisposable
             _ => settings.HangWatchdog,
         };
 
-    /// <summary>Five seconds by default because that is the rule Windows itself uses to call a window not
-    /// responding - so it fires when, and only when, the user can see something is wrong.</summary>
+    /// <summary>Two seconds by default. Windows waits five before it calls a window not responding, but a
+    /// freeze is perceivable well before the shell starts drawing over the app, and the point of this is to
+    /// catch the stall a reader complains about rather than the one the desktop has already given up on.</summary>
     internal static int SecondsToWait(AppSettings settings)
     {
         int seconds = settings.HangWatchdogSeconds;
