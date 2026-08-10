@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -161,15 +162,18 @@ internal sealed class HangWatchdog : IDisposable
         string stem = Path.Combine(_dir,
             $"cascade_hang_{DateTime.Now:yyyyMMdd_HHmmss}_{Environment.ProcessId}_{_dumps}");
 
-        // The report goes first: if writing a dump of a process this big fails, this is still enough to say
-        // what kind of stall it was.
-        TryWrite(stem + ".txt", Describe(stalledMs, now));
-
+        // The report is written twice: once now, so a process that dies while the dump is being taken still
+        // leaves evidence, and again afterwards to say what became of the dump. It is the same file both
+        // times, so nothing accumulates.
+        string report = stem + ".txt";
         string dump = stem + ".dmp";
-        Volatile.Write(ref _pendingReport, Path.GetFileName(WriteDump(dump) ? dump : stem + ".txt"));
+        TryWrite(report, Describe(stalledMs, now, "still being taken"));
+        bool wrote = WriteDump(dump, out string outcome);
+        TryWrite(report, Describe(stalledMs, now, outcome));
+        Volatile.Write(ref _pendingReport, Path.GetFileName(wrote ? dump : report));
     }
 
-    private string Describe(long stalledMs, Health now)
+    private string Describe(long stalledMs, Health now, string dumpOutcome)
     {
         var pause = now.GcPause - _healthy.GcPause;
         int gen2 = now.Gen2 - _healthy.Gen2;
@@ -187,7 +191,7 @@ internal sealed class HangWatchdog : IDisposable
         sb.Append(CultureInfo.InvariantCulture, $"  managed heap  {GC.GetTotalMemory(false) / (1024 * 1024):N0} MB\n");
         sb.Append(CultureInfo.InvariantCulture, $"  page faults   +{faults:N0} during the stall\n");
         sb.Append(CultureInfo.InvariantCulture, $"  working set   {now.WorkingSet / (1024 * 1024):N0} MB\n");
-        sb.Append(CultureInfo.InvariantCulture, $"  dump          {_dumps} of at most {MaxDumps} this session\n");
+        sb.Append(CultureInfo.InvariantCulture, $"  dump          {_dumps} of at most {MaxDumps} this session - {dumpOutcome}\n");
 
         // The one reading a dump cannot do for itself: this thread is suspended by a blocking collection, so
         // when the pause accounts for the stall the stacks in the dump are of whatever ran after it.
@@ -197,28 +201,93 @@ internal sealed class HangWatchdog : IDisposable
         return sb.ToString();
     }
 
-    private bool WriteDump(string path)
+    private bool WriteDump(string path, out string outcome)
     {
         // Writing a dump suspends every other thread until it is done, so this lengthens the very freeze it
         // is recording. That is the price of catching the stack in the act, and the app is already stuck.
-        uint type = _detail switch
+        //
+        // Taking a dump of one's own process is asking dbghelp to read a heap it is itself allocating from,
+        // and it fails part way often enough to matter - MEASURED at 1 run in 5. A second attempt is cheap
+        // and usually lands, and thread stacks are the fallback when it does not.
+        string refused = "";
+        for (int attempt = 0; attempt < 2; attempt++)
         {
-            DumpDetail.Stacks => MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules,
-            DumpDetail.Everything => MiniDumpWithFullMemory | MiniDumpWithDataSegs | MiniDumpWithHandleData
-                                     | MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo | MiniDumpWithThreadInfo,
-            _ => MiniDumpWithPrivateReadWriteMemory | MiniDumpWithDataSegs | MiniDumpWithHandleData
-                 | MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo | MiniDumpWithThreadInfo,
-        };
+            if (TryWriteDump(path, Flags(_detail), out refused))
+            {
+                outcome = $"{_detail} dump written ({Length(path)})"
+                          + (attempt > 0 ? " on the second attempt" : "");
+                return true;
+            }
+        }
+        // Whatever turned the fuller dump down, thread stacks are a fraction of the size and ask far less of
+        // the process, so they are worth one more try before giving up on the useful half of the evidence.
+        if (_detail != DumpDetail.Stacks && TryWriteDump(path, Flags(DumpDetail.Stacks), out _))
+        {
+            outcome = $"{_detail} dump refused ({refused}); wrote thread stacks only ({Length(path)})";
+            return true;
+        }
+        outcome = $"NO DUMP WRITTEN: {refused}";
+        return false;
+    }
+
+    private static string Length(string path)
+    {
+        try { return $"{new FileInfo(path).Length / 1024:N0} KB"; } catch { return "size unknown"; }
+    }
+
+    private static uint Flags(DumpDetail detail) => detail switch
+    {
+        DumpDetail.Stacks => MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules,
+        DumpDetail.Everything => MiniDumpWithFullMemory | MiniDumpWithDataSegs | MiniDumpWithHandleData
+                                 | MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo | MiniDumpWithThreadInfo,
+        _ => MiniDumpWithPrivateReadWriteMemory | MiniDumpWithDataSegs | MiniDumpWithHandleData
+             | MiniDumpWithUnloadedModules | MiniDumpWithFullMemoryInfo | MiniDumpWithThreadInfo,
+    };
+
+    /// <summary>Test seam: given what a dump is being asked for, whether to refuse it. It makes the real call
+    /// fail rather than standing in for the failure, so everything that follows - including reading what
+    /// Windows gave as the reason - is the same code a refusal on a real machine goes through.</summary>
+    internal static Func<uint, bool>? RefuseDumpForTesting;
+
+    internal static uint FlagsForTesting(DumpDetail detail) => Flags(detail);
+
+    private static bool TryWriteDump(string path, uint type, out string failure)
+    {
         try
         {
+            // Refusing still goes through dbghelp, with a handle it cannot use: the call fails for real, so
+            // what follows - reading the reason Windows gives and explaining it - is the same code a refusal
+            // on a real machine runs. Some dump kinds will write something even from a bad handle, hence the
+            // second half of the condition.
+            bool refuse = RefuseDumpForTesting?.Invoke(type) == true;
             using var file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-            if (MiniDumpWriteDump(GetCurrentProcess(), (uint)Environment.ProcessId, file.SafeFileHandle, type,
-                                  IntPtr.Zero, IntPtr.Zero, IntPtr.Zero))
+            if (MiniDumpWriteDump(refuse ? IntPtr.Zero : GetCurrentProcess(), (uint)Environment.ProcessId,
+                                  file.SafeFileHandle, type, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero) && !refuse)
+            {
+                failure = "";
                 return true;
+            }
+            failure = Explain(Marshal.GetLastWin32Error());
         }
-        catch { /* fall through to the delete below */ }
+        catch (Exception ex) { failure = $"{ex.GetType().Name}: {ex.Message}"; }
         try { File.Delete(path); } catch { /* nothing else to try */ }
         return false;
+    }
+
+    /// <summary>What Windows said, in words as well as in numbers. dbghelp reports its failures as HRESULTs
+    /// rather than plain codes, so those are unwrapped - otherwise the one error that actually turns up here
+    /// reads as a meaningless negative number. The two worth naming are that dumping your own process is a
+    /// pattern security software blocks, and that a dump of a program holding a large file is not small.</summary>
+    internal static string Explain(int error)
+    {
+        if ((error & 0xFFFF0000u) == 0x80070000u) error &= 0xFFFF;   // HRESULT_FROM_WIN32
+        string hint = error switch
+        {
+            5 or 299 => " - reading one's own process to dump it is a pattern security software interferes with",
+            112 => " - no room left where the dump was going",
+            _ => "",
+        };
+        return $"{new Win32Exception(error).Message} ({error}){hint}";
     }
 
     private static Health Sample()
@@ -247,14 +316,19 @@ internal sealed class HangWatchdog : IDisposable
     private const uint MiniDumpWithFullMemoryInfo = 0x0800;
     private const uint MiniDumpWithThreadInfo = 0x1000;
 
+    // By name alone these would be searched for beside the executable first, and Cascade is a single file
+    // people copy about - so the folder it happens to be sitting in decides which dbghelp gets loaded.
     [DllImport("dbghelp.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool MiniDumpWriteDump(IntPtr process, uint processId, SafeHandle file, uint type,
                                                  IntPtr exception, IntPtr userStream, IntPtr callback);
 
     [DllImport("kernel32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern IntPtr GetCurrentProcess();
 
     [DllImport("user32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool IsHungAppWindow(IntPtr window);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -273,5 +347,6 @@ internal sealed class HangWatchdog : IDisposable
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool K32GetProcessMemoryInfo(IntPtr process, ref ProcessMemoryCounters counters, uint size);
 }
