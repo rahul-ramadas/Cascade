@@ -114,6 +114,10 @@ internal sealed class MiniMapControl : Control
     /// <summary>Throws away the summary so the next paint rebuilds it.</summary>
     public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; _cacheRows = -1; Invalidate(); }
 
+    /// <summary>The filters look different but match the same rows: work the colours out again without
+    /// forgetting where the view was tracked, which would re-centre a window the user had dragged.</summary>
+    internal void InvalidateColors() { _builtGeneration = -1; _cacheRows = -1; Invalidate(); }
+
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
@@ -127,6 +131,9 @@ internal sealed class MiniMapControl : Control
     internal int RowPixelsForTesting => _rowPixels;
     internal int RowsPerPixelForTesting => _step;
     internal long TopRowForTesting => _top;
+    /// <summary>The view position the window was last placed for. Forgetting it re-centres the map, which
+    /// would undo a drag - so a refresh that only means "the colours changed" must leave it alone.</summary>
+    internal long TrackedViewForTesting => _trackedView;
     internal long SpanForTesting => _span;
     internal long RowAtForTesting(int slot) => slot >= 0 && slot < _slots ? _rowAt[slot] : -1;
     internal int ColourAtForTesting(int slot) => slot >= 0 && slot < _slots ? _colour[slot] : 0;

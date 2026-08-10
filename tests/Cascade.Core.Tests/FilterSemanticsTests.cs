@@ -304,4 +304,114 @@ public class FilterSemanticsTests
         Assert.Equal(new[] { grand }, child.Children);
         Assert.Equal(child, grand.Parent);
     }
+
+    /// <summary>The tree the two comparison tests below mutate. Ids are fixed so the copies line up.</summary>
+    private static FilterCollection Shaped()
+    {
+        var c = new FilterCollection();
+        var error = new Filter { Id = "a", Enabled = true, Match = { Text = "Error" }, Style = { Bold = true } };
+        var disk = new Filter { Id = "b", Kind = FilterKind.Exclude, Match = { Text = "disk", Regex = true } };
+        var marked = new Filter { Id = "c", Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 2 } };
+        c.Add(error);
+        c.Add(disk, error);
+        c.Add(marked);
+        return c;
+    }
+
+    private static Filter At(FilterCollection c, string id) => c.FindById(id)!;
+
+    /// <summary>The rule the appearance-only edit path turns on: two trees filter the same iff every filter
+    /// is still in the same place with the same predicate, kind and enabled state. Anything that only
+    /// decides how a row is painted must be invisible to it, and everything else must not be.</summary>
+    [Fact]
+    public void SameMatching_ignores_appearance_and_catches_everything_else()
+    {
+        var baseline = Shaped();
+
+        void Same(string what, Action<FilterCollection> change)
+        {
+            var other = Shaped();
+            change(other);
+            Assert.True(FilterCollection.SameMatching(baseline.Roots, other.Roots), what);
+        }
+
+        void Differs(string what, Action<FilterCollection> change)
+        {
+            var other = Shaped();
+            change(other);
+            Assert.False(FilterCollection.SameMatching(baseline.Roots, other.Roots), what);
+        }
+
+        Same("an untouched copy", _ => { });
+        Same("a text colour", c => At(c, "a").Style.Foreground = new RgbColor(1, 2, 3));
+        Same("a background", c => At(c, "b").Style.Background = new RgbColor(4, 5, 6));
+        Same("bold", c => At(c, "a").Style.Bold = null);
+        Same("italic", c => At(c, "c").Style.Italic = true);
+        Same("underline", c => At(c, "a").Style.Underline = true);
+        Same("a description", c => At(c, "b").Description = "disk errors");
+
+        Differs("the pattern", c => At(c, "b").Match.Text = "disc");
+        Differs("the regex flag", c => At(c, "b").Match.Regex = false);
+        Differs("case sensitivity", c => At(c, "a").Match.CaseSensitive = true);
+        Differs("the match type", c => At(c, "c").Match.Type = FilterMatchType.Text);
+        Differs("the marker", c => At(c, "c").Match.MarkerIndex = 3);
+        Differs("include or exclude", c => At(c, "b").Kind = FilterKind.Include);
+        Differs("switching one on", c => At(c, "b").Enabled = true);
+        Differs("switching one off", c => At(c, "a").Enabled = false);
+        Differs("which filter this is", c => At(c, "a").Id = "z");
+        Differs("a filter added", c => c.Add(new Filter { Id = "d", Match = { Text = "new" } }));
+        Differs("a filter removed", c => c.Remove(At(c, "c")));
+        Differs("a child added", c => c.Add(new Filter { Id = "d", Match = { Text = "new" } }, At(c, "a")));
+        Differs("the order of two filters", c => c.Move(At(c, "c"), null, 0));
+        Differs("one of them nested elsewhere", c => c.Move(At(c, "b"), At(c, "c"), 0));
+        Differs("one of them un-nested", c => c.Outdent(At(c, "b")));
+    }
+
+    /// <summary>The other half of the pair: undo records an edit, so it must see a colour change and must
+    /// not see a filter being switched on. The two comparisons share their predicate test, and this is what
+    /// pins the difference between them.</summary>
+    [Fact]
+    public void SameStructure_catches_appearance_and_ignores_enabling()
+    {
+        var baseline = Shaped();
+
+        var restyled = Shaped();
+        At(restyled, "a").Style.Underline = true;
+        Assert.False(FilterCollection.SameStructure(baseline.Roots, restyled.Roots));
+        Assert.True(FilterCollection.SameMatching(baseline.Roots, restyled.Roots));
+
+        var toggled = Shaped();
+        At(toggled, "b").Enabled = true;
+        Assert.True(FilterCollection.SameStructure(baseline.Roots, toggled.Roots));
+        Assert.False(FilterCollection.SameMatching(baseline.Roots, toggled.Roots));
+
+        var retyped = Shaped();
+        At(retyped, "b").Match.Text = "disc";
+        Assert.False(FilterCollection.SameStructure(baseline.Roots, retyped.Roots));
+        Assert.False(FilterCollection.SameMatching(baseline.Roots, retyped.Roots));
+    }
+
+    /// <summary>Why skipping the pipeline for an appearance edit is legal at all: a snapshot hands back the
+    /// LIVE filter, not a copy of its style, so restyling one is visible through a snapshot built before the
+    /// change. If this ever stopped holding, the log view would go on painting the old colours.</summary>
+    [Fact]
+    public void A_lines_colour_is_read_from_the_live_filter_not_from_the_snapshot()
+    {
+        var c = new FilterCollection();
+        var f = Make("Error", enabled: true);
+        f.Style.Foreground = new RgbColor(1, 2, 3);
+        c.Add(f);
+
+        var snapshot = FilterSnapshot.Build(c);
+        Assert.Same(f, snapshot.Evaluate("Error: disk".AsSpan(), 0, null).ColorFilter);
+
+        f.Style.Foreground = new RgbColor(9, 9, 9);
+        f.Style.Underline = true;
+
+        var again = snapshot.Evaluate("Error: disk".AsSpan(), 0, null);
+        Assert.Same(f, again.ColorFilter);
+        var style = StyleResolver.Resolve(again.ColorFilter!, new ResolvedStyle(default, default, false, false));
+        Assert.Equal(new RgbColor(9, 9, 9), style.Foreground);
+        Assert.True(style.Underline);
+    }
 }

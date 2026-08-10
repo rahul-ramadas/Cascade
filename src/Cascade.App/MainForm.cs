@@ -48,6 +48,7 @@ public sealed class MainForm : Form
     };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Visible = false, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
+    private HangWatchdog? _watchdog;
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
@@ -240,6 +241,9 @@ public sealed class MainForm : Form
 
         _refreshTimer.Tick += (_, _) =>
         {
+            _watchdog?.Beat();
+            if (_watchdog?.TakeReport() is { } dump)
+                ShowFindMessage($"Hang recorded: {dump}", Path.Combine(HangWatchdog.Folder, dump));
             if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _grid.InvalidateMatchMap(); _filterTree.RefreshCounts(); }
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
             if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.ClearViewAnchor(); _anchorActive = false; }
@@ -247,6 +251,7 @@ public sealed class MainForm : Form
             FlushConfig();
         };
         _refreshTimer.Start();
+        SyncHangWatchdog();
 
         Shown += (_, _) => ProcessArgs(args);
         FormClosing += OnClosing;
@@ -964,6 +969,12 @@ public sealed class MainForm : Form
 
     private void OnFiltersChanged()
     {
+        // An edit that changed only how filters LOOK needs no pass over the file: every visible line is
+        // already the right one, and both the log view and the map resolve a line's colour from the live
+        // filter each time they paint. Deciding it from the two trees rather than trusting the caller to say
+        // so means a path that forgets cannot get it wrong - it just re-filters, as it always did.
+        bool appearanceOnly = _history.PendingRoots is { } before
+                              && FilterCollection.SameMatching(before, _doc.Filters.Roots);
         // Every structural edit funnels through here, so this is where a snapshot taken before one becomes
         // an undo entry - or is dropped, when the tree turns out not to have changed.
         _history.Commit(_doc.Filters);
@@ -972,6 +983,14 @@ public sealed class MainForm : Form
         // rather than tracked - ticking a filter by hand lights the matching preset up.
         _presets.RefreshActive();
         _filtersDirty = true;
+        if (appearanceOnly)
+        {
+            // The list is already repainted by the SyncToModel every caller does before getting here.
+            _grid.RefreshColors();
+            UpdateTitle();
+            UpdateStatus();
+            return;
+        }
         // Capture where the viewport is BEFORE the visible-line set changes, so the same line can be held at
         // the same place on screen while the new matches stream in.
         var anchor = _grid.CaptureViewAnchor();
@@ -991,7 +1010,11 @@ public sealed class MainForm : Form
 
     /// <summary>Puts a restored tree on screen. Deliberately not routed through <see cref="OnFiltersChanged"/>
     /// for the history's sake - the snapshot has already been swapped onto the other stack, and committing
-    /// again here would record undoing as an edit of its own.</summary>
+    /// again here would record undoing as an edit of its own.
+    ///
+    /// It also cannot take that method's appearance-only shortcut, even when all the undo put back was a
+    /// colour: a restore swaps in CLONES of the filters, so the snapshot still in force points at the
+    /// instances that were replaced, and painting from it would show the styles that were just undone.</summary>
     private void ApplyHistory(string? label, string emptyMessage)
     {
         if (label is null) { ShowFindMessage(emptyMessage); return; }
@@ -1050,12 +1073,25 @@ public sealed class MainForm : Form
         using var dlg = new FilterEditDialog(filter, isNew: false, _doc.Filters.EnumerateDepthFirst().ToList(),
                                              filter.Parent, ViewDefaults);
         _history.Begin("Edit Filter", _doc.Filters);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-        {
-            _filterTree.SyncToModel();
-            OnFiltersChanged();
-        }
+        if (dlg.ShowDialog(this) == DialogResult.OK) CommitFilterEdit();
         else _history.Abandon();
+    }
+
+    /// <summary>What an accepted edit of one filter does. The rows are already there, so only what changed is
+    /// touched, and the funnel works out for itself whether anything needs re-filtering.</summary>
+    private void CommitFilterEdit()
+    {
+        _filterTree.SyncToModel();
+        OnFiltersChanged();
+    }
+
+    /// <summary>Test seam: an edit accepted in the filter dialog, which is modal and so cannot be driven from
+    /// a headless check. <paramref name="edit"/> stands in for what the dialog writes to the filter.</summary>
+    internal void EditFilterForTesting(Action edit)
+    {
+        _history.Begin("Edit Filter", _doc.Filters);
+        edit();
+        CommitFilterEdit();
     }
 
     /// <summary>Appearance, and only appearance, for a group of filters: a pattern belongs to one filter, so
@@ -1615,7 +1651,16 @@ public sealed class MainForm : Form
         SnapSplitter();
         _filterTree.SetSettings(_settings);
         RefreshRecentMenus();
+        SyncHangWatchdog();
         UpdateStatus();
+    }
+
+    /// <summary>Starts or stops the hang watchdog to match the preference. Built fresh rather than adjusted,
+    /// because the only things it holds are the window and how long to wait.</summary>
+    private void SyncHangWatchdog()
+    {
+        _watchdog?.Dispose();
+        _watchdog = HangWatchdog.Start(this, _settings);
     }
 
     private void ExportSettings()
@@ -1906,6 +1951,9 @@ public sealed class MainForm : Form
     {
         if (!OfferToSaveFilters()) { e.Cancel = true; return; }
         _refreshTimer.Stop();
+        // Nothing beats once the timer is down, so the watchdog would call an ordinary shutdown a hang.
+        _watchdog?.Dispose();
+        _watchdog = null;
         _settingsDirty = _stateDirty = true;   // a clean exit rewrites both, as it always has
         FlushConfig(force: true);
         Hide();
@@ -1948,7 +1996,7 @@ public sealed class MainForm : Form
     // down either way, whether we ask or the process simply ends.
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _doc.Dispose();
+        if (disposing) { _watchdog?.Dispose(); _doc.Dispose(); }
         base.Dispose(disposing);
     }
 

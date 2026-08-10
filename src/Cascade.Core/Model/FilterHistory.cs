@@ -32,6 +32,10 @@ public sealed class FilterHistory
 
     public int Count => _undo.Count;
 
+    /// <summary>The tree as it stood when <see cref="Begin"/> was called, or null when no edit is under way.
+    /// Lets the caller ask what an edit actually changed before <see cref="Commit"/> disposes of it.</summary>
+    public IReadOnlyList<Filter>? PendingRoots => _pending?.Roots;
+
     /// <summary>Records the state an edit is about to change.</summary>
     public void Begin(string label, FilterCollection filters) => _pending = new Entry(label, filters.CloneRoots());
 
