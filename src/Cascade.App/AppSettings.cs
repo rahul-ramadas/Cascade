@@ -80,8 +80,10 @@ public sealed class AppSettings
     /// for the machine where a freeze reproduces, and a dump of a process holding a large log is not small.</summary>
     public bool HangWatchdog { get; set; }
 
-    /// <summary>How long the window may go without answering before that counts as a hang.</summary>
-    public int HangWatchdogSeconds { get; set; } = 5;
+    /// <summary>How long the window may go without answering before that counts as a hang. Windows waits
+    /// five seconds before it calls a window not responding, but a reader notices long before that, so this
+    /// is deliberately shorter than the point at which the shell starts drawing over the app.</summary>
+    public int HangWatchdogSeconds { get; set; } = 2;
 
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
