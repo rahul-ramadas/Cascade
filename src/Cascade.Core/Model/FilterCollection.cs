@@ -40,10 +40,7 @@ public sealed class FilterCollection
         for (int i = 0; i < a.Count; i++)
         {
             Filter x = a[i], y = b[i];
-            if (x.Id != y.Id || x.Description != y.Description || x.Kind != y.Kind) return false;
-            if (x.Match.Type != y.Match.Type || x.Match.Text != y.Match.Text ||
-                x.Match.CaseSensitive != y.Match.CaseSensitive || x.Match.Regex != y.Match.Regex ||
-                x.Match.MarkerIndex != y.Match.MarkerIndex) return false;
+            if (!SamePredicate(x, y) || x.Description != y.Description) return false;
             if (x.Style.Foreground != y.Style.Foreground || x.Style.Background != y.Style.Background ||
                 x.Style.Bold != y.Style.Bold || x.Style.Italic != y.Style.Italic ||
                 x.Style.Underline != y.Style.Underline) return false;
@@ -51,6 +48,33 @@ public sealed class FilterCollection
         }
         return true;
     }
+
+    /// <summary>Whether two trees would filter identically: the same filters in the same places, each with
+    /// the same predicate, kind and enabled state.
+    ///
+    /// Style and description are excluded because nothing in evaluation reads them - the view resolves a
+    /// line's colour from the live filter every time it paints. That is what lets an edit that changed only
+    /// how filters look skip the whole filtering pipeline instead of restarting a pass over the file.</summary>
+    public static bool SameMatching(IReadOnlyList<Filter> a, IReadOnlyList<Filter> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+        {
+            Filter x = a[i], y = b[i];
+            if (!SamePredicate(x, y) || x.Enabled != y.Enabled) return false;
+            if (!SameMatching(x.Children, y.Children)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>Everything about one filter that decides which lines it claims. Shared so that a field added
+    /// to <see cref="FilterMatch"/> later cannot be remembered by one of the two comparisons and forgotten
+    /// by the other.</summary>
+    private static bool SamePredicate(Filter x, Filter y) =>
+        x.Id == y.Id && x.Kind == y.Kind &&
+        x.Match.Type == y.Match.Type && x.Match.Text == y.Match.Text &&
+        x.Match.CaseSensitive == y.Match.CaseSensitive && x.Match.Regex == y.Match.Regex &&
+        x.Match.MarkerIndex == y.Match.MarkerIndex;
 
     public void Add(Filter filter, Filter? parent = null, int index = -1)
     {

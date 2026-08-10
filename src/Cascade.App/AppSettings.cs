@@ -76,6 +76,13 @@ public sealed class AppSettings
     /// <summary>Behind the occurrences on the line the search actually landed on.</summary>
     public int FindCurrentArgb { get; set; } = Color.FromArgb(255, 170, 60).ToArgb();
 
+    /// <summary>Whether to leave a memory dump behind when the window stops answering. Off by default: it is
+    /// for the machine where a freeze reproduces, and a dump of a process holding a large log is not small.</summary>
+    public bool HangWatchdog { get; set; }
+
+    /// <summary>How long the window may go without answering before that counts as a hang.</summary>
+    public int HangWatchdogSeconds { get; set; } = 5;
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 

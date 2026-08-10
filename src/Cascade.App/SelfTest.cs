@@ -72,6 +72,8 @@ internal static class SelfTest
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("cell selection", RunColumnSelectionChecks);
             ok &= Timed("underline", RunUnderlineChecks);
+            ok &= Timed("restyling", RunRestyleChecks);
+            ok &= Timed("hang watchdog", RunHangWatchdogChecks);
             ok &= Timed("letting go of the filters", RunCloseFiltersChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
@@ -2302,6 +2304,254 @@ internal static class SelfTest
             try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Changing how a filter LOOKS must not send the filtering pipeline round again. The lines on
+    /// screen are already the right ones, and both the log view and the map resolve a line's colour from the
+    /// live filter every time they paint, so the whole gesture is a repaint. On a large file the difference
+    /// is a window that answers straight away against one that stops answering for seconds.
+    ///
+    /// The half of this that earns its keep is the other one: an edit to what a filter MATCHES still has to
+    /// go the whole way round, and a shortcut that swallowed those would be far worse than the cost it saves.</summary>
+    private static bool RunRestyleChecks()
+    {
+        Line("-- restyling a filter --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_restyle_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        // Big enough that the map cannot hold the whole file even at its most compressed, so it is a WINDOW
+        // over the file - which is the only state in which moving it is something a check can see.
+        const int Lines = 60_000;
+        for (int i = 0; i < Lines; i++)
+            sb.Append(i % 5 == 0 ? $"ERROR line {i}\n" : i % 7 == 0 ? $"WARN line {i}\n" : $"plain line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        string filters = Path.Combine(Path.GetTempPath(), "cascade_st_restyle_" + Guid.NewGuid().ToString("N") + ".cascade");
+        File.WriteAllText(filters, """
+            { "filters": [ { "id": "f1", "enabled": true, "matchType": "Text", "text": "ERROR",
+                             "style": { "background": "#FFD0D0" } } ] }
+            """, new UTF8Encoding(false));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), new[] { path, "/Filters:" + filters })
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1000, 760),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 200 && doc.CompletedLineCount < Lines; i++) { Thread.Sleep(20); Pump(); }
+            for (int i = 0; i < 200 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+
+            var grid = form.GridForTesting;
+            var map = grid.MatchMapForTesting!;
+            var tree = form.FilterTreeForTesting;
+            var filter = doc.Filters.Roots[0];
+
+            bool ok = Check("the file is open with its filter", doc.CompletedLineCount == Lines && doc.MatchedLineCount == 12_000,
+                            $"{doc.CompletedLineCount} lines, {doc.MatchedLineCount} matched");
+
+            // Park deep in the file and then carry the map's window off centre, which is the one state a
+            // refresh that forgot where it was placed would visibly undo.
+            grid.ScrollToRow(30_000);
+            Pump();
+            map.GrabForTesting(map.Height / 2);
+            map.DragToForTesting(0);
+            map.DropForTesting();
+            map.LeaveForTesting();
+            Pump();
+
+            ok &= Check($"the map is a window over the file, not the whole of it ({map.SpanForTesting} of {doc.RowCount} rows)",
+                        map.SpanForTesting < doc.RowCount);
+            ok &= Check($"and it has been carried away from the middle (top row {map.TopRowForTesting})",
+                        map.TopRowForTesting > 0);
+
+            int generation = doc.FilterGeneration;
+            long matched = doc.MatchedLineCount, rows = doc.RowCount, firstRow = grid.FirstVisibleRow;
+            long mapTop = map.TopRowForTesting, tracked = map.TrackedViewForTesting;
+            int gridPaints = grid.PaintsForTesting, mapPaints = map.PaintsForTesting, listPaints = tree.PaintsForTesting;
+            int resolved = map.ColoursResolvedForTesting;
+            long visibleRow = (grid.FirstVisibleRow + 4) / 5 * 5;   // the first ERROR line on screen
+            ok &= Check($"a line the filter claims is in view (row {visibleRow})",
+                        doc.GetLineText(visibleRow).StartsWith("ERROR", StringComparison.Ordinal),
+                        doc.GetLineText(visibleRow));
+            bool underlinedBefore = grid.FontForRowForTesting(visibleRow).Underline;
+
+            form.EditFilterForTesting(() => filter.Style.Underline = true);
+            Pump();
+
+            ok &= Check($"underlining a filter starts no filtering pass (generation {generation})",
+                        doc.FilterGeneration == generation, $"generation is now {doc.FilterGeneration}");
+            ok &= Check("so there is nothing to wait for", doc.IsFilterIdle && !doc.IsBusy);
+            ok &= Check("the same lines are still shown", doc.MatchedLineCount == matched && doc.RowCount == rows,
+                        $"{doc.MatchedLineCount} matched, {doc.RowCount} rows");
+            ok &= Check("and the view has not moved", grid.FirstVisibleRow == firstRow,
+                        $"first row {firstRow} -> {grid.FirstVisibleRow}");
+            ok &= Check("nor has the map's window", map.TopRowForTesting == mapTop,
+                        $"map top {mapTop} -> {map.TopRowForTesting}");
+            ok &= Check($"and it is still tracking the view it was placed for ({tracked})",
+                        tracked >= 0 && map.TrackedViewForTesting == tracked,
+                        $"tracking {map.TrackedViewForTesting}");
+
+            // Nothing was re-evaluated, so the only proof the change reached the screen is that the places
+            // that draw a filter painted again.
+            ok &= Check($"the log view repaints ({grid.PaintsForTesting - gridPaints} times)",
+                        grid.PaintsForTesting > gridPaints);
+            ok &= Check("in an underlined face", !underlinedBefore && grid.FontForRowForTesting(visibleRow).Underline);
+            ok &= Check($"the filter list repaints ({tree.PaintsForTesting - listPaints} times)",
+                        tree.PaintsForTesting > listPaints);
+            ok &= Check($"and the map works its colours out again ({map.ColoursResolvedForTesting - resolved} rows)",
+                        map.PaintsForTesting > mapPaints && map.ColoursResolvedForTesting > resolved);
+
+            // A description is not a colour, but it is just as invisible to the engine.
+            generation = doc.FilterGeneration;
+            listPaints = tree.PaintsForTesting;
+            form.EditFilterForTesting(() => filter.Description = "the ones that matter");
+            Pump();
+            ok &= Check("naming a filter does not start one either", doc.FilterGeneration == generation);
+            ok &= Check("and the list still shows it", tree.PaintsForTesting > listPaints);
+
+            // The one that must NOT be shortcut.
+            generation = doc.FilterGeneration;
+            form.EditFilterForTesting(() => filter.Match.Text = "WARN");
+            for (int i = 0; i < 200 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("editing what a filter matches does start a pass",
+                        doc.FilterGeneration > generation, $"generation {generation} -> {doc.FilterGeneration}");
+            ok &= Check("and the view follows it", doc.MatchedLineCount is > 0 and not 12_000,
+                        $"{doc.MatchedLineCount} matched, was {matched}");
+
+            // Undo restores CLONES of the filters, so it cannot take the shortcut: the snapshot in force
+            // still points at the instances that were replaced. This is what says so out loud.
+            long afterEdit = doc.MatchedLineCount;
+            ok &= Check("undo puts the pattern back", form.ClickMenuForTesting("Edit", "Undo Edit Filter"));
+            for (int i = 0; i < 200 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check($"and the lines with it ({afterEdit} -> {doc.MatchedLineCount})", doc.MatchedLineCount == 12_000);
+            ok &= Check("undo of a restyle takes the underline away too",
+                        form.ClickMenuForTesting("Edit", "Undo Edit Filter") &&
+                        form.ClickMenuForTesting("Edit", "Undo Edit Filter"));
+            for (int i = 0; i < 200 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("the log view is drawn plainly again", !grid.FontForRowForTesting(visibleRow).Underline);
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            try { File.Delete(path); } catch { /* ignore */ }
+            try { File.Delete(filters); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>The hang watchdog: it must stay out of the way until asked for, notice a UI thread that has
+    /// stopped answering, leave one dump and one report per episode rather than a pile of them, and tell the
+    /// window so when it comes back.
+    ///
+    /// It is driven through a real <see cref="MainForm"/> rather than the class alone, because the half most
+    /// likely to be broken is the wiring: a heartbeat that is never sent looks exactly like a hang, and would
+    /// dump the process every few seconds of ordinary use.</summary>
+    private static bool RunHangWatchdogChecks()
+    {
+        Line("-- hang watchdog --");
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_st_hang_" + Guid.NewGuid().ToString("N"));
+        string? oldOn = Environment.GetEnvironmentVariable("CASCADE_HANG_WATCHDOG");
+        string? oldSeconds = Environment.GetEnvironmentVariable("CASCADE_HANG_SECONDS");
+        string? oldDir = Environment.GetEnvironmentVariable("CASCADE_HANG_DIR");
+        string? oldDump = Environment.GetEnvironmentVariable("CASCADE_HANG_DUMP");
+        Form? probe = null;
+        MainForm? form = null;
+        try
+        {
+            Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", null);
+            var off = new AppSettings();
+            bool ok = Check("nobody is watched unless they ask", !HangWatchdog.IsWanted(off));
+            ok &= Check("and the limit is the five seconds Windows itself calls not responding",
+                        HangWatchdog.SecondsToWait(off) == 5, $"{HangWatchdog.SecondsToWait(off)}s");
+            ok &= Check("a dump leaves the mapped log out unless told otherwise",
+                        HangWatchdog.WantedDetail() == DumpDetail.Heap);
+
+            probe = new Form { Opacity = 0, FormBorderStyle = FormBorderStyle.None, ClientSize = new Size(80, 60) };
+            ok &= Check("switched off, nothing is started", HangWatchdog.Start(probe, off) is null);
+
+            Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", "1");
+            ok &= Check("the environment can turn it on without touching the preferences", HangWatchdog.IsWanted(off));
+            Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", null);
+
+            // From here the PREFERENCE turns it on, which is how a user would.
+            Directory.CreateDirectory(dir);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_SECONDS", "1");
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", dir);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DUMP", "stacks");   // seconds, not minutes, to write
+            var settings = new AppSettings { HangWatchdog = true };
+
+            form = new MainForm(settings, new MachineState(), Array.Empty<string>())
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 600),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+
+            // Answering. Longer than the limit, so a heartbeat that never arrived would already have been
+            // called a hang - which is what makes this the check on the wiring.
+            for (int i = 0; i < 14; i++) { Pump(); Thread.Sleep(100); }
+            ok &= Check("a window that keeps answering is left alone", Directory.GetFiles(dir).Length == 0,
+                        string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));
+
+            // Not answering: no pumping at all, on the thread that owns the window. The real thing.
+            Thread.Sleep(1800);
+
+            string[] dumps = Directory.GetFiles(dir, "*.dmp");
+            string[] reports = Directory.GetFiles(dir, "cascade_hang_*.txt");
+            ok &= Check($"a stalled window is caught ({dumps.Length} dump(s), {reports.Length} report(s))",
+                        dumps.Length == 1 && reports.Length == 1);
+
+            if (reports.Length >= 1)
+            {
+                string text = File.ReadAllText(reports[0]);
+                foreach (string line in text.Split('\n'))
+                    if (line.Length > 0) Line("   | " + line.TrimEnd());
+                ok &= Check("the report says how long it was stuck",
+                            text.Contains("stopped answering for", StringComparison.Ordinal), text.Split('\n')[0]);
+                ok &= Check("and what the collector was doing, which is what the stacks cannot say",
+                            text.Contains("gc pause", StringComparison.Ordinal) &&
+                            text.Contains("VERDICT", StringComparison.Ordinal));
+                ok &= Check("and how hard the process was having to page",
+                            text.Contains("page faults", StringComparison.Ordinal));
+            }
+            if (dumps.Length >= 1)
+            {
+                byte[] head = new byte[4];
+                using (var f = File.OpenRead(dumps[0])) f.ReadExactly(head);
+                ok &= Check($"the dump is a real one ({new FileInfo(dumps[0]).Length / 1024:N0} KB)",
+                            Encoding.ASCII.GetString(head) == "MDMP", Encoding.ASCII.GetString(head));
+            }
+
+            // Coming back: the window is told what was written, so the evidence does not have to be found.
+            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+            ok &= Check("and the window says so when it comes back",
+                        form.StatusForTesting.Contains("Hang recorded", StringComparison.Ordinal),
+                        form.StatusForTesting);
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            try { probe?.Dispose(); } catch { /* ignore */ }
+            Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", oldOn);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_SECONDS", oldSeconds);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", oldDir);
+            Environment.SetEnvironmentVariable("CASCADE_HANG_DUMP", oldDump);
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
         }
     }
 

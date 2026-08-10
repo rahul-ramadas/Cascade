@@ -65,6 +65,7 @@ public sealed class LineGridControl : Control
     private long _firstRow;
     private int _hScroll;
     private int _maxContentWidth;
+    private int _paints;
     private long _caretRow = -1;
     private bool _dragging;
     // View stabilization across streaming view rebuilds: hold _anchorLine at _anchorOffset rows from the top
@@ -396,6 +397,14 @@ public sealed class LineGridControl : Control
 
     /// <summary>Tells the map its summary is stale (the filters, markers or file changed).</summary>
     internal void InvalidateMatchMap() => _map?.InvalidateSummary();
+
+    /// <summary>The filters are painted differently but still match the same lines. Colour is resolved at
+    /// paint time, so a repaint is the whole of it - nothing has to be re-evaluated or re-filtered.</summary>
+    internal void RefreshColors()
+    {
+        _map?.InvalidateColors();
+        Invalidate();
+    }
 
     internal MiniMapControl? MatchMapForTesting => _map;
 
@@ -806,6 +815,11 @@ public sealed class LineGridControl : Control
     }
 
     internal int RowsPaintedForTesting => _layout.Count;
+
+    /// <summary>How many times the view has actually repainted. A picture of it cannot answer that - drawing
+    /// a control to a bitmap paints it whether or not anything asked it to.</summary>
+    internal int PaintsForTesting => _paints;
+
     internal long CharOriginForTesting => _charOriginRow;
     internal int ViewportHeightForTesting => ViewportHeight;
     internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
@@ -923,6 +937,7 @@ public sealed class LineGridControl : Control
 
     protected override void OnPaint(PaintEventArgs e)
     {
+        _paints++;
         var g = e.Graphics;
         g.Clear(_settings.Background);
         if (_doc is null) { DrawFocusBar(g); return; }
