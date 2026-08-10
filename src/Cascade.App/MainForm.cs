@@ -1987,6 +1987,7 @@ public sealed class MainForm : Form
 
     internal string? FilterFileForTesting => _filterFilePath;
     internal bool FiltersAreDirtyForTesting => _filtersDirty;
+    internal bool WatchingForHangsForTesting => _watchdog is not null;
     internal void LoadFiltersForTesting(string path) => LoadFiltersFrom(path);
 
     // Releasing the mapping of a very large log means the kernel has to give back every page of it that is

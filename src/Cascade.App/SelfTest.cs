@@ -2510,13 +2510,9 @@ internal static class SelfTest
             // Answering. Longer than the limit, so a heartbeat that never arrived would already have been
             // called a hang - which is what makes this the check on the wiring.
             for (int i = 0; i < 14; i++) { Pump(); Thread.Sleep(100); }
-            string activity = Path.Combine(dir, "cascade_hang.log");
             // "Nothing was recorded" only means something once it is clear something was watching.
-            ok &= Check("the watchdog says it is watching",
-                        File.Exists(activity) && File.ReadAllText(activity).Contains("watching", StringComparison.Ordinal),
-                        File.Exists(activity) ? File.ReadAllText(activity).Trim() : "(no log)");
-            ok &= Check("and a window that keeps answering is left alone",
-                        Directory.GetFiles(dir, "*.dmp").Length == 0 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length == 0,
+            ok &= Check("the preference really did start one", form.WatchingForHangsForTesting);
+            ok &= Check("and a window that keeps answering is left alone", Directory.GetFiles(dir).Length == 0,
                         string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));
 
             // Not answering: no pumping at all, on the thread that owns the window. The real thing.

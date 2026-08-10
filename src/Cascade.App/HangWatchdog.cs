@@ -74,14 +74,7 @@ internal sealed class HangWatchdog : IDisposable
         if (!IsWanted(settings)) return null;
         string dir = Folder;
         try { Directory.CreateDirectory(dir); } catch { return null; }
-        int limitMs = SecondsToWait(settings) * 1000;
-        var detail = WantedDetail();
-        // Said out loud, because otherwise a session that recorded nothing cannot be told from one that was
-        // never watching - which is the difference between good news and a broken switch.
-        TryWrite(Path.Combine(dir, "cascade_hang.log"),
-                 $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} watching process {Environment.ProcessId}, " +
-                 $"limit {limitMs:N0} ms, {detail} dump\n");
-        return new HangWatchdog(form, limitMs, dir, detail);
+        return new HangWatchdog(form, SecondsToWait(settings) * 1000, dir, WantedDetail());
     }
 
     /// <summary>Where dumps and reports are written.</summary>
@@ -154,8 +147,9 @@ internal sealed class HangWatchdog : IDisposable
             if (_reported || _dumps >= MaxDumps) continue;
             _reported = true;
             _dumps++;
+            // A diagnostic that cannot record a stall must still never disturb the app it is watching.
             try { Capture(stalled); }
-            catch (Exception ex) { TryWrite(Path.Combine(_dir, "cascade_hang.log"), "watchdog failed: " + ex + "\n"); }
+            catch { /* the report is written first, so most failures have already left something behind */ }
         }
     }
 
@@ -169,9 +163,7 @@ internal sealed class HangWatchdog : IDisposable
 
         // The report goes first: if writing a dump of a process this big fails, this is still enough to say
         // what kind of stall it was.
-        string report = Describe(stalledMs, now);
-        TryWrite(stem + ".txt", report);
-        TryWrite(Path.Combine(_dir, "cascade_hang.log"), report + "\n");
+        TryWrite(stem + ".txt", Describe(stalledMs, now));
 
         string dump = stem + ".dmp";
         Volatile.Write(ref _pendingReport, Path.GetFileName(WriteDump(dump) ? dump : stem + ".txt"));
@@ -244,7 +236,7 @@ internal sealed class HangWatchdog : IDisposable
 
     private static void TryWrite(string path, string text)
     {
-        try { File.AppendAllText(path, text); } catch { /* best-effort: this is the diagnostic, not the app */ }
+        try { File.WriteAllText(path, text); } catch { /* best-effort: this is the diagnostic, not the app */ }
     }
 
     private const uint MiniDumpWithDataSegs = 0x0001;
