@@ -58,6 +58,8 @@ public sealed class LineGridControl : Control
     private FontFamily? _fontFamily;
     private int _rowHeight = 16;
     private int _charWidth = 8;
+    private readonly int[] _charWidths = new int[8];
+    private readonly Dictionary<int, SolidBrush> _brushes = new();
     /// <summary>Whether every character is the same width, measured rather than asked of the family name.
     /// It is what decides whether a column is sized in characters or in pixels.</summary>
     private bool _monospaced = true;
@@ -123,8 +125,11 @@ public sealed class LineGridControl : Control
 
     public LineGridControl()
     {
+        // Opaque as well as user-painted: the paint below covers every pixel that is not a child window -
+        // a row, or the strip of background under the last one - so letting WinForms fill the client area
+        // first only writes the whole window twice.
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
-                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw | ControlStyles.Opaque, true);
         BackColor = Color.White;
         // Added in this order because docking runs from the end of the collection backwards: the scrollbar
         // and map take a full-height strip each, and the sideways bar gets what is left, so it stops short
@@ -342,8 +347,7 @@ public sealed class LineGridControl : Control
             if (b <= a) continue;
             int x0 = SegmentX(text, from, a, gutter, font);
             int x1 = SegmentX(text, from, b, gutter, font);
-            using var brush = new SolidBrush(colour);
-            g.FillRectangle(brush, x0, y, Math.Max(1, x1 - x0), _rowHeight);
+            g.FillRectangle(Fill(colour), x0, y, Math.Max(1, x1 - x0), _rowHeight);
         }
     }
 
@@ -559,6 +563,7 @@ public sealed class LineGridControl : Control
         ClearCharSelection();
         ClearViewAnchor();
         RebuildFonts();
+        _map?.InvalidateColors();   // another file: nothing remembered about the last one still holds
         RefreshView();
     }
 
@@ -566,6 +571,9 @@ public sealed class LineGridControl : Control
     {
         _settings = settings;
         RebuildFonts();
+        // The settings decide what counts as "no colour at all", so the map's remembered colours were
+        // worked out against them and have to be worked out again.
+        _map?.InvalidateColors();
         RefreshView();
     }
 
@@ -589,6 +597,9 @@ public sealed class LineGridControl : Control
         _rowHeight = Math.Max(FontRegular.Height + Math.Max(0, _settings.ExtraLineSpacing), 8);
         _charWidth = Math.Max(1, TextRenderer.MeasureText("0", FontRegular, new Size(1000, 100),
             TextFormatFlags.NoPadding).Width);
+        for (int i = 0; i < _fonts.Length; i++)
+            _charWidths[i] = Math.Max(1, TextRenderer.MeasureText("0", _fonts[i], new Size(1000, 100),
+                TextFormatFlags.NoPadding).Width);
         // Asked of the shapes, not of the name: "Consolas" is fixed-pitch and "Segoe UI" is not, but a
         // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
         _monospaced = TextRenderer.MeasureText("iiiiiiiiii", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
@@ -939,8 +950,7 @@ public sealed class LineGridControl : Control
     {
         _paints++;
         var g = e.Graphics;
-        g.Clear(_settings.Background);
-        if (_doc is null) { DrawFocusBar(g); return; }
+        if (_doc is null) { g.Clear(_settings.Background); DrawFocusBar(g); return; }
 
         int gutter = GutterWidth();
         int contentW = ContentWidth;
@@ -975,6 +985,9 @@ public sealed class LineGridControl : Control
         _layout.Clear();
         int atY = TextTop;
         int bottom = ClientSize.Height - BottomInset;
+        // Kept for the whole frame, not read back per row: every read of Graphics.Clip builds a GDI+ region
+        // with a finaliser behind it, and a screenful of rows is a few thousand of those a second.
+        var paintClip = g.Clip;
         for (int i = 0; i < visible; i++)
         {
             long row = _firstRow + i;
@@ -997,19 +1010,19 @@ public sealed class LineGridControl : Control
             Color fore = selected ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
 
             Font font = SelectFont(style);
+            int charWidth = CharWidthOf(FontIndex(style));
             string shown = columns ? text : Expand(text);
             int segments = columns ? 1 : WrapInto(shown, contentW, font, _segments);
             int rowHeight = segments * _rowHeight;
             _layout.Add((row, y, rowHeight, segments));
 
             var rowRect = new Rectangle(0, y, ClientSize.Width - RightGutterWidth, rowHeight);
-            using (var b = new SolidBrush(back)) g.FillRectangle(b, rowRect);
+            g.FillRectangle(Fill(back), rowRect);
 
             DrawMarkers(g, line, y, rowHeight);
             DrawLineNumber(g, line, y, rowHeight, selected);
 
             var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
-            var clip = g.Clip;
             g.SetClip(contentRect);
             if (columns)
                 DrawColumns(g, text, row, gutter, y, fore, font, charSel);
@@ -1022,12 +1035,12 @@ public sealed class LineGridControl : Control
                     int to = s + 1 < _segments.Count ? _segments[s + 1] : shown.Length;
                     int sy = y + s * _rowHeight;
                     FillHighlights(g, shown, from, to, gutter, sy, font);
-                    runningMaxWidth = Math.Max(runningMaxWidth, DrawSegment(g, shown, from, to, gutter, sy, fore, font));
+                    runningMaxWidth = Math.Max(runningMaxWidth, DrawSegment(g, shown, from, to, gutter, sy, fore, font, charWidth));
                     DrawHighlightText(g, shown, from, to, gutter, sy, font);
                     if (charSel) DrawCharSelection(g, shown, from, to, gutter, sy, font);
                 }
             }
-            g.Clip = clip;
+            g.Clip = paintClip;
 
             if (_doc.IsLineTruncated(line))
                 TextRenderer.DrawText(g, " […]", FontItalic,
@@ -1038,6 +1051,13 @@ public sealed class LineGridControl : Control
 
             atY += rowHeight;
         }
+
+        paintClip.Dispose();
+
+        // Only the strip no row reached needs the background. Clearing the whole view first and then
+        // painting a row over every part of it wrote every pixel of the window twice.
+        if (atY < bottom)
+            g.FillRectangle(Fill(_settings.Background), 0, atY, ClientSize.Width - RightGutterWidth, bottom - atY);
 
         DrawFocusBar(g);
 
@@ -1052,15 +1072,16 @@ public sealed class LineGridControl : Control
     private void DrawFocusBar(Graphics g)
     {
         if (!Focused) return;
-        using var b = new SolidBrush(_settings.SelectionBack);
-        g.FillRectangle(b, 0, 0, LogicalToDeviceUnits(3), ClientSize.Height);
+        g.FillRectangle(Fill(_settings.SelectionBack), 0, 0, LogicalToDeviceUnits(3), ClientSize.Height);
     }
 
     protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
     protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
-    private Font SelectFont(ResolvedStyle s) =>
-        _fonts[(s.Bold ? 1 : 0) | (s.Italic ? 2 : 0) | (s.Underline ? 4 : 0)];
+    private Font SelectFont(ResolvedStyle s) => _fonts[FontIndex(s)];
+
+    private static int FontIndex(ResolvedStyle s) =>
+        (s.Bold ? 1 : 0) | (s.Italic ? 2 : 0) | (s.Underline ? 4 : 0);
 
     private void DrawColumnHeader(Graphics g, int gutter, int contentW)
     {
@@ -1925,16 +1946,58 @@ public sealed class LineGridControl : Control
 
     /// <summary>Draws one segment of a line - the whole of it when nothing is wrapped. Returns how wide the
     /// content is, which is what the horizontal scrollbar's range is built from.</summary>
-    private int DrawSegment(Graphics g, string text, int from, int to, int gutter, int y, Color fore, Font font)
+    private int DrawSegment(Graphics g, string text, int from, int to, int gutter, int y, Color fore, Font font, int charWidth)
     {
         string part = text[from..to];
         int x = gutter - (Wrapping ? 0 : _hScroll);
         TextRenderer.DrawText(g, part, font, new Point(x, y), fore, TextFlags);
         if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
-        int w = TextRenderer.MeasureText(g, part, font, new Size(int.MaxValue, _rowHeight),
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
-        return w + 8;
+        return DrawnWidth(part, font, charWidth) + 8;
     }
+
+    /// <summary>
+    /// How wide a stretch of text is drawn. Only the horizontal scrollbar's range is built from this, so it
+    /// is answered the cheapest way that is still exact.
+    /// <para>Measuring it is not cheap: <see cref="TextRenderer.MeasureText(string, Font)"/> lays the text
+    /// out through the same call that draws it, which MEASURED a sixth of every repaint on a full screen of
+    /// long lines. In a fixed-pitch face every plain-ASCII character is exactly one character wide -
+    /// verified exact against the measurement for Consolas, Courier New, Lucida Console and Cascadia Mono at
+    /// five sizes and every combination of bold, italic and underline - so the common case is a
+    /// multiplication. Anything else (a proportional face, or a character that may be drawn from a linked
+    /// font) is still measured, because those really do disagree, by tens of pixels.</para>
+    /// </summary>
+    private int DrawnWidth(ReadOnlySpan<char> text, Font font, int charWidth)
+        => charWidth > 0 && text.IndexOfAnyExceptInRange(' ', '~') < 0
+            ? text.Length * charWidth
+            : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
+                  TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+
+    /// <summary>The width of one character when every character is the same width, else 0.</summary>
+    private int CharWidthOf(int fontIndex) => _monospaced ? _charWidths[fontIndex] : 0;
+
+    /// <summary>A brush for a colour, kept rather than made. A frame fills a few hundred rectangles in a
+    /// handful of colours, and every one of those used to be a fresh GDI+ object and a finaliser.</summary>
+    private SolidBrush Fill(Color colour)
+    {
+        if (_brushes.TryGetValue(colour.ToArgb(), out var brush)) return brush;
+        // A view has as many colours as it has filters; anything beyond that is a settings change, and
+        // starting again is cheaper than remembering for ever.
+        if (_brushes.Count > 512) { foreach (var b in _brushes.Values) b.Dispose(); _brushes.Clear(); }
+        return _brushes[colour.ToArgb()] = new SolidBrush(colour);
+    }
+
+    /// <summary>What the horizontal scrollbar's range is built from, however it was arrived at.</summary>
+    internal int DrawnWidthForTesting(string text, int fontIndex)
+        => DrawnWidth(text, _fonts[fontIndex], CharWidthOf(fontIndex));
+
+    /// <summary>The same width, always measured - what the shortcut has to agree with.</summary>
+    internal int MeasuredWidthForTesting(string text, int fontIndex)
+        => DrawnWidth(text, _fonts[fontIndex], 0);
+
+    /// <summary>Whether the shortcut was taken, so a check can prove it is doing something.</summary>
+    internal bool WidthWasArithmeticForTesting(string text, int fontIndex)
+        => CharWidthOf(fontIndex) > 0 && text.AsSpan().IndexOfAnyExceptInRange(' ', '~') < 0;
+
 
     /// <summary>Paints the selected part of a line over the text already drawn, clipped to one segment. The
     /// row keeps its own colours - only the range is in the selection colours - which is how a text box
@@ -1961,15 +2024,13 @@ public sealed class LineGridControl : Control
         if (!MarkersVisible || _doc is null) return;
         // Keep the marker gutter the neutral margin color (not the line's fill color) so the marker
         // bars stay clearly visible regardless of the line's filter highlight or selection.
-        using (var bg = new SolidBrush(_settings.GutterBack))
-            g.FillRectangle(bg, 0, y, MarkerGutterWidth, height);
+        g.FillRectangle(Fill(_settings.GutterBack), 0, y, MarkerGutterWidth, height);
         byte mask = _doc.Markers.MaskOf(line);
         if (mask == 0) return;
         for (int m = 0; m < 8; m++)
         {
             if ((mask & (1 << m)) == 0) continue;
-            using var b = new SolidBrush(AppSettings.MarkerColors[m]);
-            g.FillRectangle(b, 3 + m * 5, y + 2, 4, _rowHeight - 4);
+            g.FillRectangle(Fill(AppSettings.MarkerColors[m]), 3 + m * 5, y + 2, 4, _rowHeight - 4);
         }
     }
 
@@ -1980,7 +2041,7 @@ public sealed class LineGridControl : Control
         int x = MarkerGutterWidth;
         // The whole height of the row, not one line of it: a wrapped row is several lines tall, and the
         // segments below the first would otherwise keep the row's own fill - or its selection colour.
-        using (var b = new SolidBrush(_settings.GutterBack)) g.FillRectangle(b, x, y, lnw, height);
+        g.FillRectangle(Fill(_settings.GutterBack), x, y, lnw, height);
         var color = selected ? _settings.SelectionBack : _settings.LineNumberColor;
         TextRenderer.DrawText(g, (line + 1).ToString(), FontRegular, new Rectangle(x, y, lnw - 6, _rowHeight),
             color, TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
@@ -2114,6 +2175,8 @@ public sealed class LineGridControl : Control
         {
             _tipTimer.Dispose(); _tips.Dispose();
             foreach (var f in _fonts) f?.Dispose();
+            foreach (var b in _brushes.Values) b.Dispose();
+            _brushes.Clear();
             _fontFamily?.Dispose();
         }
         base.Dispose(disposing);

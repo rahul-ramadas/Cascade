@@ -1037,4 +1037,68 @@ public class DocumentIntegrationTests
             File.Delete(path);
         }
     }
+
+    [Theory]
+    [InlineData(300)]     // answered on the calling thread
+    [InlineData(4_000)]   // shared out across the cores
+    public void Colouring_many_lines_at_once_agrees_with_asking_one_at_a_time(int count)
+    {
+        // Summarising the file for the minimap means colouring tens of thousands of rows at once, which is a
+        // fifth of a second of filter matching on one thread - paid on every scroll, by the thread that has
+        // to repaint. Sharing it out is only safe if it comes to exactly the same answer, so that is what is
+        // asserted here: against the very call the text view colours a row with.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 5_000; i++)
+        {
+            string kind = i % 11 == 0 ? "ERROR" : i % 5 == 0 ? "WARN" : "INFO";
+            string area = i % 3 == 0 ? "disk" : "net";
+            sb.Append(kind).Append(' ').Append(area).Append(" line ").Append(i).Append('\n');
+        }
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            // Nested, so which filter gives a line its colour is the deepest enabled one that matches - the
+            // part a per-line walk could get right and a bulk one wrong.
+            var error = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            var disk = new Filter { Enabled = true, Match = { Text = "disk" } };
+            doc.Filters.Add(error);
+            doc.Filters.Add(disk, error);
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "WARN" } });
+            doc.Filters.Add(new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "line 7" } });
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "line" } });   // so most rows have a colour
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            var lines = new long[count];
+            var got = new Filter?[count];
+            var rnd = new Random(11);
+            for (int i = 0; i < count; i++)
+                lines[i] = i % 17 == 0 ? -1 : rnd.Next(-3, 5_100);   // includes skips and out-of-range lines
+
+            doc.ColouringFilters(lines, count, got);
+
+            int coloured = 0;
+            for (int i = 0; i < count; i++)
+            {
+                long line = lines[i];
+                Filter? want = line >= 0 && line < 5_000
+                    ? doc.EvaluateText(doc.GetLineText(line), line).ColorFilter
+                    : null;
+                Assert.True(ReferenceEquals(want, got[i]),
+                            $"line {line}: expected {want?.DisplayName ?? "none"}, got {got[i]?.DisplayName ?? "none"}");
+                if (got[i] is not null) coloured++;
+            }
+            // The fixture has to be able to tell a right answer from a blank one.
+            Assert.True(coloured > count / 2, $"only {coloured} of {count} lines were coloured at all");
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
 }

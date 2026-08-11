@@ -65,6 +65,9 @@ internal sealed class MiniMapControl : Control
     private const int Blank = 1;                   // a real colour is always opaque, so this cannot collide
     private int[] _cache = Array.Empty<int>();
     private ulong[] _words = Array.Empty<ulong>();
+    private long[] _wantLines = Array.Empty<long>();
+    private Filter?[] _wantFilters = Array.Empty<Filter?>();
+    private readonly Dictionary<Filter, int> _colourOf = new();
     private long _cacheBase = -1;
     private long _cacheBaseLine = -1;
     private int _cacheGeneration = -1;
@@ -115,7 +118,9 @@ internal sealed class MiniMapControl : Control
     public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; _cacheRows = -1; Invalidate(); }
 
     /// <summary>The filters look different but match the same rows: work the colours out again without
-    /// forgetting where the view was tracked, which would re-centre a window the user had dragged.</summary>
+    /// forgetting where the view was tracked, which would re-centre a window the user had dragged. Also how
+    /// the two things the summary key does not cover - the settings, and which file is open - are
+    /// reported.</summary>
     internal void InvalidateColors() { _builtGeneration = -1; _cacheRows = -1; Invalidate(); }
 
     protected override void OnResize(EventArgs e)
@@ -296,6 +301,8 @@ internal sealed class MiniMapControl : Control
         long firstWord = _top >> 6;
         var matched = anyColour ? ReadMatchedRows(doc, firstWord, lastRow) : ReadOnlySpan<ulong>.Empty;
 
+        if (anyColour) ResolveColours(doc, rows, lastRow, matched, firstWord, defaults, settings);
+
         int at = 0;
         for (; at < slots; at++)
         {
@@ -310,7 +317,7 @@ internal sealed class MiniMapControl : Control
             for (long row = from; row < to; row++)
             {
                 if (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0) continue;
-                int argb = ColourOfRow(doc, row, defaults, settings);
+                int argb = ColourOfRow(row);
                 if (argb == 0) continue;
                 int k = 0;
                 while (k < kinds && colours[k] != argb) k++;
@@ -326,6 +333,60 @@ internal sealed class MiniMapControl : Control
             else if (kinds > 1) _colour[at] = PickColour(colours, counts, kinds, from);
         }
         return at;
+    }
+
+    /// <summary>
+    /// Works out the colour of every row the map is over that it does not already know, in one go.
+    /// <para>Asking line by line is what made dragging the scrollbar lag: a mapful is tens of thousands of
+    /// rows, and running the filters over a line is about a microsecond, so a rebuild spent a fifth of a
+    /// second on the thread that has to repaint. Gathering the unknown rows first lets the document share
+    /// them out across the cores, and lets the ones carried over from the last build cost nothing at
+    /// all.</para>
+    /// </summary>
+    private void ResolveColours(CascadeDocument doc, long rows, long lastRow, ReadOnlySpan<ulong> matched,
+        long firstWord, ResolvedStyle defaults, AppSettings settings)
+    {
+        int want = (int)Math.Min(int.MaxValue, Math.Max(0, lastRow - _top));
+        if (want <= 0) return;
+        if (_wantLines.Length < want) { _wantLines = new long[want]; _wantFilters = new Filter?[want]; }
+
+        // Rows to lines against ONE snapshot of the visible set, rather than a lookup apiece - the same
+        // reason the text view resolves a whole frame at a time.
+        int found = doc.LinesForRows(_top, _wantLines.AsSpan(0, want));
+        int asked = 0;
+        for (int i = 0; i < found; i++)
+        {
+            long row = _top + i;
+            bool skip = _cache[i] != Unknown ||
+                        (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0);
+            if (skip) _wantLines[i] = -1; else asked++;
+        }
+        for (int i = found; i < want; i++) _wantLines[i] = -1;
+        if (asked == 0) return;
+
+        _resolved += asked;
+        doc.ColouringFilters(_wantLines, found, _wantFilters);
+
+        // Turning a filter into a colour is a walk up its parents, and a few filters colour thousands of
+        // rows, so each one is worked out once per build.
+        _colourOf.Clear();
+        for (int i = 0; i < found; i++)
+        {
+            if (_wantLines[i] < 0) continue;
+            var filter = _wantFilters[i];
+            int argb = 0;
+            if (filter is not null && !_colourOf.TryGetValue(filter, out argb))
+                _colourOf[filter] = argb = ColourOf(filter, defaults, settings);
+            _cache[i] = argb == 0 ? Blank : argb;
+        }
+    }
+
+    private int ColourOfRow(long row)
+    {
+        int at = (int)(row - _cacheBase);
+        if (at < 0 || at >= _cache.Length) return 0;
+        int cached = _cache[at];
+        return cached is Unknown or Blank ? 0 : cached;
     }
 
     /// <summary>How much rarer than everything else a colour must be to take a pixel on its own.</summary>
@@ -378,13 +439,11 @@ internal sealed class MiniMapControl : Control
         new RgbColor(settings.Foreground.R, settings.Foreground.G, settings.Foreground.B),
         new RgbColor(settings.Background.R, settings.Background.G, settings.Background.B), false, false);
 
-    /// <summary>The colour the text area paints this line's background in, or its text colour when the
+    /// <summary>The colour the text area paints a line's background in, or its text colour when the
     /// filter sets only that, or nothing at all. Resolved through the same evaluation the grid uses, so the
     /// map cannot come to a different answer than the row it stands for.</summary>
-    private static int ColourOf(CascadeDocument doc, long line, ResolvedStyle defaults, AppSettings settings)
+    private static int ColourOf(Filter filter, ResolvedStyle defaults, AppSettings settings)
     {
-        var eval = doc.EvaluateText(doc.GetLineText(line), line);
-        if (eval.ColorFilter is not { } filter) return 0;
         var style = StyleResolver.Resolve(filter, defaults);
         var bg = Color.FromArgb(style.Background.R, style.Background.G, style.Background.B);
         if (bg.ToArgb() != settings.Background.ToArgb()) return bg.ToArgb();
@@ -396,18 +455,6 @@ internal sealed class MiniMapControl : Control
     /// <paramref name="slots"/> pixels, and never more than <see cref="MaxRowsPerPixel"/>.</summary>
     internal static int RowsPerPixelFor(long rows, int slots)
         => rows <= slots ? 1 : (int)Math.Min(MaxRowsPerPixel, (rows + slots - 1) / Math.Max(1, slots));
-
-    private int ColourOfRow(CascadeDocument doc, long row, ResolvedStyle defaults, AppSettings settings)
-    {
-        int at = (int)(row - _cacheBase);
-        if (at < 0 || at >= _cache.Length) { _resolved++; return ColourOf(doc, doc.RowToLine(row), defaults, settings); }
-        int cached = _cache[at];
-        if (cached != Unknown) return cached == Blank ? 0 : cached;
-        _resolved++;
-        int argb = ColourOf(doc, doc.RowToLine(row), defaults, settings);
-        _cache[at] = argb == 0 ? Blank : argb;
-        return argb;
-    }
 
     /// <summary>The slot standing for a row. One rate the whole way down, so this is division.</summary>
     private int SlotOf(long row)
@@ -701,10 +748,8 @@ internal sealed class MiniMapControl : Control
     /// rather than whichever filter happens to own the first row behind it.</summary>
     private long LineColoured(CascadeDocument doc, long from, long to, int argb)
     {
-        var settings = _grid.Settings;
-        var defaults = Defaults(settings);
         for (long row = from; row < to; row++)
-            if (ColourOfRow(doc, row, defaults, settings) == argb) return doc.RowToLine(row);
+            if (ColourOfRow(row) == argb) return doc.RowToLine(row);
         return doc.RowToLine(from);
     }
 }
