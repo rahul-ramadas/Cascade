@@ -79,6 +79,7 @@ internal static class SelfTest
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
             ok &= Timed("word wrap", RunWordWrapChecks);
+            ok &= Timed("text width", RunTextWidthChecks);
             ok &= Timed("filter tips", RunFilterTipChecks);
             ok &= Timed("find bar", RunFindBarChecks);
             ok &= Timed("find bar layout", RunFindBarLayoutChecks);
@@ -1431,6 +1432,15 @@ internal static class SelfTest
             ok &= Check("and sliding it read far fewer rows than starting over",
                         resolvedSliding * 4 < resolvedCold,
                         $"{resolvedSliding} rows read after a 400-row scroll, {resolvedCold} from cold");
+
+            // A change of settings has to reach the map: what counts as "no colour at all" is one of them,
+            // so the colours it remembered were worked out against the settings that were in force.
+            int beforeSettings = map.ColoursResolvedForTesting;
+            grid.ApplySettings(settings);
+            map.RebuildForTesting();
+            ok &= Check("a change of settings makes the map work its colours out again",
+                        map.ColoursResolvedForTesting > beforeSettings,
+                        $"{map.ColoursResolvedForTesting - beforeSettings} rows read");
 
             collection.Roots.Remove(special);
             doc.SetFilters(collection);
@@ -3143,6 +3153,75 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>
+    /// How wide a line is drawn decides how far right the view can be scrolled, and measuring it for every
+    /// row of every frame cost a sixth of a repaint. It is now worked out arithmetically whenever it can be
+    /// - a fixed-pitch face, plain ASCII - so what has to hold is that the shortcut and the measurement
+    /// never disagree, in either face, on either kind of text.
+    /// </summary>
+    private static bool RunTextWidthChecks()
+    {
+        Line("-- text width --");
+        bool ok = true;
+
+        string[] samples =
+        {
+            "",
+            "a",
+            "2026-08-10T12:00:00.123 [api-gateway] INFO  req-8891 accepted in 12ms",
+            new string('W', 400),
+            "  leading and trailing spaces   ",
+            "tabs are expanded before this point, so: plain",
+            "punctuation !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+            "caf\u00e9 na\u00efve \u4f60\u597d \u0442\u0435\u043a\u0441\u0442 emoji \U0001F600",   // must fall back to measuring
+            "control\u0001chars\u0007here",
+        };
+
+        var grid = new LineGridControl();
+        var settings = new AppSettings();
+        try
+        {
+            foreach (string family in new[] { "Consolas", "Segoe UI" })
+            {
+                settings.FontFamily = family;
+                grid.ApplySettings(settings);
+                bool monospaced = grid.MonospacedForTesting;
+                ok &= Check($"\"{family}\" is recognised as {(family == "Consolas" ? "fixed" : "proportional")} pitch",
+                            monospaced == (family == "Consolas"), $"monospaced={monospaced}");
+
+                int shortcuts = 0;
+                bool agrees = true;
+                foreach (string s in samples)
+                    for (int style = 0; style < 8; style++)
+                    {
+                        int drawn = grid.DrawnWidthForTesting(s, style);
+                        int measured = grid.MeasuredWidthForTesting(s, style);
+                        if (drawn != measured)
+                        {
+                            agrees = false;
+                            Check($"{family} style {style}: the width of \"{Clip(s)}\" agrees", false,
+                                  $"worked out {drawn}, measured {measured}");
+                            break;
+                        }
+                        if (grid.WidthWasArithmeticForTesting(s, style)) shortcuts++;
+                    }
+                ok &= Check($"every width in {family} agrees with the measurement", agrees, "");
+                // The shortcut has to be doing something in the fixed-pitch face, and nothing in the other,
+                // or this check would pass with it removed.
+                ok &= Check($"the shortcut is {(monospaced ? "taken" : "never taken")} in {family}",
+                            monospaced ? shortcuts > samples.Length * 4 : shortcuts == 0,
+                            $"{shortcuts} of {samples.Length * 8}");
+            }
+            return ok;
+        }
+        finally
+        {
+            grid.Dispose();
+        }
+
+        static string Clip(string s) => s.Length <= 24 ? s : s[..24] + "...";
     }
 
     /// <summary>Word wrap breaks the "one row, one line of pixels" rule the whole view is built on, so what

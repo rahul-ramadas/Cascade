@@ -300,6 +300,59 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>Evaluates a decoded line against the current filters (for coloring visible rows).</summary>
     public LineEval EvaluateText(ReadOnlySpan<char> text, long line) => CurrentSnapshot.Evaluate(text, line, Markers);
 
+    /// <summary>
+    /// The filter each of the first <paramref name="count"/> <paramref name="lines"/> takes its colour
+    /// from - <c>null</c> where nothing colours it - written into <paramref name="into"/>. A line given as
+    /// -1 is skipped and answered <c>null</c>, so a caller can ask about the ones it does not already know.
+    /// <para>Exactly what <see cref="EvaluateText"/> answers one line at a time, but <b>across every
+    /// core</b>. That matters because the caller is the minimap, which stands for tens of thousands of rows
+    /// at once: running the filters over that many lines is a fifth of a second on a single thread, and it
+    /// is asked for again on every scroll.</para>
+    /// </summary>
+    public void ColouringFilters(long[] lines, int count, Filter?[] into)
+    {
+        ArgumentNullException.ThrowIfNull(lines);
+        ArgumentNullException.ThrowIfNull(into);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(count, Math.Min(lines.Length, into.Length));
+        if (count <= 0) return;
+        Array.Clear(into, 0, count);
+        if (_src is null || _index is null) return;
+
+        var snapshot = CurrentSnapshot;
+        var markers = Markers;
+        var src = _src;
+        var index = _index;
+        var encoding = _enc.Encoding;
+        long length = src.Length;
+        long known = index.Count;
+
+        // Below this the fork and join cost more than the work does.
+        const int WorthSharingOut = 512;
+        if (count < WorthSharingOut)
+        {
+            var reader = new LineReader(src, encoding);
+            var context = snapshot.GetThreadContext();
+            for (int i = 0; i < count; i++) One(i, reader, context);
+            return;
+        }
+
+        // One reader and one match context per partition, never one per line: both carry scratch buffers
+        // that would otherwise be reallocated - or, worse, shared between threads.
+        Parallel.For(0, count, () => new LineReader(src, encoding), (i, _, reader) =>
+        {
+            One(i, reader, snapshot.GetThreadContext());
+            return reader;
+        }, _ => { });
+
+        void One(int i, LineReader reader, FilterSnapshot.MatchContext context)
+        {
+            long line = lines[i];
+            if (line < 0 || line >= known) return;
+            index.GetRange(line, length, out long s, out long e);
+            into[i] = snapshot.Evaluate(reader.GetChars(s, e), line, markers, null, context).ColorFilter;
+        }
+    }
+
     /// <summary>Every filter that deep-matches a line, switched-off ones included, in document order.
     /// For explaining a line to the user; not on any hot path.</summary>
     public List<Filter> FiltersMatching(long line)
