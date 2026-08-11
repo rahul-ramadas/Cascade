@@ -1038,6 +1038,76 @@ public class DocumentIntegrationTests
         }
     }
 
+    [Fact]
+    public void A_row_the_view_is_still_showing_keeps_its_colour_until_the_pass_drops_it()
+    {
+        // Reported as a flicker: switch a filter off and the lines it was showing turn into plain white text
+        // for a frame or two before they disappear. The visible set is rewritten IN PLACE, so until the sweep
+        // reaches a line the view is still listing it - and asked about that line the new filters answer
+        // "not shown", which has no colour at all. It must keep the appearance the filters that put it there
+        // gave it, so the view has one clean change rather than two.
+        const int lines = 200_000, alphaOnly = 150_000;   // 150,000 is a multiple of 10 and not of 7
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 10 == 0 ? "ALPHA" : i % 7 == 0 ? "BETA" : "plain").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        var alpha = new Filter { Enabled = true, Match = { Text = "ALPHA" } };
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(alpha);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
+        // A marker filter keeps the match cache out of it, so the next pass really sweeps the file and can be
+        // held part way. Answered from the cache the whole set is replaced in one go and there is no
+        // half-finished state to test - though the window this is about is just as real there. It has to be
+        // ENABLED to count: a filter nothing under it switches on is pruned, and prunes its veto with it.
+        // Nothing is marked, so it matches nothing and leaves what is on show exactly as it was.
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+
+        var gate = new SemaphoreSlim(0);
+        int blocks = 0;
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.True(doc.IsLineVisible(alphaOnly), "the line the check is about is not on show to begin with");
+            Assert.Same(alpha, doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+
+            doc.FilterCheckpointForTesting = _ =>
+            {
+                Interlocked.Increment(ref blocks);
+                gate.Wait(TimeSpan.FromSeconds(20));
+            };
+            alpha.Enabled = false;
+            doc.ApplyFilters();
+            WaitFor(() => Volatile.Read(ref blocks) >= 1, "the pass never finished a block");
+
+            // Held near the start of the file, so the sweep cannot have reached the line yet.
+            Assert.True(doc.FilterProcessedLineCount < alphaOnly,
+                        $"the pass got too far to test ({doc.FilterProcessedLineCount:N0})");
+            Assert.True(doc.IsLineVisible(alphaOnly), "the view has already dropped it, so there is nothing to draw");
+            Assert.Same(alpha, doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            WaitFilter(doc);
+
+            // And once the view has caught up it really is gone, colour and all.
+            Assert.False(doc.IsLineVisible(alphaOnly));
+            Assert.Null(doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+        }
+        finally
+        {
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(300)]     // answered on the calling thread
     [InlineData(4_000)]   // shared out across the cores
