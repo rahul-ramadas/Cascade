@@ -179,6 +179,7 @@ public sealed class MainForm : Form
 
     public MainForm(AppSettings settings, MachineState state, string[] args, UpdateService? updater = null)
     {
+        Automation.Suppress(this);
         _settings = settings;
         _state = state;
         _updater = updater;

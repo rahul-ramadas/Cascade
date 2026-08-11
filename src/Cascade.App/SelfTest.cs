@@ -74,6 +74,7 @@ internal static class SelfTest
             ok &= Timed("underline", RunUnderlineChecks);
             ok &= Timed("restyling", RunRestyleChecks);
             ok &= Timed("hang watchdog", RunHangWatchdogChecks);
+            ok &= Timed("automation", RunAutomationChecks);
             ok &= Timed("letting go of the filters", RunCloseFiltersChecks);
             ok &= Timed("find highlighting", RunFindHighlightChecks);
             ok &= Timed("find status wording", RunFindStatusChecks);
@@ -2631,6 +2632,105 @@ internal static class SelfTest
             Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", oldDir);
             Environment.SetEnvironmentVariable("CASCADE_HANG_DUMP", oldDump);
             try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>UI Automation is answered only when it is asked for. Checked by sending the very message a
+    /// client sends, to the real windows the app builds: the mechanism is a window message, so nothing above
+    /// it could tell the difference, and a window that still answers would still arm the teardown that
+    /// freezes the app for seconds on a machine that inspects thread creation.</summary>
+    private static bool RunAutomationChecks()
+    {
+        Line("-- automation --");
+        string? old = Environment.GetEnvironmentVariable(Automation.Variable);
+        try
+        {
+            // Read back below, so the group has to start from nothing rather than from what it inherited.
+            Environment.SetEnvironmentVariable(Automation.Variable, null);
+            bool ok = Check("a fresh installation does not answer automation", !new AppSettings().Automation);
+
+            Automation.Configure(false);
+            ok &= Check("nor does the app, left alone", !Automation.Wanted);
+            Automation.Configure(true);
+            ok &= Check("the preference turns it on", Automation.Wanted);
+
+            // Nothing calls Configure on the headless paths, so the answer they get is the bare default.
+            using (Automation.ForTesting(null))
+                ok &= Check("and a run that never settles the question is silent too", !Automation.Wanted);
+
+            Environment.SetEnvironmentVariable(Automation.Variable, "0");
+            Automation.Configure(true);
+            ok &= Check("the environment overrules the preference", !Automation.Wanted);
+            Environment.SetEnvironmentVariable(Automation.Variable, "1");
+            Automation.Configure(false);
+            ok &= Check("and does so in both directions", Automation.Wanted);
+            Environment.SetEnvironmentVariable(Automation.Variable, null);
+
+            var silent = AskDialogForProviders(automationWanted: false);
+            Line($"   | silent: window {silent.Window}, nested {silent.Nested}, older interface {silent.Msaa}");
+            ok &= Check("switched off, a window offers nothing", silent.Window == 0);
+            // The nested one is the check on the wiring: a dialog's controls are all added after the window
+            // has been hooked, so a hook that did not follow them would leave every one of them answering.
+            ok &= Check("nor does anything nested inside it", silent.Nested == 0);
+            ok &= Check("and the older interface is refused too, or WinForms builds the object anyway",
+                        silent.Msaa == 0);
+
+            var answering = AskDialogForProviders(automationWanted: true);
+            Line($"   | answering: window {answering.Window}, nested {answering.Nested}, older interface {answering.Msaa}");
+            ok &= Check("switched on, a window hands out a provider", answering.Window != 0);
+            ok &= Check("and so does a control nested inside it", answering.Nested != 0);
+            ok &= Check("and the older interface it can also be reached through", answering.Msaa != 0);
+
+            // The whole point of the warm-up is WHERE the cost lands. Held long enough that a call which
+            // waited for it could not possibly come back in time.
+            Automation.BeforeWarmUpForTesting = () => Thread.Sleep(600);
+            var clock = Stopwatch.StartNew();
+            var warmUp = Automation.PayTheStartupCost();
+            long handedBack = clock.ElapsedMilliseconds;
+            warmUp.Join(10_000);
+            ok &= Check($"the startup warm-up does not hold up the thread that starts it ({handedBack} ms)",
+                        handedBack < 300);
+            return ok;
+        }
+        finally
+        {
+            Automation.BeforeWarmUpForTesting = null;
+            Environment.SetEnvironmentVariable(Automation.Variable, old);
+            Automation.Configure(false);
+        }
+    }
+
+    /// <summary>Asks a real dialog, the way a client asks, for the two objects a window can be reached
+    /// through - at the window itself and at a control nested inside it.</summary>
+    private static (long Window, long Nested, long Msaa) AskDialogForProviders(bool automationWanted)
+    {
+        const uint WmGetObject = 0x003D;
+        const int UiaRootObjectId = -25;
+        const int ObjIdClient = -4;
+
+        using var scope = Automation.ForTesting(automationWanted);
+        using var dlg = new FilterEditDialog(new Filter { Match = { Text = "probe" } }, isNew: true)
+        {
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Opacity = 0,
+        };
+        dlg.Show();
+        Pump();
+
+        var nested = Nest(dlg) ?? throw new InvalidOperationException("the filter dialog has no text box to ask");
+        long window = (long)SendMessage(dlg.Handle, WmGetObject, IntPtr.Zero, UiaRootObjectId);
+        long inside = (long)SendMessage(nested.Handle, WmGetObject, IntPtr.Zero, UiaRootObjectId);
+        long msaa = (long)SendMessage(dlg.Handle, WmGetObject, IntPtr.Zero, ObjIdClient);
+        dlg.Close();
+        return (window, inside, msaa);
+
+        static Control? Nest(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+                if (c is TextBox) return c;
+                else if (Nest(c) is { } found) return found;
+            return null;
         }
     }
 
@@ -7621,6 +7721,9 @@ internal static class SelfTest
 
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern bool PeekMessage(out MSG message, IntPtr window, uint first, uint last, uint remove);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     /// <summary>Exported settings must come back exactly, or carrying them to another machine silently
     /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one

@@ -65,6 +65,9 @@ internal static class Program
         var settings = AppSettings.Load();
         var state = MachineState.Load();
 
+        Automation.Configure(settings.Automation);
+        _ = Automation.PayTheStartupCost();
+
         // Tidy up after previous runs first, and do it whether or not updating is switched on: turning
         // updates off must not strand a superseded executable or a half-finished download forever.
         try { UpdateInstaller.Sweep(AppInfo.ExePath); } catch { /* best effort */ }
@@ -146,6 +149,9 @@ internal static class Program
 
           CASCADE_SETTINGS_DIR    Directory holding settings.json and state.json
                                   (default %APPDATA%\Cascade).
+          CASCADE_AUTOMATION=1    Answer screen readers and UI automation. Off by default:
+                                  handing out a provider is what makes closing a window
+                                  stall on machines that inspect thread creation.
           CASCADE_UPDATE=off      Disable checking for updates at startup.
           CASCADE_UPDATE_FORCE=1  Install the latest release even if it is not newer.
           CASCADE_UPDATE_REPO     owner/name to update from.

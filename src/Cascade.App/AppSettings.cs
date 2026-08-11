@@ -85,6 +85,11 @@ public sealed class AppSettings
     /// is deliberately shorter than the point at which the shell starts drawing over the app.</summary>
     public int HangWatchdogSeconds { get; set; } = 2;
 
+    /// <summary>Whether the window answers Windows UI Automation and screen readers. Off by default
+    /// because handing out a provider is what arms the teardown that freezes the app for seconds on a
+    /// machine whose security software inspects thread creation - see <see cref="Automation"/>.</summary>
+    public bool Automation { get; set; }
+
     [System.Text.Json.Serialization.JsonIgnore]
     public float EffectiveFontSize => Math.Max(4f, FontSize * ZoomPercent / 100f);
 

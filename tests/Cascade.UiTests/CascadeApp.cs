@@ -56,6 +56,8 @@ internal sealed class CascadeApp : IDisposable
         string args = tat is null ? $"\"{log}\"" : $"\"{log}\" /Filters:\"{tat}\"";
         var psi = new ProcessStartInfo(exe, args) { UseShellExecute = false };
         psi.EnvironmentVariables["CASCADE_SETTINGS_DIR"] = settingsDir;
+        // These tests ARE a UI Automation client, and the app answers automation only when asked to.
+        psi.EnvironmentVariables["CASCADE_AUTOMATION"] = "1";
         // No test may reach out to GitHub: it would be slow, flaky offline, and could actually replace the
         // executable under test. The update tests opt back in explicitly, against a local stub server.
         psi.EnvironmentVariables["CASCADE_UPDATE"] = "off";

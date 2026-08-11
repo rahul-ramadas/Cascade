@@ -11,6 +11,7 @@ public abstract class DialogBase : Form
 {
     protected DialogBase()
     {
+        Automation.Suppress(this);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MinimizeBox = false;
         MaximizeBox = false;
