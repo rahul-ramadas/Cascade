@@ -3897,6 +3897,7 @@ internal static class SelfTest
             Pump();
 
             ok &= RunGroupDragChecks(doc, tree, rowH);
+            ok &= RunAbandonedDragChecks(doc, tree, rowH);
             return ok;
         }
         finally
@@ -3962,6 +3963,116 @@ internal static class SelfTest
                     leftovers.Length == 0);
         ok &= Check($"the list shows what the model says [{string.Join(" ", tree.VisibleRowNamesForTesting.Take(3))}]",
                     string.Join(" ", tree.VisibleRowNamesForTesting.Take(3)) == landed);
+        return ok;
+    }
+
+    /// <summary>Letting go of a filter somewhere that is not the list ends the drag.
+    ///
+    /// This is the whole of what the source is told in that case: OLE calls nothing on a window that is not
+    /// a drop target, and MainForm's own file-drop targets answer DROPEFFECT_NONE for a filter, which OLE
+    /// turns into DragLeave rather than Drop - so DoDragDrop simply returns. Missing that left the control
+    /// mid-drag for the rest of the session: the row kept its fade, no filter could be picked up again and
+    /// the pane stopped offering to open dropped files. The easiest way to hit it is aiming a filter at the
+    /// very top of the list and releasing on the column header a row above it.</summary>
+    private static bool RunAbandonedDragChecks(CascadeDocument doc, FilterTreeControl tree, int rowH)
+    {
+        // A flat fixture of its own: what the checks above leave behind is nested and scrolled, and where a
+        // row sits on screen is what a drag is aimed at.
+        var filters = new FilterCollection();
+        for (int i = 0; i < 20; i++)
+            filters.Roots.Add(new Filter { Match = new FilterMatch { Text = $"a{i:00}" } });
+        doc.SetFilters(filters);
+        tree.Rebuild();
+        Pump();
+
+        var roots = doc.Filters.Roots;
+        string Order() => string.Join(" ", roots.Select(f => f.Match.Text));
+        string Shown() => string.Join(" ", tree.VisibleRowNamesForTesting.Take(8));
+
+        int reevaluated = 0;
+        void Count() => reevaluated++;
+        tree.FiltersChanged += Count;
+
+        // ---- one filter
+        var carried = roots[6];
+        string before = Order();
+        var row = tree.RowBoundsForTesting(carried);
+        tree.StartDragForTesting(carried, new Point(row.Left + 2, row.Top + row.Height / 2));
+        tree.DragToForTesting(new Point(row.Left + 2, rowH / 4));
+        Pump();
+        bool ok = Check($"the drag really did carry the filter somewhere else [{Shown()}]", Order() != before);
+        ok &= Check("and the list knows a drag is under way, which is what fades the row",
+                    tree.DragInProgressForTesting);
+
+        tree.ReleaseAwayFromTheListForTesting();
+        Pump();
+        ok &= Check("letting go away from the list ends the drag", !tree.DragInProgressForTesting);
+        ok &= Check($"and puts the filter back where it was [{Shown()}]", Order() == before);
+        ok &= Check($"without re-running the filters over the file ({reevaluated} times)", reevaluated == 0);
+        ok &= Check("the pane offers to open a dropped file again",
+                    tree.DragEffectForTesting(DragArgs(Files(doc.FilePath!))) == DragDropEffects.Copy);
+
+        // The reported symptom was not the fade but what came after it: nothing in the list would move.
+        var next = roots[3];
+        bool pickedUp = tree.StartDragForTesting(next, new Point(row.Left + 2, tree.RowBoundsForTesting(next).Top + rowH / 2));
+        tree.DragToForTesting(new Point(row.Left + 2, rowH / 4));
+        Pump();
+        tree.DropForTesting();
+        Pump();
+        ok &= Check($"and another filter can still be dragged afterwards [{Shown()}]",
+                    pickedUp && ReferenceEquals(roots[0], next));
+        ok &= Check($"a real drop re-runs the filters exactly once, however far it was carried ({reevaluated})",
+                    reevaluated == 1);
+        tree.FiltersChanged -= Count;
+
+        // Escape ends the drag the same way, and the direction that carries the filter back DOWN the list
+        // is the one that used to leave it a place short of where it was picked up.
+        foreach (bool upward in new[] { true, false })
+        {
+            tree.ScrollToForTesting(roots[0]);
+            Pump();
+            var f = roots[upward ? 9 : 4];
+            before = Order();
+            var r = tree.RowBoundsForTesting(f);
+            tree.StartDragForTesting(f, new Point(r.Left + 2, r.Top + r.Height / 2));
+            tree.DragToForTesting(new Point(r.Left + 2, upward ? rowH / 4 : rowH * 12 + rowH / 2));
+            Pump();
+            ok &= Check($"dragging {(upward ? "up" : "down")} moved it [{Shown()}]", Order() != before);
+            tree.CancelDragForTesting();
+            Pump();
+            ok &= Check($"escape after dragging {(upward ? "up" : "down")} puts it back exactly [{Shown()}]",
+                        Order() == before);
+        }
+
+        // ---- several filters, which are carried as a placeholder with their rows out of the list
+        tree.ScrollToForTesting(roots[0]);
+        Pump();
+        var one = roots[2];
+        var two = roots[4];
+        var three = roots[6];
+        before = Order();
+        tree.ClickFilterForTesting(one);
+        tree.ClickFilterForTesting(two, Keys.Control);
+        tree.ClickFilterForTesting(three, Keys.Control);
+        row = tree.RowBoundsForTesting(one);
+        tree.StartDragForTesting(one, new Point(row.Left + 2, row.Top + row.Height / 2));
+        tree.DragToForTesting(new Point(row.Left + 2, rowH * 9 + rowH / 2));
+        Pump();
+        tree.ReleaseAwayFromTheListForTesting();
+        Pump();
+
+        ok &= Check("letting go of a group away from the list ends that drag too",
+                    !tree.DragInProgressForTesting);
+        ok &= Check($"the filters it was carrying are back in the list [{Shown()}]",
+                    tree.VisibleRowNamesForTesting.Contains(one.Match.Text)
+                    && tree.VisibleRowNamesForTesting.Contains(two.Match.Text)
+                    && tree.VisibleRowNamesForTesting.Contains(three.Match.Text));
+        ok &= Check($"with no placeholder row left standing [{Shown()}]",
+                    !tree.VisibleRowNamesForTesting.Any(n => n.EndsWith(" filters", StringComparison.Ordinal)));
+        ok &= Check($"and nothing moved [{Shown()}]", Order() == before);
+        ok &= Check($"the selection is still something the menus can act on " +
+                    $"[{string.Join(" ", tree.SelectedNamesForTesting)}]",
+                    tree.SelectedNamesForTesting.Length == 3);
         return ok;
     }
 

@@ -1058,9 +1058,13 @@ public sealed class FilterTreeControl : UserControl
 
     // ---- drag & drop reorder + nest ----
 
+    /// <summary>Whether a filter is being carried right now: what fades its row, what stops another one
+    /// being picked up, and what makes the pane read a drag as its own rather than as a file arriving.</summary>
+    private bool DragInProgress => _dragNode is not null || _dragGroup is not null;
+
     private void OnTreeMouseMove(object? sender, MouseEventArgs e)
     {
-        if (_pressed is null || e.Button != MouseButtons.Left || _dragNode is not null) return;
+        if (_pressed is null || e.Button != MouseButtons.Left || DragInProgress) return;
 
         // The system's own threshold, so a press that wobbles still reads as a click.
         var slop = SystemInformation.DragSize;
@@ -1073,7 +1077,22 @@ public sealed class FilterTreeControl : UserControl
 
         BeginDrag(node, f, _pressedAt.X);
         try { DoDragDrop(node, DragDropEffects.Move); }
-        finally { StopAutoScroll(); }
+        finally { EndDragAwayFromTheList(); }
+    }
+
+    /// <summary>DoDragDrop has returned. A release over the list has already been dealt with by OnDragDrop
+    /// and Escape by QueryContinueDrag, so a drag still in progress here was let go somewhere that is not a
+    /// drop target - the column header a row above the list, the log view, the status bar, another window -
+    /// which means the same as Escape: put the filter back and leave the list alone.
+    ///
+    /// OLE calls nothing at all on a window that is not a drop target, and MainForm's own file-drop targets
+    /// answer DROPEFFECT_NONE for a filter, which OLE turns into DragLeave rather than Drop. So without this
+    /// the control stays mid-drag for the rest of the session: the row keeps its fade, OnTreeMouseMove
+    /// refuses to start another drag, and the pane stops offering to open dropped files.</summary>
+    private void EndDragAwayFromTheList()
+    {
+        StopAutoScroll();
+        if (DragInProgress) CancelDrag();
     }
 
     private void BeginDrag(TreeNode n, Filter f, int grabX)
@@ -1123,10 +1142,13 @@ public sealed class FilterTreeControl : UserControl
     }
 
     /// <summary>Test seams: a real drag is a modal DoDragDrop loop, which a test cannot run - these drive
-    /// the same code from the outside. Everything after the grab is shared with the real thing.</summary>
-    internal void StartDragForTesting(Filter f, Point at)
+    /// the same code from the outside. Everything after the grab is shared with the real thing, including
+    /// the refusal to pick a second filter up while one is already being carried.</summary>
+    internal bool StartDragForTesting(Filter f, Point at)
     {
-        if (_doc is not null && NodeFor(f) is { } n) BeginDrag(n, f, at.X);
+        if (DragInProgress || _doc is null || NodeFor(f) is not { } n) return false;
+        BeginDrag(n, f, at.X);
+        return true;
     }
 
     internal void DragToForTesting(Point at)
@@ -1135,7 +1157,18 @@ public sealed class FilterTreeControl : UserControl
         UpdateDropPosition(at);
     }
 
-    internal void DropForTesting() => ResetDrag();
+    /// <summary>Finishes the drag the way a release over the list does - through the handler the mouse
+    /// really reaches, so a check cannot pass on a path the gesture never takes.</summary>
+    internal void DropForTesting()
+        => OnDragDrop(_tree, new DragEventArgs(null, 0, 0, 0, DragDropEffects.Move, DragDropEffects.Move));
+
+    /// <summary>Lets go of the drag somewhere that is not a drop target, which is the whole of what the
+    /// caller of DoDragDrop sees of it: no drop, no Escape, just a return.</summary>
+    internal void ReleaseAwayFromTheListForTesting() => EndDragAwayFromTheList();
+
+    /// <summary>Whether the list still believes a drag is under way - what fades the row and what stops
+    /// another filter being picked up.</summary>
+    internal bool DragInProgressForTesting => DragInProgress;
 
     /// <summary>What the pane would do with a drag that is not one of its own filters, and what a drop of
     /// one does. A real shell drag cannot be staged from a test, but everything after the data arrives can.</summary>
@@ -1236,7 +1269,7 @@ public sealed class FilterTreeControl : UserControl
 
     internal void CancelDragForTesting() => CancelDrag();
 
-    internal void DropGroupForTesting() { if (_dragGroup is not null) DropGroup(); else ResetDrag(); }
+    internal void DropGroupForTesting() => DropForTesting();
 
     /// <summary>Whether pressing here would pick the filter up, by way of the real handler.</summary>
     internal bool PressArmsDragForTesting(Point at)
@@ -1342,7 +1375,7 @@ public sealed class FilterTreeControl : UserControl
     /// drop cursor over a file being dragged in and then quietly did nothing with it.</summary>
     private DragDropEffects DragEffectFor(DragEventArgs e)
     {
-        if (_dragNode is not null || _dragGroup is not null) return DragDropEffects.Move;
+        if (DragInProgress) return DragDropEffects.Move;
         return e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
     }
 
@@ -1526,14 +1559,29 @@ public sealed class FilterTreeControl : UserControl
         if (moved) FiltersChanged?.Invoke();
     }
 
-    /// <summary>Escape during a drag, or dropping nowhere, puts the filter back where it started.</summary>
+    /// <summary>Escape during a drag, or letting go anywhere that is not the list, puts the filter back
+    /// where it started.</summary>
     private void CancelDrag()
     {
         StopAutoScroll();
         if (_dragGroup is not null) { ResetDrag(); return; }   // the model was never touched
         if (_doc is not null && _dragNode?.Tag is Filter f && _dragOrigin is { } origin)
-            MoveLive(f, origin.Parent, origin.Index);
+            MoveLive(f, origin.Parent, SlotToLandAt(f, origin.Parent, origin.Index));
         ResetDrag();
+    }
+
+    /// <summary>What to ask for so the filter ends up AT <paramref name="place"/> among
+    /// <paramref name="parent"/>'s children. <see cref="FilterCollection.Move"/> reads its index in the
+    /// list as it stands BEFORE the filter is taken out of it - which is the right frame for a drop,
+    /// because the drop position is worked out from a list the filter is still in. Putting one back
+    /// further down a list it is already in therefore takes one more, without which cancelling a drag that
+    /// went upwards leaves the filter a place short of where it was picked up.</summary>
+    private int SlotToLandAt(Filter f, Filter? parent, int place)
+    {
+        var current = f.Parent?.Children ?? _doc!.Filters.Roots;
+        var target = parent?.Children ?? _doc!.Filters.Roots;
+        int now = current.IndexOf(f);
+        return ReferenceEquals(current, target) && now >= 0 && place > now ? place + 1 : place;
     }
 
     private void ResetDrag()
