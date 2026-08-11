@@ -191,6 +191,7 @@ internal sealed class HangWatchdog : IDisposable
         sb.Append(CultureInfo.InvariantCulture, $"  managed heap  {GC.GetTotalMemory(false) / (1024 * 1024):N0} MB\n");
         sb.Append(CultureInfo.InvariantCulture, $"  page faults   +{faults:N0} during the stall\n");
         sb.Append(CultureInfo.InvariantCulture, $"  working set   {now.WorkingSet / (1024 * 1024):N0} MB\n");
+        sb.Append(CultureInfo.InvariantCulture, $"  automation    {(AutomationClientAttached ? "YES - a UI Automation client is reading this window" : "none")}\n");
         sb.Append(CultureInfo.InvariantCulture, $"  dump          {_dumps} of at most {MaxDumps} this session - {dumpOutcome}\n");
 
         // The one reading a dump cannot do for itself: this thread is suspended by a blocking collection, so
@@ -290,6 +291,12 @@ internal sealed class HangWatchdog : IDisposable
         return $"{new Win32Exception(error).Message} ({error}){hint}";
     }
 
+    /// <summary>Whether something is reading this window through UI Automation - a screen reader, or the
+    /// monitoring software a managed machine runs. Worth recording because Windows makes tearing a window
+    /// down wait on every attached client, so a dialog closing can block for seconds on such a machine and
+    /// not at all anywhere else. UIAutomationCore is only ever loaded once a client has asked.</summary>
+    internal static bool AutomationClientAttached => GetModuleHandleW("UIAutomationCore.dll") != IntPtr.Zero;
+
     private static Health Sample()
     {
         uint faults = 0;
@@ -330,6 +337,10 @@ internal sealed class HangWatchdog : IDisposable
     [DllImport("user32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern bool IsHungAppWindow(IntPtr window);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern IntPtr GetModuleHandleW(string name);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ProcessMemoryCounters

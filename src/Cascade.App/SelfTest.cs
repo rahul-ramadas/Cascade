@@ -2541,6 +2541,12 @@ internal static class SelfTest
                             text.Contains("VERDICT", StringComparison.Ordinal));
                 ok &= Check("and how hard the process was having to page",
                             text.Contains("page faults", StringComparison.Ordinal));
+                // Whether anything is reading the window through UI Automation decides whether closing a
+                // window blocks at all, so a report that does not say is missing the first thing to check.
+                ok &= Check("and whether anything is reading the window through automation",
+                            text.Contains("automation", StringComparison.Ordinal),
+                            text.Split('\n').FirstOrDefault(l => l.Contains("automation", StringComparison.Ordinal))?.Trim()
+                            ?? "(not mentioned)");
             }
             if (dumps.Length >= 1)
             {
