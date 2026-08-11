@@ -80,6 +80,7 @@ public sealed class FilterSnapshot
     private readonly int _hitWords;
 
     [ThreadStatic] private static MatchContext? _threadContext;
+    [ThreadStatic] private static MatchContext? _displacedContext;
 
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
@@ -122,8 +123,15 @@ public sealed class FilterSnapshot
         get
         {
             var ctx = _threadContext;
-            if (ctx is null || !ReferenceEquals(ctx.Owner, this)) _threadContext = ctx = CreateContext();
-            return ctx;
+            if (ctx is not null && ReferenceEquals(ctx.Owner, this)) return ctx;
+            // Room for two, because a view catching up with a filter change asks the old snapshot and the new
+            // one about alternate lines. With a single slot each question throws the other's scratch away, and
+            // building it again compiles every regex again - measured at 1.7ms a line, against 1.2us.
+            var spare = _displacedContext;
+            if (spare is null || !ReferenceEquals(spare.Owner, this)) spare = CreateContext();
+            _displacedContext = ctx;
+            _threadContext = spare;
+            return spare;
         }
     }
 

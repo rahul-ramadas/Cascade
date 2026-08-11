@@ -172,6 +172,31 @@ public class MatchingEngineTests
     // ---- whole snapshot: the engine vs a brute-force reference ----
 
     [Fact]
+    public void Two_snapshots_asked_in_turn_each_keep_their_own_scratch()
+    {
+        // While the view catches up with a filter change it asks the snapshot a row came from and the one
+        // that replaced it about alternate lines. Scratch is held per thread, so if there is only room for
+        // one, each question throws the other's away - and building it again compiles that snapshot's
+        // regexes again. Measured on the real filter set that is 1.7ms a line rather than 1.2us.
+        var filters = new FilterCollection();
+        var noisy = new Filter { Enabled = true, Match = { Text = "q(1|2)z", Regex = true } };
+        filters.Add(noisy);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "keep" } });
+        var before = FilterSnapshot.Build(filters);
+        noisy.Enabled = false;
+        var after = FilterSnapshot.Build(filters);
+
+        var beforeScratch = before.GetThreadContext();
+        var afterScratch = after.GetThreadContext();
+        Assert.NotSame(beforeScratch, afterScratch);
+        for (int i = 0; i < 10; i++)
+        {
+            Assert.Same(beforeScratch, before.GetThreadContext());
+            Assert.Same(afterScratch, after.GetThreadContext());
+        }
+    }
+
+    [Fact]
     public void Snapshot_evaluation_matches_a_brute_force_reference()
     {
         var filters = new FilterCollection();
