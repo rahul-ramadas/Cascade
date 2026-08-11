@@ -65,8 +65,13 @@ internal sealed class CascadeApp : IDisposable
             foreach (var kv in environment) psi.EnvironmentVariables[kv.Key] = kv.Value;
         var app = Application.Launch(psi);
         var automation = new UIA3Automation();
-        var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(20))
-                     ?? throw new InvalidOperationException("Main window did not appear.");
+        var budget = _launchedBefore ? WindowWait : ColdWindowWait;
+        Window window;
+        // A launch that never produced a window used to leave the app running for the rest of the suite,
+        // where it competes for the desktop with every test after it.
+        try { window = WaitForMainWindow(app, automation, exe, budget); }
+        catch { Abandon(app, automation); throw; }
+        _launchedBefore = true;
         var harness = new CascadeApp(app, automation, window,
             ownsFiles ? log : "", ownsFiles ? (tat ?? "") : "", ownsSettingsDir ? settingsDir : "");
         // Launching a windowed app normally makes it the foreground one, and that matters: a WinForms
@@ -75,9 +80,79 @@ internal sealed class CascadeApp : IDisposable
         // (two timeouts) against 120ms, which is the whole of the suite's occasional 4x slowdown. It only
         // fails to happen when something else is sitting on the foreground; ask once when that is the case.
         harness.EnsureForegroundIfLost();
-        // Wait for indexing to finish (Total shows the full line count).
-        harness.WaitStatus("Total:", $"Total: {TestData.LineCount:N0}", 20000);
+        // Wait for indexing to finish (Total shows the full line count). Same budget as the window: a
+        // machine slow enough to be cold is slow at this too.
+        harness.WaitStatus("Total:", $"Total: {TestData.LineCount:N0}", (int)budget.TotalMilliseconds);
         return harness;
+    }
+
+    // The first launch of a run is the only slow one, and it can be very slow. MEASURED on a CI runner:
+    // the first launch of the just-published exe took longer than the 20s this used to wait (which is how
+    // it failed), the next 10s, and every one of the 39 after it about a second. The same exe shows its
+    // window in under 200ms here, even from a copy that has never been run, so this is the machine and
+    // not the app. Hence one generous wait for the cold one and the ordinary wait for the rest: a build
+    // that really cannot open a window still fails the other tests promptly, which the CI step's own
+    // 15-minute cap depends on.
+    private static readonly TimeSpan ColdWindowWait = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan WindowWait = TimeSpan.FromSeconds(20);
+    private static bool _launchedBefore;   // the suite never runs in parallel - see TestData.cs
+
+    /// <summary>Waits for the app to put its main window up, and says what happened when it does not.
+    /// FlaUI's own wait just returns null at the end of it, which tells a slow machine, a crash on startup
+    /// and a window that never comes apart not at all.</summary>
+    private static Window WaitForMainWindow(Application app, UIA3Automation automation, string exe, TimeSpan wait)
+    {
+        var clock = Stopwatch.StartNew();
+        DateTime launchedAt = DateTime.UtcNow;
+        while (true)
+        {
+            if (!IsRunning(app, out int exitCode))
+                throw new InvalidOperationException(
+                    $"{Path.GetFileName(exe)} exited with code {exitCode} after {clock.ElapsedMilliseconds:N0} ms " +
+                    $"without showing a window.{CrashLogSince(launchedAt)}");
+
+            Window? window = null;
+            // Reading the handle of a process that exits mid-wait throws; the next turn of the loop reports it.
+            try { window = app.GetMainWindow(automation, TimeSpan.FromMilliseconds(250)); }
+            catch (InvalidOperationException) { }
+            if (window is not null) return window;
+
+            if (clock.Elapsed >= wait)
+                throw new InvalidOperationException(
+                    $"Main window did not appear in {clock.Elapsed.TotalSeconds:N1} s. {Path.GetFileName(exe)} " +
+                    $"(pid {app.ProcessId}) is still running but has no visible top-level window." +
+                    CrashLogSince(launchedAt));
+        }
+    }
+
+    private static bool IsRunning(Application app, out int exitCode)
+    {
+        exitCode = 0;
+        if (!app.HasExited) return true;
+        try { exitCode = app.ExitCode; } catch (InvalidOperationException) { }
+        return false;
+    }
+
+    /// <summary>Lets go of an app the harness never took charge of, so a failed launch does not leave a
+    /// window on the desktop for the rest of the run.</summary>
+    private static void Abandon(Application app, UIA3Automation automation)
+    {
+        try { app.Kill(); } catch (InvalidOperationException) { /* already gone */ }
+        automation.Dispose();
+    }
+
+    /// <summary>What the app wrote to its crash log during this launch, if anything. Dated, so a file left
+    /// by an earlier run is never reported as this launch's reason.</summary>
+    private static string CrashLogSince(DateTime launchedAt)
+    {
+        try
+        {
+            var file = new FileInfo(Path.Combine(Path.GetTempPath(), "cascade_crash.log"));
+            if (!file.Exists || file.LastWriteTimeUtc < launchedAt) return "";
+            string text = File.ReadAllText(file.FullName).Trim();
+            return "\nIt logged a crash: " + (text.Length > 600 ? text[..600] + "..." : text);
+        }
+        catch (IOException) { return ""; }
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
