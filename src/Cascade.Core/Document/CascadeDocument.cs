@@ -48,6 +48,9 @@ public sealed class CascadeDocument : IDisposable
     public ColumnSpec Columns { get; private set; } = new();
     public FilterSnapshot CurrentSnapshot { get; private set; } = FilterSnapshot.Build(new FilterCollection());
 
+    /// <summary>The filters the visible set is known to reflect. Null until they have changed once.</summary>
+    private FilterSnapshot? _viewSnapshot;
+
     /// <summary>Fires when indexing or filtering makes progress (may be raised on a background thread).</summary>
     public event Action? Updated;
 
@@ -245,6 +248,11 @@ public sealed class CascadeDocument : IDisposable
     /// to the filter tree, its enabled states, or the filtered/dim mode.</summary>
     public void ApplyFilters()
     {
+        // The visible set is REUSED by the next pass and rewritten line by line, so for as long as that pass
+        // runs the view is still showing rows the OLD filters put there. Remembering those filters is what
+        // lets such a row be drawn as it was until the view really drops it - see EvaluateText. Only worth
+        // recording when the last pass finished: if one is still running the view reflects something older.
+        if (IsFilterIdle) _viewSnapshot = CurrentSnapshot;
         CurrentSnapshot = FilterSnapshot.Build(Filters);
         FilterGeneration++;
         if (_filterService is null)
@@ -297,8 +305,23 @@ public sealed class CascadeDocument : IDisposable
         return LineReader.IsTruncated(s, e);
     }
 
-    /// <summary>Evaluates a decoded line against the current filters (for coloring visible rows).</summary>
-    public LineEval EvaluateText(ReadOnlySpan<char> text, long line) => CurrentSnapshot.Evaluate(text, line, Markers);
+    /// <summary>
+    /// Evaluates a decoded line against the current filters (for colouring visible rows).
+    /// <para>While a pass is running the view and the filters disagree on purpose: the visible set is
+    /// rewritten in place, so it still lists rows the OLD filters matched until the sweep reaches them.
+    /// Asked about such a row the new filters answer "not shown", which has no colour - and the row is
+    /// painted as plain unfiltered text for the frame or two before it disappears, which reads as a white
+    /// flash. It is answered by the filters that put it on screen instead, so it simply keeps the
+    /// appearance it had until the view drops it. Once the pass settles nothing on screen can be unshown,
+    /// so this cannot affect a settled view - and in dim mode nothing is hidden at all, so the change of
+    /// colour is the point and is left immediate.</para>
+    /// </summary>
+    public LineEval EvaluateText(ReadOnlySpan<char> text, long line)
+    {
+        var eval = CurrentSnapshot.Evaluate(text, line, Markers);
+        if (eval.Shown || !FilteredMode || IsFilterIdle || _viewSnapshot is not { } view) return eval;
+        return view.Evaluate(text, line, Markers);
+    }
 
     /// <summary>
     /// The filter each of the first <paramref name="count"/> <paramref name="lines"/> takes its colour
@@ -325,6 +348,9 @@ public sealed class CascadeDocument : IDisposable
         var encoding = _enc.Encoding;
         long length = src.Length;
         long known = index.Count;
+        // The same rule EvaluateText follows, so the map cannot come to a different answer than the row it
+        // stands for while a pass is catching up with the view.
+        var view = !FilteredMode || IsFilterIdle ? null : _viewSnapshot;
 
         // Below this the fork and join cost more than the work does.
         const int WorthSharingOut = 512;
@@ -349,7 +375,10 @@ public sealed class CascadeDocument : IDisposable
             long line = lines[i];
             if (line < 0 || line >= known) return;
             index.GetRange(line, length, out long s, out long e);
-            into[i] = snapshot.Evaluate(reader.GetChars(s, e), line, markers, null, context).ColorFilter;
+            var text = reader.GetChars(s, e);
+            var eval = snapshot.Evaluate(text, line, markers, null, context);
+            if (!eval.Shown && view is not null) eval = view.Evaluate(text, line, markers, null, view.GetThreadContext());
+            into[i] = eval.ColorFilter;
         }
     }
 
