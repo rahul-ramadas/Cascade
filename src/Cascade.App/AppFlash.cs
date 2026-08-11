@@ -40,6 +40,7 @@ internal sealed class AppFlash : Form
 
     private AppFlash(Form owner)
     {
+        Automation.Suppress(this);
         FormBorderStyle = FormBorderStyle.None;
         ControlBox = false;
         ShowInTaskbar = false;
