@@ -248,6 +248,7 @@ public sealed class MainForm : Form
             if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _grid.InvalidateMatchMap(); _filterTree.RefreshCounts(); }
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
             if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.ClearViewAnchor(); _anchorActive = false; }
+            _doc.DropRememberedViews();
             UpdateStatusIfChanged();
             FlushConfig();
         };

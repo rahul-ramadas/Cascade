@@ -1308,6 +1308,75 @@ public class DocumentIntegrationTests
         }
     }
 
+    [Fact]
+    public void The_filters_a_settled_view_can_no_longer_be_asked_about_are_let_go()
+    {
+        // Each remembered set carries its own matching automaton - about 400 KB for a filter file of a
+        // couple of hundred - and a finished pass has swept the whole file, so nothing can ask about the
+        // older ones again. They used to sit there until the next filter change, which may never come.
+        // The refusal while a pass is still running matters more than the release: those stretches still
+        // need the filters that put them on screen, or they go back to being drawn as unfiltered text.
+        const int lines = 200_000, alphaOnly = 50_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 10 == 0 ? "ALPHA" : i % 7 == 0 ? "BETA" : "plain").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        var alpha = new Filter { Enabled = false, Match = { Text = "ALPHA" } };
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(alpha);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+
+        var gate = new SemaphoreSlim(0);
+        int blocks = 0;
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+
+            doc.FilterCheckpointForTesting = _ => { Interlocked.Increment(ref blocks); gate.Wait(TimeSpan.FromSeconds(20)); };
+            alpha.Enabled = true;
+            doc.ApplyFilters();
+            WaitFor(() => Volatile.Read(ref blocks) >= 1, "the pass never started");
+            gate.Release(3);
+            WaitFor(() => Volatile.Read(ref blocks) >= 4, "the pass did not reach the line");
+            alpha.Enabled = false;
+            doc.ApplyFilters();
+            int was = Volatile.Read(ref blocks);
+            gate.Release(1);
+            WaitFor(() => Volatile.Read(ref blocks) >= was + 1, "the second pass never started");
+            Assert.Equal(2, doc.RememberedViewCountForTesting);
+
+            // Asked while the pass is still catching up, it must keep them - and the stretch the abandoned
+            // pass left behind must still have its colour.
+            doc.DropRememberedViews();
+            Assert.Equal(2, doc.RememberedViewCountForTesting);
+            Assert.Same(alpha, doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            WaitFilter(doc);
+
+            doc.DropRememberedViews();
+            Assert.Equal(1, doc.RememberedViewCountForTesting);
+            // And what is left is the filters in force, so consulting it can only repeat what they say.
+            Assert.False(doc.IsLineVisible(alphaOnly));
+            Assert.Null(doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+        }
+        finally
+        {
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(300)]     // answered on the calling thread
     [InlineData(4_000)]   // shared out across the cores

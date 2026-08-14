@@ -2821,6 +2821,8 @@ internal static class SelfTest
             int doomed = 0;
             for (int i = 0; i < have; i++) if (doc.GetLineText(coming[i]).StartsWith("BETA", StringComparison.Ordinal)) doomed++;
             ok &= Check($"and a good part of the screen is rows it hides ({doomed} of {have})", doomed >= 5);
+            ok &= Check("while the pass runs it holds on to the filters that put those rows there",
+                        doc.HoldsOldFiltersForTesting);
 
             // The frame the report is about: its rows are resolved, and THEN the pass finishes.
             grid.AfterWindowForTesting = () =>
@@ -2844,6 +2846,10 @@ internal static class SelfTest
             for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(10); Pump(); }
             Pump();
             ok &= Check($"the view catches up ({doc.RowCount:N0} rows)", doc.RowCount == Lines / 2);
+            // Letting go is driven by the window's own timer, so this is a check of that wiring.
+            for (int i = 0; i < 200 && doc.HoldsOldFiltersForTesting; i++) { Thread.Sleep(10); Pump(); }
+            ok &= Check("and lets go of them once nothing can be asked about them again",
+                        !doc.HoldsOldFiltersForTesting);
             using var settled = new Bitmap(Math.Max(1, grid.Width), Math.Max(1, grid.Height));
             grid.DrawToBitmap(settled, new Rectangle(0, 0, settled.Width, settled.Height));
             var after = RowBackgrounds(settled, grid);
