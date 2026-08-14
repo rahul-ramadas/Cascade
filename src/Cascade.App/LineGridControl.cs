@@ -31,7 +31,7 @@ public sealed class LineGridControl : Control
     private SlimScrollBar _hbar = null!;
     private SlimScrollBar _vbar = null!;
     private MiniMapControl? _map;
-    private readonly RowSelection _sel = new();
+    private readonly LineSelection _sel = new();
     private readonly List<ColumnValue> _cols = new();
 
     // ---- column geometry and the gestures on the header (see the "columns" region below) ----
@@ -84,10 +84,11 @@ public sealed class LineGridControl : Control
     private readonly List<(long Row, int Top, int Height, int Segments)> _layout = new();
     private readonly List<int> _segments = new();   // wrap points for the row being painted
 
-    // Character selection within one row. There is no caret and none is drawn - nothing here is editable -
-    // so this is purely a highlighted range that any navigation drops. Indices are into the row's DISPLAYED
+    // Character selection within one line. There is no caret and none is drawn - nothing here is editable -
+    // so this is purely a highlighted range that any navigation drops. Indices are into the line's DISPLAYED
     // text (tabs already expanded), which is what the hit test and the painting both work in.
-    private long _charRow = -1;
+    // Held against the FILE LINE, not the row it happens to be on: the row moves whenever the filters do.
+    private long _charLine = -1;
     private int _charAnchor, _charFocus;
     private bool _charDragging;
     // Which column the selection lives in while the log is split into cells, so a drag stays inside the
@@ -95,7 +96,8 @@ public sealed class LineGridControl : Control
     // and dropped when the other is turned on.
     private int _charColumn = -1;
     // Where a drag first took hold. Kept while the drag wanders onto other rows, which is what lets coming
-    // back to that row go back to selecting characters on it.
+    // back to that row go back to selecting characters on it. A ROW, unlike the selection itself: it lives
+    // only for the length of a gesture, and what it answers is "is the pointer back where it started".
     private long _charOriginRow = -1;
     private int _charOriginAt;
     private int _charOriginColumn = -1;
@@ -156,10 +158,15 @@ public sealed class LineGridControl : Control
 
     public long CaretLine => _caretRow >= 0 && _doc is not null ? _doc.RowToLine(_caretRow) : -1;
 
+    /// <summary>The file line a display row is showing, or -1 when there is no such row. Everything the
+    /// reader picked out is remembered by line, so this is where rows are turned into that.</summary>
+    private long LineAt(long row)
+        => _doc is not null && row >= 0 && row < _doc.RowCount ? _doc.RowToLine(row) : -1;
+
     // ---- character selection ----
 
     /// <summary>Whether part of one line is selected, as opposed to whole lines.</summary>
-    public bool HasCharSelection => _charRow >= 0 && _charFocus != _charAnchor;
+    public bool HasCharSelection => _charLine >= 0 && _charFocus != _charAnchor;
 
     /// <summary>The selected part of a line, or null when the selection is whole lines. This is the
     /// displayed text, so a tab reads as the spaces it was shown as.</summary>
@@ -168,7 +175,7 @@ public sealed class LineGridControl : Control
         get
         {
             if (!HasCharSelection || _doc is null) return null;
-            string text = DisplayText(_charRow);
+            string text = DisplayTextOf(_charLine);
             int from = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
             int to = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
             return to > from ? text[from..to] : null;
@@ -179,8 +186,8 @@ public sealed class LineGridControl : Control
     /// nothing once the thing it was pointing at is no longer where the user is looking.</summary>
     private void ClearCharSelection()
     {
-        if (_charRow < 0) return;
-        _charRow = -1;
+        if (_charLine < 0) return;
+        _charLine = -1;
         _charColumn = -1;
         _charAnchor = _charFocus = 0;
         Invalidate();
@@ -193,10 +200,13 @@ public sealed class LineGridControl : Control
     /// painting and the clipboard. Tabs are expanded because that is how a whole line is drawn - but NOT
     /// while the line is split into cells, where each cell is drawn straight out of the line and a tab is
     /// usually the very thing the line was split on.</summary>
-    private string DisplayText(long row)
+    private string DisplayText(long row) => DisplayTextOf(LineAt(row));
+
+    /// <summary>The same, of a file line rather than of whatever row is showing it.</summary>
+    private string DisplayTextOf(long line)
     {
-        if (_doc is null) return "";
-        string raw = _doc.GetLineText(_doc.RowToLine(row));
+        if (_doc is null || line < 0) return "";
+        string raw = _doc.GetLineText(line);
         return ColumnsOn ? raw : Expand(raw);
     }
 
@@ -306,15 +316,15 @@ public sealed class LineGridControl : Control
 
     /// <summary>Every occurrence to mark on a line: the find term, and what is selected elsewhere. The line
     /// the caret is on gets the stronger colour, so which line the search landed on is obvious without the
-    /// navigation having to work in occurrences.</summary>
-    private void CollectHighlights(string text, long row)
+    /// navigation having to work in occurrences. <paramref name="selected"/> is worked out once for the
+    /// frame - decoding the line it came from again per row would be a string apiece for nothing.</summary>
+    private void CollectHighlights(string text, bool caretRow, bool selectionLine, string? selected)
     {
         _highlights.Clear();
         var matcher = _highlight;
-        string? selected = SelectedText;
         if (matcher is null && selected is null) return;
 
-        Color colour = row == _caretRow ? _settings.FindCurrent : _settings.FindHighlight;
+        Color colour = caretRow ? _settings.FindCurrent : _settings.FindHighlight;
         if (matcher is not null)
         {
             int from = 0;
@@ -332,7 +342,7 @@ public sealed class LineGridControl : Control
             {
                 int at = text.AsSpan(from).IndexOf(selected, StringComparison.Ordinal);
                 if (at < 0) break;
-                if (row != _charRow || from + at != Math.Min(_charAnchor, _charFocus))
+                if (!selectionLine || from + at != Math.Min(_charAnchor, _charFocus))
                     _highlights.Add((from + at, selected.Length, _settings.FindHighlight));
                 from += at + selected.Length;
             }
@@ -372,11 +382,22 @@ public sealed class LineGridControl : Control
     internal int VisibleRows => EffectiveVisibleRows;
     internal long CaretRow => _caretRow;
 
-    /// <summary>What the minimap needs to draw the selection, and to know when it has moved.</summary>
-    internal bool HasSelection => _sel.Count > 0;
-    internal bool IsRowSelected(long row) => _sel.Contains(row);
-    internal bool SelectionIntersects(long from, long toExclusive) => _sel.IntersectsRange(from, toExclusive);
+    /// <summary>What the minimap needs to know about the selection having moved.</summary>
     internal long SelectionVersion => _sel.Version * 1_000_003L + _caretRow;
+
+    /// <summary>The selected lines as ranges of display rows, worked out once rather than per pixel of the
+    /// map: the map asks about hundreds of slots, and turning each slot's rows back into lines would be a
+    /// rank and a select apiece. Stretches of the selection the view is hiding drop out here.</summary>
+    internal void FillSelectedRowRanges(List<(long From, long To)> into)
+    {
+        into.Clear();
+        if (_doc is null) return;
+        foreach (var (a, b) in _sel.Ranges)
+        {
+            long from = _doc.RowAtOrAfterLine(a), to = _doc.RowAtOrAfterLine(b + 1);
+            if (to > from) into.Add((from, to));
+        }
+    }
 
     /// <summary>Scrolls so <paramref name="row"/> is the top visible row. Used by the map, which stands in
     /// for the scrollbar, so it drops the view anchor exactly as dragging the thumb does.</summary>
@@ -471,8 +492,7 @@ public sealed class LineGridControl : Control
         _anchorLine = _doc.RowToLine(Math.Clamp(_firstRow, 0, rows - 1));
         _anchorOffset = 0;
         _anchorCaretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
-        // Keep a single selected row on its line; leave a multi-row selection alone.
-        _anchorSelect = _sel.Count == 1;
+        _anchorSelect = true;
     }
 
     /// <summary>Row currently displaying <paramref name="line"/> (or the nearest following visible line), or
@@ -514,7 +534,9 @@ public sealed class LineGridControl : Control
         _firstRow = ClampFirstRow(Math.Clamp(row, 0, rows - 1) - _anchorOffset);
     }
 
-    /// <summary>Keeps the caret (and, in filtered mode, the selection) on its original line as rows shift.</summary>
+    /// <summary>Keeps the caret on its original line as rows shift, and lets a lone selected line go with it
+    /// when that line is no longer being shown at all. A selection of several lines is left exactly as it
+    /// is: it is held in lines, so it needs no re-establishing.</summary>
     private void PinCaretToAnchor()
     {
         if (_doc is null || _anchorCaretLine < 0) return;
@@ -522,7 +544,7 @@ public sealed class LineGridControl : Control
         long caret = ResolveRow(_anchorCaretLine);
         if (caret < 0 || rows == 0) return;
         _caretRow = Math.Clamp(caret, 0, rows - 1);
-        if (_anchorSelect) _sel.SetSingle(_caretRow);
+        if (_anchorSelect && _sel.LineCount == 1) _sel.SetSingle(LineAt(_caretRow));
     }
 
     private long ClampFirstRow(long first)
@@ -619,7 +641,7 @@ public sealed class LineGridControl : Control
         if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
         // Nor does a selection outlive the mode it was made in: split into cells the indices are into the
         // line itself and belong to one cell, whole lines they are into the line with its tabs expanded.
-        if (_charRow >= 0 && ColumnsOn != (_charColumn >= 0)) ClearCharSelection();
+        if (_charLine >= 0 && ColumnsOn != (_charColumn >= 0)) ClearCharSelection();
 
         _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
@@ -832,6 +854,14 @@ public sealed class LineGridControl : Control
     internal int PaintsForTesting => _paints;
 
     internal long CharOriginForTesting => _charOriginRow;
+
+    /// <summary>Which file line the part-of-a-line selection is on, or -1. The whole point of the selection
+    /// is that this answer does not change when the filters do.</summary>
+    internal long CharSelectionLineForTesting => _charLine;
+
+    /// <summary>Whether a file line is selected, whether or not the view is currently showing it.</summary>
+    internal bool IsLineSelectedForTesting(long line) => _sel.Contains(line);
+
     internal int ViewportHeightForTesting => ViewportHeight;
     internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
     internal Font FontForTesting => FontRegular;
@@ -976,6 +1006,9 @@ public sealed class LineGridControl : Control
         else windowCount = _doc.LinesForRows(_firstRow, window);
 
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
+        // What is picked out of a line, once for the frame rather than once per row: every row asks whether
+        // it carries the same text, and answering it decodes the line the selection came from.
+        string? selected = SelectedText;
 
         bool columns = _doc.Columns.Enabled;
         int runningMaxWidth = 0;
@@ -1002,12 +1035,14 @@ public sealed class LineGridControl : Control
                 ? StyleResolver.Resolve(eval.ColorFilter, defaults)
                 : defaults;
 
-            bool charSel = HasCharSelection && row == _charRow;
-            bool selected = !charSel && _sel.Contains(row);
+            // Both of these are asked of the LINE, not of the row it landed on this frame: the filters move
+            // every row about, and a highlight left on a row would end up over text nobody picked out.
+            bool charSel = HasCharSelection && line == _charLine;
+            bool selectedRow = !charSel && _sel.Contains(line);
             bool dim = !_doc.FilteredMode && !eval.Shown;
 
-            Color back = selected ? _settings.SelectionBack : ToColor(style.Background);
-            Color fore = selected ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
+            Color back = selectedRow ? _settings.SelectionBack : ToColor(style.Background);
+            Color fore = selectedRow ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
 
             Font font = SelectFont(style);
             int charWidth = CharWidthOf(FontIndex(style));
@@ -1020,15 +1055,15 @@ public sealed class LineGridControl : Control
             g.FillRectangle(Fill(back), rowRect);
 
             DrawMarkers(g, line, y, rowHeight);
-            DrawLineNumber(g, line, y, rowHeight, selected);
+            DrawLineNumber(g, line, y, rowHeight, selectedRow);
 
             var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
             g.SetClip(contentRect);
             if (columns)
-                DrawColumns(g, text, row, gutter, y, fore, font, charSel);
+                DrawColumns(g, text, row, gutter, y, fore, font, charSel, selected);
             else
             {
-                CollectHighlights(shown, row);
+                CollectHighlights(shown, row == _caretRow, charSel, selected);
                 for (int s = 0; s < segments; s++)
                 {
                     int from = _segments[s];
@@ -1127,10 +1162,11 @@ public sealed class LineGridControl : Control
     /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
     /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
     /// once from <see cref="TotalColumnsWidth"/> rather than once per row.</summary>
-    private void DrawColumns(Graphics g, string text, long row, int gutter, int y, Color fore, Font font, bool charSel)
+    private void DrawColumns(Graphics g, string text, long row, int gutter, int y, Color fore, Font font,
+                             bool charSel, string? selected)
     {
         Splitter().Split(text, _cols);
-        CollectHighlights(text, row);
+        CollectHighlights(text, row == _caretRow, charSel, selected);
         bool marks = _highlights.Count > 0 || charSel;
         int x = gutter - _hScroll;
         int right = gutter + ContentWidth;
@@ -1902,11 +1938,11 @@ public sealed class LineGridControl : Control
     internal void SelectPartOfCellForTesting(long row, int column, int from, int to)
     {
         var (start, end) = CellRangeForTesting(row, column);
-        _charRow = row;
+        _charLine = LineAt(row);
         _charColumn = column;
         _charAnchor = Math.Clamp(start + from, start, end);
         _charFocus = Math.Clamp(start + to, start, end);
-        _sel.SetSingle(row);
+        _sel.SetSingle(_charLine);
         _caretRow = row;
         Invalidate();
     }
@@ -2074,6 +2110,7 @@ public sealed class LineGridControl : Control
         long row = RowAtY(e.Y); // resolves against the live viewport before stabilization is dropped
         ClearViewAnchor();
         if (row < 0 || row >= _doc.RowCount) return;
+        long line = LineAt(row);
 
         if (_clickCount == 2)
         {
@@ -2086,13 +2123,13 @@ public sealed class LineGridControl : Control
 
         // Remembered before the click below throws it away, so the double-click that may follow can still
         // make a filter from the part of the line that was picked out.
-        _carriedSelection = row == _charRow && HasCharSelection ? SelectedText : null;
+        _carriedSelection = line == _charLine && HasCharSelection ? SelectedText : null;
 
         // A plain click - and a triple click - means the whole line, which is also where a drag starts from.
         ClearCharSelection();
-        if ((ModifierKeys & Keys.Shift) != 0 && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, row);
-        else if ((ModifierKeys & Keys.Control) != 0) _sel.ToggleSingle(row);
-        else _sel.SetSingle(row);
+        if ((ModifierKeys & Keys.Shift) != 0 && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, line);
+        else if ((ModifierKeys & Keys.Control) != 0) _sel.ToggleSingle(line);
+        else _sel.SetSingle(line);
 
         _caretRow = row;
         _dragging = true;
@@ -2103,7 +2140,8 @@ public sealed class LineGridControl : Control
         {
             // Armed, not shown: a drag that stays on this row turns into a character selection, one that
             // leaves it selects whole rows, and one that comes back picks the characters up again.
-            _charRow = _charOriginRow = row;
+            _charLine = line;
+            _charOriginRow = row;
             _charAnchor = _charFocus = _charOriginAt = CharIndexAt(row, e.X, e.Y, out _charColumn);
             _charOriginColumn = _charColumn;
         }
@@ -2125,27 +2163,27 @@ public sealed class LineGridControl : Control
             {
                 // Back on the row it started from, so it is a selection within that line again - and, when
                 // the line is split into cells, within the cell it started in.
-                _charRow = _charOriginRow;
+                _charLine = LineAt(row);
                 _charColumn = _charOriginColumn;
                 _charAnchor = _charOriginAt;
-                int at = _charColumn >= 0 ? CharIndexIn(_charRow, _charColumn, e.X)
-                                          : CharIndexAt(_charRow, e.X, e.Y);
-                if (at != _charFocus || _caretRow != row || _sel.Count != 1)
+                int at = _charColumn >= 0 ? CharIndexIn(row, _charColumn, e.X)
+                                          : CharIndexAt(row, e.X, e.Y);
+                if (at != _charFocus || _caretRow != row || _sel.LineCount != 1)
                 {
                     _charFocus = at;
                     _charDragging = true;
                     _caretRow = row;
-                    _sel.SetSingle(row);
+                    _sel.SetSingle(_charLine);
                     Invalidate();
                     Update();
                     SelectionChanged?.Invoke();
                 }
             }
-            else if (row != _caretRow || _charRow >= 0)
+            else if (row != _caretRow || _charLine >= 0)
             {
                 // Left the row: this is a selection of whole lines after all.
                 ClearCharSelection();
-                _sel.SetRange(_sel.Anchor, row);
+                _sel.SetRange(_sel.Anchor, LineAt(row));
                 _caretRow = row;
                 EnsureVisible(row);
                 Invalidate();
@@ -2266,7 +2304,7 @@ public sealed class LineGridControl : Control
             case Keys.End: SetHScroll(MaxHScroll); break;
             case Keys.Left: SetHScroll(_hScroll - _charWidth * 4); break;
             case Keys.Right: SetHScroll(_hScroll + _charWidth * 4); break;
-            case Keys.A when e.Control: _sel.SelectAll(rows); Invalidate(); SelectionChanged?.Invoke(); break;
+            case Keys.A when e.Control: SelectAll(); break;
             case Keys.C when e.Control: CopySelection(false); break;
             case >= Keys.D1 and <= Keys.D8 when e.Control: ToggleMarker(e.KeyCode - Keys.D1); break;
             case >= Keys.D1 and <= Keys.D8: NavigateMarker(e.KeyCode - Keys.D1, !e.Shift); break;
@@ -2278,8 +2316,8 @@ public sealed class LineGridControl : Control
     private void ToggleMarker(int index)
     {
         if (_doc is null) return;
-        foreach (long row in _sel.Rows(CopyLineCap)) _doc.Markers.Toggle(_doc.RowToLine(row), index);
-        if (_sel.Count == 0 && _caretRow >= 0) _doc.Markers.Toggle(_doc.RowToLine(_caretRow), index);
+        foreach (long line in SelectedLines(CopyLineCap)) _doc.Markers.Toggle(line, index);
+        if (_sel.IsEmpty && _caretRow >= 0) _doc.Markers.Toggle(_doc.RowToLine(_caretRow), index);
         // Re-run filtering only when a marker-based filter is active (its matches depend on markers).
         // Otherwise a marker toggle just changes the gutter, so a repaint suffices — re-filtering would
         // needlessly rebuild the view and shift the scroll position / selection.
@@ -2298,7 +2336,7 @@ public sealed class LineGridControl : Control
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         _caretRow = row;
-        _sel.SetSingle(row);
+        _sel.SetSingle(LineAt(row));
         RevealRow(row);
         Invalidate();
         SelectionChanged?.Invoke();
@@ -2329,8 +2367,8 @@ public sealed class LineGridControl : Control
         _anchorLine = -1;
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _caretRow = row;
-        if (extend && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, row);
-        else _sel.SetSingle(row);
+        if (extend && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, LineAt(row));
+        else _sel.SetSingle(LineAt(row));
         if (reveal) EnsureVisible(row);
         Invalidate();
         Update();   // a held arrow key keeps the queue full, and a repaint waits for it to empty
@@ -2464,12 +2502,47 @@ public sealed class LineGridControl : Control
         else if (row > _firstRow + bottom) SetFirstRow(row - bottom);
     }
 
-    public void SelectAll() { if (_doc is not null) { ClearCharSelection(); _sel.SelectAll(_doc.RowCount); Invalidate(); SelectionChanged?.Invoke(); } }
+    public void SelectAll()
+    {
+        if (_doc is null) return;
+        ClearCharSelection();
+        _sel.SelectAll(_doc.CompletedLineCount);
+        Invalidate();
+        SelectionChanged?.Invoke();
+    }
 
-    /// <summary>Clears the current selection (used when the visible row set changes).</summary>
+    /// <summary>Clears the current selection.</summary>
     public void ClearSelection() { _sel.Clear(); Invalidate(); SelectionChanged?.Invoke(); }
 
-    public long SelectedCount => _sel.Count;
+    /// <summary>How many selected lines the view is showing. A selection is a stretch of the log, so what
+    /// is hidden is not counted - two rank lookups a range, rather than a walk.</summary>
+    public long SelectedCount
+    {
+        get
+        {
+            if (_doc is null) return 0;
+            long n = 0;
+            foreach (var (a, b) in _sel.Ranges)
+                n += Math.Max(0, _doc.RowAtOrAfterLine(b + 1) - _doc.RowAtOrAfterLine(a));
+            return n;
+        }
+    }
+
+    /// <summary>The selected lines the view is showing, in order. Walked through the rows rather than
+    /// through the lines, so a selection spanning a hidden million costs only what it yields.</summary>
+    private IEnumerable<long> SelectedLines(long cap)
+    {
+        if (_doc is null) yield break;
+        long rows = _doc.RowCount, n = 0;
+        foreach (var (a, b) in _sel.Ranges)
+            for (long row = _doc.RowAtOrAfterLine(a); row < rows; row++)
+            {
+                long line = _doc.RowToLine(row);
+                if (line > b) break;
+                if (n++ >= cap) yield break;
+                yield return line;
+            }
+    }
 
     public void Zoom(int deltaPercent)
     {
@@ -2491,7 +2564,7 @@ public sealed class LineGridControl : Control
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _caretRow = row;
-        _sel.SetSingle(row);
+        _sel.SetSingle(LineAt(row));
         RevealRow(row);
         Invalidate();
         SelectionChanged?.Invoke();
@@ -2502,19 +2575,16 @@ public sealed class LineGridControl : Control
         if (_doc is null) return;
         if (SelectedText is { } part)
         {
-            string one = withLineNumbers ? $"{_doc.RowToLine(_charRow) + 1}\t{part}" : part;
+            string one = withLineNumbers ? $"{_charLine + 1}\t{part}" : part;
             try { Clipboard.SetText(one); } catch { /* clipboard busy */ }
             return;
         }
-        if (_sel.Count == 0) return;
+        if (_sel.IsEmpty) return;
         var sb = new StringBuilder();
-        long n = 0;
-        foreach (long row in _sel.Rows(CopyLineCap))
+        foreach (long line in SelectedLines(CopyLineCap))
         {
-            long line = _doc.RowToLine(row);
             if (withLineNumbers) sb.Append(line + 1).Append('\t');
             sb.AppendLine(_doc.GetLineText(line));
-            if (++n >= CopyLineCap) break;
         }
         if (sb.Length > 0)
             try { Clipboard.SetText(sb.ToString()); } catch { /* clipboard busy */ }
@@ -2545,7 +2615,7 @@ public sealed class LineGridControl : Control
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _anchorLine = -1;
         _caretRow = row;
-        _sel.SetSingle(row);
+        _sel.SetSingle(LineAt(row));
         EnsureVisible(row);
         Invalidate();
         SelectionChanged?.Invoke();
@@ -2663,7 +2733,7 @@ public sealed class LineGridControl : Control
             get
             {
                 var s = AccessibleStates.Selectable | AccessibleStates.Focusable;
-                if (_g._sel.Contains(Row)) s |= AccessibleStates.Selected;
+                if (_g._sel.Contains(_g.LineAt(Row))) s |= AccessibleStates.Selected;
                 if (Row == _g._caretRow) s |= AccessibleStates.Focused;
                 return s;
             }

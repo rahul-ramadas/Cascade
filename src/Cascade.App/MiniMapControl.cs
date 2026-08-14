@@ -52,6 +52,7 @@ internal sealed class MiniMapControl : Control
     private long[] _rowAt = Array.Empty<long>();   // the row behind each pixel row
     private int[] _colour = Array.Empty<int>();    // 0 where nothing is painted
     private int[] _scanline = Array.Empty<int>();
+    private readonly List<(long From, long To)> _selectedRows = new();   // the selection, in rows, per paint
     private Bitmap? _picture;
     private int _rowPixels = 1;
     private int _step = 1;                         // rows behind one pixel
@@ -545,14 +546,20 @@ internal sealed class MiniMapControl : Control
         // Selected rows and find hits share the map with the colours, so they take an edge each rather than
         // covering the row they belong to. The selection goes down first: a mark is deliberate and stays,
         // a selection is wherever you last clicked, and the two want the same few pixels.
-        if (_grid.HasSelection)
+        // It is held in file lines, so it is turned into rows once here rather than once per slot.
+        _grid.FillSelectedRowRanges(_selectedRows);
+        if (_selectedRows.Count > 0)
         {
             using var brush = new SolidBrush(_grid.Settings.SelectionBack);
             for (int s = 0; s < _slots; s++)
             {
                 var (from, to) = RowsAt(s);
-                if (_grid.SelectionIntersects(from, to))
-                    g.FillRectangle(brush, left, s * _rowPixels, edge, Math.Max(2, _rowPixels));
+                foreach (var (a, b) in _selectedRows)
+                    if (a < to && b > from)
+                    {
+                        g.FillRectangle(brush, left, s * _rowPixels, edge, Math.Max(2, _rowPixels));
+                        break;
+                    }
             }
         }
 
