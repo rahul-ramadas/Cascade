@@ -2746,8 +2746,9 @@ internal static class SelfTest
         string filterFile = Path.Combine(Path.GetTempPath(), "cascade_st_colour_" + stem + ".cascade");
 
         // More than one 32,768-line block, so the pass can be held with the view still listing the rows the
-        // old filters put there below it. In runs, so a screenful straddles both kinds.
-        const int Lines = 60_000, Run = 25, Park = 40_000;
+        // old filters put there below it. In runs, and parked a few lines short of one the exclude hides, so
+        // a screenful holds several of those rows however tall a row is on the machine running this.
+        const int Lines = 60_000, Run = 25, Park = 40_020, FirstHidden = 40_025;
         var sb = new StringBuilder();
         for (int i = 0; i < Lines; i++)
             sb.Append(i / Run % 2 == 0 ? "ALPHA" : "BETA").Append(" line ").Append(i).Append('\n');
@@ -2813,13 +2814,13 @@ internal static class SelfTest
                         Volatile.Read(ref blocks) > 0 && doc.FilterProcessedLineCount < firstRow);
             // What it has already swept it has already dropped; the stretch the view is over, it has not.
             ok &= Check($"so the view is still showing the lines it hides ({doc.RowCount:N0} rows)",
-                        doc.RowCount > Lines / 2 && doc.IsLineVisible(Park + Run + 5));
+                        doc.RowCount > Lines / 2 && doc.IsLineVisible(FirstHidden));
 
             var coming = new long[grid.VisibleRowCountForTesting];
             int have = doc.LinesForRows(firstRow, coming);
             int doomed = 0;
             for (int i = 0; i < have; i++) if (doc.GetLineText(coming[i]).StartsWith("BETA", StringComparison.Ordinal)) doomed++;
-            ok &= Check($"and a good part of the screen is rows it hides ({doomed} of {have})", doomed >= 8);
+            ok &= Check($"and a good part of the screen is rows it hides ({doomed} of {have})", doomed >= 5);
 
             // The frame the report is about: its rows are resolved, and THEN the pass finishes.
             grid.AfterWindowForTesting = () =>
