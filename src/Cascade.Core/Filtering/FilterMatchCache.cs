@@ -25,12 +25,13 @@ public sealed class FilterMatchCache
 
     private long _usedBytes;
 
-    /// <summary>The lines a filter matched. Read sequentially by <see cref="Combine"/> via a word cursor.</summary>
+    /// <summary>The lines a filter matched. <see cref="Combine"/> reads the storage directly, so it can walk
+    /// a dense set a word at a time and scatter a sparse one bit by bit rather than treating both alike.</summary>
     public sealed class MatchSet
     {
-        private readonly ulong[]? _dense;   // one bit per line
-        private readonly uint[]? _sparse;   // sorted matching line numbers
-        private readonly int _sparseCount;
+        internal readonly ulong[]? _dense;   // one bit per line
+        internal readonly uint[]? _sparse;   // sorted matching line numbers
+        internal readonly int _sparseCount;
 
         internal MatchSet(ulong[]? dense, uint[]? sparse, int sparseCount, long covered, long matches, long bytes)
         {
@@ -156,28 +157,6 @@ public sealed class FilterMatchCache
                 if (_sparse![mid] < line) lo = mid + 1; else hi = mid;
             }
             return lo;
-        }
-
-        /// <summary>Walks the set 64 lines at a time. Words must be requested in ascending order.</summary>
-        internal struct Cursor
-        {
-            private readonly MatchSet _set;
-            private int _at;
-
-            public Cursor(MatchSet set) { _set = set; _at = 0; }
-
-            public ulong Word(long wordIndex)
-            {
-                if (_set._dense is ulong[] dense)
-                    return (ulong)wordIndex < (ulong)dense.LongLength ? dense[wordIndex] : 0UL;
-
-                uint[] sparse = _set._sparse!;
-                long first = wordIndex << 6, end = first + 64;
-                ulong word = 0;
-                while (_at < _set._sparseCount && sparse[_at] < first) _at++;   // ascending access only
-                for (int i = _at; i < _set._sparseCount && sparse[i] < end; i++) word |= 1UL << (int)(sparse[i] - first);
-                return word;
-            }
         }
     }
 
@@ -392,25 +371,56 @@ public sealed class FilterMatchCache
         bool hasEnabledInclude, long lines, ulong[] shown)
     {
         int words = (int)((lines + 63) / 64);
-        var incCursors = new MatchSet.Cursor[includes.Count];
-        for (int i = 0; i < includes.Count; i++) incCursors[i] = new MatchSet.Cursor(includes[i]);
-        var excCursors = new MatchSet.Cursor[excludes.Count];
-        for (int i = 0; i < excludes.Count; i++) excCursors[i] = new MatchSet.Cursor(excludes[i]);
+        var span = shown.AsSpan(0, words);
 
-        for (int w = 0; w < words; w++)
+        // Sets differ enormously in shape and it is worth treating them differently: in a real filter file
+        // most match nothing at all, most of the rest match a fraction of a percent, and only a handful are
+        // dense enough to be worth walking a word at a time. Asking every set for every word costs
+        // O(lines x filters) whatever they hold; splitting by shape costs O(lines x dense sets + sparse bits).
+        if (!hasEnabledInclude) span.Fill(ulong.MaxValue);   // no include filters: everything qualifies
+        else
         {
-            ulong included = 0;
-            for (int i = 0; i < incCursors.Length; i++) included |= incCursors[i].Word(w);
-            if (!hasEnabledInclude) included = ulong.MaxValue;   // no include filters: everything qualifies
-
-            ulong excluded = 0;
-            for (int i = 0; i < excCursors.Length; i++) excluded |= excCursors[i].Word(w);
-
-            shown[w] = included & ~excluded;
+            span.Clear();
+            foreach (var set in includes) Or(span, set, lines);
         }
+        foreach (var set in excludes) AndNot(span, set, lines);
 
         // Clear any bits past the end of the file in the final word.
         int tail = (int)(lines & 63);
-        if (tail != 0 && words > 0) shown[words - 1] &= (1UL << tail) - 1;
+        if (tail != 0 && words > 0) span[words - 1] &= (1UL << tail) - 1;
+    }
+
+    private static void Or(Span<ulong> shown, MatchSet set, long lines)
+    {
+        if (set._dense is ulong[] dense)
+        {
+            int n = Math.Min(shown.Length, dense.Length);
+            for (int w = 0; w < n; w++) shown[w] |= dense[w];
+            return;
+        }
+        if (set._sparse is not uint[] sparse) return;
+        for (int i = 0; i < set._sparseCount; i++)
+        {
+            uint line = sparse[i];
+            if (line >= lines) return;   // ascending, and a set may cover more of the file than was asked for
+            shown[(int)(line >> 6)] |= 1UL << (int)(line & 63);
+        }
+    }
+
+    private static void AndNot(Span<ulong> shown, MatchSet set, long lines)
+    {
+        if (set._dense is ulong[] dense)
+        {
+            int n = Math.Min(shown.Length, dense.Length);
+            for (int w = 0; w < n; w++) shown[w] &= ~dense[w];
+            return;
+        }
+        if (set._sparse is not uint[] sparse) return;
+        for (int i = 0; i < set._sparseCount; i++)
+        {
+            uint line = sparse[i];
+            if (line >= lines) return;
+            shown[(int)(line >> 6)] &= ~(1UL << (int)(line & 63));
+        }
     }
 }

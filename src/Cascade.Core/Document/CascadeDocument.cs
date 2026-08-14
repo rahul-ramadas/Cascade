@@ -436,11 +436,20 @@ public sealed class CascadeDocument : IDisposable
     }
 
     /// <summary>Lines currently matching (deep-match) <paramref name="filter"/>, or -1 if unknown
-    /// (no active filtering generation). The value grows while filtering streams, final when idle.</summary>
+    /// (no active filtering generation). The value grows while filtering streams, final when idle.
+    /// A disabled filter counts nothing, as it contributes nothing to the view.
+    /// <para>An enabled filter's count is a property of its predicate chain alone - it does not depend on
+    /// which filters are enabled - so a result already worked out for the whole file is its answer and is
+    /// used as it stands. Without that, every filter's count would restart from zero on every filter change,
+    /// because a fresh pass owns fresh accumulators: the whole list would read 0 for as long as the change
+    /// took to apply, even though nothing about those filters had changed.</para></summary>
     public long MatchCountFor(Filter filter)
     {
         var gen = _generation;
         if (gen is null || !gen.Snapshot.TryGetIndex(filter, out int idx) || idx >= gen.Counts.Length) return -1;
+        if (filter.Enabled && _filterService is not null
+            && _filterService.TryGetMatchSet(gen.Snapshot, filter, out var known))
+            return known.Matches;
         lock (gen.CountsSync) return gen.Counts[idx];
     }
 
