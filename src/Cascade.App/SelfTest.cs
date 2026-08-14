@@ -74,6 +74,7 @@ internal static class SelfTest
             ok &= Timed("selection follows the text", RunSelectionFollowsTextChecks);
             ok &= Timed("underline", RunUnderlineChecks);
             ok &= Timed("restyling", RunRestyleChecks);
+            ok &= Timed("colour while filtering", RunColourWhileFilteringChecks);
             ok &= Timed("hang watchdog", RunHangWatchdogChecks);
             ok &= Timed("automation", RunAutomationChecks);
             ok &= Timed("letting go of the filters", RunCloseFiltersChecks);
@@ -2728,6 +2729,168 @@ internal static class SelfTest
             try { File.Delete(path); } catch { /* ignore */ }
             try { File.Delete(filters); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>
+    /// What a frame draws must not change under it. A filtering pass ending half way through one used to
+    /// switch which filters answer for a row, so every row painted after that instant came out with no
+    /// colour at all - plain unfiltered text across the bottom of an otherwise coloured screen, for one
+    /// frame. Driven through a real window, and read off the pixels, because that is the only place the
+    /// symptom exists.
+    /// </summary>
+    private static bool RunColourWhileFilteringChecks()
+    {
+        Line("-- colour while a pass finishes --");
+        string stem = Guid.NewGuid().ToString("N");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_colour_" + stem + ".log");
+        string filterFile = Path.Combine(Path.GetTempPath(), "cascade_st_colour_" + stem + ".cascade");
+
+        // More than one 32,768-line block, so the pass can be held with the view still listing the rows the
+        // old filters put there below it. In runs, so a screenful straddles both kinds.
+        const int Lines = 60_000, Run = 25, Park = 40_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < Lines; i++)
+            sb.Append(i / Run % 2 == 0 ? "ALPHA" : "BETA").Append(" line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(new Filter
+        {
+            Enabled = true,
+            Match = { Text = "ALPHA" },
+            Style = { Background = new RgbColor(0xD0, 0xE4, 0xFF), Foreground = new RgbColor(0, 0, 0x60) },
+        });
+        filters.Add(new Filter
+        {
+            Enabled = true,
+            Match = { Text = "BETA" },
+            Style = { Background = new RgbColor(0xD0, 0xFF, 0xD0), Foreground = new RgbColor(0, 0x50, 0) },
+        });
+        var exclude = new Filter { Enabled = false, Kind = FilterKind.Exclude, Match = { Text = "BETA" } };
+        filters.Add(exclude);
+        // Enabled and matching nothing: keeps the match cache out of it, so ticking the exclude really
+        // sweeps the file instead of being answered in one go from what an earlier pass recorded.
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+        CascadeFile.Save(filterFile, filters);
+
+        var settings = new AppSettings();
+        MainForm? form = null;
+        var gate = new SemaphoreSlim(0);
+        int blocks = 0;
+        try
+        {
+            form = new MainForm(settings, new MachineState(), new[] { path, "/Filters:" + filterFile })
+            {
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1000, 760),
+            };
+            form.NoSavePrompt = true;
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 400 && doc.CompletedLineCount < Lines; i++) { Thread.Sleep(10); Pump(); }
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(10); Pump(); }
+
+            var grid = form.GridForTesting;
+            var live = doc.Filters.EnumerateDepthFirst().First(f => f.Kind == FilterKind.Exclude);
+            grid.ScrollToRow(Park);
+            Pump();
+
+            bool ok = Check($"the file is open with every line shown and coloured ({doc.RowCount:N0} rows)",
+                            doc.CompletedLineCount == Lines && doc.RowCount == Lines && doc.FilteredMode);
+            long firstRow = grid.FirstVisibleRow;
+            ok &= Check($"parked past the first block, so a held pass has not reached it (row {firstRow:N0})",
+                        firstRow >= 32_768);
+
+            // Tick the exclude with the pass held after its first block: the sweep is then a long way above
+            // the view, which is still listing every line the old filters showed.
+            doc.FilterCheckpointForTesting = _ => { Interlocked.Increment(ref blocks); gate.Wait(TimeSpan.FromSeconds(20)); };
+            form.FilterTreeForTesting.ToggleCheckboxForTesting(live, false);
+            for (int i = 0; i < 600 && Volatile.Read(ref blocks) == 0; i++) { Thread.Sleep(5); Pump(); }
+            ok &= Check($"the pass is held short of the view ({doc.FilterProcessedLineCount:N0} lines done)",
+                        Volatile.Read(ref blocks) > 0 && doc.FilterProcessedLineCount < firstRow);
+            // What it has already swept it has already dropped; the stretch the view is over, it has not.
+            ok &= Check($"so the view is still showing the lines it hides ({doc.RowCount:N0} rows)",
+                        doc.RowCount > Lines / 2 && doc.IsLineVisible(Park + Run + 5));
+
+            var coming = new long[grid.VisibleRowCountForTesting];
+            int have = doc.LinesForRows(firstRow, coming);
+            int doomed = 0;
+            for (int i = 0; i < have; i++) if (doc.GetLineText(coming[i]).StartsWith("BETA", StringComparison.Ordinal)) doomed++;
+            ok &= Check($"and a good part of the screen is rows it hides ({doomed} of {have})", doomed >= 8);
+
+            // The frame the report is about: its rows are resolved, and THEN the pass finishes.
+            grid.AfterWindowForTesting = () =>
+            {
+                doc.FilterCheckpointForTesting = null;
+                gate.Release(1000);
+                for (int i = 0; i < 5000 && !doc.IsFilterIdle; i++) Thread.Sleep(1);
+            };
+            using var shot = new Bitmap(Math.Max(1, grid.Width), Math.Max(1, grid.Height));
+            grid.DrawToBitmap(shot, new Rectangle(0, 0, shot.Width, shot.Height));
+            grid.AfterWindowForTesting = null;
+            ok &= Check("the pass really did finish inside that frame", doc.IsFilterIdle);
+
+            var drawn = RowBackgrounds(shot, grid);
+            int blank = drawn.Count(c => SameColour(c, settings.Background));
+            ok &= Check($"every row it drew still carries a filter's colour ({drawn.Count} rows)",
+                        blank == 0, $"{blank} of {drawn.Count} were drawn on the view's own background");
+
+            // And the rule is still doing its job: once the view has caught up those rows are gone, not
+            // kept alive in the colour of filters that no longer show them.
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(10); Pump(); }
+            Pump();
+            ok &= Check($"the view catches up ({doc.RowCount:N0} rows)", doc.RowCount == Lines / 2);
+            using var settled = new Bitmap(Math.Max(1, grid.Width), Math.Max(1, grid.Height));
+            grid.DrawToBitmap(settled, new Rectangle(0, 0, settled.Width, settled.Height));
+            var after = RowBackgrounds(settled, grid);
+            ok &= Check($"and every row on screen is still coloured ({after.Count} rows)",
+                        after.Count > 0 && !after.Any(c => SameColour(c, settings.Background)));
+            ok &= Check("with nothing but the lines that are still shown",
+                        doc.GetLineText(doc.RowToLine(grid.FirstVisibleRow)).StartsWith("ALPHA", StringComparison.Ordinal));
+            return ok;
+        }
+        finally
+        {
+            try { if (form is not null) { form.DocForTesting.FilterCheckpointForTesting = null; form.GridForTesting.AfterWindowForTesting = null; } } catch { /* ignore */ }
+            gate.Release(1000);
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            gate.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+            try { File.Delete(filterFile); } catch { /* ignore */ }
+        }
+    }
+
+    private static bool SameColour(Color a, Color b) => a.ToArgb() == b.ToArgb();
+
+    /// <summary>The background each row was painted in, read as the commonest colour along its middle. The
+    /// glyphs are a minority of any row, so the mode is the fill - and it is the fill that says whether a
+    /// filter coloured the row or nothing did.</summary>
+    private static List<Color> RowBackgrounds(Bitmap shot, LineGridControl grid)
+    {
+        var rows = new List<Color>();
+        int top = grid.GutterAreaForTesting.Top;
+        int pitch = Math.Max(1, grid.RowHeightForTesting);
+        int x0 = grid.GutterWidthForTesting + 4;
+        int x1 = Math.Min(shot.Width, grid.GutterWidthForTesting + grid.ContentWidthForTesting) - 4;
+        var counts = new Dictionary<int, int>();
+        for (int i = 0; i < grid.RowsPaintedForTesting; i++)
+        {
+            int y = top + i * pitch + pitch / 2;
+            if (y >= shot.Height || x1 <= x0) break;
+            counts.Clear();
+            for (int x = x0; x < x1; x += 3)
+            {
+                int argb = shot.GetPixel(x, y).ToArgb();
+                counts[argb] = counts.GetValueOrDefault(argb) + 1;
+            }
+            int best = 0, bestCount = -1;
+            foreach (var (argb, n) in counts) if (n > bestCount) { best = argb; bestCount = n; }
+            rows.Add(Color.FromArgb(best));
+        }
+        return rows;
     }
 
     /// <summary>The hang watchdog: it must stay out of the way until asked for, notice a UI thread that has

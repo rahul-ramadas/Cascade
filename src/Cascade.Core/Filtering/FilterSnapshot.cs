@@ -79,8 +79,11 @@ public sealed class FilterSnapshot
     private readonly int _ciWords;
     private readonly int _hitWords;
 
-    [ThreadStatic] private static MatchContext? _threadContext;
-    [ThreadStatic] private static MatchContext? _displacedContext;
+    [ThreadStatic] private static MatchContext?[]? _threadContexts;
+
+    /// <summary>How many snapshots one thread can be asked about without rebuilding scratch: the filters in
+    /// force, plus the ones the view may still be showing rows from.</summary>
+    private const int ContextSlots = 3;
 
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
@@ -122,16 +125,23 @@ public sealed class FilterSnapshot
     {
         get
         {
-            var ctx = _threadContext;
-            if (ctx is not null && ReferenceEquals(ctx.Owner, this)) return ctx;
-            // Room for two, because a view catching up with a filter change asks the old snapshot and the new
-            // one about alternate lines. With a single slot each question throws the other's scratch away, and
-            // building it again compiles every regex again - measured at 1.7ms a line, against 1.2us.
-            var spare = _displacedContext;
-            if (spare is null || !ReferenceEquals(spare.Owner, this)) spare = CreateContext();
-            _displacedContext = ctx;
-            _threadContext = spare;
-            return spare;
+            // One slot per snapshot that can be in play at once. A view catching up with a filter change
+            // asks the old snapshot and the new one about alternate lines, and a change made before the
+            // previous pass could finish leaves a third in the mixture. With too few slots each question
+            // throws another's scratch away, and building it again compiles every regex again - MEASURED at
+            // 32.4us an evaluation against 1.7us. Most recently used first, so the ordinary case is one
+            // comparison and costs what the two fields this replaced did.
+            var slots = _threadContexts ??= new MatchContext?[ContextSlots];
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (slots[i] is not { } held || !ReferenceEquals(held.Owner, this)) continue;
+                if (i > 0) { slots[i] = slots[0]; slots[0] = held; }
+                return held;
+            }
+            var made = CreateContext();
+            Array.Copy(slots, 0, slots, 1, slots.Length - 1);
+            slots[0] = made;
+            return made;
         }
     }
 

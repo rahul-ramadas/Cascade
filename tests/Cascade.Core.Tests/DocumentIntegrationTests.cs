@@ -806,7 +806,7 @@ public class DocumentIntegrationTests
             Assert.Equal(2, doc.RowToLine(1));
             Assert.Equal(5, doc.RowToLine(2));
 
-            var eval = doc.EvaluateText("ERROR one".AsSpan(), 0);
+            var eval = doc.ColouringSnapshot().Evaluate("ERROR one".AsSpan(), 0);
             Assert.True(eval.Shown);
             Assert.Same(error, eval.ColorFilter);
         }
@@ -1073,7 +1073,7 @@ public class DocumentIntegrationTests
             doc.SetFilters(filters);
             WaitFilter(doc);
             Assert.True(doc.IsLineVisible(alphaOnly), "the line the check is about is not on show to begin with");
-            Assert.Same(alpha, doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+            Assert.Same(alpha, doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
 
             doc.FilterCheckpointForTesting = _ =>
             {
@@ -1088,7 +1088,7 @@ public class DocumentIntegrationTests
             Assert.True(doc.FilterProcessedLineCount < alphaOnly,
                         $"the pass got too far to test ({doc.FilterProcessedLineCount:N0})");
             Assert.True(doc.IsLineVisible(alphaOnly), "the view has already dropped it, so there is nothing to draw");
-            Assert.Same(alpha, doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+            Assert.Same(alpha, doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
 
             doc.FilterCheckpointForTesting = null;
             gate.Release(1000);
@@ -1096,7 +1096,7 @@ public class DocumentIntegrationTests
 
             // And once the view has caught up it really is gone, colour and all.
             Assert.False(doc.IsLineVisible(alphaOnly));
-            Assert.Null(doc.EvaluateText(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+            Assert.Null(doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
         }
         finally
         {
@@ -1104,6 +1104,206 @@ public class DocumentIntegrationTests
             gate.Release(1000);
             doc.Dispose();
             gate.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void A_frames_colours_do_not_change_when_the_pass_ends_half_way_through_it()
+    {
+        // The same flash again, in the shape the fallback above still missed: the pass ends while a frame is
+        // being PAINTED. Its rows were resolved against the visible set as it stood, so they are the rows the
+        // old filters put there - but the moment the pass finished, "the view has not caught up yet" went
+        // false, and every row drawn after that instant came out with no colour: the bottom of the screen
+        // went white for one frame. So the decision of which filters answer is taken once, up front, and a
+        // frame keeps the one it was given.
+        const int lines = 200_000, first = 150_000, second = 150_010;   // both ALPHA-only
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 10 == 0 ? "ALPHA" : i % 7 == 0 ? "BETA" : "plain").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        var alpha = new Filter { Enabled = true, Match = { Text = "ALPHA" } };
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(alpha);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
+        // Enabled, matches nothing, and keeps the match cache out of it so the next change really sweeps.
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+
+        var gate = new SemaphoreSlim(0);
+        int blocks = 0;
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+
+            doc.FilterCheckpointForTesting = _ =>
+            {
+                Interlocked.Increment(ref blocks);
+                gate.Wait(TimeSpan.FromSeconds(20));
+            };
+            alpha.Enabled = false;
+            doc.ApplyFilters();
+            WaitFor(() => Volatile.Read(ref blocks) >= 1, "the pass never finished a block");
+            Assert.True(doc.FilterProcessedLineCount < first,
+                        $"the pass got too far to test ({doc.FilterProcessedLineCount:N0})");
+
+            // A frame begins: it takes its colours, and its rows still include the lines ALPHA was showing.
+            var frame = doc.ColouringSnapshot();
+            Assert.True(doc.IsLineVisible(first) && doc.IsLineVisible(second));
+            Assert.Same(alpha, frame.Evaluate(doc.GetLineText(first), first).ColorFilter);
+
+            // The pass finishes underneath it, exactly as it did on screen.
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            WaitFilter(doc);
+
+            // The rest of the frame must come out the same. Asked about a line it had not reached yet, so no
+            // caching of an earlier answer can be what makes this pass.
+            Assert.Same(alpha, frame.Evaluate(doc.GetLineText(second), second).ColorFilter);
+
+            // And the NEXT frame is told the truth - the guard is still doing its job, not simply gone.
+            Assert.False(doc.IsLineVisible(second));
+            Assert.Null(doc.ColouringSnapshot().Evaluate(doc.GetLineText(second), second).ColorFilter);
+        }
+        finally
+        {
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void A_stretch_left_behind_by_a_superseded_pass_is_still_coloured()
+    {
+        // Change the filters twice before a pass can finish and the view becomes a mixture: the new pass
+        // rewrites from line 0, so between where it has reached and where the abandoned one got to, the view
+        // is still listing the rows THAT pass added. The filters in force do not show them, and neither do
+        // the ones from before it started - so with only one set remembered they were drawn with no colour
+        // at all, for as long as it took the new pass to sweep that far. The filters each pass was running
+        // are remembered, not just the last settled set.
+        const int lines = 200_000, alphaOnly = 50_000;   // a multiple of 10, so ALPHA and nothing else
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 10 == 0 ? "ALPHA" : i % 7 == 0 ? "BETA" : "plain").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        var alpha = new Filter { Enabled = false, Match = { Text = "ALPHA" } };
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(alpha);
+        filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
+        // Enabled, matches nothing, and keeps the match cache out of it so each change really sweeps.
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+
+        var gate = new SemaphoreSlim(0);
+        int blocks = 0;
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.False(doc.IsLineVisible(alphaOnly), "the line starts out hidden, so only a pass can put it on screen");
+
+            doc.FilterCheckpointForTesting = _ => { Interlocked.Increment(ref blocks); gate.Wait(TimeSpan.FromSeconds(20)); };
+            alpha.Enabled = true;
+            doc.ApplyFilters();
+            WaitFor(() => Volatile.Read(ref blocks) >= 1, "the pass never started");
+            gate.Release(3);
+            WaitFor(() => Volatile.Read(ref blocks) >= 4, "the pass did not reach the line");
+
+            // Superseded well past the line, and the next pass held before it gets back there.
+            alpha.Enabled = false;
+            doc.ApplyFilters();
+            int was = Volatile.Read(ref blocks);
+            gate.Release(1);
+            WaitFor(() => Volatile.Read(ref blocks) >= was + 1, "the second pass never started");
+
+            Assert.True(doc.FilterProcessedLineCount < alphaOnly,
+                        $"the second pass has already swept the stretch ({doc.FilterProcessedLineCount:N0})");
+            Assert.True(doc.IsLineVisible(alphaOnly), "the abandoned pass's stretch is not on screen, so there is nothing to draw");
+            Assert.Same(alpha, doc.ColouringSnapshot().Evaluate(doc.GetLineText(alphaOnly), alphaOnly).ColorFilter);
+        }
+        finally
+        {
+            doc.FilterCheckpointForTesting = null;
+            gate.Release(1000);
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void A_storm_of_filter_changes_cannot_alter_what_a_frame_already_holds()
+    {
+        // The invariant the two checks above are particular cases of: once a frame has taken its colours,
+        // nothing - a pass finishing, a pass starting, the filters changing again - can change the answers
+        // it gets for the rows it is drawing. Every round below moves thousands of lines in and out of the
+        // view while the same frame keeps asking.
+        const int lines = 40_000;
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 3 == 0 ? "ALPHA" : i % 3 == 1 ? "BETA" : "GAMMA").Append(" line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        var toggles = new[]
+        {
+            new Filter { Enabled = true, Match = { Text = "ALPHA" }, Style = { Foreground = new RgbColor(200, 0, 0) } },
+            new Filter { Enabled = true, Match = { Text = "BETA" }, Style = { Foreground = new RgbColor(0, 150, 0) } },
+            new Filter { Enabled = true, Match = { Text = "GAMMA" }, Style = { Foreground = new RgbColor(0, 0, 200) } },
+            new Filter { Enabled = false, Kind = FilterKind.Exclude, Match = { Text = "line 1" } },
+            new Filter { Enabled = false, Kind = FilterKind.Exclude, Match = { Text = "7 " } },
+        };
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        foreach (var f in toggles) filters.Add(f);
+        // Enabled and matching nothing: keeps the match cache out of it, so every round is a real pass.
+        filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+
+            // One screenful, resolved in one shot, exactly as a frame does it.
+            var window = new long[40];
+            int n = doc.LinesForRows(doc.RowCount / 2, window);
+            Assert.Equal(window.Length, n);
+
+            var frame = doc.ColouringSnapshot();
+            var texts = new string[n];
+            var first = new Filter?[n];
+            for (int i = 0; i < n; i++)
+            {
+                texts[i] = doc.GetLineText(window[i]);
+                first[i] = frame.Evaluate(texts[i], window[i]).ColorFilter;
+                Assert.NotNull(first[i]);   // the fixture colours everything it shows, so a blank is a fault
+            }
+
+            var rnd = new Random(7);
+            for (int round = 0; round < 60; round++)
+            {
+                var moved = toggles[rnd.Next(toggles.Length)];
+                moved.Enabled = !moved.Enabled;
+                doc.ApplyFilters();
+                if (round % 4 == 0) WaitFilter(doc);            // sometimes let it finish, sometimes cut it short
+                for (int i = 0; i < n; i++)
+                    Assert.Same(first[i], frame.Evaluate(texts[i], window[i]).ColorFilter);
+            }
+        }
+        finally
+        {
+            doc.Dispose();
             File.Delete(path);
         }
     }
@@ -1152,11 +1352,12 @@ public class DocumentIntegrationTests
             doc.ColouringFilters(lines, count, got);
 
             int coloured = 0;
+            var colouring = doc.ColouringSnapshot();
             for (int i = 0; i < count; i++)
             {
                 long line = lines[i];
                 Filter? want = line >= 0 && line < 5_000
-                    ? doc.EvaluateText(doc.GetLineText(line), line).ColorFilter
+                    ? colouring.Evaluate(doc.GetLineText(line), line).ColorFilter
                     : null;
                 Assert.True(ReferenceEquals(want, got[i]),
                             $"line {line}: expected {want?.DisplayName ?? "none"}, got {got[i]?.DisplayName ?? "none"}");
