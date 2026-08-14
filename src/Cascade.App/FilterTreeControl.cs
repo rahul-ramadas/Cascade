@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Windows.Forms;
 using Cascade.Core.Document;
 using Cascade.Core.Model;
@@ -841,7 +842,7 @@ public sealed class FilterTreeControl : UserControl
         foreach (var n in _flat)
         {
             if (n.Tag is not Filter f) { n.ToolTipText = ""; continue; }
-            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset;
+            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset - ExcludeIconRoom(f);
             bool patternCut = Measure(n.Text, Pick(FontStyle.Bold)) > patternRoom;
             bool descCut = !string.IsNullOrWhiteSpace(f.Description)
                            && Measure(f.Description, Pick(FontStyle.Bold)) > _columns.DescriptionWidth - Inset * 2;
@@ -852,6 +853,68 @@ public sealed class FilterTreeControl : UserControl
     }
 
     // ---- owner draw (color swatch, exclude style, bold search matches, drop indicator) ----
+
+    private int ExcludeIconGap => LogicalToDeviceUnits(3);
+
+    /// <summary>Height of one line of the list's own font. The icon is sized from this rather than from the
+    /// row, so it keeps its proportion to the text at any DPI or system font size.</summary>
+    private int LineHeight()
+    {
+        EnsureFonts();
+        return TextRenderer.MeasureText("Xg", Pick(FontStyle.Regular), Unbounded, MeasureFlags).Height;
+    }
+
+    /// <summary>Width an exclude row's icon takes from its pattern; zero for every other filter, because
+    /// most filters are includes and a column of blank space to their left reads as a mistake.</summary>
+    private int ExcludeIconRoom(Filter f) => f.Kind == FilterKind.Exclude
+        ? ExcludeIconBox(0, new Rectangle(0, 0, 0, _tree.ItemHeight), LineHeight()).Width + ExcludeIconGap
+        : 0;
+
+    /// <summary>The icon sits at the left of the row's content, a shade shorter than a line of text. The box
+    /// is sized for the SLASH, which runs corner to corner; the eye is a flat lens inside it, so the slash
+    /// reads as crossing an eye rather than bisecting a circle.</summary>
+    private Rectangle ExcludeIconBox(int left, Rectangle bounds, int textHeight)
+    {
+        // Tied to the text so it scales with the font and the DPI together, but capped: past a point a
+        // bigger icon says nothing more and only takes width the pattern needs.
+        int h = Math.Clamp(textHeight - LogicalToDeviceUnits(2), LogicalToDeviceUnits(8), LogicalToDeviceUnits(20));
+        h = Math.Min(h, Math.Max(1, bounds.Height - LogicalToDeviceUnits(1)));
+        int w = h * 7 / 6;
+        return new Rectangle(left, bounds.Top + (bounds.Height - h) / 2, w, h);
+    }
+
+    /// <summary>An eye with a slash through it: what this filter does is hide the lines it matches. Drawn
+    /// rather than lettered because it has to take the row's own colours and be legible from about eight
+    /// pixels up to whatever a large system font asks for, which no single font glyph manages.</summary>
+    private static void DrawHiddenEye(Graphics g, Rectangle r, Color color)
+    {
+        // Stroke scales with the box, or the glyph is spidery at a large font and a blob at a small one.
+        float thick = Math.Max(1f, r.Height / 11f);
+        float inset = thick / 2f;
+        float cx = r.Left + r.Width / 2f, cy = r.Top + r.Height / 2f;
+        float halfW = r.Width / 2f - inset, halfH = r.Height / 2f - inset;
+        float lens = halfH * 0.60f;
+
+        var mode = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var pen = new Pen(color, thick) { LineJoin = LineJoin.Round, StartCap = LineCap.Round, EndCap = LineCap.Round })
+        {
+            // A cubic whose two controls sit at -ctrl peaks at 0.75*ctrl, so the control offset has to be
+            // 4/3 of the height the lens should actually reach.
+            float ctrl = lens / 0.75f, k = halfW * 0.62f;
+            using var path = new GraphicsPath();
+            var left = new PointF(cx - halfW, cy);
+            var right = new PointF(cx + halfW, cy);
+            path.AddBezier(left, new PointF(cx - k, cy - ctrl), new PointF(cx + k, cy - ctrl), right);
+            path.AddBezier(right, new PointF(cx + k, cy + ctrl), new PointF(cx - k, cy + ctrl), left);
+            g.DrawPath(pen, path);
+
+            float iris = lens * 0.78f;
+            g.DrawEllipse(pen, cx - iris, cy - iris, iris * 2, iris * 2);
+            g.DrawLine(pen, cx - halfW, cy + halfH, cx + halfW, cy - halfH);
+        }
+        g.SmoothingMode = mode;
+    }
 
     private void OnDrawNode(object? sender, DrawTreeNodeEventArgs e)
     {
@@ -904,12 +967,18 @@ public sealed class FilterTreeControl : UserControl
 
         int textHeight = TextRenderer.MeasureText(g, "Xg", Pick(FontStyle.Regular), new Size(int.MaxValue, h), TextFormatFlags.NoPadding).Height;
         int textY = bounds.Top + Math.Max(0, (h - textHeight) / 2);
-        string pattern = (f.Kind == FilterKind.Exclude ? "\u2260 " : "") + e.Node.Text;
 
         var savedClip = g.Clip;
         g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, filterRight - Inset), bounds.Bottom));
-        DrawWithSearchHighlight(g, pattern, new Point(contentLeft, textY),
-                                filterRight - Inset - contentLeft, fg, style);
+        int textLeft = contentLeft;
+        if (f.Kind == FilterKind.Exclude)
+        {
+            var icon = ExcludeIconBox(contentLeft, bounds, textHeight);
+            DrawHiddenEye(g, icon, fg);
+            textLeft = icon.Right + ExcludeIconGap;
+        }
+        DrawWithSearchHighlight(g, e.Node.Text, new Point(textLeft, textY),
+                                filterRight - Inset - textLeft, fg, style);
 
         if (_columns.HasDescription && !string.IsNullOrEmpty(f.Description))
         {
@@ -1185,6 +1254,10 @@ public sealed class FilterTreeControl : UserControl
     internal int TreeWidthForTesting => _tree.ClientSize.Width;
     internal bool IsExpandedForTesting(Filter f) => NodeFor(f)?.IsExpanded ?? false;
     internal Rectangle RowBoundsForTesting(Filter f) => NodeFor(f)?.Bounds ?? Rectangle.Empty;
+    internal int ContentLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) : 0;
+
+    /// <summary>Test seam: what an exclude row's icon takes from its pattern, gap included.</summary>
+    internal int ExcludeIconRoomForTesting(Filter f) => ExcludeIconRoom(f);
     internal bool IsCheckedForTesting(Filter f) => NodeFor(f)?.Checked ?? false;
     internal void SelectForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.SelectedNode = n; }
     internal void PressKeyForTesting(Keys key) => OnTreeKeyDown(_tree, new KeyEventArgs(key));
