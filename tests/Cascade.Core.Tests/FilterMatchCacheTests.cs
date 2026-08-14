@@ -118,6 +118,45 @@ public class FilterMatchCacheTests
     }
 
     [Fact]
+    public async Task A_pass_does_not_report_itself_idle_before_it_has_recorded_what_it_worked_out()
+    {
+        // The sweep sets its processed count to the total and only THEN hands the per-filter results over,
+        // and that window was reported as idle: a filter change arriving in it missed the cache and paid for
+        // a whole pass again, and anything waiting for the pass could find the cache empty. It showed up as a
+        // one-run-in-eight failure of the checks below on a loaded machine, and on a slow CI runner.
+        // Watched from another thread, the instant it calls itself idle the results must already be there.
+        string path = WriteLog();
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = BuildFilters(out _);
+
+            bool sawItWorking = false;
+            var watcher = Task.Run(() =>
+            {
+                var sw = Stopwatch.StartNew();
+                while (doc.IsFilterIdle && sw.ElapsedMilliseconds < 10_000) { }
+                sawItWorking = !doc.IsFilterIdle;
+                while (!doc.IsFilterIdle && sw.ElapsedMilliseconds < 30_000) { }
+                return doc.FilterCacheBytes;   // read the moment it says it has finished
+            });
+
+            doc.SetFilters(filters);
+            long bytes = await watcher;
+
+            Assert.True(sawItWorking, "the pass was over before it could be watched, so this proves nothing");
+            Assert.True(bytes > 0, "called itself idle before recording what the pass worked out");
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Toggling_filters_from_cache_matches_a_fresh_evaluation()
     {
         string path = WriteLog();
