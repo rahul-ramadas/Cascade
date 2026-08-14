@@ -964,14 +964,29 @@ internal static class SelfTest
 
         Color At(int x, int rowY) => x < 0 || x >= picture.Width || rowY < 0 || rowY >= picture.Height
             ? Color.Transparent : picture.GetPixel(x, rowY);
-        bool IsInk(Color c) => c.R + c.G + c.B < 600;   // anything darker than near-white
+        var paper = Color.White;                                    // the fixture's own row background
+        int Away(Color c) => Math.Abs(c.R - paper.R) + Math.Abs(c.G - paper.G) + Math.Abs(c.B - paper.B);
 
-        // Something is actually drawn in the space the marker reserved.
-        int drawn = 0;
+        // Something is actually drawn in the space the marker reserved. Measured against the row's own
+        // background, not an absolute darkness, so dimming the marker cannot quietly weaken this.
+        int drawn = 0, boldest = 0;
         for (int dx = 0; dx < room; dx++)
             for (int y = 1; y < excRow.Height - 1; y++)
-                if (IsInk(At(area.Left + excLeft + dx, area.Top + excRow.Top + y))) drawn++;
+            {
+                int away = Away(At(area.Left + excLeft + dx, area.Top + excRow.Top + y));
+                if (away > 30) drawn++;
+                boldest = Math.Max(boldest, away);
+            }
         ok &= Check($"the marker is drawn, not just reserved ({drawn} pixels of ink in its {room}px)", drawn > 8);
+
+        // ...and it sits behind the pattern rather than beside it.
+        int text = 0;
+        for (int dx = room; dx < room + 120; dx++)
+            for (int y = 1; y < excRow.Height - 1; y++)
+                text = Math.Max(text, Away(At(area.Left + excLeft + dx, area.Top + excRow.Top + y)));
+        ok &= Check($"the marker is quieter than the pattern it marks " +
+                    $"(marker {boldest} from the background, text {text})",
+                    text > 0 && boldest < text * 3 / 4);
 
         // ...and the pattern beyond it is the same picture as the include's, just moved right by the room
         // the marker took. That is the whole claim, and it fails whichever way the marker goes wrong.

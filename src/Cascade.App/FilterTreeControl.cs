@@ -877,11 +877,22 @@ public sealed class FilterTreeControl : UserControl
     {
         // Tied to the text so it scales with the font and the DPI together, but capped: past a point a
         // bigger icon says nothing more and only takes width the pattern needs.
-        int h = Math.Clamp(textHeight - LogicalToDeviceUnits(2), LogicalToDeviceUnits(8), LogicalToDeviceUnits(20));
+        int h = Math.Clamp(textHeight - LogicalToDeviceUnits(4), LogicalToDeviceUnits(8), LogicalToDeviceUnits(18));
         h = Math.Min(h, Math.Max(1, bounds.Height - LogicalToDeviceUnits(1)));
         int w = h * 7 / 6;
         return new Rectangle(left, bounds.Top + (bounds.Height - h) / 2, w, h);
     }
+
+    /// <summary>How far the marker is blended into the row behind it. It says what kind of filter this is,
+    /// which is worth a glance and not a stare, so it is drawn to sit behind the pattern rather than beside
+    /// it. Blended towards the row's own background rather than to a fixed grey, so a filter wearing any
+    /// colours keeps the same relative contrast.</summary>
+    private const float ExcludeIconDim = 0.55f;
+
+    private static Color Blend(Color c, Color towards, float t) => Color.FromArgb(
+        (int)(c.R + (towards.R - c.R) * t),
+        (int)(c.G + (towards.G - c.G) * t),
+        (int)(c.B + (towards.B - c.B) * t));
 
     /// <summary>An eye with a slash through it: what this filter does is hide the lines it matches. Drawn
     /// rather than lettered because it has to take the row's own colours and be legible from about eight
@@ -974,7 +985,7 @@ public sealed class FilterTreeControl : UserControl
         if (f.Kind == FilterKind.Exclude)
         {
             var icon = ExcludeIconBox(contentLeft, bounds, textHeight);
-            DrawHiddenEye(g, icon, fg);
+            DrawHiddenEye(g, icon, Blend(fg, bg, ExcludeIconDim));
             textLeft = icon.Right + ExcludeIconGap;
         }
         DrawWithSearchHighlight(g, e.Node.Text, new Point(textLeft, textY),
