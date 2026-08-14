@@ -52,8 +52,70 @@ public class FilterPresetTests
     }
 
     [Fact]
+    public void Putting_a_preset_in_effect_leaves_every_filter_it_does_not_name_alone()
+    {
+        // A preset names the filters that belong to it and says nothing whatever about the rest, so a
+        // filter switched on by hand - or one belonging to another preset - has to survive both directions.
+        var c = Tree("a", "b", "outside");
+        var p = Preset(c, "pair", "a", "b");
+        By(c, "outside").Enabled = true;
+
+        Assert.True(c.SetPresetEnabled(p, true));
+        Assert.Equal(new[] { true, true, true }, c.Roots.Select(f => f.Enabled));
+
+        Assert.True(c.SetPresetEnabled(p, false));
+        Assert.Equal(new[] { false, false, true }, c.Roots.Select(f => f.Enabled));
+    }
+
+    [Fact]
+    public void Putting_a_preset_where_it_already_is_reports_that_nothing_moved()
+    {
+        // What stops a tick that changes nothing re-running a pass over a multi-gigabyte file.
+        var c = Tree("a", "b");
+        var p = Preset(c, "just a", "a");
+
+        Assert.True(c.SetPresetEnabled(p, true));
+        Assert.False(c.SetPresetEnabled(p, true));
+        Assert.True(c.SetPresetEnabled(p, false));
+        Assert.False(c.SetPresetEnabled(p, false));
+    }
+
+    [Fact]
+    public void A_preset_naming_nothing_that_exists_switches_nothing()
+    {
+        var c = Tree("a");
+        var p = Preset(c, "gone", "a");
+        c.Remove(By(c, "a"));
+        c.Add(new Filter { Match = { Text = "b" }, Enabled = true });
+
+        Assert.False(c.SetPresetEnabled(p, true));
+        Assert.False(c.SetPresetEnabled(p, false));
+        Assert.True(By(c, "b").Enabled);
+    }
+
+    [Fact]
+    public void Presets_sharing_a_filter_hand_it_over_rather_than_fight_over_it()
+    {
+        var c = Tree("shared", "a", "b");
+        var one = Preset(c, "one", "shared", "a");
+        var two = Preset(c, "two", "shared", "b");
+
+        c.SetPresetEnabled(one, true);
+        c.SetPresetEnabled(two, true);
+        Assert.All(c.Roots, f => Assert.True(f.Enabled));
+
+        // Taking one out takes the shared filter with it, so the other is no longer wholly in effect - which
+        // is what the list has to say, and it derives that rather than remembering it.
+        c.SetPresetEnabled(one, false);
+        Assert.Equal(new[] { false, false, true }, c.Roots.Select(f => f.Enabled));
+        Assert.False(c.IsPresetActive(two));
+    }
+
+    [Fact]
     public void Applying_presets_switches_on_exactly_their_union()
     {
+        // This is "Apply Only This Preset" - the one command that does mean "just this and nothing else".
+        // Ticking a preset goes through SetPresetEnabled instead, which leaves outsiders alone.
         var c = Tree("a", "b", "c", "d");
         var one = Preset(c, "one", "a", "b");
         var two = Preset(c, "two", "c");

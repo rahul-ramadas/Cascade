@@ -939,10 +939,10 @@ internal static class SelfTest
         Pump();
     }
 
-    /// <summary>A preset's TICK says it is in effect, and the enabled filters are the union of what is
-    /// ticked. Its SELECTION is only the user's aim, and must survive anything the model does - while the
-    /// two were one thing, aiming at a preset switched its filters back on and it could never be updated to
-    /// drop one.</summary>
+    /// <summary>A preset's TICK says it is in effect: it switches the filters it names on and off and leaves
+    /// every other filter alone. Its SELECTION is only the user's aim, and must survive anything the model
+    /// does - while the two were one thing, aiming at a preset switched its filters back on and it could
+    /// never be updated to drop one.</summary>
     private static bool RunFilterPresetChecks()
     {
         Line("-- filter presets --");
@@ -976,7 +976,9 @@ internal static class SelfTest
             var a = new Filter { Match = new FilterMatch { Text = "alpha" } };
             var b = new Filter { Match = new FilterMatch { Text = "beta" } };
             var c = new Filter { Match = new FilterMatch { Text = "gamma" } };
-            foreach (var f in new[] { a, b, c }) collection.Roots.Add(f);
+            // In no preset at all, which is what says the presets keep their hands off everything else.
+            var loose = new Filter { Match = new FilterMatch { Text = "line" } };
+            foreach (var f in new[] { a, b, c, loose }) collection.Roots.Add(f);
             collection.Presets.Add(new FilterPreset("first", new[] { a.Id }));
             collection.Presets.Add(new FilterPreset("second", new[] { b.Id, c.Id }));
             doc.SetFilters(collection);
@@ -996,10 +998,10 @@ internal static class SelfTest
             ok &= Check("ticking a preset enables exactly its filters", a.Enabled && !b.Enabled && !c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
-            // Ticking a second means "both", and does not drop the first.
+            // Ticking a second means "and these too", and does not drop the first.
             pane.TickForTesting("first", "second");
             Pump();
-            ok &= Check("ticking a second enables the union", a.Enabled && b.Enabled && c.Enabled,
+            ok &= Check("ticking a second adds its filters to the first's", a.Enabled && b.Enabled && c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
 
             pane.TickForTesting("second");
@@ -1011,6 +1013,29 @@ internal static class SelfTest
             Pump();
             ok &= Check("unticking the last leaves every filter off", !a.Enabled && !b.Enabled && !c.Enabled,
                         $"a={a.Enabled} b={b.Enabled} c={c.Enabled}");
+
+            // THE REPORTED BUG. A preset says which filters belong to it and nothing about the rest, so a
+            // filter switched on by hand has to survive a preset being put in and taken out of effect.
+            loose.Enabled = true;
+            pane.TickForTesting("first");
+            Pump();
+            ok &= Check("ticking a preset leaves a filter it does not name alone", a.Enabled && loose.Enabled,
+                        $"a={a.Enabled} loose={loose.Enabled}");
+            pane.TickForTesting();
+            Pump();
+            ok &= Check("and unticking it takes only its own filters away", !a.Enabled && loose.Enabled,
+                        $"a={a.Enabled} loose={loose.Enabled}");
+            loose.Enabled = false;
+            pane.RefreshActive();
+
+            // A burst that nets out must cost nothing at all: re-running a pass over a whole file to arrive
+            // back where it started is a visible flicker of the progress bar and a lot of work for no answer.
+            applied = 0;
+            pane.TickForTesting("first");
+            pane.TickForTesting();
+            Pump();
+            ok &= Check("ticking a preset and unticking it again before the pass runs re-filters nothing",
+                        applied == 0 && !a.Enabled, $"applied {applied} times, a={a.Enabled}");
 
             // A burst of tick changes must cost one re-filter, not one each: applying is what re-runs the
             // filters over the whole file.
@@ -1123,6 +1148,15 @@ internal static class SelfTest
             pane.Rebuild();
             ok &= Check("a preset says how many of its filters have gone",
                         pane.LabelsForTesting[1].Contains("1 missing"), string.Join(" | ", pane.LabelsForTesting));
+
+            // ...and one that names nothing still standing has nothing to put in effect: the tick springs
+            // back rather than claiming it is on, and no pass is run for it.
+            applied = 0;
+            pane.ClickForTesting("second", onTick: true);
+            Pump();
+            ok &= Check("and ticking one whose filters have all gone comes to nothing",
+                        applied == 0 && !pane.ActiveForTesting.Contains("second", StringComparer.Ordinal),
+                        $"applied {applied} times, in effect [{string.Join(",", pane.ActiveForTesting)}]");
 
             return ok;
         }
@@ -7325,8 +7359,23 @@ internal static class SelfTest
             for (int i = 0; i < 8; i++) { pal.MoveForTesting(Keys.Down); Pump(); }
             ok &= Check("but arrowing off the bottom does scroll it", pal.ScrollForTesting > before,
                         $"{before} -> {pal.ScrollForTesting}");
-            pal.Close();
+
+            // The keys are POSTED rather than sent, because only a posted message goes through the
+            // pre-processing that offers a key to the control first and to the dialog second - which is
+            // exactly what a control claiming every key interferes with.
+            var wasPicked = pal.Picked;
+            PostMessage(pal.GridHandleForTesting, WM_KEYDOWN, (IntPtr)(int)Keys.Down, IntPtr.Zero);
             Pump();
+            ok &= Check("a real arrow key reaches the grid", pal.Picked != wasPicked,
+                        $"#{wasPicked.Back.ToHex()} -> #{pal.Picked.Back.ToHex()}");
+
+            // A key the grid claims never reaches ProcessDialogKey, so claiming everything left the palette
+            // with no way out but the mouse.
+            PostMessage(pal.GridHandleForTesting, WM_KEYDOWN, (IntPtr)(int)Keys.Escape, IntPtr.Zero);
+            Pump();
+            ok &= Check("and escape puts the palette away",
+                        pal.IsDisposed && pal.DialogResult == DialogResult.Cancel,
+                        $"disposed {pal.IsDisposed}, result {pal.DialogResult}");
         }
 
         // Everything fits, so there must be nothing to scroll - a viewport a couple of pixels short of the
@@ -8133,6 +8182,7 @@ internal static class SelfTest
     }
 
     private const uint PM_NOREMOVE = 0;
+    private const uint WM_KEYDOWN = 0x0100;
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct MSG
@@ -8149,6 +8199,11 @@ internal static class SelfTest
 
     [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>Posted, not sent: a sent message goes straight to WndProc and skips the key pre-processing
+    /// where a control is asked whether it wants the key and the dialog gets it if not.</summary>
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
     /// <summary>Exported settings must come back exactly, or carrying them to another machine silently
     /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one
