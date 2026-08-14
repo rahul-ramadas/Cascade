@@ -710,6 +710,64 @@ public class FilterMatchCacheTests
         if (tail != 0) Assert.Equal(0UL, shown[^1] >> tail);
     }
 
+    [Fact]
+    public void Combine_agrees_with_a_line_by_line_reference_whatever_shape_the_sets_are()
+    {
+        // Combine treats the shapes completely differently - a set that matches nothing is skipped, a sparse
+        // one is scattered bit by bit, a dense one is walked a word at a time - so the mix is the whole test.
+        // A real filter file is mostly the first two: of 156 filters over a 72 M-line log, 43 matched nothing,
+        // 108 matched under a tenth of a percent each, and 5 were dense.
+        var rng = new Random(20260813);
+
+        (FilterMatchCache.MatchSet Set, HashSet<long> Members) Make(double density, long covered)
+        {
+            var members = new HashSet<long>();
+            var b = new FilterMatchCache.SetBuilder(covered);
+            for (long w = 0; w < (covered + 63) / 64; w++)
+            {
+                ulong bits = 0;
+                for (int i = 0; i < 64; i++)
+                {
+                    long line = w * 64 + i;
+                    if (line < covered && rng.NextDouble() < density) { bits |= 1UL << i; members.Add(line); }
+                }
+                b.AddWord(w, bits);
+            }
+            return (b.Build(covered), members);
+        }
+
+        // Sets may cover more of the file than the combine is asked about (indexing runs ahead), so every
+        // shape is also tried with lines past the end.
+        foreach (long lines in new long[] { 1, 63, 64, 65, 4_097, 100_000, 100_001 })
+            foreach (long extra in new long[] { 0, 500 })
+                foreach (bool hasEnabledInclude in new[] { true, false })
+                {
+                    long covered = lines + extra;
+                    var inc = new[] { 0.0, 0.00001, 0.002, 0.6 }.Select(d => Make(d, covered)).ToArray();
+                    var exc = new[] { 0.0, 0.003, 0.4 }.Select(d => Make(d, covered)).ToArray();
+
+                    var shown = new ulong[(lines + 63) / 64 + 3];        // headroom must be left alone
+                    Array.Fill(shown, 0xDEADBEEFDEADBEEFUL);
+                    FilterMatchCache.Combine(inc.Select(x => x.Set).ToArray(), exc.Select(x => x.Set).ToArray(),
+                                             hasEnabledInclude, lines, shown);
+
+                    for (long l = 0; l < lines; l++)
+                    {
+                        bool included = !hasEnabledInclude || inc.Any(x => x.Members.Contains(l));
+                        bool expected = included && !exc.Any(x => x.Members.Contains(l));
+                        bool actual = (shown[l >> 6] & (1UL << (int)(l & 63))) != 0;
+                        Assert.True(expected == actual,
+                            $"line {l} of {lines} (covered {covered}, includes on {hasEnabledInclude}): " +
+                            $"expected {expected}, got {actual}");
+                    }
+
+                    int words = (int)((lines + 63) / 64);
+                    int tail = (int)(lines & 63);
+                    if (tail != 0) Assert.Equal(0UL, shown[words - 1] >> tail);   // nothing past the last line
+                    for (int w = words; w < shown.Length; w++) Assert.Equal(0xDEADBEEFDEADBEEFUL, shown[w]);
+                }
+    }
+
     /// <summary>Deleting a filter has to take its cached results with it. The key is the whole predicate
     /// chain, so a deleted filter's results can never be asked for again - kept, they would simply
     /// accumulate for as long as the file stayed open.</summary>

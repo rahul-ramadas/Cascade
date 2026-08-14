@@ -540,6 +540,54 @@ public class DocumentIntegrationTests
     }
 
     [Fact]
+    public void A_filter_change_does_not_blank_the_counts_already_worked_out()
+    {
+        // Reported on a 72 M-line log with 156 filters: toggling one filter made EVERY filter's count flash
+        // 0 for about a third of a second before settling back to the same number it had before. A new pass
+        // owns fresh accumulators, so until it sweeps a line no filter has a count - even though enabling or
+        // disabling a filter cannot change what any filter matches, and the answers were already worked out.
+        string path = WriteStreamLog();
+        var gate = new SemaphoreSlim(0);
+        var reached = new List<long>();
+        try
+        {
+            using var doc = new CascadeDocument();
+            try
+            {
+                doc.Open(path);
+                doc.WaitForIndex();
+
+                var filters = new FilterCollection();
+                var target = new Filter { Enabled = true, Match = { Text = "TARGET" } };
+                filters.Add(target);
+                doc.SetFilters(filters);
+                WaitFilter(doc);
+                Assert.Equal(StreamHits.Length, doc.MatchCountFor(target));
+
+                // A filter nothing has evaluated yet forces a real pass - the cached path cannot serve this
+                // change - and that pass is held after its first block, which holds one TARGET line of three.
+                doc.FilterCheckpointForTesting = frontier =>
+                {
+                    lock (reached) reached.Add(frontier);
+                    gate.Wait(TimeSpan.FromSeconds(20));
+                };
+                filters.Add(new Filter { Enabled = true, Match = { Text = "line 4" } });
+                doc.ApplyFilters();
+                WaitFor(() => { lock (reached) return reached.Count >= 1; }, "the pass never finished a block");
+
+                Assert.InRange(doc.FilterProcessedLineCount, 1, StreamLines - 1);   // genuinely mid-file
+                Assert.Equal(StreamHits.Length, doc.MatchCountFor(target));
+            }
+            finally
+            {
+                doc.FilterCheckpointForTesting = null;
+                gate.Release(1000);
+            }
+        }
+        finally { gate.Dispose(); File.Delete(path); }
+    }
+
+    [Fact]
     public void A_marker_filter_elsewhere_in_the_list_no_longer_spoils_every_other_find()
     {
         // Marker membership changes independently of the filters, so nothing whose chain involves one can be
