@@ -252,7 +252,8 @@ public sealed class FilterService : IDisposable
     public void Notify() => _wake.Set();
 
     /// <summary>True when there is no current generation, or the current generation has processed all
-    /// completed lines and indexing has finished (used by tests and the self-test harness).</summary>
+    /// completed lines, indexing has finished, and what it worked out has been recorded (used by tests and
+    /// the self-test harness).</summary>
     public bool IsIdle
     {
         get
@@ -260,7 +261,11 @@ public sealed class FilterService : IDisposable
             lock (_lock)
             {
                 if (_current is null) return true;
-                return _indexComplete() && _processed >= _completedCount();
+                // A pass is not finished until its per-filter results are stored: the sweep sets _processed
+                // to the total and only then hands them over, and a filter change arriving in that window
+                // would miss the cache and pay for a whole pass again. CacheBuild is nulled by the store,
+                // and is null from the outset for a pass that records nothing.
+                return _indexComplete() && _processed >= _completedCount() && _current.CacheBuild is null;
             }
         }
     }
