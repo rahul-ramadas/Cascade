@@ -349,16 +349,17 @@ public sealed class CascadeDocument : IDisposable
         Array.Clear(into, 0, count);
         if (_src is null || _index is null) return;
 
-        var snapshot = CurrentSnapshot;
+        // The same object the text view paints a frame with, so the map cannot come to a different answer
+        // than the row it stands for while a pass is catching up with the view.
+        var colouring = ColouringSnapshot();
+        var snapshot = colouring.Filters;
         var markers = Markers;
         var src = _src;
         var index = _index;
         var encoding = _enc.Encoding;
         long length = src.Length;
         long known = index.Count;
-        // One decision for the whole batch, from the same place the text view takes its own, so the map
-        // cannot come to a different answer than the row it stands for while a pass catches up with the view.
-        var views = ColouringSnapshot().Previous;
+        var views = colouring.Previous;
 
         // Below this the fork and join cost more than the work does.
         const int WorthSharingOut = 512;
