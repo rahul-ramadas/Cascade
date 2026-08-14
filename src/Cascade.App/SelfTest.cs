@@ -71,6 +71,7 @@ internal static class SelfTest
             ok &= Timed("match map", RunMatchMapChecks);
             ok &= Timed("text selection", RunTextSelectionChecks);
             ok &= Timed("cell selection", RunColumnSelectionChecks);
+            ok &= Timed("selection follows the text", RunSelectionFollowsTextChecks);
             ok &= Timed("underline", RunUnderlineChecks);
             ok &= Timed("restyling", RunRestyleChecks);
             ok &= Timed("hang watchdog", RunHangWatchdogChecks);
@@ -2055,6 +2056,240 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>What is picked out belongs to the TEXT, not to the place on screen it happened to be when
+    /// it was picked. Turning a filter on drops lines out from above the selection, so every row below moves
+    /// - and a highlight remembered by row would be left over whatever slid into its place.</summary>
+    private static bool RunSelectionFollowsTextChecks()
+    {
+        Line("-- selection follows the text --");
+        const int Lines = 60, Noise = 5, Pad = 7;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_selfollow_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        // One line in five is dropped by the filter below, so everything under it shifts up. The rest are
+        // padded by differing amounts, so a highlight left on a row lands on the wrong CHARACTERS as well
+        // as on the wrong line - which is what the reader sees.
+        for (int i = 0; i < Lines; i++)
+            sb.Append(i % Noise == 0 ? "cache miss, nothing here" : new string('.', i % Pad) + "TARGET request handled okay")
+              .Append(" #").Append(i.ToString("00")).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(900, 560),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            // "Show only matching lines" from the start with nothing enabled, which is what a reader has
+            // after opening a file: every line is shown, and the first filter is what moves them.
+            void Filter(string? text)
+            {
+                var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+                if (text is not null)
+                    filters.Roots.Add(new Filter { Enabled = true, Match = new FilterMatch { Text = text } });
+                // Exactly what MainForm.OnFiltersChanged does, in the same order.
+                var anchor = grid.CaptureViewAnchor();
+                doc.SetFilters(filters);
+                grid.SetViewAnchor(anchor, select: doc.FilteredMode);
+                grid.RefreshView();
+                WaitForFiltering(doc);
+                grid.RefreshView();
+            }
+
+            Filter(null);
+            bool ok = Check("every line is shown to begin with", doc.RowCount == Lines, $"{doc.RowCount} rows");
+
+            // ---- part of a line ----
+            const long Picked = 17;                       // a TARGET line, padded by three
+            string text = doc.GetLineText(Picked);
+            int at = text.IndexOf("request", StringComparison.Ordinal);
+            long startRow = doc.RowForLine(Picked);
+            grid.DragForTesting(startRow, grid.XForCharForTesting(startRow, at),
+                                          grid.XForCharForTesting(startRow, at + 7));
+            ok &= Check("part of a line is picked out", grid.SelectedText == "request", grid.SelectedText ?? "(none)");
+
+            Filter("TARGET");
+            long moved = doc.RowForLine(Picked);
+            ok &= Check("the filter really did move the line", moved >= 0 && moved != startRow,
+                        $"row {startRow} -> {moved} of {doc.RowCount}");
+            ok &= Check("the same text is still picked out", grid.SelectedText == "request",
+                        grid.SelectedText ?? "(none)");
+            ok &= Check("and it is still on the line it was picked from",
+                        grid.CharSelectionLineForTesting == Picked, $"line {grid.CharSelectionLineForTesting}");
+
+            // The claim in pixels, which is what the reader is actually complaining about: exactly one row
+            // is drawn picked out, it is the row now showing that line, and it is a PART of the row - a
+            // highlight left behind shows up as a second one, and the line it belonged to as a whole row.
+            using (var picture = Capture(host))
+            {
+                var runs = SelectionRuns(grid, host, picture, settings);
+                ok &= Check("only one row on screen is picked out", runs.Count == 1,
+                            string.Join(", ", runs.Select(r => $"row {r.Row} ({r.Pixels}px)")));
+                ok &= Check("and it is the row that line is on now",
+                            runs.Count == 1 && runs[0].Row == moved,
+                            runs.Count == 1 ? $"row {runs[0].Row}, wanted {moved}" : "(nothing picked out)");
+                ok &= Check("part of the row, not the whole of it",
+                            runs.Count == 1 && runs[0].Pixels < grid.ContentWidthForTesting / 2,
+                            runs.Count == 1 ? $"{runs[0].Pixels}px of {grid.ContentWidthForTesting}" : "(nothing picked out)");
+            }
+
+            // ---- several whole lines ----
+            Filter(null);
+            long fromLine = 12, toLine = 22;
+            grid.PressForTesting(doc.RowForLine(fromLine), 5);
+            grid.DragOverRowForTesting(doc.RowForLine(toLine), 5);
+            grid.ReleaseForTesting(doc.RowForLine(toLine), 5);
+            ok &= Check("a run of whole lines is selected", grid.SelectedCount == toLine - fromLine + 1,
+                        $"{grid.SelectedCount} lines");
+
+            Filter("TARGET");
+            var wanted = new List<long>();
+            for (long line = fromLine; line <= toLine; line++) if (line % Noise != 0) wanted.Add(line);
+            var still = new List<long>();
+            for (long line = 0; line < Lines; line++) if (grid.IsLineSelectedForTesting(line)) still.Add(line);
+            ok &= Check("the same lines are selected after the filter",
+                        still.SequenceEqual(Enumerable.Range((int)fromLine, (int)(toLine - fromLine + 1)).Select(i => (long)i)),
+                        string.Join(",", still));
+            ok &= Check("and the count is of the ones being shown", grid.SelectedCount == wanted.Count,
+                        $"{grid.SelectedCount}, wanted {wanted.Count}");
+            using (var picture = Capture(host))
+            {
+                var drawn = SelectionRuns(grid, host, picture, settings).Select(r => doc.RowToLine(r.Row)).ToList();
+                ok &= Check("exactly those lines are drawn selected", drawn.SequenceEqual(wanted),
+                            $"drew {string.Join(",", drawn)}, wanted {string.Join(",", wanted)}");
+            }
+
+            // Anything that acts on the selection acts on what is being shown, not on the whole stretch:
+            // a marker put on it must not land on lines the filter is hiding.
+            grid.PressKeyForTesting(Keys.D1 | Keys.Control);
+            var marked = new List<long>();
+            for (long line = 0; line < Lines; line++) if (doc.Markers.MaskOf(line) != 0) marked.Add(line);
+            ok &= Check("marking the selection marks the lines being shown", marked.SequenceEqual(wanted),
+                        $"marked {string.Join(",", marked)}, wanted {string.Join(",", wanted)}");
+            grid.PressKeyForTesting(Keys.D1 | Keys.Control);
+
+            // Taking the filter away brings the hidden ones back, still selected - the selection was never
+            // narrowed, only some of it was out of sight.
+            Filter(null);
+            ok &= Check("the hidden lines come back selected", grid.SelectedCount == toLine - fromLine + 1,
+                        $"{grid.SelectedCount} lines");
+
+            ok &= SelectionStress(grid, doc, Lines, Filter);
+            return ok;
+        }
+        finally
+        {
+            host?.Close();
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Random gestures, each followed by a filter change, checked against a reference worked out
+    /// from the document rather than from the view: whatever was selected must still be selected, and the
+    /// number reported must be however many of those lines the view is showing.</summary>
+    private static bool SelectionStress(LineGridControl grid, CascadeDocument doc, int lines,
+                                        Action<string?> filter)
+    {
+        var terms = new string?[] { null, "TARGET", "handled okay", "#1", "cache" };
+        var rnd = new Random(20260813);
+        int gestures = 0;
+        for (int iter = 0; iter < 60; iter++)
+        {
+            long rows = doc.RowCount;
+            if (rows > 2)
+            {
+                long a = rnd.Next((int)rows), b = rnd.Next((int)rows);
+                switch (rnd.Next(4))
+                {
+                    case 0: grid.ClickForTesting(a, 5); break;
+                    case 1:
+                        grid.PressForTesting(a, 5);
+                        grid.DragOverRowForTesting(b, 5);
+                        grid.ReleaseForTesting(b, 5);
+                        break;
+                    case 2: grid.SelectAll(); break;
+                    default:
+                        grid.DragForTesting(a, grid.XForCharForTesting(a, 1), grid.XForCharForTesting(a, 6));
+                        break;
+                }
+                gestures++;
+            }
+
+            var before = new bool[lines];
+            for (long line = 0; line < lines; line++) before[line] = grid.IsLineSelectedForTesting(line);
+            string? pickedOut = grid.SelectedText;
+            long onlyLine = Array.IndexOf(before, true) >= 0 && Array.IndexOf(before, true) == Array.LastIndexOf(before, true)
+                          ? Array.IndexOf(before, true) : -1;
+
+            filter(terms[rnd.Next(terms.Length)]);
+
+            // A lone selected line goes with the caret when the view stops showing it - that is the one
+            // thing allowed to move, and only because there is nothing left to point at.
+            var wanted = before;
+            if (onlyLine >= 0)
+            {
+                wanted = new bool[lines];
+                long now = grid.CaretLine;
+                if (now >= 0 && now < lines) wanted[now] = true;
+                if (doc.IsLineVisible(onlyLine) && now != onlyLine)
+                    return Check($"a line still being shown does not move (iteration {iter})", false,
+                                 $"line {onlyLine} -> {now}");
+            }
+
+            for (long line = 0; line < lines; line++)
+                if (grid.IsLineSelectedForTesting(line) != wanted[line])
+                    return Check($"the same lines stay selected (iteration {iter})", false,
+                                 $"line {line}: {wanted[line]} -> {grid.IsLineSelectedForTesting(line)}");
+
+            long shown = 0;
+            for (long line = 0; line < lines; line++) if (wanted[line] && doc.IsLineVisible(line)) shown++;
+            if (grid.SelectedCount != shown)
+                return Check($"the count is of the selected lines being shown (iteration {iter})", false,
+                             $"said {grid.SelectedCount}, {shown} are shown");
+
+            if (pickedOut is not null && grid.SelectedText != pickedOut)
+                return Check($"the part of a line stays picked out (iteration {iter})", false,
+                             $"'{pickedOut}' -> '{grid.SelectedText ?? "(none)"}'");
+        }
+        return Check($"{gestures} random selections all survive a filter change", true);
+    }
+
+    /// <summary>Which rows have anything drawn in the selection colour, and how much of each. Read off the
+    /// picture rather than asked of the control: where the highlight LANDS is the whole complaint.</summary>
+    private static List<(long Row, int Pixels)> SelectionRuns(LineGridControl grid, Form host, Bitmap picture,
+                                                             AppSettings settings)
+    {
+        var found = new List<(long Row, int Pixels)>();
+        int left = grid.GutterWidthForTesting + 2;
+        int right = host.ClientSize.Width - grid.MapWidthForTesting - grid.ScrollBarWidthForTesting - 2;
+        for (int i = 0; i < grid.RowsPaintedForTesting; i++)
+        {
+            long row = grid.FirstRowForTesting + i;
+            int y = grid.RowMiddleForTesting(row), pixels = 0;
+            for (int x = left; x < right; x += 2)
+                if (IsBackground(picture, x, y, settings.SelectionBack)) pixels += 2;
+            if (pixels > 0) found.Add((row, pixels));
+        }
+        return found;
     }
 
     /// <summary>Anything that throws away the filter file on screen has to ask first: closing them, closing
