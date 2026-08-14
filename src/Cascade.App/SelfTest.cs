@@ -921,6 +921,8 @@ internal static class SelfTest
             ok &= Check($"the selection outline is a plain box, with no stripe left in it beside the " +
                         $"checkbox (worst column x={worstX} is highlighted down {worst} of {rowRect.Height} pixels)",
                         worst <= 2);
+
+            ok &= CheckExcludeIcon(doc, tree, host);
             return ok;
         }
         finally
@@ -929,6 +931,87 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>An exclude hides the lines it matches, so it is marked with an eye that has a slash through
+    /// it. The marker is DRAWN, and only exclude rows give up any width to it - most filters are includes
+    /// and a column of blank space to their left reads as a mistake.</summary>
+    private static bool CheckExcludeIcon(CascadeDocument doc, FilterTreeControl tree, Form host)
+    {
+        host.ClientSize = new Size(420, 200);
+        Pump();
+
+        // Same pattern, same colours, same everything but the kind: then the only thing that can differ
+        // between the two rows is the marker and what it displaces.
+        var style = new FilterStyle { Foreground = new RgbColor(31, 31, 112), Background = new RgbColor(255, 255, 255) };
+        var shown = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
+        var hidden = new Filter { Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
+        SetFilters(doc, tree, shown, hidden);
+        tree.SelectForTesting(shown);
+        Pump();
+
+        int room = tree.ExcludeIconRoomForTesting(hidden);
+        bool ok = Check($"an include gives up no width to a marker it does not have",
+                        tree.ExcludeIconRoomForTesting(shown) == 0);
+        ok &= Check($"an exclude reserves room for its marker ({room}px)", room > 0);
+
+        var area = tree.TreeAreaForTesting;
+        var incRow = tree.RowBoundsForTesting(shown);
+        var excRow = tree.RowBoundsForTesting(hidden);
+        int incLeft = tree.ContentLeftForTesting(shown);
+        int excLeft = tree.ContentLeftForTesting(hidden);
+        using var picture = Capture(host);
+
+        Color At(int x, int rowY) => x < 0 || x >= picture.Width || rowY < 0 || rowY >= picture.Height
+            ? Color.Transparent : picture.GetPixel(x, rowY);
+        bool IsInk(Color c) => c.R + c.G + c.B < 600;   // anything darker than near-white
+
+        // Something is actually drawn in the space the marker reserved.
+        int drawn = 0;
+        for (int dx = 0; dx < room; dx++)
+            for (int y = 1; y < excRow.Height - 1; y++)
+                if (IsInk(At(area.Left + excLeft + dx, area.Top + excRow.Top + y))) drawn++;
+        ok &= Check($"the marker is drawn, not just reserved ({drawn} pixels of ink in its {room}px)", drawn > 8);
+
+        // ...and the pattern beyond it is the same picture as the include's, just moved right by the room
+        // the marker took. That is the whole claim, and it fails whichever way the marker goes wrong.
+        int compared = 0, differing = 0, firstX = -1;
+        int height = Math.Min(incRow.Height, excRow.Height);
+        for (int dx = 0; dx < 120; dx++)
+            for (int y = 1; y < height - 1; y++)
+            {
+                var a = At(area.Left + incLeft + dx, area.Top + incRow.Top + y);
+                var b = At(area.Left + excLeft + room + dx, area.Top + excRow.Top + y);
+                compared++;
+                if (a.ToArgb() == b.ToArgb()) continue;
+                differing++;
+                if (firstX < 0) firstX = dx;
+            }
+        ok &= Check($"the marker shifts the pattern right by exactly its own width and nothing else " +
+                    $"({differing} of {compared} pixels differ" + (firstX < 0 ? "" : $", first at +{firstX}px") + ")",
+                    compared > 0 && differing == 0);
+
+        // Sized from the list's own text, so it follows the font and the DPI together - and then stops,
+        // because past a point a bigger marker says nothing more and only takes width the pattern needs.
+        var baseFont = host.Font;
+        using (var larger = new Font(baseFont.FontFamily, baseFont.Size * 1.6f))
+        using (var enormous = new Font(baseFont.FontFamily, baseFont.Size * 6f))
+        {
+            host.Font = larger;
+            Pump();
+            int grown = tree.ExcludeIconRoomForTesting(hidden);
+            host.Font = enormous;
+            Pump();
+            int capped = tree.ExcludeIconRoomForTesting(hidden);
+            host.Font = baseFont;
+            Pump();
+
+            ok &= Check($"the marker grows with the font ({room}px at {baseFont.Size:0.#}pt, " +
+                        $"{grown}px at {larger.Size:0.#}pt)", grown > room);
+            ok &= Check($"and stops growing rather than eating the pattern column " +
+                        $"({capped}px at {enormous.Size:0.#}pt)", capped < room * 3);
+        }
+        return ok;
     }
 
     private static void SetFilters(CascadeDocument doc, FilterTreeControl tree, params Filter[] filters)
