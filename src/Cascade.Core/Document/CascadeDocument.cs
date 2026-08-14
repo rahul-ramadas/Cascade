@@ -332,6 +332,30 @@ public sealed class CascadeDocument : IDisposable
         => new(CurrentSnapshot, !FilteredMode || IsFilterIdle ? null : _viewSnapshots, Markers);
 
     /// <summary>
+    /// Lets go of the filters a settled view can no longer be asked about. Each one carries its own
+    /// matching automaton - about 400 KB for a filter file of a couple of hundred - and otherwise sits
+    /// there until the next filter change, which may never come.
+    /// <para>It cannot change what is drawn, whenever it is called. A finished pass has swept the whole
+    /// file, so every row reflects the filters in force; what this leaves behind is exactly what the next
+    /// filter change would leave, so consulting it could only ever repeat what those filters already said.
+    /// While a pass is still running it does nothing at all, because the stretches it has not reached yet
+    /// need the older filters to keep their colour.</para>
+    /// </summary>
+    public void DropRememberedViews()
+    {
+        if (_viewSnapshots is [var only] && ReferenceEquals(only, CurrentSnapshot)) return;
+        if (!IsFilterIdle) return;
+        _viewSnapshots = [CurrentSnapshot];
+    }
+
+    /// <summary>How many sets of filters the view might still be showing rows from.</summary>
+    public int RememberedViewCountForTesting => _viewSnapshots.Length;
+
+    /// <summary>Whether any of them is other than the filters in force - i.e. whether anything is being
+    /// held that a settled view has no use for.</summary>
+    public bool HoldsOldFiltersForTesting => _viewSnapshots.Any(s => !ReferenceEquals(s, CurrentSnapshot));
+
+    /// <summary>
     /// The filter each of the first <paramref name="count"/> <paramref name="lines"/> takes its colour
     /// from - <c>null</c> where nothing colours it - written into <paramref name="into"/>. A line given as
     /// -1 is skipped and answered <c>null</c>, so a caller can ask about the ones it does not already know.
