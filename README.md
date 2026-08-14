@@ -53,6 +53,8 @@ screen.
 
 A preset names a combination of filters — *the payment incident*, *the slow queries*. The tick says
 which are in effect, the highlight says which one the commands act on, and ticking two gives you both.
+Ticking and unticking move only that preset's own filters; anything you switched on by hand stays as
+you left it.
 
 ### Dim or hide
 

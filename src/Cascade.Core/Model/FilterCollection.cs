@@ -253,13 +253,33 @@ public sealed class FilterCollection
     public FilterPreset CaptureEnabled(string name)
         => new(name, EnumerateDepthFirst().Where(f => f.Enabled).Select(f => f.Id));
 
-    /// <summary>Switches on exactly the union of the given presets, and everything else off. Selecting one
-    /// preset therefore means "just this", and adding a second means "both" - which is what makes the list's
-    /// selection and the enabled set the same thing.
+    /// <summary>Switches every filter a preset names on, or off, and leaves every other filter exactly as
+    /// it was. A preset says which filters belong to it and nothing whatever about the rest, so putting one
+    /// in or out of effect must not disturb a filter the user turned on by hand - nor one that belongs to
+    /// another preset and is only being shared.
     ///
-    /// Returns whether that changed anything, so a click that lands on the same set of filters costs
+    /// Returns whether that changed anything, so a tick that lands on filters already in that state costs
     /// nothing - re-running a pass over a multi-gigabyte file to arrive back where it started is a visible
     /// flicker of the progress bar and a lot of work for no answer.</summary>
+    public bool SetPresetEnabled(FilterPreset preset, bool on)
+    {
+        var ids = new HashSet<string>(preset.FilterIds, StringComparer.Ordinal);
+        bool changed = false;
+        foreach (var f in EnumerateDepthFirst())
+        {
+            if (!ids.Contains(f.Id) || f.Enabled == on) continue;
+            f.Enabled = on;
+            changed = true;
+        }
+        return changed;
+    }
+
+    /// <summary>Switches on exactly the union of the given presets, and everything else off - so a single
+    /// preset means "just this and nothing else". That is what <i>Apply Only This Preset</i> is for; ticking
+    /// and unticking go through <see cref="SetPresetEnabled"/>, which leaves filters outside the preset
+    /// alone.
+    ///
+    /// Returns whether that changed anything, for the same reason as above.</summary>
     public bool ApplyPresets(IEnumerable<FilterPreset> presets)
     {
         var wanted = new HashSet<string>(presets.SelectMany(p => p.FilterIds), StringComparer.Ordinal);

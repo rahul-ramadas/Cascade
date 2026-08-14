@@ -8,10 +8,11 @@ namespace Cascade.App;
 /// <summary>
 /// The filter presets pane: named sets of filters to switch on together.
 ///
-/// A preset's <b>tick</b> says it is in effect, and the enabled filters are the union of what is ticked - so
-/// ticking one means "and this too", and unticking it takes its filters away again. The ticks are derived
-/// from which filters are actually enabled, never from what was last clicked, so ticking a filter by hand in
-/// the list next door lights the matching preset up (or clears it) exactly as applying it would.
+/// A preset's <b>tick</b> says it is in effect: ticking one switches on the filters it names, unticking it
+/// switches those same filters off, and neither touches a filter the preset does not name - a filter turned
+/// on by hand is nobody's business but the user's. The ticks are derived from which filters are actually
+/// enabled, never from what was last clicked, so ticking a filter by hand in the list next door lights the
+/// matching preset up (or clears it) exactly as applying it would.
 ///
 /// The <b>selection</b> is the user's alone: it says which preset the commands act on, and nothing in the
 /// model ever moves it. That separation is the whole point - while the two were one thing, any click that
@@ -52,6 +53,7 @@ public sealed class FilterPresetsControl : UserControl
     private bool _settingTicks;     // true only while we write a tick ourselves; everything else is vetoed
     private bool _applyQueued;      // collapses a burst of tick changes into one re-filter
     private bool _downOnTick;       // the last press landed on a tick box, so its double-click is not a rename
+    private readonly List<(FilterPreset Preset, bool On)> _pending = new();   // ticks waiting to reach the filters
 
     /// <summary>The enabled filters changed, so the view has to be brought up to date.</summary>
     public event Action? PresetsApplied;
@@ -150,7 +152,13 @@ public sealed class FilterPresetsControl : UserControl
     private void ToggleAt(int index)
     {
         if (index < 0 || index >= Presets.Count || index >= _list.Items.Count) return;
-        SetTick(index, !_list.GetItemChecked(index));
+        bool on = !_list.GetItemChecked(index);
+        SetTick(index, on);
+        // Which preset moved and which way, not "everything ticked": the filters a preset does not name are
+        // none of its business, and rewriting the whole enabled set from the ticks would switch them off.
+        // Only the last word about a preset counts, so a burst that nets out costs no pass.
+        _pending.RemoveAll(p => ReferenceEquals(p.Preset, Presets[index]));
+        _pending.Add((Presets[index], on));
         QueueApply();
     }
 
@@ -165,14 +173,24 @@ public sealed class FilterPresetsControl : UserControl
     /// re-run the filters. Applying once the message has been handled collapses a burst into a single pass.</summary>
     private void QueueApply()
     {
-        if (_doc is null || _applyQueued || !IsHandleCreated) return;
+        // Nothing to apply to, so nothing may be left waiting either - a recorded tick with no callback
+        // coming would be replayed by whatever queued next.
+        if (_doc is null || !IsHandleCreated) { _pending.Clear(); return; }
+        if (_applyQueued) return;
         _applyQueued = true;
         BeginInvoke(() =>
         {
             _applyQueued = false;
+            var pending = _pending.ToArray();
+            _pending.Clear();
             if (_doc is null) return;
-            var ticked = _list.CheckedIndices.Cast<int>().Where(i => i < Presets.Count).Select(i => Presets[i]).ToList();
-            if (_doc.Filters.ApplyPresets(ticked)) PresetsApplied?.Invoke();
+            bool changed = false;
+            foreach (var (preset, on) in pending) changed |= _doc.Filters.SetPresetEnabled(preset, on);
+            // A filter can belong to more than one preset, so switching one off can take another out of
+            // effect. The tick is derived from the filters, so read it back rather than assume the click was
+            // the whole story.
+            RefreshActive();
+            if (changed) PresetsApplied?.Invoke();
         });
     }
 
@@ -212,17 +230,16 @@ public sealed class FilterPresetsControl : UserControl
         e.Handled = e.SuppressKeyPress = true;
     }
 
-    /// <summary>Puts one preset in effect and takes every other out, which is what a single click used to
-    /// mean before the tick took that job over.</summary>
+    /// <summary>Puts one preset in effect and takes every other filter out - the one command that does mean
+    /// "just this and nothing else", which is what a single click used to mean before the tick took that job
+    /// over. Ticking a preset deliberately does not do this: it leaves filters the preset does not name
+    /// exactly as they were.</summary>
     public void ApplyOnlySelected()
     {
         if (_doc is null || Current is not { } p) return;
-        for (int i = 0; i < Presets.Count && i < _list.Items.Count; i++)
-        {
-            bool want = ReferenceEquals(Presets[i], p);
-            if (_list.GetItemChecked(i) != want) SetTick(i, want);
-        }
-        QueueApply();
+        bool changed = _doc.Filters.ApplyPresets(new[] { p });
+        RefreshActive();
+        if (changed) PresetsApplied?.Invoke();
     }
 
     public void SaveCurrent()
@@ -282,14 +299,15 @@ public sealed class FilterPresetsControl : UserControl
 
     internal int TickZoneWidthForTesting => TickZoneWidth;
 
+    /// <summary>Ticks exactly these presets, one press at a time - so what it drives is what a user clicking
+    /// tick boxes drives, including the collapsing of a burst into one pass.</summary>
     internal void TickForTesting(params string[] names)
     {
         for (int i = 0; i < Presets.Count && i < _list.Items.Count; i++)
         {
             bool want = names.Contains(Presets[i].Name, StringComparer.Ordinal);
-            if (_list.GetItemChecked(i) != want) SetTick(i, want);
+            if (_list.GetItemChecked(i) != want) ToggleAt(i);
         }
-        QueueApply();
     }
 
     /// <summary>Drives the real mouse handler, so where in the row the press lands is part of what is

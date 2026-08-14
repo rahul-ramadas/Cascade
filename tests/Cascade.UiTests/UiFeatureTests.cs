@@ -319,12 +319,14 @@ public class UiFeatureTests
     [Fact]
     public void Presets_switch_filters_on_together()
     {
-        // A preset's TICK is what puts it in effect, and the enabled filters are the union of what is
-        // ticked, so Fil: is what proves a tick reached the filters rather than just the list. The
-        // SELECTION is only the user's aim and must apply nothing at all.
+        // A preset's TICK is what puts it in effect: ticking one switches on the filters it names and
+        // unticking it switches those same filters off, so Fil: is what proves a tick reached the filters
+        // rather than just the list. Neither touches a filter the preset does not name. The SELECTION is
+        // only the user's aim and must apply nothing at all.
+        // "line 997" is in no preset, so it is what says the presets keep their hands off everything else.
         string log = TestData.WriteLogFile();
         string filters = TestData.WritePresetFile(
-            new[] { "MATCH", "line 999", "line 998" },
+            new[] { "MATCH", "line 999", "line 998", "line 997" },
             ("just match", new[] { 0 }),
             ("the pair", new[] { 1, 2 }));
         try
@@ -345,6 +347,21 @@ public class UiFeatureTests
                   app.DescribePresets());
             Check("but selecting one applies nothing", app.ActivePresets().Length == 0, app.DescribePresets());
             Check("and leaves every filter alone", app.WaitStatus("Fil:", $"Fil: {TestData.LineCount:N0}"), app.StatusText("Fil:"));
+
+            // THE REPORTED BUG. A filter belonging to no preset is nobody's business but the user's, so
+            // putting a preset in or out of effect must leave it exactly as they set it. Shift+Space rather
+            // than Space: the plain one is handled by the native tree, which ignores an injected keystroke.
+            app.FocusFilter("line 997");
+            app.ShiftKey(app.Tree(), VirtualKeyShort.SPACE);
+            Check("a filter outside every preset can be switched on by hand", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
+            app.TickPreset("just match");
+            Check("ticking a preset leaves a filter it does not name alone",
+                  app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount + 1:N0}"), app.StatusText("Fil:"));
+            app.UntickPreset("just match");
+            Check("and unticking it takes only its own filters away", app.WaitStatus("Fil:", "Fil: 1"), app.StatusText("Fil:"));
+            app.FocusFilter("line 997");
+            app.ShiftKey(app.Tree(), VirtualKeyShort.SPACE);
+            Check("back to nothing enabled", app.WaitStatus("Fil:", $"Fil: {TestData.LineCount:N0}"), app.StatusText("Fil:"));
 
             app.TickPreset("just match");
             Check("ticking one preset enables its filter", app.WaitStatus("Fil:", $"Fil: {TestData.MatchCount:N0}"), app.StatusText("Fil:"));

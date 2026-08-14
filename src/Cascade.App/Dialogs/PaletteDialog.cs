@@ -85,6 +85,8 @@ internal sealed class PaletteDialog : DialogBase
     }
 
     internal int CountForTesting => _chips.Count;
+    /// <summary>The grid's own window, so a check can put a key exactly where the keyboard would.</summary>
+    internal IntPtr GridHandleForTesting => _chips.Handle;
     internal void MoveForTesting(Keys key) => _chips.MoveForTesting(key);
     internal Rectangle CellForTesting(int index) => _chips.CellAt(index);
     internal int ScrollForTesting => -_scroller.AutoScrollPosition.Y;
@@ -201,7 +203,14 @@ internal sealed class PaletteDialog : DialogBase
             if (want != top) panel.AutoScrollPosition = new Point(0, want);
         }
 
-        protected override bool IsInputKey(Keys keyData) => true;
+        /// <summary>Only the keys the grid steers itself by. Claiming a key is what stops it reaching
+        /// ProcessDialogKey, so answering true for everything - which this used to do - swallowed Escape
+        /// and left the dialog with no way out but the mouse.</summary>
+        protected override bool IsInputKey(Keys keyData) => (keyData & Keys.KeyCode) switch
+        {
+            Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.Enter => true,
+            _ => base.IsInputKey(keyData)
+        };
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
