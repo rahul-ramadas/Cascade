@@ -48,8 +48,15 @@ public sealed class CascadeDocument : IDisposable
     public ColumnSpec Columns { get; private set; } = new();
     public FilterSnapshot CurrentSnapshot { get; private set; } = FilterSnapshot.Build(new FilterCollection());
 
-    /// <summary>The filters the visible set is known to reflect. Null until they have changed once.</summary>
-    private FilterSnapshot? _viewSnapshot;
+    /// <summary>The filters the visible set may still be showing rows from, newest first, and empty until
+    /// they have changed once. Usually one: the filters in force before the running pass started. A second
+    /// appears when the filters are changed AGAIN before a pass can finish - the superseded pass leaves the
+    /// stretch it had already rewritten behind it, and only the filters it was running explain those rows.
+    /// Past <see cref="MaxRememberedViews"/> the oldest stretch is answered by the filters in force, which
+    /// is what every stretch got before any of this existed.</summary>
+    private FilterSnapshot[] _viewSnapshots = [];
+
+    private const int MaxRememberedViews = 2;
 
     /// <summary>Fires when indexing or filtering makes progress (may be raised on a background thread).</summary>
     public event Action? Updated;
@@ -186,8 +193,9 @@ public sealed class CascadeDocument : IDisposable
     public long FilterLinesScanned => _filterService?.LinesScanned ?? 0;
 
     /// <summary>Test seam: runs on the filter worker after each block, so a test can hold a pass at a known
-    /// frontier and exercise what happens while one is still in flight. Survives <see cref="Open"/>.</summary>
-    internal Action<long>? FilterCheckpointForTesting
+    /// frontier and exercise what happens while one is still in flight. Public because the app's own
+    /// self-test holds a pass to check what the view draws while one is running. Survives <see cref="Open"/>.</summary>
+    public Action<long>? FilterCheckpointForTesting
     {
         get => _filterCheckpoint;
         set
@@ -250,9 +258,12 @@ public sealed class CascadeDocument : IDisposable
     {
         // The visible set is REUSED by the next pass and rewritten line by line, so for as long as that pass
         // runs the view is still showing rows the OLD filters put there. Remembering those filters is what
-        // lets such a row be drawn as it was until the view really drops it - see EvaluateText. Only worth
-        // recording when the last pass finished: if one is still running the view reflects something older.
-        if (IsFilterIdle) _viewSnapshot = CurrentSnapshot;
+        // lets such a row be drawn as it was until the view really drops it - see ColouringSnapshot. A pass
+        // that ran to the end left the whole view reflecting the filters it was running; one that was cut
+        // short left only the stretch it had reached, so what came before it has to be kept as well.
+        if (IsFilterIdle) _viewSnapshots = [CurrentSnapshot];
+        else if (FilterProcessedLineCount > 0)
+            _viewSnapshots = [CurrentSnapshot, .. _viewSnapshots.Take(MaxRememberedViews - 1)];
         CurrentSnapshot = FilterSnapshot.Build(Filters);
         FilterGeneration++;
         if (_filterService is null)
@@ -306,7 +317,8 @@ public sealed class CascadeDocument : IDisposable
     }
 
     /// <summary>
-    /// Evaluates a decoded line against the current filters (for colouring visible rows).
+    /// The filters to draw with, fixed at the moment this is called: take one and use it for a whole frame
+    /// (see <see cref="LineColouring"/>), never one per row.
     /// <para>While a pass is running the view and the filters disagree on purpose: the visible set is
     /// rewritten in place, so it still lists rows the OLD filters matched until the sweep reaches them.
     /// Asked about such a row the new filters answer "not shown", which has no colour - and the row is
@@ -316,18 +328,14 @@ public sealed class CascadeDocument : IDisposable
     /// so this cannot affect a settled view - and in dim mode nothing is hidden at all, so the change of
     /// colour is the point and is left immediate.</para>
     /// </summary>
-    public LineEval EvaluateText(ReadOnlySpan<char> text, long line)
-    {
-        var eval = CurrentSnapshot.Evaluate(text, line, Markers);
-        if (eval.Shown || !FilteredMode || IsFilterIdle || _viewSnapshot is not { } view) return eval;
-        return view.Evaluate(text, line, Markers);
-    }
+    public LineColouring ColouringSnapshot()
+        => new(CurrentSnapshot, !FilteredMode || IsFilterIdle ? null : _viewSnapshots, Markers);
 
     /// <summary>
     /// The filter each of the first <paramref name="count"/> <paramref name="lines"/> takes its colour
     /// from - <c>null</c> where nothing colours it - written into <paramref name="into"/>. A line given as
     /// -1 is skipped and answered <c>null</c>, so a caller can ask about the ones it does not already know.
-    /// <para>Exactly what <see cref="EvaluateText"/> answers one line at a time, but <b>across every
+    /// <para>Exactly what a <see cref="LineColouring"/> answers one line at a time, but <b>across every
     /// core</b>. That matters because the caller is the minimap, which stands for tens of thousands of rows
     /// at once: running the filters over that many lines is a fifth of a second on a single thread, and it
     /// is asked for again on every scroll.</para>
@@ -348,9 +356,9 @@ public sealed class CascadeDocument : IDisposable
         var encoding = _enc.Encoding;
         long length = src.Length;
         long known = index.Count;
-        // The same rule EvaluateText follows, so the map cannot come to a different answer than the row it
-        // stands for while a pass is catching up with the view.
-        var view = !FilteredMode || IsFilterIdle ? null : _viewSnapshot;
+        // One decision for the whole batch, from the same place the text view takes its own, so the map
+        // cannot come to a different answer than the row it stands for while a pass catches up with the view.
+        var views = ColouringSnapshot().Previous;
 
         // Below this the fork and join cost more than the work does.
         const int WorthSharingOut = 512;
@@ -377,7 +385,12 @@ public sealed class CascadeDocument : IDisposable
             index.GetRange(line, length, out long s, out long e);
             var text = reader.GetChars(s, e);
             var eval = snapshot.Evaluate(text, line, markers, null, context);
-            if (!eval.Shown && view is not null) eval = view.Evaluate(text, line, markers, null, view.GetThreadContext());
+            if (!eval.Shown && views is not null)
+                foreach (var was in views)
+                {
+                    var older = was.Evaluate(text, line, markers, null, was.GetThreadContext());
+                    if (older.Shown) { eval = older; break; }
+                }
             into[i] = eval.ColorFilter;
         }
     }

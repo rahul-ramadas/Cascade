@@ -283,7 +283,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return FontRegular;
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
-        var eval = _doc.EvaluateText(text, _doc.RowToLine(row));
+        var eval = _doc.ColouringSnapshot().Evaluate(text, _doc.RowToLine(row));
         return SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
     }
 
@@ -853,6 +853,9 @@ public sealed class LineGridControl : Control
     /// a control to a bitmap paints it whether or not anything asked it to.</summary>
     internal int PaintsForTesting => _paints;
 
+    /// <summary>Raised inside a frame, after its rows have been resolved and before any of them is drawn.</summary>
+    internal Action? AfterWindowForTesting;
+
     internal long CharOriginForTesting => _charOriginRow;
 
     /// <summary>Which file line the part-of-a-line selection is on, or -1. The whole point of the selection
@@ -990,6 +993,11 @@ public sealed class LineGridControl : Control
         // view and run past the bottom, and a budget of whole rows would stop short of drawing it.
         int visible = VisibleRowCount + (Wrapping ? 1 : 0);
 
+        // Which filters answer for a row is fixed here, once, and BEFORE the rows are resolved: the pass
+        // can finish at any moment, and taking it first means a frame can only ever be too generous - rows
+        // resolved afterwards are ones the new filters already show, and answer for themselves.
+        var colouring = _doc.ColouringSnapshot();
+
         // Resolve this whole frame in one shot against a single snapshot of the visible set. While a filter
         // pass streams, lines before the viewport are being added and dropped continuously, so a first row
         // computed on the last refresh tick is already stale, and row-by-row lookups would mix two states
@@ -1004,6 +1012,10 @@ public sealed class LineGridControl : Control
             _firstRow = ClampFirstRow(_doc.ResolveWindow(_anchorLine, _anchorOffset, window, out windowCount));
         }
         else windowCount = _doc.LinesForRows(_firstRow, window);
+
+        // The rows are settled and nothing has been drawn yet: a check hooks in here to make the world move
+        // exactly where it used to be able to move under a frame.
+        AfterWindowForTesting?.Invoke();
 
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
         // What is picked out of a line, once for the frame rather than once per row: every row asks whether
@@ -1029,7 +1041,7 @@ public sealed class LineGridControl : Control
             int y = atY;
             long line = _window[i];
             string text = _doc.GetLineText(line);
-            var eval = _doc.EvaluateText(text, line);
+            var eval = colouring.Evaluate(text, line);
 
             ResolvedStyle style = eval.ColorFilter is not null
                 ? StyleResolver.Resolve(eval.ColorFilter, defaults)
@@ -2483,7 +2495,7 @@ public sealed class LineGridControl : Control
         if (_doc is null) return _rowHeight;
         long line = _doc.RowToLine(row);
         string text = _doc.GetLineText(line);
-        var eval = _doc.EvaluateText(text, line);
+        var eval = _doc.ColouringSnapshot().Evaluate(text, line);
         var defaults = new ResolvedStyle(ToRgb(_settings.Foreground), ToRgb(_settings.Background), false, false);
         var font = SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
         return WrapInto(Expand(text), ContentWidth, font, _segments) * _rowHeight;
