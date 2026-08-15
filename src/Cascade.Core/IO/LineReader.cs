@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 
 namespace Cascade.Core.IO;
@@ -12,9 +13,19 @@ public sealed class LineReader
     /// <summary>Lines longer than this many bytes are truncated when decoded (display/filter safety).</summary>
     public const int MaxLineBytes = 8 * 1024 * 1024;
 
+    /// <summary>How much decoding scratch a reader KEEPS of its own. A longer line is decoded into a pooled
+    /// buffer instead, which is handed back as soon as the reader moves on. Without that split a reader ends
+    /// up holding the longest line it ever saw - up to <see cref="MaxLineBytes"/>, so about 16 MB of chars -
+    /// for the rest of its life, and readers are per thread: a search alone keeps one per core.</summary>
+    internal const int KeptBufferChars = 256 * 1024;
+
     private readonly MemoryMappedTextSource _src;
     private readonly Encoding _encoding;
     private char[] _buffer = new char[256];
+    private char[]? _large;
+
+    /// <summary>Scratch this reader is holding on to, pooled or not.</summary>
+    internal int HeldChars => _buffer.Length + (_large?.Length ?? 0);
 
     public LineReader(MemoryMappedTextSource src, Encoding encoding)
     {
@@ -33,11 +44,10 @@ public sealed class LineReader
         int byteLen = (int)Math.Min(len, MaxLineBytes);
 
         ReadOnlySpan<byte> bytes = _src.Slice(start, byteLen);
-        int maxChars = _encoding.GetMaxCharCount(byteLen);
-        if (_buffer.Length < maxChars) _buffer = new char[Math.Max(maxChars, _buffer.Length * 2)];
+        char[] buffer = Scratch(_encoding.GetMaxCharCount(byteLen));
 
-        int n = _encoding.GetChars(bytes, _buffer);
-        var span = _buffer.AsSpan(0, n);
+        int n = _encoding.GetChars(bytes, buffer);
+        var span = buffer.AsSpan(0, n);
 
         if (!truncated)
         {
@@ -48,6 +58,34 @@ public sealed class LineReader
     }
 
     public string GetString(long start, long endExclusive) => new string(GetChars(start, endExclusive));
+
+    /// <summary>Room to decode one line into.
+    /// <para>Ordinary lines use scratch the reader owns and keeps, so reading a screenful allocates nothing.
+    /// A line too long for that is decoded into a POOLED buffer, handed back as soon as the reader moves on
+    /// to ordinary lines again - so a file made of very long lines still costs no allocation per line, while
+    /// one long line in an ordinary file does not leave every reader holding megabytes for good.</para>
+    /// <para>The span from the previous call is invalidated by this one either way, which is what makes
+    /// returning the pooled buffer here safe.</para></summary>
+    private char[] Scratch(int maxChars)
+    {
+        if (maxChars > KeptBufferChars)
+        {
+            if (_large is null || _large.Length < maxChars)
+            {
+                if (_large is not null) ArrayPool<char>.Shared.Return(_large);
+                _large = ArrayPool<char>.Shared.Rent(maxChars);
+            }
+            return _large;
+        }
+
+        if (_large is not null)
+        {
+            ArrayPool<char>.Shared.Return(_large);
+            _large = null;
+        }
+        if (_buffer.Length < maxChars) _buffer = new char[Math.Max(maxChars, _buffer.Length * 2)];
+        return _buffer;
+    }
 
     public static bool IsTruncated(long start, long endExclusive) => (endExclusive - start) > MaxLineBytes;
 }
