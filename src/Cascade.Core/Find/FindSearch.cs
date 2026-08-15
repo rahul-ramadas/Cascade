@@ -67,6 +67,14 @@ public sealed class FindSearch : IDisposable
 
     public FindQuery Query { get; }
 
+    /// <summary>Completes once both sweeps have really stopped reading the file. Whoever owns the mapping
+    /// must wait for this before freeing it: a sweep can be inside a scan that does not answer cancellation
+    /// promptly, and a wait that gave up would free memory still being read. Valid from construction, so an
+    /// observer that sees the search at all cannot mistake it for one that has finished.</summary>
+    public Task Stopped => _sweepsDone.Task;
+
+    private readonly TaskCompletionSource _sweepsDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     /// <summary>How much of the file has been examined, 0..1.</summary>
     public double Progress
     {
@@ -213,12 +221,22 @@ public sealed class FindSearch : IDisposable
 
     public void Start()
     {
-        if (_lines <= 0) { lock (_sync) { _lo = 0; _hi = 0; Pulse(); } return; }
+        lock (_sync)
+        {
+            if (_stopped || _lines <= 0)
+            {
+                if (_lines <= 0) { _lo = 0; _hi = 0; Pulse(); }
+                _sweepsDone.TrySetResult();
+                return;
+            }
+        }
         _sweeps = new[]
         {
             Task.Run(() => Sweep(forward: true, _cts.Token)),
             Task.Run(() => Sweep(forward: false, _cts.Token)),
         };
+        _ = Task.WhenAll(_sweeps).ContinueWith(_ => _sweepsDone.TrySetResult(), CancellationToken.None,
+                                               TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     /// <summary>The next match in the given direction from <paramref name="from"/> (inclusive) that
@@ -345,6 +363,8 @@ public sealed class FindSearch : IDisposable
     /// <summary>Same, for tests outside this assembly.</summary>
     public bool WaitForCompletionForTesting(int timeoutMs = 30000) => WaitForCompletion(timeoutMs);
 
+    /// <summary>Asks the sweeps to stop. It does <b>not</b> wait for them: wait on <see cref="Stopped"/>
+    /// instead, and only free the file once that has completed.</summary>
     public void Dispose()
     {
         lock (_sync)
@@ -354,8 +374,11 @@ public sealed class FindSearch : IDisposable
             Pulse();          // anything still waiting is for a term nobody wants any more
         }
         try { _cts.Cancel(); } catch { /* ignore */ }
-        // The scanner reads the file, so it has to have stopped before the caller frees it.
-        try { Task.WaitAll(_sweeps, 5000); } catch { /* ignore */ }
-        _cts.Dispose();
+        // A search that never ran has no sweep to wait for; one that did completes through Start's
+        // continuation, and only then is the source nothing is using any more.
+        if (_sweeps.Length == 0) _sweepsDone.TrySetResult();
+        _ = Stopped.ContinueWith(static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+                                 _cts, CancellationToken.None,
+                                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 }
