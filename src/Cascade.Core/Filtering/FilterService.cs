@@ -77,8 +77,11 @@ public sealed class FilterService : IDisposable
     private readonly Func<bool> _indexComplete;
 
     private readonly object _lock = new();
-    private readonly AutoResetEvent _wake = new(false);
     private readonly Thread _thread;
+    // Woken through the lock rather than an event handle: the handle would have to be disposed, and
+    // disposing it is exactly what cannot be done safely while a pass may still be running.
+    private bool _woken;
+    private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     // One visible-line set per file, reused by every generation: a filter change re-evaluates lines and
     // updates it in place (keep / drop / add) rather than rebuilding it, so the view is never empty.
     private readonly VisibleLineSet _visible = new();
@@ -94,6 +97,16 @@ public sealed class FilterService : IDisposable
 
     /// <summary>Raised (on the worker thread) when the visible count for the current generation grows.</summary>
     public event Action<Generation>? Progress;
+
+    /// <summary>Completes once the worker has really stopped reading the file. Whoever owns the mapping must
+    /// wait for this before freeing it - a pass can be deep inside work that does not answer cancellation
+    /// (a regular expression is the usual one), and a wait that gave up would free memory still being read
+    /// through a raw pointer.</summary>
+    public Task Stopped => _stopped.Task;
+
+    /// <summary>What went wrong the last time a pass failed, or null. A pass runs on a background thread,
+    /// where an escaping exception ends the process, so a failure is recorded rather than thrown.</summary>
+    public Exception? LastFailure { get; private set; }
 
     public FilterService(MemoryMappedTextSource src, LineIndex index, long fileLength, MarkerStore markers,
         Encoding encoding, Func<long> completedCount, Func<bool> indexComplete)
@@ -130,19 +143,20 @@ public sealed class FilterService : IDisposable
         Generation gen;
         lock (_lock)
         {
-            _cts.Cancel();
-            _cts = new CancellationTokenSource();
             gen = new Generation(snapshot, FilteredView.CreateExplicit(_visible), ++_genId)
             {
                 SeedAllVisible = seedAllVisible,
                 CacheBuild = builders,
                 CacheFilters = cacheFilters,
             };
+            if (_disposed) return gen;   // torn down: nothing will ever run it
+            _cts.Cancel();
+            _cts = new CancellationTokenSource();
             _current = gen;
             _processed = 0;
+            _woken = true;
             Monitor.PulseAll(_lock);
         }
-        _wake.Set();
         return gen;
     }
 
@@ -239,17 +253,26 @@ public sealed class FilterService : IDisposable
     {
         lock (_lock)
         {
+            if (_disposed) return;
             _cts.Cancel();
             _cts = new CancellationTokenSource();
             _current = null;
             _processed = 0;
+            _woken = true;
             Monitor.PulseAll(_lock);
         }
-        _wake.Set();
     }
 
     /// <summary>Signals that more indexed lines are available (or indexing completed).</summary>
-    public void Notify() => _wake.Set();
+    public void Notify()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _woken = true;
+            Monitor.PulseAll(_lock);
+        }
+    }
 
     /// <summary>True when there is no current generation, or the current generation has processed all
     /// completed lines, indexing has finished, and what it worked out has been recorded (used by tests and
@@ -278,18 +301,43 @@ public sealed class FilterService : IDisposable
 
     private void Loop()
     {
-        while (!_disposed)
+        try
         {
-            _wake.WaitOne();
-            if (_disposed) break;
+            while (true)
+            {
+                Generation? gen;
+                CancellationToken ct;
+                lock (_lock)
+                {
+                    while (!_disposed && !_woken) Monitor.Wait(_lock);
+                    if (_disposed) return;
+                    _woken = false;
+                    gen = _current;
+                    ct = _cts.Token;
+                }
+                if (gen is null) continue;
 
-            Generation? gen;
-            CancellationToken ct;
-            lock (_lock) { gen = _current; ct = _cts.Token; }
-            if (gen is null) continue;
+                try { ProcessAvailable(gen, ct); }
+                catch (OperationCanceledException) { /* superseded generation */ }
+                catch (Exception ex) { Abandon(gen, ex); }
+            }
+        }
+        finally
+        {
+            lock (_lock) _cts.Dispose();
+            _stopped.TrySetResult();
+        }
+    }
 
-            try { ProcessAvailable(gen, ct); }
-            catch (OperationCanceledException) { /* superseded generation */ }
+    /// <summary>Gives up a pass that failed, leaving the view exactly as it stands. Letting the exception
+    /// escape would end the process: this runs on a background thread.</summary>
+    private void Abandon(Generation gen, Exception failure)
+    {
+        lock (_lock)
+        {
+            LastFailure = failure;
+            if (ReferenceEquals(gen, _current)) { _current = null; _processed = 0; }
+            Monitor.PulseAll(_lock);
         }
     }
 
@@ -570,14 +618,16 @@ public sealed class FilterService : IDisposable
             if (builders[f.Index] is { } builder) _cache.Store(f.Key, builder.Build(lines));
     }
 
+    /// <summary>Asks the worker to stop. It does <b>not</b> wait: wait on <see cref="Stopped"/> instead,
+    /// and only free the file once that has completed.</summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        lock (_lock) { _cts.Cancel(); Monitor.PulseAll(_lock); }
-        _wake.Set();
-        _thread.Join(2000);
-        _wake.Dispose();
-        _cts.Dispose();
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _cts.Cancel();
+            Monitor.PulseAll(_lock);
+        }
     }
 }

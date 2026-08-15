@@ -33,6 +33,11 @@ public sealed class CascadeDocument : IDisposable
     private FindSearch? _search;
     private ThreadLocal<FindEngine.FindMatcher>? _searchMatchers;
     private ThreadLocal<LineReader>? _searchReaders;
+    // Readers that have been superseded - a search whose term was replaced, a find that a newer one took
+    // over from - but which may still be inside a scan of the file that is open. They are no longer
+    // reachable through the fields above, so the release has to be told about them separately or it would
+    // free the mapping out from under them.
+    private Task _retired = Task.CompletedTask;
 
     public CascadeDocument()
     {
@@ -76,14 +81,15 @@ public sealed class CascadeDocument : IDisposable
     }
 
     /// <summary>Number of fully-known lines (all but the last while still streaming).</summary>
-    public long CompletedLineCount
+    public long CompletedLineCount => _index is null || _indexer is null ? 0 : CompletedLinesOf(_index, _indexer);
+
+    /// <summary>The same, of one particular file's index. A retired pass must keep asking about the file it
+    /// was started for, never about whatever is open now.</summary>
+    private static long CompletedLinesOf(LineIndex index, LineIndexer indexer)
     {
-        get
-        {
-            long c = _index?.Count ?? 0;
-            if (IsIndexComplete) return c;
-            return c > 0 ? c - 1 : 0;
-        }
+        long count = index.Count;
+        if (indexer.IsComplete) return count;
+        return count > 0 ? count - 1 : 0;
     }
 
     private FilteredView MatchView =>
@@ -236,8 +242,10 @@ public sealed class CascadeDocument : IDisposable
         _indexer = new LineIndexer(_src, _index, _enc.PreambleLength, _enc.UnitSize, _enc.BigEndian);
         _uiReader = new LineReader(_src, _enc.Encoding);
         _identityView = FilteredView.CreateIdentity(() => CompletedLineCount);
+        var index = _index;
+        var indexer = _indexer;
         _filterService = new FilterService(_src, _index, _src.Length, Markers, _enc.Encoding,
-            () => CompletedLineCount, () => IsIndexComplete);
+            () => CompletedLinesOf(index, indexer), () => indexer.IsComplete);
         _filterService.Progress += _ => Updated?.Invoke();
         _filterService.AfterBlockForTesting = _filterCheckpoint;
 
@@ -245,9 +253,10 @@ public sealed class CascadeDocument : IDisposable
 
         _indexCts = new CancellationTokenSource();
         var ct = _indexCts.Token;
-        _indexTask = Task.Run(() => _indexer.Run(_ =>
+        var service = _filterService;
+        _indexTask = Task.Run(() => indexer.Run(_ =>
         {
-            _filterService.Notify();
+            service.Notify();
             Updated?.Invoke();
         }, ct), ct);
     }
@@ -496,11 +505,23 @@ public sealed class CascadeDocument : IDisposable
     public Task<long> FindNextAsync(FindQuery query, long fromLine, bool forward)
     {
         _findCts?.Cancel();
+        Retire(_findTask);
         var cts = new CancellationTokenSource();
         _findCts = cts;
         var task = FindNextAsync(query, fromLine, forward, cts.Token);
         _findTask = task;
         return task;
+    }
+
+    /// <summary>Remembers a reader that has been superseded, so the file it is reading is not freed until it
+    /// has really stopped. Cancelling it is not enough: it can be inside work that never looks at the token.
+    /// One that has already finished is dropped rather than chained, so a long session of searches cannot
+    /// build up a chain of tasks that keeps every earlier one alive.</summary>
+    private void Retire(Task? reader)
+    {
+        if (reader is null || reader.IsCompleted) return;
+        var settled = Settled(reader);
+        _retired = _retired.IsCompleted ? settled : Task.WhenAll(_retired, settled);
     }
 
     /// <summary>How much of the file the current search term has been swept for, 0..1.</summary>
@@ -619,15 +640,30 @@ public sealed class CascadeDocument : IDisposable
     }
 
     /// <summary>Releases the current search: nothing is looking for that term any more, so its sweep and
-    /// the per-thread readers behind it can go.</summary>
+    /// the per-thread readers behind it can go. The readers are let go only once the sweep has really
+    /// stopped - it reads the file through them - and waiting for that here would freeze the window,
+    /// since this runs when the reader presses Escape.</summary>
     public void DropSearch()
     {
-        _search?.Dispose();          // stops the sweep before anything it reads can be freed
+        var search = _search;
+        var matchers = _searchMatchers;
+        var readers = _searchReaders;
         _search = null;
-        _searchMatchers?.Dispose();
         _searchMatchers = null;
-        _searchReaders?.Dispose();
         _searchReaders = null;
+        if (search is null)
+        {
+            matchers?.Dispose();
+            readers?.Dispose();
+            return;
+        }
+        search.Dispose();
+        Retire(search.Stopped);
+        _ = search.Stopped.ContinueWith(_ =>
+        {
+            matchers?.Dispose();
+            readers?.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via
@@ -764,6 +800,7 @@ public sealed class CascadeDocument : IDisposable
         IProgress<double>? progress = null)
     {
         _findCts?.Cancel();
+        Retire(_findTask);
         var cts = new CancellationTokenSource();
         _findCts = cts;
         Action<double>? onProgress = progress is null ? null : progress.Report;
@@ -790,38 +827,84 @@ public sealed class CascadeDocument : IDisposable
     /// Only tests need to wait for it; the app never does.</summary>
     internal Task ReleasePending { get; private set; } = Task.CompletedTask;
 
-    /// <summary>Test seam: runs on the release worker before the mapping is let go, so a test can hold it
-    /// open and prove the window was not waiting for it. Per document, not shared: the test suite runs
-    /// several classes at once and a static hook would stall whatever else happened to be opening a file.</summary>
+    /// <summary>Test seam: runs just before the file is let go, so a test can hold the release open and
+    /// prove the window was not waiting for it - or count whether it happened at all. Per document, not
+    /// shared: the test suite runs several classes at once and a static hook would stall whatever else
+    /// happened to be opening a file.</summary>
     internal Action? ReleaseDelayForTesting;
 
     private void DisposeCurrent(bool releaseAsync = false)
     {
-        // Stop any background find first so it cannot read the memory-mapped file after we free it.
+        // Everything that reads the file is asked to stop here, and NOTHING is waited for with a deadline.
+        // The mapping is handed out as a raw pointer, so freeing it while a reader is still inside a scan
+        // is an access violation - and a reader can be deep in work that does not answer cancellation at
+        // all (a regular expression is the usual one). So the release waits on the readers themselves.
         try { _findCts?.Cancel(); } catch { /* ignore */ }
-        try { _findTask?.Wait(2000); } catch { /* ignore */ }
-        _findTask = null;
-        try { DropSearch(); } catch { /* ignore */ }
         try { _indexCts.Cancel(); } catch { /* ignore */ }
-        try { _indexTask.Wait(1000); } catch { /* ignore */ }
-        _filterService?.Dispose();
+
+        var search = _search;
+        var matchers = _searchMatchers;
+        var readers = _searchReaders;
+        _search = null;
+        _searchMatchers = null;
+        _searchReaders = null;
+        try { search?.Dispose(); } catch { /* ignore */ }
+
+        var service = _filterService;
+        _filterService = null!;
+        try { service?.Dispose(); } catch { /* ignore */ }
+
+        var findTask = _findTask;
+        _findTask = null;
+        var indexTask = _indexTask;
+        _indexTask = Task.CompletedTask;
         // The generation belongs to the file being let go: the next one must not inherit it, or the first
         // pass over the new file would think it was replacing a view that is already filtered.
         _generation = null;
 
         var source = _src;
         _src = null!;
-        if (!releaseAsync) { source?.Dispose(); return; }
-        // Unmapping a large log makes the kernel hand back every resident page - MEASURED at 973 ms for a
-        // 15.8 GB file - and everything that could read it has just been stopped above. So the wait goes to
-        // a worker: opening another file is the one time this happens with a window still on screen.
-        var delay = ReleaseDelayForTesting;
-        ReleasePending = Task.Run(() =>
+
+        var stopped = Task.WhenAll(service?.Stopped ?? Task.CompletedTask,
+                                   search?.Stopped ?? Task.CompletedTask,
+                                   _retired,
+                                   Settled(findTask), Settled(indexTask));
+        _retired = Task.CompletedTask;
+
+        void Release()
         {
-            delay?.Invoke();
+            ReleaseDelayForTesting?.Invoke();
+            // Only now: these are what the sweeps read the file through.
+            matchers?.Dispose();
+            readers?.Dispose();
             source?.Dispose();
-        });
+        }
+
+        if (!releaseAsync)
+        {
+            // Closing: the window is already down. Give the readers a moment, but never free the mapping
+            // because the wait ran out - a process on its way out can leave that to the kernel.
+            ReleasePending = stopped;
+            try { if (stopped.Wait(ReleaseWaitMs)) Release(); } catch { /* leave it to the kernel */ }
+            return;
+        }
+
+        // Unmapping a large log makes the kernel hand back every resident page - MEASURED at 973 ms for a
+        // 15.8 GB file. So the wait goes to a worker: opening another file is the one time this happens
+        // with a window still on screen.
+        ReleasePending = stopped.ContinueWith(_ => Release(), CancellationToken.None,
+                                              TaskContinuationOptions.None, TaskScheduler.Default);
     }
+
+    /// <summary>How long closing waits for the readers before leaving the mapping to the kernel.</summary>
+    internal int ReleaseWaitMs = 5000;
+
+    /// <summary>A task that completes when <paramref name="task"/> does, however it ends. Waiting on the
+    /// originals directly would re-throw the cancellation they were just asked for.</summary>
+    private static Task Settled(Task? task)
+        => task is null ? Task.CompletedTask
+                        : task.ContinueWith(static _ => { }, CancellationToken.None,
+                                            TaskContinuationOptions.None, TaskScheduler.Default);
 
     /// <summary>True once the file has been let go. Releasing the mapping of a large log is slow, so what
     /// matters is that this happens with the window already down - see MainForm.Dispose.</summary>
