@@ -232,6 +232,9 @@ public sealed class MainForm : Form
         _filterTree.FindFilterRequested += FindFilterMatch;
         _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
+        _grid.CopyTruncated += (copied, selected) => ShowFindMessage(
+            $"Copied {copied:N0} of {selected:N0} lines",
+            $"The clipboard will not take the whole selection. Use File \u25b8 Save Current Lines\u2026 for all {selected:N0}.");
 
         // A log dragged in from Explorer replaces the one on screen and keeps the filters. Every area that
         // covers the window has to accept the drop for itself; the filter pane answers for its own, since

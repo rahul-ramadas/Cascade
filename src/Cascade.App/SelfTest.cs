@@ -117,6 +117,7 @@ internal static class SelfTest
             ok &= Timed("resources", RunResourceChecks);
             ok &= Timed("progress paint", RunProgressPaintChecks);
             ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
+            ok &= Timed("copying", RunCopyBudgetChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -6043,6 +6044,69 @@ internal static class SelfTest
 
     /// <summary>A filter started from a log line has to arrive holding that line. It used to keep only the
     /// first 200 characters, and the lines worth filtering on are exactly the long ones.</summary>
+    private static bool RunCopyBudgetChecks()
+    {
+        Line("-- copying --");
+        // Long lines on purpose: the cost of a copy follows CHARACTERS, and a cap counted in lines says
+        // nothing at all about how much memory the clipboard is being asked for.
+        const int lines = 200, width = 200;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_copy_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++) sb.Append("line ").Append(i).Append(' ').Append('x', width).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(700, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, new AppSettings());
+            host.Show();
+            Pump();
+
+            grid.SelectAll();
+            bool ok = Check("the whole file is selected", grid.SelectedCount == lines, $"{grid.SelectedCount} lines");
+
+            string whole = grid.BuildCopyText(withLineNumbers: false, out long copiedWhole);
+            ok &= Check("within its budget a copy takes every selected line", copiedWhole == lines,
+                        $"{copiedWhole} of {lines}");
+
+            // Budget lowered rather than the fixture grown: the rule is what is under test, not the number.
+            const int budget = 2_000;
+            grid.CopyCharCap = budget;
+            string capped = grid.BuildCopyText(withLineNumbers: false, out long copied);
+
+            int lineWidth = whole.Length / lines;   // as copied, newline included
+            ok &= Check("a copy stops at its character budget",
+                        capped.Length <= budget + lineWidth, $"{capped.Length:N0} chars for a {budget:N0} budget");
+            ok &= Check("and takes as many lines as that budget holds",
+                        copied > 0 && copied < lines && Math.Abs(copied * lineWidth - capped.Length) <= lineWidth,
+                        $"{copied} of {lines} lines, {capped.Length:N0} chars");
+            ok &= Check("what it did take is the start of the selection, in one piece",
+                        capped.StartsWith("line 0 ", StringComparison.Ordinal) && whole.StartsWith(capped, StringComparison.Ordinal),
+                        capped.Length > 30 ? capped[..30] : capped);
+            return ok;
+        }
+        finally
+        {
+            host?.Dispose();
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
     private static bool RunNewFilterFromLineChecks()
     {
         Line("-- a filter made from a log line --");
