@@ -80,6 +80,45 @@ public class IndexingTests
         finally { src.Dispose(); }
     }
 
+    [Theory]
+    [InlineData("utf-16le")]
+    [InlineData("utf-16be")]
+    [InlineData("utf-32le")]
+    [InlineData("utf-32be")]
+    public void Multi_byte_lines_are_found_across_chunk_boundaries(string name)
+    {
+        // The scan works through the file in 4 MB chunks and searches whole code units within each one, so
+        // the seams are where a newline would go missing. Blank lines and a character CONTAINING a 0x0A byte
+        // are in the mix, since those are what a search over the wrong unit gets wrong.
+        Encoding enc = name switch
+        {
+            "utf-16le" => new UnicodeEncoding(bigEndian: false, byteOrderMark: true),
+            "utf-16be" => new UnicodeEncoding(bigEndian: true, byteOrderMark: true),
+            "utf-32le" => new UTF32Encoding(bigEndian: false, byteOrderMark: true),
+            _ => new UTF32Encoding(bigEndian: true, byteOrderMark: true),
+        };
+
+        const int lines = 400_000;
+        var sb = new StringBuilder();
+        var expected = new List<string>(lines);
+        for (int i = 0; i < lines; i++)
+        {
+            string text = i % 1000 == 0 ? "" : $"line \u0a41{i}\u410a";
+            expected.Add(text);
+            sb.Append(text).Append('\n');
+        }
+        byte[] bytes = enc.GetPreamble().Concat(enc.GetBytes(sb.ToString())).ToArray();
+        Assert.True(bytes.Length > 8 * 1024 * 1024, $"need several chunks to cross a seam, got {bytes.Length} bytes");
+
+        var (src, index, det) = Harness.BuildFromBytes(bytes, enc);
+        try
+        {
+            Assert.Equal(lines, index.Count);
+            Assert.Equal(expected, Harness.ReadAll(src, index, det));
+        }
+        finally { src.Dispose(); }
+    }
+
     [Fact]
     public void Progress_is_reported_in_bytes_as_the_scan_moves_through_the_file()
     {
