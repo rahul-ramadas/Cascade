@@ -39,7 +39,10 @@ public sealed class MarkerStore
     /// small however large the file - which is what lets a whole-file summary just walk it.
     /// <para>Kept until something changes: the minimap and the scrollbar both ask for this while PAINTING,
     /// and sorting the marks afresh every repaint is fine for a handful and quite another thing for the two
-    /// million a select-all and Ctrl+1 can make.</para></summary>
+    /// million a select-all and Ctrl+1 can make.</para>
+    /// <para>It is held rather than rebuilt, so it COSTS 16 bytes a mark - MEASURED at 32 MB for two
+    /// million, against the 64 MB a frame it was throwing away, and against the ~200 MB the dictionary and
+    /// the sorted sets already spend on the same marks. At any ordinary number of marks it is kilobytes.</para></summary>
     public IReadOnlyList<(long Line, byte Mask)> Snapshot()
     {
         lock (_lock)
