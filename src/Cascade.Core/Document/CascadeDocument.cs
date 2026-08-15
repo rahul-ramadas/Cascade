@@ -325,6 +325,47 @@ public sealed class CascadeDocument : IDisposable
         return LineReader.IsTruncated(s, e);
     }
 
+    /// <summary>Writes every row on show to a file, off the calling thread. Exporting a filtered view of a
+    /// large log is minutes of reading and writing, and doing it in hand with the window meant the window
+    /// stopped answering for all of it.
+    /// <para>What to write is settled HERE, on the caller's thread: the file, its index, its encoding, the
+    /// row set and how many rows there are. A retired pass must keep asking about the file it was started
+    /// for, so none of it is read from a field again once the writing begins - reopening while this runs
+    /// would otherwise have it reading the new file through the old index. The row set itself is read the
+    /// same way a background find reads it, which is safe by its own design.</para>
+    /// <para>Registered as a reader before returning, so the mapping cannot be freed under it.</para></summary>
+    public Task SaveRowsAsync(string path, IProgress<double>? progress, CancellationToken token)
+    {
+        var src = _src;
+        var index = _index;
+        var encoding = _enc.Encoding;
+        var view = MatchView;
+        bool filtered = FilteredMode;
+        long rows = RowCount;
+
+        var task = Task.Run(() => AtomicFile.Write(path, writer =>
+        {
+            var reader = new LineReader(src, encoding);
+            for (long r = 0; r < rows; r++)
+            {
+                // Often enough that Esc feels immediate, rarely enough to cost nothing against the read
+                // and the write it sits between.
+                if ((r & 0xFFF) == 0)
+                {
+                    token.ThrowIfCancellationRequested();
+                    progress?.Report((double)r / rows);
+                }
+                long line = filtered ? view.LineAt(r) : r;
+                if (line < 0 || line >= index.Count) continue;
+                index.GetRange(line, src.Length, out long s, out long e);
+                writer.WriteLine(reader.GetString(s, e));
+            }
+            token.ThrowIfCancellationRequested();
+        }), token);          // written as UTF-8, as it always has been - the source encoding decodes only
+        Retire(task);
+        return task;
+    }
+
     /// <summary>
     /// The filters to draw with, fixed at the moment this is called: take one and use it for a whole frame
     /// (see <see cref="LineColouring"/>), never one per row.

@@ -15,13 +15,21 @@ namespace Cascade.Core.IO;
 public static class AtomicFile
 {
     public static void WriteAllText(string path, string contents, Encoding? encoding = null)
+        => Write(path, writer => writer.Write(contents), encoding);
+
+    /// <summary>The same swap, for content too big to hold as a string - an export of a whole log runs to
+    /// gigabytes. The writer is handed out rather than the text handed in, so nothing is ever fully in
+    /// memory; throwing out of <paramref name="write"/> (which is how a cancelled export leaves) takes the
+    /// half-written temporary with it and leaves the target as it was.</summary>
+    public static void Write(string path, Action<TextWriter> write, Encoding? encoding = null)
     {
         string full = Path.GetFullPath(path);
         // Beside the target, so the rename stays on one volume and cannot degrade into a copy.
         string temp = full + "." + Environment.ProcessId + ".tmp";
         try
         {
-            File.WriteAllText(temp, contents, encoding ?? new UTF8Encoding(false));
+            using (var writer = new StreamWriter(temp, false, encoding ?? new UTF8Encoding(false)))
+                write(writer);
             Swap(temp, full);
         }
         catch
