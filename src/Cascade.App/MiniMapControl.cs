@@ -512,6 +512,16 @@ internal sealed class MiniMapControl : Control
         (int)Math.Round(back.G + (c.G - back.G) * t),
         (int)Math.Round(back.B + (c.B - back.B) * t));
 
+    /// <summary>The brush for a marker, made once. Marks are drawn a rectangle at a time down both the map
+    /// and the scrollbar, so a brush per mark is a GDI+ object made and destroyed millions of times a
+    /// repaint for eight fixed colours. These outlive every view on purpose - there are eight of them and
+    /// the colours never change.</summary>
+    internal static SolidBrush MarkerBrush(int index) =>
+        MarkerBrushes[Math.Clamp(index, 0, MarkerBrushes.Length - 1)];
+
+    private static readonly SolidBrush[] MarkerBrushes =
+        Array.ConvertAll(AppSettings.MarkerColors, c => new SolidBrush(c));
+
     protected override void OnPaint(PaintEventArgs e)
     {
         _paints++;
@@ -568,8 +578,7 @@ internal sealed class MiniMapControl : Control
             long row = doc.FilteredMode ? doc.RowForLine(line) : line;
             if (row < first || row > last) continue;
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
-            using var brush = new SolidBrush(AppSettings.MarkerColors[Math.Clamp(index, 0, AppSettings.MarkerColors.Length - 1)]);
-            g.FillRectangle(brush, left, SlotOf(row) * _rowPixels, edge, Math.Max(2, _rowPixels));
+            g.FillRectangle(MarkerBrush(index), left, SlotOf(row) * _rowPixels, edge, Math.Max(2, _rowPixels));
         }
 
         if (doc.FindHitCount > 0)

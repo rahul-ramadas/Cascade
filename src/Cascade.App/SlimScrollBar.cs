@@ -157,7 +157,7 @@ internal sealed class SlimScrollBar : Control
     {
         if (_grid.Document is not { } doc || _total <= 0) return;
         var marks = doc.Markers.Snapshot();
-        if (marks.Length == 0) return;
+        if (marks.Count == 0) return;
 
         var track = Track;
         foreach (var (line, mask) in marks)
@@ -166,8 +166,7 @@ internal sealed class SlimScrollBar : Control
             if (row < 0 || row >= _total) continue;
             int y = track.Top + (int)(row * (track.Height - MarkThickness) / _total);
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
-            using var brush = new SolidBrush(AppSettings.MarkerColors[Math.Clamp(index, 0, AppSettings.MarkerColors.Length - 1)]);
-            g.FillRectangle(brush, track.Left, y, track.Width, MarkThickness);
+            g.FillRectangle(MiniMapControl.MarkerBrush(index), track.Left, y, track.Width, MarkThickness);
         }
     }
 

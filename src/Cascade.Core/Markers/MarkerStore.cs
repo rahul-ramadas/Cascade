@@ -36,13 +36,25 @@ public sealed class MarkerStore
     private int _version;
 
     /// <summary>Every marked line with its mask, in line order. Marked lines are hand-picked, so this stays
-    /// small however large the file - which is what lets a whole-file summary just walk it.</summary>
-    public (long Line, byte Mask)[] Snapshot()
+    /// small however large the file - which is what lets a whole-file summary just walk it.
+    /// <para>Kept until something changes: the minimap and the scrollbar both ask for this while PAINTING,
+    /// and sorting the marks afresh every repaint is fine for a handful and quite another thing for the two
+    /// million a select-all and Ctrl+1 can make.</para></summary>
+    public IReadOnlyList<(long Line, byte Mask)> Snapshot()
     {
-        var all = _mask.ToArray();
-        Array.Sort(all, static (a, b) => a.Key.CompareTo(b.Key));
-        return Array.ConvertAll(all, kv => (kv.Key, kv.Value));
+        lock (_lock)
+        {
+            if (_snapshot is { } cached && _snapshotVersion == _version) return cached;
+            var all = _mask.ToArray();
+            Array.Sort(all, static (a, b) => a.Key.CompareTo(b.Key));
+            _snapshot = Array.ConvertAll(all, kv => (kv.Key, kv.Value));
+            _snapshotVersion = _version;
+            return _snapshot;
+        }
     }
+
+    private (long Line, byte Mask)[]? _snapshot;
+    private int _snapshotVersion = -1;
 
     /// <summary>Bitmask of which of the 8 markers are currently used on at least one line.</summary>
     public int UsedMarkers
@@ -72,8 +84,11 @@ public sealed class MarkerStore
             else { m &= (byte)~bit; _byMarker[index].Remove(line); }
             if (m == 0) _mask.TryRemove(line, out _);
             else _mask[line] = m;
+            // Stepped under the lock that made the change, so the version and the marks it labels are
+            // always set together. Callers see the bump before Toggle returns either way; keeping it here
+            // just means a reader overlapping a change can't pair new marks with the old number.
+            Interlocked.Increment(ref _version);
         }
-        Interlocked.Increment(ref _version);
         Changed?.Invoke();
         return set;
     }
@@ -90,8 +105,8 @@ public sealed class MarkerStore
             else { m &= (byte)~bit; _byMarker[index].Remove(line); }
             if (m == 0) _mask.TryRemove(line, out _);
             else _mask[line] = m;
+            Interlocked.Increment(ref _version);
         }
-        Interlocked.Increment(ref _version);
         Changed?.Invoke();
     }
 
@@ -124,8 +139,8 @@ public sealed class MarkerStore
         {
             _mask.Clear();
             foreach (var s in _byMarker) s.Clear();
+            Interlocked.Increment(ref _version);
         }
-        Interlocked.Increment(ref _version);
         Changed?.Invoke();
     }
 }
