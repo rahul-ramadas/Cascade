@@ -28,6 +28,14 @@ public sealed class LineGridControl : Control
     private const int DefaultColumnWidth = 160;
     private const long CopyLineCap = 2_000_000;
 
+    /// <summary>How much text one copy will gather. A cap in LINES is barely a cap at all: the same two
+    /// million lines is a couple of hundred megabytes of a short-line log and tens of gigabytes of one
+    /// carrying a JSON payload per line. The cost is proportional to CHARACTERS, so that is what is
+    /// budgeted - and the clipboard holds a second copy of whatever it is given, so this is doubled in
+    /// practice. Far more than anything will paste it, and bounded whatever the file looks like.
+    /// A field so a check can lower it instead of building a 64 MB fixture.</summary>
+    internal int CopyCharCap = 32 * 1024 * 1024;
+
     private SlimScrollBar _hbar = null!;
     private SlimScrollBar _vbar = null!;
     private MiniMapControl? _map;
@@ -124,6 +132,10 @@ public sealed class LineGridControl : Control
     /// <summary>Raised with the 0-based marker index when marker navigation runs off the end. The host
     /// decides how to report it, so all the find commands give identical feedback.</summary>
     public event Action<int>? NoMoreMarkers;
+
+    /// <summary>Raised when a copy took less than was selected, with how many lines it took and how many
+    /// were asked for. Saying nothing would leave the reader with a quietly incomplete clipboard.</summary>
+    public event Action<long, long>? CopyTruncated;
 
     public LineGridControl()
     {
@@ -2592,14 +2604,27 @@ public sealed class LineGridControl : Control
             return;
         }
         if (_sel.IsEmpty) return;
+        string text = BuildCopyText(withLineNumbers, out long copied);
+        if (text.Length == 0) return;
+        try { Clipboard.SetText(text); } catch { return; /* clipboard busy: nothing was copied */ }
+        long selected = SelectedCount;
+        if (copied < selected) CopyTruncated?.Invoke(copied, selected);
+    }
+
+    /// <summary>The selected lines as one block of text, up to <see cref="CopyCharCap"/>.</summary>
+    internal string BuildCopyText(bool withLineNumbers, out long copied)
+    {
+        copied = 0;
+        if (_doc is null) return "";
         var sb = new StringBuilder();
         foreach (long line in SelectedLines(CopyLineCap))
         {
+            if (sb.Length >= CopyCharCap) break;
             if (withLineNumbers) sb.Append(line + 1).Append('\t');
             sb.AppendLine(_doc.GetLineText(line));
+            copied++;
         }
-        if (sb.Length > 0)
-            try { Clipboard.SetText(sb.ToString()); } catch { /* clipboard busy */ }
+        return sb.ToString();
     }
 
     protected override void OnResize(EventArgs e) { base.OnResize(e); RefreshView(); }
