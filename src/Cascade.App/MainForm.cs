@@ -1040,9 +1040,7 @@ public sealed class MainForm : Form
         // the same place on screen while the new matches stream in.
         var anchor = _grid.CaptureViewAnchor();
         _doc.ApplyFilters();
-        // In filtered mode the matched rows shift, so re-select the anchor line; in dim mode the row
-        // set is unchanged, so leave any existing (possibly multi-row) selection intact.
-        _grid.SetViewAnchor(anchor, select: _doc.FilteredMode);
+        _grid.SetViewAnchor(anchor);
         _grid.RefreshView();
         _anchorActive = anchor.IsValid;
         UpdateTitle();
@@ -1070,7 +1068,7 @@ public sealed class MainForm : Form
         _filtersDirty = true;
         var anchor = _grid.CaptureViewAnchor();
         _doc.ApplyFilters();
-        _grid.SetViewAnchor(anchor, select: _doc.FilteredMode);
+        _grid.SetViewAnchor(anchor);
         _grid.RefreshView();
         _anchorActive = anchor.IsValid;
         SyncUndoMenu();
@@ -1445,7 +1443,7 @@ public sealed class MainForm : Form
         // Filtered vs. dim is a display-only mode: the matched set is unchanged, so there is no need to
         // re-run filtering (which would blank the view). Just re-map the view, holding the line where it
         // already is - the same as every filter change does.
-        _grid.SetViewAnchor(anchor, select: true);
+        _grid.SetViewAnchor(anchor);
         _grid.RefreshView();
         _anchorActive = anchor.IsValid;
         UpdateStatus();

@@ -83,7 +83,6 @@ public sealed class LineGridControl : Control
     private long _anchorLine = -1;
     private int _anchorOffset;
     private long _anchorCaretLine = -1;
-    private bool _anchorSelect;
     private long[] _window = new long[64];   // file lines resolved for the current frame
 
     // Where each row was actually painted this frame. With word wrap a row is as tall as the number of
@@ -404,6 +403,12 @@ public sealed class LineGridControl : Control
     {
         into.Clear();
         if (_doc is null) return;
+        if (StandInLine is var stand && stand >= 0)
+        {
+            long row = _doc.RowForLine(stand);
+            if (row >= 0) into.Add((row, row + 1));
+            return;
+        }
         foreach (var (a, b) in _sel.Ranges)
         {
             long from = _doc.RowAtOrAfterLine(a), to = _doc.RowAtOrAfterLine(b + 1);
@@ -482,12 +487,11 @@ public sealed class LineGridControl : Control
     /// <summary>Arms view stabilization: as the filtered view streams in, the anchor's line is held at the
     /// same on-screen offset, so lines discovered before it move the scrollbar rather than the text.
     /// Re-applied on each <see cref="RefreshView"/> until cleared.</summary>
-    public void SetViewAnchor(ViewAnchor anchor, bool select)
+    public void SetViewAnchor(ViewAnchor anchor)
     {
         _anchorLine = anchor.Line;
         _anchorCaretLine = anchor.CaretLine;
         _anchorOffset = Math.Clamp(anchor.Offset, 0, Math.Max(0, EffectiveVisibleRows - 1));
-        _anchorSelect = select;
     }
 
     public void ClearViewAnchor() { _anchorLine = -1; _anchorCaretLine = -1; }
@@ -504,7 +508,6 @@ public sealed class LineGridControl : Control
         _anchorLine = _doc.RowToLine(Math.Clamp(_firstRow, 0, rows - 1));
         _anchorOffset = 0;
         _anchorCaretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
-        _anchorSelect = true;
     }
 
     /// <summary>Row currently displaying <paramref name="line"/> (or the nearest following visible line), or
@@ -546,9 +549,8 @@ public sealed class LineGridControl : Control
         _firstRow = ClampFirstRow(Math.Clamp(row, 0, rows - 1) - _anchorOffset);
     }
 
-    /// <summary>Keeps the caret on its original line as rows shift, and lets a lone selected line go with it
-    /// when that line is no longer being shown at all. A selection of several lines is left exactly as it
-    /// is: it is held in lines, so it needs no re-establishing.</summary>
+    /// <summary>Keeps the caret on its original line as rows shift. The selection is left alone: it is held
+    /// in lines, so hiding some of it is a question of what is drawn, not of what is chosen.</summary>
     private void PinCaretToAnchor()
     {
         if (_doc is null || _anchorCaretLine < 0) return;
@@ -556,8 +558,27 @@ public sealed class LineGridControl : Control
         long caret = ResolveRow(_anchorCaretLine);
         if (caret < 0 || rows == 0) return;
         _caretRow = Math.Clamp(caret, 0, rows - 1);
-        if (_anchorSelect && _sel.LineCount == 1) _sel.SetSingle(LineAt(_caretRow));
     }
+
+    /// <summary>Whether any chosen line is on screen. Two rank lookups a range, and it stops at the first
+    /// one that is, so the usual single range costs two.</summary>
+    private bool AnyChosenVisible
+    {
+        get
+        {
+            if (_doc is null) return false;
+            foreach (var (a, b) in _sel.Ranges)
+                if (_doc.RowAtOrAfterLine(b + 1) > _doc.RowAtOrAfterLine(a)) return true;
+            return false;
+        }
+    }
+
+    /// <summary>The line standing in for a selection the filters have hidden every line of, or -1.
+    /// <para>Something has to be highlighted or the reader loses their place entirely, so the caret's line
+    /// is shown in its stead - the caret has already moved to the nearest line still on show. It is only
+    /// ever DRAWN as selected: what was chosen is untouched, so putting the lines back - undoing the filter,
+    /// pressing Ctrl+H again - shows the original selection again rather than this.</para></summary>
+    private long StandInLine => _doc is null || _sel.IsEmpty || AnyChosenVisible ? -1 : CaretLine;
 
     private long ClampFirstRow(long first)
     {
@@ -877,6 +898,12 @@ public sealed class LineGridControl : Control
     /// <summary>Whether a file line is selected, whether or not the view is currently showing it.</summary>
     internal bool IsLineSelectedForTesting(long line) => _sel.Contains(line);
 
+    /// <summary>Whether a line is DRAWN selected - the chosen lines, or the stand-in when every chosen line
+    /// is hidden. The two differ exactly while the filters are covering the whole selection.</summary>
+    internal bool IsLineShownSelectedForTesting(long line) => _sel.Contains(line) || line == StandInLine;
+
+    internal long StandInLineForTesting => StandInLine;
+
     internal int ViewportHeightForTesting => ViewportHeight;
     internal int RowHeightOfForTesting(long row) => RowHeightOf(row);
     internal Font FontForTesting => FontRegular;
@@ -1033,6 +1060,7 @@ public sealed class LineGridControl : Control
         // What is picked out of a line, once for the frame rather than once per row: every row asks whether
         // it carries the same text, and answering it decodes the line the selection came from.
         string? selected = SelectedText;
+        long standIn = StandInLine;
 
         bool columns = _doc.Columns.Enabled;
         int runningMaxWidth = 0;
@@ -1062,7 +1090,7 @@ public sealed class LineGridControl : Control
             // Both of these are asked of the LINE, not of the row it landed on this frame: the filters move
             // every row about, and a highlight left on a row would end up over text nobody picked out.
             bool charSel = HasCharSelection && line == _charLine;
-            bool selectedRow = !charSel && _sel.Contains(line);
+            bool selectedRow = !charSel && (_sel.Contains(line) || line == standIn);
             bool dim = !_doc.FilteredMode && !eval.Shown;
 
             Color back = selectedRow ? _settings.SelectionBack : ToColor(style.Background);
@@ -2548,7 +2576,7 @@ public sealed class LineGridControl : Control
             long n = 0;
             foreach (var (a, b) in _sel.Ranges)
                 n += Math.Max(0, _doc.RowAtOrAfterLine(b + 1) - _doc.RowAtOrAfterLine(a));
-            return n;
+            return n > 0 ? n : (StandInLine >= 0 ? 1 : 0);
         }
     }
 
@@ -2557,6 +2585,13 @@ public sealed class LineGridControl : Control
     private IEnumerable<long> SelectedLines(long cap)
     {
         if (_doc is null) yield break;
+        // Whatever is highlighted is what a copy or a marker acts on, and while the chosen lines are all
+        // hidden that is the stand-in.
+        if (StandInLine is var stand && stand >= 0)
+        {
+            if (cap > 0) yield return stand;
+            yield break;
+        }
         long rows = _doc.RowCount, n = 0;
         foreach (var (a, b) in _sel.Ranges)
             for (long row = _doc.RowAtOrAfterLine(a); row < rows; row++)
@@ -2604,10 +2639,12 @@ public sealed class LineGridControl : Control
             return;
         }
         if (_sel.IsEmpty) return;
+        // Counted before the copy, not after: a filter pass settling in between would otherwise leave a
+        // total that the copy never worked against, and "42 of 3 lines" is worse than saying nothing.
+        long selected = SelectedCount;
         string text = BuildCopyText(withLineNumbers, out long copied);
         if (text.Length == 0) return;
         try { Clipboard.SetText(text); } catch { return; /* clipboard busy: nothing was copied */ }
-        long selected = SelectedCount;
         if (copied < selected) CopyTruncated?.Invoke(copied, selected);
     }
 
@@ -2770,7 +2807,8 @@ public sealed class LineGridControl : Control
             get
             {
                 var s = AccessibleStates.Selectable | AccessibleStates.Focusable;
-                if (_g._sel.Contains(_g.LineAt(Row))) s |= AccessibleStates.Selected;
+                long line = _g.LineAt(Row);
+                if (_g._sel.Contains(line) || line == _g.StandInLine) s |= AccessibleStates.Selected;
                 if (Row == _g._caretRow) s |= AccessibleStates.Focused;
                 return s;
             }

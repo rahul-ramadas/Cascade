@@ -280,7 +280,7 @@ internal static class SelfTest
             grid.RefreshView();
             Pump();
             grid.ClearViewAnchor();
-            grid.SetViewAnchor(new ViewAnchor(0, 0, -1), select: false);
+            grid.SetViewAnchor(new ViewAnchor(0, 0, -1));
             grid.SetVerticalScrollValue(15);
             grid.RefreshView();
             Pump();
@@ -2241,7 +2241,7 @@ internal static class SelfTest
                 // Exactly what MainForm.OnFiltersChanged does, in the same order.
                 var anchor = grid.CaptureViewAnchor();
                 doc.SetFilters(filters);
-                grid.SetViewAnchor(anchor, select: doc.FilteredMode);
+                grid.SetViewAnchor(anchor);
                 grid.RefreshView();
                 WaitForFiltering(doc);
                 grid.RefreshView();
@@ -2325,6 +2325,7 @@ internal static class SelfTest
             ok &= Check("the hidden lines come back selected", grid.SelectedCount == toLine - fromLine + 1,
                         $"{grid.SelectedCount} lines");
 
+            ok &= RunStandInChecks(grid, doc, Lines, Filter);
             ok &= SelectionStress(grid, doc, Lines, Filter);
             return ok;
         }
@@ -2335,6 +2336,64 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Hiding every selected line puts a stand-in in its place so the reader keeps their place, and
+    /// showing the lines again brings the original selection back - the whole of it, not the stand-in. What
+    /// was chosen is never written over, which is what makes undoing the filter enough to restore it.</summary>
+    private static bool RunStandInChecks(LineGridControl grid, CascadeDocument doc, int lines,
+                                         Action<string?> filter)
+    {
+        // ---- one line ----
+        filter(null);
+        const long Lone = 25;                      // every fifth line says "cache miss", so "TARGET" hides it
+        grid.ClickForTesting(doc.RowForLine(Lone), 5);
+        bool ok = Check("one line is chosen", grid.IsLineSelectedForTesting(Lone) && grid.SelectedCount == 1,
+                        $"{grid.SelectedCount} shown");
+
+        filter("TARGET");
+        long stand = grid.StandInLineForTesting;
+        ok &= Check("hiding it leaves the choice alone", grid.IsLineSelectedForTesting(Lone));
+        ok &= Check("and stands another line in for it", stand >= 0 && stand != Lone && doc.IsLineVisible(stand),
+                    $"stand-in {stand}");
+        ok &= Check("which is drawn selected", stand >= 0 && grid.IsLineShownSelectedForTesting(stand));
+        ok &= Check("and counts as the one selected line", grid.SelectedCount == 1, $"{grid.SelectedCount}");
+
+        filter(null);
+        ok &= Check("showing it again takes the stand-in away", grid.StandInLineForTesting < 0,
+                    $"stand-in {grid.StandInLineForTesting}");
+        ok &= Check("and puts the selection back where it was",
+                    grid.IsLineSelectedForTesting(Lone) && grid.IsLineShownSelectedForTesting(Lone)
+                    && grid.SelectedCount == 1, $"{grid.SelectedCount} selected");
+
+        // ---- several lines, all hidden ----
+        long from = 11, to = 15;                   // 15 says "cache miss", the rest carry TARGET
+        grid.PressForTesting(doc.RowForLine(from), 5);
+        grid.DragOverRowForTesting(doc.RowForLine(to), 5);
+        grid.ReleaseForTesting(doc.RowForLine(to), 5);
+        ok &= Check("a stretch of lines is chosen", grid.SelectedCount == to - from + 1, $"{grid.SelectedCount}");
+
+        filter("nothing matches this at all");
+        ok &= Check("with none of them on show, one line stands in", grid.SelectedCount <= 1,
+                    $"{grid.SelectedCount} selected");
+        for (long line = from; line <= to; line++)
+            ok &= Check($"line {line} is still chosen underneath", grid.IsLineSelectedForTesting(line));
+
+        filter(null);
+        ok &= Check("and the whole stretch comes back", grid.SelectedCount == to - from + 1,
+                    $"{grid.SelectedCount}");
+        ok &= Check("with no stand-in left over", grid.StandInLineForTesting < 0);
+
+        // ---- several lines, some hidden: no stand-in, the rest stay put ----
+        filter("TARGET");
+        long visible = 0;
+        for (long line = from; line <= to; line++) if (doc.IsLineVisible(line)) visible++;
+        ok &= Check("some of the stretch is still on show", visible > 0, $"{visible} of {to - from + 1}");
+        ok &= Check("so nothing stands in", grid.StandInLineForTesting < 0, $"{grid.StandInLineForTesting}");
+        ok &= Check("and the count is of the ones on show", grid.SelectedCount == visible,
+                    $"said {grid.SelectedCount}, {visible} on show");
+        filter(null);
+        return ok;
     }
 
     /// <summary>Random gestures, each followed by a filter change, checked against a reference worked out
@@ -2371,34 +2430,37 @@ internal static class SelfTest
             var before = new bool[lines];
             for (long line = 0; line < lines; line++) before[line] = grid.IsLineSelectedForTesting(line);
             string? pickedOut = grid.SelectedText;
-            long onlyLine = Array.IndexOf(before, true) >= 0 && Array.IndexOf(before, true) == Array.LastIndexOf(before, true)
-                          ? Array.IndexOf(before, true) : -1;
 
             filter(terms[rnd.Next(terms.Length)]);
 
-            // A lone selected line goes with the caret when the view stops showing it - that is the one
-            // thing allowed to move, and only because there is nothing left to point at.
-            var wanted = before;
-            if (onlyLine >= 0)
-            {
-                wanted = new bool[lines];
-                long now = grid.CaretLine;
-                if (now >= 0 && now < lines) wanted[now] = true;
-                if (doc.IsLineVisible(onlyLine) && now != onlyLine)
-                    return Check($"a line still being shown does not move (iteration {iter})", false,
-                                 $"line {onlyLine} -> {now}");
-            }
-
+            // Nothing a filter does narrows or moves what was chosen. It is held in lines, so hiding one is
+            // a question of what gets drawn - and putting it back shows it again, still selected.
             for (long line = 0; line < lines; line++)
-                if (grid.IsLineSelectedForTesting(line) != wanted[line])
+                if (grid.IsLineSelectedForTesting(line) != before[line])
                     return Check($"the same lines stay selected (iteration {iter})", false,
-                                 $"line {line}: {wanted[line]} -> {grid.IsLineSelectedForTesting(line)}");
+                                 $"line {line}: {before[line]} -> {grid.IsLineSelectedForTesting(line)}");
 
             long shown = 0;
-            for (long line = 0; line < lines; line++) if (wanted[line] && doc.IsLineVisible(line)) shown++;
-            if (grid.SelectedCount != shown)
+            for (long line = 0; line < lines; line++) if (before[line] && doc.IsLineVisible(line)) shown++;
+            long standIn = grid.StandInLineForTesting;
+            bool anyChosen = Array.IndexOf(before, true) >= 0;
+
+            // With every chosen line hidden, one line stands in for them so the reader keeps their place -
+            // and it has to be a line actually on show.
+            if (anyChosen && shown == 0 && standIn < 0)
+                return Check($"a wholly hidden selection leaves a stand-in (iteration {iter})", false,
+                             "nothing is highlighted at all");
+            if (standIn >= 0 && !doc.IsLineVisible(standIn))
+                return Check($"the stand-in is a line being shown (iteration {iter})", false,
+                             $"line {standIn} is not on show");
+            if (shown > 0 && standIn >= 0)
+                return Check($"no stand-in while any chosen line is on show (iteration {iter})", false,
+                             $"{shown} shown, yet line {standIn} stands in");
+
+            long counted = shown > 0 ? shown : (standIn >= 0 ? 1 : 0);
+            if (grid.SelectedCount != counted)
                 return Check($"the count is of the selected lines being shown (iteration {iter})", false,
-                             $"said {grid.SelectedCount}, {shown} are shown");
+                             $"said {grid.SelectedCount}, wanted {counted}");
 
             if (pickedOut is not null && grid.SelectedText != pickedOut)
                 return Check($"the part of a line stays picked out (iteration {iter})", false,
@@ -6950,7 +7012,7 @@ internal static class SelfTest
             Pump();
             long settled = grid.FirstRowForTesting;
             grid.KeepTextStillAcross(2, () =>
-                grid.SetViewAnchor(new ViewAnchor(doc.RowToLine(settled), 0, -1), false));
+                grid.SetViewAnchor(new ViewAnchor(doc.RowToLine(settled), 0, -1)));
             Pump();
             ok &= Check($"a pin armed while the view is resized does not pull it back " +
                         $"({settled} -> {grid.FirstRowForTesting})",
