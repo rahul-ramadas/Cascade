@@ -2199,7 +2199,7 @@ public sealed class LineGridControl : Control
         for (int i = 0; i < spec.Columns.Count; i++)
         {
             int which = i;
-            var item = new ToolStripMenuItem(spec.Columns[i].Name.Length > 0 ? spec.Columns[i].Name : $"Column {i + 1}")
+            var item = new ToolStripMenuItem(spec.Columns[i].Name.Length > 0 ? AsLabel(spec.Columns[i].Name) : $"Column {i + 1}")
             {
                 CheckOnClick = true
             };
@@ -2211,7 +2211,7 @@ public sealed class LineGridControl : Control
 
         if (index >= 0)
         {
-            string name = spec.Columns[index].Name;
+            string name = AsLabel(spec.Columns[index].Name);
             menu.Items.Add(new ToolStripSeparator());
             var rename = Entry($"&Rename \"{name}\"…", () => BeginRename(index));
             var hide = Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false));
@@ -2253,6 +2253,11 @@ public sealed class LineGridControl : Control
             return item;
         }
     }
+
+    /// <summary>A field's name as a menu label. A name is the reader's own text, and an &amp; in it would
+    /// otherwise disappear into an underline nobody asked for.</summary>
+    private static string AsLabel(string name) => name.Replace("&", "&&", StringComparison.Ordinal);
+
     /// <summary>The header menu as it would be shown over one column, so a check can read what it offers
     /// and press its entries.</summary>
     internal ContextMenuStrip ColumnMenuForTesting(int index) => BuildColumnMenu(index);
