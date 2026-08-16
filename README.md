@@ -86,22 +86,40 @@ are a filter type too, so lines you picked out yourself can be treated as a cate
 turns that into a filter, which is the quickest way to chase a request id you just spotted. `Alt+Z`
 wraps long lines.
 
-### Columns
+### Fields
 
-![Columns](docs/images/columns.png)
+![Fields](docs/images/columns.png)
 
-`Ctrl+Shift+C` splits each line for display, on a delimiter or with a bracket template that names the
-fields — and **View > Split Into Columns** reads those fields off the current line for you:
+`Ctrl+Shift+C` splits each line into **fields** for display — and **View > Split Lines Into Fields** reads
+them off the line under the caret for you. A template is a picture of your line: write one out, then
+replace the text that changes with `*` and wrap each field in `{ }`.
 
 ```
-[timestamp] [[service]] [[level]] [[request]] [message]
+your line:  [2026-08-05T05:00:02][BthPort][INFO] WDF PnP state: started
+template:   {[*]}{[*]}{[*]} {*}
 ```
 
-Everything else happens on the header: drag an edge to resize (snapping to whole characters in a
-fixed-pitch font), double-click an edge to fit a column to its content, carry a header sideways to
-reorder, double-click a name to rename it, right-click for the tick list that shows and hides columns.
-Anything left to size itself shares out the width of the window. Filtering always runs on the whole raw
-line, so turning columns on can never change what you see.
+| | |
+|---|---|
+| `*` | the text that changes — matches as little as it can, up to whatever you wrote next |
+| `{ }` | one **field**: the thing that is hidden or moved, punctuation and all |
+| anything else | has to be there, except a run of spaces, which matches any run of spaces |
+| `\` | makes `{ } * \` ordinary |
+
+Then pick a **layout**. **Columns** lines the fields up under a header: drag an edge to resize (snapping to
+whole characters in a fixed-pitch font), double-click an edge to fit a column to its content, carry a
+header sideways to reorder, double-click a name to rename it, right-click for the tick list. **Inline**
+keeps every row a line and simply leaves out what you have hidden — better when one field is far longer
+than the rest — with a strip of chips above the log to click and drag instead of a header.
+
+Hiding a field takes its punctuation with it, so `[a][b][c]` closes up to `[a][c]` rather than leaving
+empty brackets behind. **View > Field Settings…** shows the template against real lines from the file: a
+coloured band per field, the row as it will actually be drawn, how many of the sampled lines match, and —
+for one that does not — the character where it stopped matching.
+
+Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
+A line the template does not match is shown whole and untouched, and Cascade says so when a search lands
+on a match you cannot see.
 
 ---
 
@@ -167,7 +185,7 @@ registry keys, and updates itself.
 | `Ctrl+G` / `Ctrl+H` | Go to line / show only filtered lines |
 | `Ctrl+N` | New filter from the selection or the current line |
 | `Ctrl+E` | Search the filter list |
-| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / columns |
+| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / split lines into fields |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |
@@ -180,7 +198,7 @@ registry keys, and updates itself.
 ## Files and command line
 
 `.cascade` is the native filter set — JSON holding the filter tree with its per-property styles, any
-presets, the column spec and the view mode, so it diffs well in source control. TextAnalysisTool.NET
+presets, the field template with its layout, and the view mode, so it diffs well in source control. TextAnalysisTool.NET
 `.tat` files are **imported** (flattened to top-level filters, keeping patterns, colours and flags);
 saving is always `.cascade`. Preferences live in `%APPDATA%\Cascade\settings.json` and machine-local
 state in `state.json`; `CASCADE_SETTINGS_DIR` overrides the folder.
@@ -210,7 +228,8 @@ dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj   # engine tests
 ```
 
 .NET 10 SDK. `src/Cascade.Core` is a UI-agnostic engine (mapping, indexing, filtering, find, markers,
-columns, persistence, updating) with no reference to WinForms; `src/Cascade.App` is the GUI.
+columns, persistence, updating) with no reference to WinForms; `src/Cascade.App` is the GUI. Filter files
+written by older builds are read and their column settings migrated (`schemaVersion` 1 → 2).
 
 ## License
 

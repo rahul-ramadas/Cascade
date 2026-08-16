@@ -10,7 +10,9 @@ namespace Cascade.Core.Persistence;
 /// tree with per-property styles, column spec, and view state. Additive-only via <c>schemaVersion</c>.</summary>
 public static class CascadeFile
 {
-    public const int SchemaVersion = 1;
+    /// <summary>2 replaced the old delimiter/bracket column settings with a template. Files written by
+    /// version 1 are still read and their columns migrated; see <see cref="LegacyColumns"/>.</summary>
+    public const int SchemaVersion = 2;
     public const string Extension = ".cascade";
 
     private static readonly JsonSerializerOptions Options = new()
@@ -102,10 +104,7 @@ public static class CascadeFile
     private static ColumnsDto ToDto(ColumnSpec c) => new()
     {
         Enabled = c.Enabled,
-        Mode = c.Mode.ToString(),
-        Delimiter = c.Delimiter,
-        CollapseConsecutive = c.CollapseConsecutive,
-        MaxSplits = c.MaxSplits,
+        Layout = c.Layout.ToString(),
         Template = c.Template,
         Columns = c.Columns.Select(col => new ColumnDefDto
         {
@@ -123,12 +122,10 @@ public static class CascadeFile
         var c = new ColumnSpec
         {
             Enabled = d.Enabled,
-            Mode = Enum.TryParse<ColumnSplitMode>(d.Mode, out var m) ? m : ColumnSplitMode.Delimiter,
-            Delimiter = d.Delimiter ?? "\t",
-            CollapseConsecutive = d.CollapseConsecutive,
-            MaxSplits = d.MaxSplits,
+            Layout = Enum.TryParse<FieldLayout>(d.Layout, out var l) ? l : FieldLayout.Columns,
             Template = d.Template ?? ""
         };
+
         if (d.Columns is not null)
             foreach (var col in d.Columns)
                 c.Columns.Add(new ColumnDef
@@ -141,6 +138,14 @@ public static class CascadeFile
                     Source = col.Source ?? -1,
                     Align = Enum.TryParse<ColumnAlign>(col.Align, out var a) ? a : ColumnAlign.Left
                 });
+
+        // A "mode" only exists in files written before the template language, and says which of the two old
+        // shapes this is. Both become templates, so the columns the reader set up still stand.
+        if (d.Mode is not null)
+            c.Template = d.Mode.Equals("Delimiter", StringComparison.OrdinalIgnoreCase)
+                ? LegacyColumns.FromDelimiter(d.Delimiter ?? "\t", c.Columns.Count)
+                : LegacyColumns.FromBracketTemplate(d.Template ?? "");
+
         c.NormalizeSources();
         return c;
     }
@@ -184,12 +189,13 @@ public static class CascadeFile
     private sealed class ColumnsDto
     {
         public bool Enabled { get; set; }
-        public string? Mode { get; set; }
-        public string? Delimiter { get; set; }
-        public bool CollapseConsecutive { get; set; }
-        public int MaxSplits { get; set; }
+        public string? Layout { get; set; }
         public string? Template { get; set; }
         public List<ColumnDefDto>? Columns { get; set; }
+
+        // Written only by builds before the template language. Read, migrated, never written again.
+        public string? Mode { get; set; }
+        public string? Delimiter { get; set; }
     }
 
     private sealed class ColumnDefDto

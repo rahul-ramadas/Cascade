@@ -67,21 +67,33 @@ internal static class UiShots
         ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
         ShotFindBar(outDir, "find-badregex", "", badPattern: "charge(declined");
 
-        // Set up as a real one would be, so the grid in it shows the names that can be typed over rather
+        // Set up as a real one would be, so the list in it shows the names that can be typed over rather
         // than a blank block that says nothing about the dialog.
         var cols = new ColumnSpec
         {
             Enabled = true,
-            Mode = ColumnSplitMode.Template,
-            Template = "[[Time]][[Service]][[Level]] [Message]"
+            Template = "{[*]}{[*]}{[*]} {*}"
         };
-        cols.SyncColumnsFromTemplate();
+        cols.Reset();
+        cols.Columns[0].Name = "Time";
+        cols.Columns[1].Name = "Service";
+        cols.Columns[2].Name = "Level";
+        cols.Columns[3].Name = "Message";
         cols.Columns[2].Width = 90;
-        ShotDialog(new ColumnsDialog(cols, "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text"), outDir, "columns");
-        // ...and with the splitting turned off, where the list has to read as being out of reach too.
-        var colsOff = cols.Clone();
-        colsOff.Enabled = false;
-        ShotDialog(new ColumnsDialog(colsOff, "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text"), outDir, "columns-off");
+        string[] columnSamples =
+        [
+            "[2026-07-31T09:31:17][api-gateway][INFO] payment order message text",
+            "[2026-07-31T09:31:18][payment-service][WARN] retrying charge for order 4417",
+            "[2026-07-31T09:31:19][api-gateway][ERROR] charge declined for order 4417",
+            "a line of quite another shape"
+        ];
+        ShotDialog(new ColumnsDialog(cols, columnSamples), outDir, "columns");
+        // ...and laid out inline, with a couple of parts hidden, which is the other half of the feature.
+        var colsInline = cols.Clone();
+        colsInline.Layout = FieldLayout.Inline;
+        colsInline.Columns[1].Visible = false;
+        colsInline.Columns[2].Visible = false;
+        ShotDialog(new ColumnsDialog(colsInline, columnSamples), outDir, "columns-inline");
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog((Cascade.Core.Updating.UpdateService?)null), outDir, "about");
@@ -219,16 +231,27 @@ internal static class UiShots
         doc.ApplyFilters();
         WaitIdle(doc);
         doc.Columns.Enabled = true;
-        doc.Columns.Mode = ColumnSplitMode.Delimiter;
-        doc.Columns.Delimiter = "]";
+        doc.Columns.Template = "{[*]}{[*]}{[*]}{[*]} {*}";
         doc.Columns.Columns.Clear();
         // The last one is left to size itself, which is how a log usually reads: fixed fields on the left
         // and the message running on to the right-hand edge.
+        int source = 0;
         foreach (var (n, w) in new[] { ("Time", 190), ("Provider", 90), ("Id", 55), ("Level", 80), ("Message", 0) })
-            doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w });
+            doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w, Source = source++ });
         grid.RefreshView();
         Settle();
         CapControl(host, dir, "state-columns");
+
+        // ...and the same lines laid out inline, with the noisier parts hidden.
+        doc.Columns.Layout = FieldLayout.Inline;
+        doc.Columns.Columns[2].Visible = false;
+        doc.Columns.Columns[3].Visible = false;
+        grid.RefreshView();
+        Settle();
+        CapControl(host, dir, "state-inline");
+        doc.Columns.Layout = FieldLayout.Columns;
+        doc.Columns.Columns[2].Visible = true;
+        doc.Columns.Columns[3].Visible = true;
 
         // Text picked out inside one cell, with a find term live: the selection must sit in the cell it was
         // dragged in and the marks must land on the glyphs, cell by cell.

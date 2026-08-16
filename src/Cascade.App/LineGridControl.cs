@@ -40,7 +40,8 @@ public sealed class LineGridControl : Control
     private SlimScrollBar _vbar = null!;
     private MiniMapControl? _map;
     private readonly LineSelection _sel = new();
-    private readonly List<ColumnValue> _cols = new();
+    private readonly TemplateMatch _match = new();
+    private readonly LineProjection _projection = new();
 
     // ---- column geometry and the gestures on the header (see the "columns" region below) ----
     private int[] _colWidths = [];      // resolved pixel width per column in the spec; 0 when hidden
@@ -117,6 +118,7 @@ public sealed class LineGridControl : Control
     private const int HoverDelayMs = 600;
     private const int TipDurationMs = 20_000;
     private long _tipRow = -1;
+    private int _tipChip = -1;
     private Point _tipPoint;
     private Point _lastClickAtPoint;
     private int _clickCount;
@@ -204,8 +206,12 @@ public sealed class LineGridControl : Control
         Invalidate();
     }
 
-    /// <summary>Whether the log is being shown split into cells rather than as whole lines.</summary>
-    private bool ColumnsOn => _doc is not null && _doc.Columns.Enabled;
+    /// <summary>Whether the log is being shown split into cells rather than as whole lines. Only the
+    /// Columns layout does that; Inline keeps every row a line and simply leaves parts out of it.</summary>
+    private bool ColumnsOn => _doc is not null && _doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns;
+
+    /// <summary>Whether rows are being shortened in place - still lines, with the hidden parts left out.</summary>
+    private bool InlineOn => _doc is not null && _doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Inline;
 
     /// <summary>A row's text as it is drawn, so a character index means the same thing to the hit test, the
     /// painting and the clipboard. Tabs are expanded because that is how a whole line is drawn - but NOT
@@ -218,7 +224,18 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null || line < 0) return "";
         string raw = _doc.GetLineText(line);
-        return ColumnsOn ? raw : Expand(raw);
+        if (ColumnsOn) return raw;
+        return Expand(InlineOn ? Project(raw).Text : raw);
+    }
+
+    /// <summary>The shared projection, rebuilt for whichever line is being asked about. Reused rather than
+    /// made afresh because the paint asks for one per row per frame; the caller must read what it needs
+    /// before asking about another line.</summary>
+    private LineProjection Project(string line)
+    {
+        _doc!.Columns.Compiled.Match(line, _match);
+        _projection.Build(line, _doc.Columns, _match);
+        return _projection;
     }
 
     /// <summary>Tabs as the spaces they are drawn as, so a character index means the same thing to the hit
@@ -748,10 +765,13 @@ public sealed class LineGridControl : Control
     /// <summary>Room taken above the text by a hosted bar.</summary>
     private int TopInset => _topBar is { Visible: true } ? _topBar.Height : 0;
 
-    /// <summary>Where the text starts: below anything sitting above it and below the column header.</summary>
+    /// <summary>Where the text starts: below anything sitting above it and below the header strip.</summary>
     private int TextTop => TopInset + HeaderHeight;
 
-    private int HeaderHeight => (_doc?.Columns.Enabled ?? false) ? _rowHeight : 0;
+    /// <summary>The strip above the text. Columns puts a draggable header there; Inline puts the chips that
+    /// show which parts are being kept. Either way it is one row, so turning splitting on or off moves the
+    /// text by the same amount whichever layout is in use.</summary>
+    private int HeaderHeight => (_doc?.Columns.Active ?? false) ? _rowHeight : 0;
 
     /// <summary>Room the sideways scrollbar takes at the bottom. Nothing at all when it is hidden - a
     /// hidden docked control gives its space back, so counting its height anyway left a strip of the view
@@ -1062,10 +1082,12 @@ public sealed class LineGridControl : Control
         string? selected = SelectedText;
         long standIn = StandInLine;
 
-        bool columns = _doc.Columns.Enabled;
+        bool columns = ColumnsOn;
+        bool inline = InlineOn;
         int runningMaxWidth = 0;
 
         if (columns) { EnsureColumnLayout(); DrawColumnHeader(g, gutter, contentW); }
+        else if (inline) DrawFieldChips(g);
 
         _layout.Clear();
         int atY = TextTop;
@@ -1098,7 +1120,7 @@ public sealed class LineGridControl : Control
 
             Font font = SelectFont(style);
             int charWidth = CharWidthOf(FontIndex(style));
-            string shown = columns ? text : Expand(text);
+            string shown = columns ? text : Expand(inline ? Project(text).Text : text);
             int segments = columns ? 1 : WrapInto(shown, contentW, font, _segments);
             int rowHeight = segments * _rowHeight;
             _layout.Add((row, y, rowHeight, segments));
@@ -1210,6 +1232,214 @@ public sealed class LineGridControl : Control
         return w;
     }
 
+    // ---- the chip strip: how parts are hidden and carried about while the layout is Inline ----
+
+    /// <summary>Room either side of a chip's label, and between one chip and the next.</summary>
+    private int ChipPad => LogicalToDeviceUnits(7);
+    private int ChipGap => LogicalToDeviceUnits(5);
+    private int ChipSwatch => LogicalToDeviceUnits(8);
+
+    /// <summary>Where every chip sits, in display order, and - when they do not all fit - where the button
+    /// that opens the rest sits. Laid out from the left of the content area and NOT scrolled with the text:
+    /// the chips say what the layout is doing, so they stay put while the log moves under them.</summary>
+    private List<(int Column, Rectangle Rect)> ChipRects()
+    {
+        var result = new List<(int, Rectangle)>();
+        if (_doc is null) return result;
+
+        int right = ClientSize.Width - RightGutterWidth;
+        int x = GutterWidth() + ChipGap;
+        int top = TopInset + LogicalToDeviceUnits(2);
+        int height = _rowHeight - LogicalToDeviceUnits(4);
+        var spec = _doc.Columns;
+        int room = TextRenderer.MeasureText("\u00bb 00", FontRegular, new Size(int.MaxValue, height),
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 2 * ChipPad + ChipGap;
+
+        for (int i = 0; i < spec.Columns.Count; i++)
+        {
+            string name = spec.Columns[i].Name;
+            int text = TextRenderer.MeasureText(name, FontRegular, new Size(int.MaxValue, height),
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+            int width = ChipPad + ChipSwatch + LogicalToDeviceUnits(5) + text + ChipPad;
+
+            // No one chip may eat the strip: a very long name is drawn with an ellipsis rather than pushing
+            // every field after it out of reach.
+            int most = Math.Max(LogicalToDeviceUnits(60), (right - GutterWidth()) / 3);
+            width = Math.Min(width, most);
+
+            // Stop while there is still room for the button that reaches the rest, rather than clipping the
+            // last chip and leaving the fields beyond it with no way to be got at.
+            bool last = i == spec.Columns.Count - 1;
+            if (x + width > right - (last ? 0 : room))
+            {
+                _chipsOverflowing = spec.Columns.Count - result.Count;
+                int at = Math.Min(x, Math.Max(GutterWidth() + ChipGap, right - room));
+                _chipOverflowRect = new Rectangle(at, top, room - ChipGap, height);
+                return result;
+            }
+
+            result.Add((i, new Rectangle(x, top, width, height)));
+            x += width + ChipGap;
+        }
+
+        _chipsOverflowing = 0;
+        _chipOverflowRect = Rectangle.Empty;
+        return result;
+    }
+
+    private int _chipsOverflowing;
+    private Rectangle _chipOverflowRect;
+
+    private void DrawFieldChips(Graphics g)
+    {
+        int top = TopInset;
+        var strip = new Rectangle(0, top, ClientSize.Width - RightGutterWidth, _rowHeight);
+        using (var brush = new SolidBrush(_settings.GutterBack)) g.FillRectangle(brush, strip);
+        using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
+            g.DrawLine(pen, 0, strip.Bottom - 1, strip.Width, strip.Bottom - 1);
+
+        var clip = g.Clip;
+        g.SetClip(strip);
+
+        var spec = _doc!.Columns;
+        foreach (var (index, rect) in ChipRects())
+        {
+            if (rect.Left > strip.Right) break;
+            var def = spec.Columns[index];
+            bool carrying = _colGesture == ColumnGesture.Reorder && index == _colIndex && _colMoved;
+            bool under = index == _chipUnderPointer && _colGesture == ColumnGesture.None;
+
+            // A chip has to read as something to press, not as a key to the colours: it lifts under the
+            // pointer, and its edge darkens, which is what says "this does something".
+            using (var brush = new SolidBrush(def.Visible ? (under ? SystemColors.Window : SystemColors.Window) : _settings.GutterBack))
+                g.FillRectangle(brush, rect);
+            if (under)
+                using (var brush = new SolidBrush(Color.FromArgb(40, _settings.SelectionBack)))
+                    g.FillRectangle(brush, rect);
+            if (carrying)
+                using (var brush = new SolidBrush(Color.FromArgb(60, _settings.SelectionBack)))
+                    g.FillRectangle(brush, rect);
+            using (var pen = new Pen(under ? Color.FromArgb(110, 110, 110)
+                                   : def.Visible ? Color.FromArgb(170, 170, 170) : Color.FromArgb(205, 205, 205)))
+                g.DrawRectangle(pen, rect);
+
+            var swatch = new Rectangle(rect.Left + ChipPad, rect.Top + (rect.Height - ChipSwatch) / 2, ChipSwatch, ChipSwatch);
+            using (var brush = new SolidBrush(def.Visible ? ColumnsPreview.BandOf(def.Source) : Color.FromArgb(215, 215, 215)))
+                g.FillRectangle(brush, swatch);
+            using (var pen = new Pen(Color.FromArgb(160, 160, 160))) g.DrawRectangle(pen, swatch);
+
+            int textLeft = swatch.Right + LogicalToDeviceUnits(5);
+            TextRenderer.DrawText(g, def.Name, FontRegular,
+                new Rectangle(textLeft, rect.Top, rect.Right - ChipPad - textLeft, rect.Height),
+                def.Visible ? Color.FromArgb(60, 60, 60) : Color.FromArgb(150, 150, 150),
+                TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+
+            if (!def.Visible)
+                using (var pen = new Pen(Color.FromArgb(150, 150, 150)))
+                    g.DrawLine(pen, textLeft, rect.Top + rect.Height / 2, rect.Right - ChipPad, rect.Top + rect.Height / 2);
+        }
+
+        // Whatever did not fit is still reachable: this opens the same tick list the strip's own menu does.
+        if (_chipsOverflowing > 0 && !_chipOverflowRect.IsEmpty)
+        {
+            bool under = _chipUnderPointer == OverflowChip;
+            using (var brush = new SolidBrush(under ? SystemColors.ControlLight : _settings.GutterBack))
+                g.FillRectangle(brush, _chipOverflowRect);
+            using (var pen = new Pen(Color.FromArgb(under ? 110 : 170, under ? 110 : 170, under ? 110 : 170)))
+                g.DrawRectangle(pen, _chipOverflowRect);
+            TextRenderer.DrawText(g, $"\u00bb {_chipsOverflowing}", FontRegular, _chipOverflowRect,
+                Color.FromArgb(60, 60, 60),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        }
+
+        g.Clip = clip;
+    }
+
+    /// <summary>The pretend index of the button that reaches the chips that did not fit.</summary>
+    private const int OverflowChip = -2;
+
+    private int _chipUnderPointer = -1;
+
+    /// <summary>The chip under a point, <see cref="OverflowChip"/> for the button that reaches the rest,
+    /// or -1.</summary>
+    private int ChipAt(int x, int y)
+    {
+        foreach (var (index, rect) in ChipRects())
+            if (rect.Contains(x, y)) return index;
+        return _chipsOverflowing > 0 && _chipOverflowRect.Contains(x, y) ? OverflowChip : -1;
+    }
+
+    /// <summary>The gesture the pointer starts on the chip strip. A click puts a part away or brings it
+    /// back; a drag carries it to another place in the row.</summary>
+    private bool HandleChipMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Right) { ShowColumnMenu(e.Location); return true; }
+        if (e.Button != MouseButtons.Left) return true;
+
+        int chip = ChipAt(e.X, e.Y);
+        if (chip == OverflowChip) { ShowColumnMenu(e.Location); return true; }
+        if (chip < 0) return true;
+
+        _colGesture = ColumnGesture.Reorder;
+        _colIndex = chip;
+        _colGrabX = e.X;
+        _colMoved = false;
+        Capture = true;
+        return true;
+    }
+
+    private void HandleChipMouseMove(MouseEventArgs e)
+    {
+        if (_colGesture != ColumnGesture.Reorder)
+        {
+            int over = InColumnHeader(e.Y) ? ChipAt(e.X, e.Y) : -1;
+            if (over != _chipUnderPointer) { _chipUnderPointer = over; Invalidate(); }
+            SetCursorTo(over >= 0 ? Cursors.Hand : Cursors.Default);
+            return;
+        }
+        if (!_colMoved && Math.Abs(e.X - _colGrabX) < SystemInformation.DragSize.Width) return;
+        _colMoved = true;
+
+        var chips = ChipRects();
+        int from = chips.FindIndex(c => c.Column == _colIndex);
+        if (from < 0) return;
+        var widths = chips.Select(c => c.Rect.Width + ChipGap).ToList();
+        int to = ColumnLayout.DropTarget(widths, from, e.X - (GutterWidth() + ChipGap));
+        if (to != from && to >= 0 && to < _doc!.Columns.Columns.Count)
+        {
+            var moved = _doc.Columns.Columns[_colIndex];
+            _doc.Columns.Columns.RemoveAt(_colIndex);
+            _doc.Columns.Columns.Insert(to, moved);
+            _colIndex = to;
+            ColumnsEdited();
+        }
+        else Invalidate();
+    }
+
+    /// <summary>A press that never turned into a drag is a click, and a click on a chip is what puts that
+    /// part away or brings it back.</summary>
+    private void EndChipGesture()
+    {
+        if (_colGesture != ColumnGesture.Reorder) return;
+        bool moved = _colMoved;
+        int chip = _colIndex;
+        _colGesture = ColumnGesture.None;
+        _colIndex = -1;
+        _colMoved = false;
+        Capture = false;
+        SetCursorTo(Cursors.Default);
+
+        if (!moved && chip >= 0 && chip < _doc!.Columns.Columns.Count)
+        {
+            var def = _doc.Columns.Columns[chip];
+            // The last one standing cannot be put away: a row with nothing in it says nothing, and there
+            // would be no chip left to bring anything back with.
+            if (def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1) { Invalidate(); return; }
+            def.Visible = !def.Visible;
+        }
+        ColumnsEdited();
+    }
+
     /// <summary>Draws one row's cells. Only the ones on screen: with a line split into dozens of fields
     /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
     /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
@@ -1217,12 +1447,26 @@ public sealed class LineGridControl : Control
     private void DrawColumns(Graphics g, string text, long row, int gutter, int y, Color fore, Font font,
                              bool charSel, string? selected)
     {
-        Splitter().Split(text, _cols);
+        var template = _doc!.Columns.Compiled;
         CollectHighlights(text, row == _caretRow, charSel, selected);
+
+        // A line the template does not fit is shown whole, across the row. Columns can shorten a line;
+        // they can never hide one, and a screenful of empty cells says nothing about why.
+        if (!template.Match(text, _match))
+        {
+            int from = 0, to = text.Length;
+            FillHighlights(g, text, from, to, gutter - _hScroll, y, font);
+            TextRenderer.DrawText(g, text, font, new Point(gutter - _hScroll, y), fore,
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
+            DrawHighlightText(g, text, from, to, gutter - _hScroll, y, font);
+            if (charSel) DrawCharSelection(g, text, from, to, gutter - _hScroll, y, font);
+            return;
+        }
+
         bool marks = _highlights.Count > 0 || charSel;
         int x = gutter - _hScroll;
         int right = gutter + ContentWidth;
-        var spec = _doc!.Columns;
+        var spec = _doc.Columns;
         for (int i = 0; i < spec.Columns.Count; i++)
         {
             var def = spec.Columns[i];
@@ -1231,14 +1475,14 @@ public sealed class LineGridControl : Control
             if (x >= right) break;
             if (x + w <= gutter) { x += w; continue; }
             var cell = new Rectangle(x + CellInset, y, w - 2 * CellInset, _rowHeight);
-            var span = CellText(text, def, _cols);
+            var span = CellText(text, def, _match);
             if (!marks)
             {
                 TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
             }
             else
             {
-                var (from, to) = CellRange(def, _cols);
+                var (from, to) = CellRange(def, _match);
                 int originX = CellTextOrigin(cell.Left, cell.Width, span, font, def.Align);
                 FillCellHighlights(g, text, from, to, originX, cell, font);
                 TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
@@ -1331,21 +1575,26 @@ public sealed class LineGridControl : Control
 
     // ================= columns: resized, reordered, renamed and hidden from the header itself =================
 
-    /// <summary>What a cell shows: the field the column says it shows, wherever that column has been
-    /// carried to. A span rather than a string - the paint asks for one per cell per row, and a line split
-    /// into dozens of fields would otherwise leave a screenful of substrings behind on every frame. The
-    /// paint and the checks both come through here, so they cannot disagree.</summary>
-    private static ReadOnlySpan<char> CellText(string line, ColumnDef def, List<ColumnValue> values)
-        => def.Source >= 0 && def.Source < values.Count
-            ? line.AsSpan(values[def.Source].Start, values[def.Source].Length)
-            : default;
-
-    /// <summary>The stretch of the line a column shows, as indices into the line.</summary>
-    private static (int From, int To) CellRange(ColumnDef def, List<ColumnValue> values)
+    /// <summary>What a cell shows: the value of the part the column says it shows, wherever that column has
+    /// been carried to. A span rather than a string - the paint asks for one per cell per row, and a line
+    /// split into dozens of parts would otherwise leave a screenful of substrings behind on every frame.
+    /// The paint and the checks both come through here, so they cannot disagree.</summary>
+    private ReadOnlySpan<char> CellText(string line, ColumnDef def, TemplateMatch match)
     {
-        if (def.Source < 0 || def.Source >= values.Count) return (0, 0);
-        var v = values[def.Source];
-        return (v.Start, v.Start + v.Length);
+        var (from, to) = CellRange(def, match);
+        return to > from ? line.AsSpan(from, to - from) : default;
+    }
+
+    /// <summary>The stretch of the line a column shows, as indices into the line. A part of pure literal
+    /// text captures nothing, so it draws nothing.</summary>
+    private (int From, int To) CellRange(ColumnDef def, TemplateMatch match)
+    {
+        var template = _doc!.Columns.Compiled;
+        if (def.Source < 0 || def.Source >= template.PartCount) return (0, 0);
+        int value = template.PartAt(def.Source).Value;
+        if (value < 0) return (0, 0);
+        var (start, length) = match.Value(value);
+        return (start, start + length);
     }
 
     /// <summary>Where a cell's text starts on screen. Not simply the left edge: a right- or centre-aligned
@@ -1386,8 +1635,8 @@ public sealed class LineGridControl : Control
     {
         EnsureColumnLayout();
         var def = _doc!.Columns.Columns[column];
-        Splitter().Split(text, _hitCells);
-        var (from, to) = CellRange(def, _hitCells);
+        _doc.Columns.Compiled.Match(text, _hitMatch);
+        var (from, to) = CellRange(def, _hitMatch);
         int originX = CellTextOrigin(ColumnLeft(column) + CellInset, _colWidths[column] - 2 * CellInset,
                                      text.AsSpan(from, to - from), font, def.Align);
         return (from, to, originX);
@@ -1408,24 +1657,9 @@ public sealed class LineGridControl : Control
     /// marks cannot drift apart.</summary>
     private const int CellInset = 3;
 
-    private readonly List<ColumnValue> _hitCells = new();
-    private ColumnSplitter? _splitter;
-    private string? _splitterKey;
-
-    /// <summary>The splitter for the current spec. Kept rather than rebuilt because only the mode and the
-    /// template are snapshotted inside one (the delimiter, the column list and their sources are read live),
-    /// so those two are the whole of the key.</summary>
-    private ColumnSplitter Splitter()
-    {
-        var spec = _doc!.Columns;
-        string key = spec.Mode + "\u0001" + spec.Template;
-        if (_splitter is null || !ReferenceEquals(_splitter.Spec, spec) || _splitterKey != key)
-        {
-            _splitter = new ColumnSplitter(spec);
-            _splitterKey = key;
-        }
-        return _splitter;
-    }
+    /// <summary>Held apart from the paint's own match so that a hit test part way through a frame cannot
+    /// overwrite what the row being drawn is using.</summary>
+    private readonly TemplateMatch _hitMatch = new();
 
     private enum ColumnGesture { None, Resize, Reorder }
 
@@ -1463,8 +1697,8 @@ public sealed class LineGridControl : Control
                 new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
                 + CellPadding;
 
-        var splitter = new ColumnSplitter(spec);
-        var values = new List<ColumnValue>();
+        var template = spec.Compiled;
+        var match = new TemplateMatch();
         long rows = _doc.RowCount;
         int sampled = 0;
         for (int r = 0; r < VisibleRowCount && sampled < 400; r++)
@@ -1472,14 +1706,14 @@ public sealed class LineGridControl : Control
             long row = _firstRow + r;
             if (row < 0 || row >= rows) break;
             string text = _doc.GetLineText(_doc.RowToLine(row));
-            splitter.Split(text, values);
             sampled++;
+            if (!template.Match(text, match)) continue;
             for (int i = 0; i < n; i++)
             {
                 if (!spec.Columns[i].Visible) continue;
-                int src = spec.Columns[i].Source;
-                if (src < 0 || src >= values.Count) continue;
-                int w = TextRenderer.MeasureText(text.AsSpan(values[src].Start, values[src].Length), FontRegular,
+                var (from, to) = CellRange(spec.Columns[i], match);
+                if (to <= from) continue;
+                int w = TextRenderer.MeasureText(text.AsSpan(from, to - from), FontRegular,
                     new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width
                     + CellPadding;
                 if (w > _colNatural[i]) _colNatural[i] = w;
@@ -1499,8 +1733,7 @@ public sealed class LineGridControl : Control
         var spec = _doc!.Columns;
         var sb = new StringBuilder();
         sb.Append(_settings.FontFamily).Append('|').Append(_settings.EffectiveFontSize).Append('|')
-          .Append(spec.Mode).Append('|').Append(spec.Delimiter).Append('|').Append(spec.Template).Append('|')
-          .Append(spec.MaxSplits).Append('|').Append(spec.CollapseConsecutive).Append('|')
+          .Append(spec.Template).Append('|').Append(spec.Layout).Append('|')
           .Append(_doc.RowCount > 0 ? '1' : '0').Append('|');
         foreach (var c in spec.Columns) sb.Append(c.Name).Append(c.Visible ? '+' : '-').Append(c.Source).Append('\u0001');
         return sb.ToString();
@@ -1685,6 +1918,8 @@ public sealed class LineGridControl : Control
         if (_doc is null || !InColumnHeader(e.Y)) return false;
         EndRename(commit: true);
 
+        if (InlineOn) return HandleChipMouseDown(e);
+
         if (e.Button == MouseButtons.Right)
         {
             ShowColumnMenu(e.Location);
@@ -1719,6 +1954,8 @@ public sealed class LineGridControl : Control
 
     private void HandleHeaderMouseMove(MouseEventArgs e)
     {
+        if (InlineOn) { HandleChipMouseMove(e); return; }
+
         switch (_colGesture)
         {
             case ColumnGesture.Resize:
@@ -1755,6 +1992,7 @@ public sealed class LineGridControl : Control
 
     private void EndColumnGesture()
     {
+        if (InlineOn) { EndChipGesture(); return; }
         if (_colGesture == ColumnGesture.None) return;
         bool moved = _colMoved;
         _colGesture = ColumnGesture.None;
@@ -1829,7 +2067,9 @@ public sealed class LineGridControl : Control
 
     private void ShowColumnMenu(Point at)
     {
-        var menu = BuildColumnMenu(ColumnAt(at.X));
+        // Inline has chips, not a header: the field under the pointer is the chip under it, and a column's
+        // width, alignment and fit mean nothing to a layout that draws no columns.
+        var menu = BuildColumnMenu(InlineOn ? ChipAt(at.X, at.Y) : ColumnAt(at.X));
         menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
         menu.Show(this, at);
     }
@@ -1887,29 +2127,35 @@ public sealed class LineGridControl : Control
             menu.Items.Add(new ToolStripSeparator());
             var rename = Entry($"&Rename \"{name}\"…", () => BeginRename(index));
             var hide = Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false));
-            var fit = Entry($"Fit \"{name}\" to &Content", () => FitColumnToContent(index));
-            var align = new ToolStripMenuItem("&Align");
-            foreach (var (text, value) in new[] { ("&Left", ColumnAlign.Left), ("&Right", ColumnAlign.Right), ("&Centre", ColumnAlign.Center) })
-            {
-                var a = value;
-                var item = new ToolStripMenuItem(text) { Checked = spec.Columns[index].Align == a };
-                item.Click += (_, _) => { menu.Close(); SetColumnAlign(index, a); };
-                align.DropDownItems.Add(item);
-            }
             forThisColumn.Add((rename, false));
             forThisColumn.Add((hide, true));
-            forThisColumn.Add((fit, false));
-            forThisColumn.Add((align, false));
             menu.Items.Add(rename);
             menu.Items.Add(hide);
-            menu.Items.Add(fit);
-            menu.Items.Add(align);
+
+            // Width, alignment and fitting are the Columns layout's business. Inline draws no columns, so
+            // offering them there would be offering commands that do nothing.
+            if (!InlineOn)
+            {
+                var fit = Entry($"Fit \"{name}\" to &Content", () => FitColumnToContent(index));
+                var align = new ToolStripMenuItem("&Align");
+                foreach (var (text, value) in new[] { ("&Left", ColumnAlign.Left), ("&Right", ColumnAlign.Right), ("&Centre", ColumnAlign.Center) })
+                {
+                    var a = value;
+                    var item = new ToolStripMenuItem(text) { Checked = spec.Columns[index].Align == a };
+                    item.Click += (_, _) => { menu.Close(); SetColumnAlign(index, a); };
+                    align.DropDownItems.Add(item);
+                }
+                forThisColumn.Add((fit, false));
+                forThisColumn.Add((align, false));
+                menu.Items.Add(fit);
+                menu.Items.Add(align);
+            }
         }
         SyncTicks();
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(Entry("&Fit All Columns to Window", FitColumnsToWindow));
-        menu.Items.Add(Entry("&Columns…", () => ColumnSettingsRequested?.Invoke()));
+        if (!InlineOn) menu.Items.Add(Entry("&Fit All Columns to Window", FitColumnsToWindow));
+        menu.Items.Add(Entry("&Field Settings…", () => ColumnSettingsRequested?.Invoke()));
         return menu;
 
         ToolStripMenuItem Entry(string text, Action run, bool enabled = true)
@@ -1956,13 +2202,51 @@ public sealed class LineGridControl : Control
     internal int DividerAtForTesting(int x) => DividerAt(x);
     internal int ColumnAtForTesting(int x) => ColumnAt(x);
 
+    // ---- the chip strip, which no automation pattern can reach: a click and a drag on owner-drawn boxes ----
+
+    internal Rectangle ChipRectForTesting(int index)
+    {
+        foreach (var (column, rect) in ChipRects()) if (column == index) return rect;
+        return Rectangle.Empty;
+    }
+
+    /// <summary>A press and a release on a chip, with nothing in between - which is a click, and what puts
+    /// a part away or brings it back.</summary>
+    internal void ClickChipForTesting(int index)
+    {
+        var rect = ChipRectForTesting(index);
+        if (rect.IsEmpty) return;
+        HandleHeaderMouseDown(new MouseEventArgs(MouseButtons.Left, 1, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2, 0), 1);
+        EndColumnGesture();
+    }
+
+    /// <summary>Carrying a chip sideways: press on it, move well past the drag threshold, let go.</summary>
+    internal void DragChipForTesting(int index, int toIndex)
+    {
+        var from = ChipRectForTesting(index);
+        var to = ChipRectForTesting(toIndex);
+        if (from.IsEmpty || to.IsEmpty) return;
+        int y = from.Top + from.Height / 2;
+        HandleHeaderMouseDown(new MouseEventArgs(MouseButtons.Left, 1, from.Left + from.Width / 2, y, 0), 1);
+        int target = toIndex > index ? to.Right - 2 : to.Left + 2;
+        HandleHeaderMouseMove(new MouseEventArgs(MouseButtons.Left, 0, target, y, 0));
+        EndColumnGesture();
+    }
+
+    internal string ChipNamesForTesting
+        => _doc is null ? "" : string.Join(",", _doc.Columns.Columns.Select(c => c.Visible ? c.Name : "(" + c.Name + ")"));
+
+    internal int HeaderHeightForTesting => HeaderHeight;
+    internal string DisplayTextForTesting(long row) => DisplayText(row);
+    internal string TipForTesting(long row) => BuildTip(row);
+
     /// <summary>What one cell of one row is drawn with - the paint's own lookup, not a copy of it.</summary>
     internal string CellTextForTesting(long row, int column)
     {
         if (_doc is null || column < 0 || column >= _doc.Columns.Columns.Count) return "";
         string text = _doc.GetLineText(_doc.RowToLine(row));
-        Splitter().Split(text, _cols);
-        return CellText(text, _doc.Columns.Columns[column], _cols).ToString();
+        _doc.Columns.Compiled.Match(text, _hitMatch);
+        return CellText(text, _doc.Columns.Columns[column], _hitMatch).ToString();
     }
 
     /// <summary>Screen x of a character inside one cell, so a check can aim at one rather than guess.</summary>
@@ -2203,7 +2487,7 @@ public sealed class LineGridControl : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        if (_doc is not null && _doc.Columns.Enabled) HandleHeaderMouseMove(e);
+        if (_doc is not null && _doc.Columns.Active) HandleHeaderMouseMove(e);
         else SetCursorTo(Cursors.Default);
         if (_colGesture != ColumnGesture.None) return;
 
@@ -2275,6 +2559,7 @@ public sealed class LineGridControl : Control
     protected override void OnMouseLeave(EventArgs e)
     {
         HideTip();
+        if (_chipUnderPointer != -1) { _chipUnderPointer = -1; Invalidate(); }
         if (_colGesture == ColumnGesture.None) SetCursorTo(Cursors.Default);
         base.OnMouseLeave(e);
     }
@@ -2283,9 +2568,23 @@ public sealed class LineGridControl : Control
     /// describes where the pointer settled rather than where it passed through.</summary>
     private void TrackHover(Point at)
     {
-        if (_doc is null || !_settings.ShowFilterTooltips || _dragging) { HideTip(); return; }
+        if (_doc is null || _dragging) { HideTip(); return; }
+
+        // The chips are an affordance, not a filter tip: they say what they do whether or not the reader
+        // has asked for tips on lines.
+        if (InlineOn && InColumnHeader(at.Y))
+        {
+            int chip = ChipAt(at.X, at.Y);
+            if (chip != _tipChip) { HideTip(); _tipChip = chip; _tipPoint = at; if (chip != -1) { _tipTimer.Stop(); _tipTimer.Start(); } }
+            return;
+        }
+        if (_tipChip != -1) HideTip();
+
+        // A line the template does not match is shown whole while its neighbours are not, and the reason
+        // belongs on it whether or not the reader asked for tips about FILTERS - it is a different question.
         long row = RowAtY(at.Y);
         if (at.Y < TextTop || row < 0 || row >= _doc.RowCount) { HideTip(); return; }
+        if (!_settings.ShowFilterTooltips && !LineDoesNotMatch(row)) { HideTip(); return; }
         if (row == _tipRow) return;
 
         HideTip();
@@ -2295,26 +2594,68 @@ public sealed class LineGridControl : Control
         _tipTimer.Start();
     }
 
+    private bool LineDoesNotMatch(long row)
+        => _doc is not null && _doc.Columns.Active &&
+           !_doc.Columns.Compiled.Match(_doc.GetLineText(_doc.RowToLine(row)), _hitMatch);
+
     private void HideTip()
     {
         _tipTimer.Stop();
-        if (_tipRow >= 0) _tips.Hide(this);
+        if (_tipRow >= 0 || _tipChip != -1) _tips.Hide(this);
         _tipRow = -1;
+        _tipChip = -1;
     }
 
     private void ShowTipNow()
     {
         _tipTimer.Stop();
-        if (_doc is null || _tipRow < 0 || _tipRow >= _doc.RowCount) return;
+        if (_doc is null) return;
 
-        string text = FilterTipText.Build(_doc.FiltersMatching(_doc.RowToLine(_tipRow)));
+        if (_tipChip >= 0)
+        {
+            if (_tipChip >= _doc.Columns.Columns.Count) return;
+            var def = _doc.Columns.Columns[_tipChip];
+            bool lastOne = def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1;
+            string what = lastOne
+                ? $"\u201c{def.Name}\u201d is the only field still shown, so it cannot be left out too.\nDrag to move it along the row."
+                : def.Visible
+                    ? $"\u201c{def.Name}\u201d is being shown.\nClick to leave it out; drag to move it along the row."
+                    : $"\u201c{def.Name}\u201d is being left out.\nClick to bring it back; drag to move it along the row.";
+            _tips.Show(what, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+            return;
+        }
+
+        if (_tipChip == OverflowChip)
+        {
+            _tips.Show($"{_chipsOverflowing} more field{(_chipsOverflowing == 1 ? "" : "s")} than there is room for.\nClick for the whole list.",
+                this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+            return;
+        }
+
+        if (_tipRow < 0 || _tipRow >= _doc.RowCount) return;
+        string text = BuildTip(_tipRow);
         if (text.Length == 0) return;
         _tips.Show(text, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
     }
 
+    /// <summary>What a hover says about a line: which filters matched it, and - when the template does not
+    /// fit - why this one is being shown whole while its neighbours are not.</summary>
+    private string BuildTip(long row)
+    {
+        if (_doc is null) return "";
+        long line = _doc.RowToLine(row);
+        string text = _settings.ShowFilterTooltips ? FilterTipText.Build(_doc.FiltersMatching(line)) : "";
+
+        if (_doc.Columns.Active && !_doc.Columns.Compiled.Match(_doc.GetLineText(line), _hitMatch))
+        {
+            const string note = "This line does not match the template, so it is shown whole.";
+            text = text.Length == 0 ? note : text + "\n\n" + note;
+        }
+        return text;
+    }
+
     /// <summary>Builds the tip a hover would show, without the wait or the window.</summary>
-    internal string TipTextForTesting(long row)
-        => _doc is null ? "" : FilterTipText.Build(_doc.FiltersMatching(_doc.RowToLine(row)));
+    internal string TipTextForTesting(long row) => BuildTip(row);
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
@@ -2648,7 +2989,10 @@ public sealed class LineGridControl : Control
         if (copied < selected) CopyTruncated?.Invoke(copied, selected);
     }
 
-    /// <summary>The selected lines as one block of text, up to <see cref="CopyCharCap"/>.</summary>
+    /// <summary>The selected lines as one block of text, up to <see cref="CopyCharCap"/>. What is copied is
+    /// what is SHOWN - so a tab reads as the spaces it was drawn as, and a line shortened by the Inline
+    /// layout is copied as short as it looks. Picking part of a line out already worked that way, and the
+    /// two disagreeing would be worse than either answer.</summary>
     internal string BuildCopyText(bool withLineNumbers, out long copied)
     {
         copied = 0;
@@ -2658,10 +3002,122 @@ public sealed class LineGridControl : Control
         {
             if (sb.Length >= CopyCharCap) break;
             if (withLineNumbers) sb.Append(line + 1).Append('\t');
-            sb.AppendLine(_doc.GetLineText(line));
+            sb.AppendLine(DisplayTextOf(line));
             copied++;
         }
         return sb.ToString();
+    }
+
+    /// <summary>Whether what is picked out of a line survives into the file in one piece. It does not when
+    /// the selection runs across something hidden, or across the join where a part has been carried
+    /// backwards - and then its text appears in no line of the file, so a filter or a search made from it
+    /// would match nothing at all.</summary>
+    /// <summary>A row's text as the reader is seeing it, which is what the clipboard, a filter seeded from
+    /// it and the search box all work from.</summary>
+    public string DisplayedLineText(long line) => DisplayTextOf(line);
+
+    /// <summary>Whether the live find term can actually be SEEN on a line. A search runs on the whole raw
+    /// line, so while fields are being hidden it can land the reader on a line where nothing lights up -
+    /// which reads as the search being broken. Answering this lets the caller say so.</summary>
+    public bool FindTermIsVisibleOn(long line)
+    {
+        if (_doc is null || _highlight is null || line < 0) return true;
+        var spec = _doc.Columns;
+        if (!spec.Active) return true;
+
+        string raw = _doc.GetLineText(line);
+        if (!_highlight.Matches(raw)) return true;      // not on this line at all; nothing is being hidden
+
+        if (spec.Layout == FieldLayout.Inline) return _highlight.Matches(DisplayTextOf(line));
+
+        // Laid out in columns there is no one string to look at. Walk the hits on the RAW line and ask
+        // whether any of them lands on something still shown - asking the pattern about each value on its
+        // own instead would take away the context it may depend on (a lookahead at the bracket after a
+        // field would stop matching), and would miss a hit that runs across two cells.
+        var template = spec.Compiled;
+        if (!template.Match(raw, _hitMatch)) return true;   // a line it does not match is drawn whole
+
+        int from = 0;
+        while (_highlight.NextMatch(raw, from, out int at, out int length))
+        {
+            length = Math.Max(1, length);
+            foreach (var column in spec.Columns)
+            {
+                if (!column.Visible || column.Source < 0 || column.Source >= template.PartCount) continue;
+                int value = template.PartAt(column.Source).Value;
+                if (value < 0) continue;
+                var (start, size) = _hitMatch.Value(value);
+                if (size > 0 && at < start + size && at + length > start) return true;
+            }
+            from = at + length;
+        }
+        return false;
+    }
+
+    /// <summary>Whether anything is being left out of the rows on screen at all.</summary>
+    public bool AnythingHidden
+        => _doc is not null && _doc.Columns.Active && _doc.Columns.Columns.Any(c => !c.Visible);
+
+    /// <summary>Whether a whole line is being shown as it stands in the file, or has had fields taken out
+    /// of it. What is seeded into a filter from a whole row depends on the answer.</summary>
+    public bool LineIsWholeInTheFile(long line)
+    {
+        if (_doc is null || !InlineOn || line < 0) return true;
+        return Project(_doc.GetLineText(line)).IsWholeLine;
+    }
+
+    public bool SelectionIsWholeInTheFile
+    {
+        get
+        {
+            if (_doc is null || !HasCharSelection || !InlineOn) return true;
+            string raw = _doc.GetLineText(_charLine);
+            var projection = Project(raw);
+            if (projection.IsWholeLine) return true;
+
+            // The selection counts in DISPLAYED characters, which is the projection with its tabs opened
+            // out into spaces. The map below works in the projection's own characters, so both ends have to
+            // be brought back through that expansion first, or every line with a tab in it answers wrong.
+            int from = Unexpand(projection.Text, Math.Min(_charAnchor, _charFocus));
+            int to = Unexpand(projection.Text, Math.Max(_charAnchor, _charFocus));
+
+            int first = projection.ToLine(from);
+            if (first < 0) return false;
+            for (int i = from + 1; i < to; i++)
+                if (projection.ToLine(i) != first + (i - from)) return false;
+            return true;
+        }
+    }
+
+    /// <summary>A displayed character index back to the index in the text it was drawn from, undoing the
+    /// tab expansion. The two only differ on a line that has a tab in it.</summary>
+    private int Unexpand(string text, int displayed)
+    {
+        int width = _settings.TabSize;
+        if (width <= 1 || !text.Contains('\t')) return Math.Clamp(displayed, 0, text.Length);
+
+        int shown = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            if (shown >= displayed) return i;
+            shown += text[i] == '\t' ? width : 1;
+        }
+        return text.Length;
+    }
+
+    /// <summary>Whether a hit at <paramref name="offset"/> in <paramref name="line"/> would actually be
+    /// visible. A search runs on the raw line, so without this "find next" can land on a line whose only
+    /// hit sits inside a part that has been put away - and nothing lights up.</summary>
+    public bool HitIsVisible(long line, int offset, int length)
+    {
+        if (_doc is null || !InlineOn || line < 0) return true;
+        string raw = _doc.GetLineText(line);
+        if (offset < 0 || offset >= raw.Length) return true;
+        var projection = Project(raw);
+        if (projection.IsWholeLine) return true;
+        for (int i = offset; i < offset + length && i < raw.Length; i++)
+            if (projection.FromLine(i) >= 0) return true;
+        return false;
     }
 
     protected override void OnResize(EventArgs e) { base.OnResize(e); RefreshView(); }

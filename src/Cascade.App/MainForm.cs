@@ -52,7 +52,7 @@ public sealed class MainForm : Form
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
-    private ToolStripMenuItem _miColumns = null!;
+    private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
@@ -214,7 +214,9 @@ public sealed class MainForm : Form
         _doc.Updated += () => _pendingRefresh = true;
         // A held drag or a held key never lets the message queue empty, and a repaint only arrives when it
         // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
-        _grid.SelectionChanged += () => { UpdateStatus(); _status.Update(); };
+        // A note about a match being out of sight answers for the line the search landed on, so moving to
+        // another line by hand retires it; the next search will say so again if it still applies.
+        _grid.SelectionChanged += () => { _hiddenMatch = ""; UpdateStatus(); _status.Update(); };
         _grid.NewFilterRequested += NewFilterFromDoubleClick;
         _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); _findBar.SnapHeightTo(_grid.RowPitch); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
@@ -224,7 +226,13 @@ public sealed class MainForm : Form
         // Columns are saved in the filter file, so a width dragged in the header is an unsaved change just
         // as an edited filter is. Only on the way from clean to dirty: a drag reports every step of itself,
         // and rewriting the title bar sixty times a second is not free.
-        _grid.ColumnsChanged += () => { if (!_filtersDirty) { _filtersDirty = true; UpdateTitle(); } };
+        _grid.ColumnsChanged += () =>
+        {
+            // Whatever was hidden or carried about has changed, so a note about a match being out of sight
+            // no longer answers for anything.
+            _hiddenMatch = "";
+            if (!_filtersDirty) { _filtersDirty = true; UpdateTitle(); }
+        };
         _grid.ColumnSettingsRequested += ShowColumns;
         _filterTree.EditRequested += EditFilter;
         _filterTree.AddRequested += AddFilter;
@@ -452,12 +460,14 @@ public sealed class MainForm : Form
         })
         { Checked = _settings.WordWrap, ShortcutKeys = Keys.Alt | Keys.Z, ShortcutKeyDisplayString = "Alt+Z" };
         view.DropDownItems.Add(_miWordWrap);
-        // Columns lay text out in fixed cells, which wrapping would tear apart - say so by greying the item
-        // rather than letting it be ticked and quietly ignored.
+        // Wrapping and the Columns layout lay text out in ways that would tear each other apart, so the item
+        // is greyed rather than left to be ticked and quietly ignored. Inline is only a shorter line, and
+        // wraps like any other.
         view.DropDownOpening += (_, _) =>
         {
-            _miWordWrap.Enabled = !_doc.Columns.Enabled;
-            _miColumns.Checked = _doc.Columns.Enabled;
+            _miWordWrap.Enabled = !(_doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns);
+            _miFitColumns.Enabled = _doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns;
+            SyncColumnsMenu();
         };
         _miFilterTips = new ToolStripMenuItem("Show Matching Filters on Ho&ver", null, (_, _) =>
         {
@@ -468,11 +478,20 @@ public sealed class MainForm : Form
         { Checked = _settings.ShowFilterTooltips };
         view.DropDownItems.Add(_miFilterTips);
         view.DropDownItems.Add(BuildMarkersMenu());
-        _miColumns = new ToolStripMenuItem("Split Into Colum&ns", null, (_, _) => ToggleColumns())
+        _miColumns = new ToolStripMenuItem("Split Li&nes Into Fields", null, (_, _) => ToggleColumns())
         { Checked = _doc.Columns.Enabled, ShortcutKeys = Keys.Control | Keys.Shift | Keys.C };
         view.DropDownItems.Add(_miColumns);
-        view.DropDownItems.Add(Mi("Fit Column&s to Window", (_, _) => _grid.FitColumnsToWindow()));
-        view.DropDownItems.Add(Mi("&Columns…", (_, _) => ShowColumns()));
+
+        _miLayoutColumns = new ToolStripMenuItem("Lay Out as &Columns", null, (_, _) => SetLayout(FieldLayout.Columns))
+        { ToolTipText = "A table: every field gets a column, lined up under a header you can drag." };
+        _miLayoutInline = new ToolStripMenuItem("La&y Out Inline", null, (_, _) => SetLayout(FieldLayout.Inline))
+        { ToolTipText = "Each row stays a line, shortened by whatever you have hidden." };
+        view.DropDownItems.Add(_miLayoutColumns);
+        view.DropDownItems.Add(_miLayoutInline);
+
+        _miFitColumns = Mi("Fit Column&s to Window", (_, _) => _grid.FitColumnsToWindow());
+        view.DropDownItems.Add(_miFitColumns);
+        view.DropDownItems.Add(Mi("Field Settin&gs…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
         view.DropDownItems.Add(Mi("Zoom &Out", (_, _) => _grid.Zoom(-10), Keys.Control | Keys.OemMinus, "Ctrl+-"));
@@ -1168,17 +1187,39 @@ public sealed class MainForm : Form
         return text.Length <= FilterEditDialog.MaxPatternLength ? text : text[..FilterEditDialog.MaxPatternLength];
     }
 
-    private void CreateFilterFromLine(long line) => CreateFilterFrom(SeedPatternFromLine(_doc.GetLineText(line)));
+    private void CreateFilterFromLine(long line)
+        => CreateFilterFromShownText(SeedPatternFromLine(DisplayedLine(line)), line);
 
     /// <summary>Ctrl+N: a filter from whatever is selected. Part of a line if part of one is selected -
     /// which is the point of being able to select part of one - and otherwise the whole caret line.</summary>
     private void NewFilterFromSelection()
     {
         long line = _grid.CaretLine;
-        string? seed = NewFilterSeed(_grid.SelectedText, line >= 0 ? _doc.GetLineText(line) : null);
+        string? seed = NewFilterSeed(_grid.SelectedText, line >= 0 ? DisplayedLine(line) : null);
         if (seed is null) AddFilter(null);
-        else CreateFilterFrom(seed);
+        else CreateFilterFromShownText(seed, line);
     }
+
+    /// <summary>The line as it is being SHOWN, which is what a filter seeded from it should start out
+    /// matching - what is on screen is what the reader means.</summary>
+    private string DisplayedLine(long line) => _grid.DisplayedLineText(line);
+
+    /// <summary>Filters and searches run on the whole raw line, so text that only exists because fields have
+    /// been hidden or carried about matches nothing. The question is not "has anything been hidden" but the
+    /// exact one: does this seed actually occur in the line it came from? Hiding a field at the FRONT still
+    /// leaves the rest of the line in one piece, and warning about that would be crying wolf.</summary>
+    private string CautionAboutShownText(string seed, long line)
+    {
+        if (!_doc.Columns.Active || line < 0 || seed.Length == 0) return "";
+        if (_doc.GetLineText(line).Contains(seed, StringComparison.Ordinal)) return "";
+        return "This is the text as it is being shown, not as it stands in that line - so as plain text it "
+             + "will not match the line it came from. Search and filtering always run on the whole line.";
+    }
+
+    /// <summary>Starts a filter from a seed taken off the screen, warning when the screen and the file no
+    /// longer agree. Every path that seeds from a line comes through here.</summary>
+    private void CreateFilterFromShownText(string seed, long line)
+        => CreateFilterFrom(seed, CautionAboutShownText(seed, line));
 
     /// <summary>What a filter started with Ctrl+N arrives matching: the part of a line that is picked out,
     /// else the whole caret line, else nothing at all. Nothing is on the caret until something has been
@@ -1193,20 +1234,22 @@ public sealed class MainForm : Form
     /// otherwise the whole line - the click that began the double-click has already put the caret there.</summary>
     private void NewFilterFromDoubleClick(string? picked)
     {
+        long line = _grid.CaretLine;
         if (picked is { Length: > 0 })
         {
-            CreateFilterFrom(SeedPatternFromLine(picked));
+            CreateFilterFromShownText(SeedPatternFromLine(picked), line);
             return;
         }
-        long line = _grid.CaretLine;
         if (line >= 0) CreateFilterFromLine(line);
     }
 
-    private void CreateFilterFrom(string pattern)
+    private void CreateFilterFrom(string pattern) => CreateFilterFrom(pattern, "");
+
+    private void CreateFilterFrom(string pattern, string caution)
     {
         var filter = new Filter { Enabled = true, Match = { Text = pattern } };
         using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList(),
-                                             parent: null, ViewDefaults);
+                                             parent: null, ViewDefaults) { Caution = caution };
         _history.Begin("New Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
@@ -1326,7 +1369,7 @@ public sealed class MainForm : Form
             {
                 var (filters, cols) = CascadeFile.Load(path);
                 _doc.SetFilters(filters);
-                if (cols is not null) { _doc.Columns.Columns.Clear(); foreach (var c in cols.Columns) _doc.Columns.Columns.Add(c); CopyColumnSpec(cols, _doc.Columns); }
+                if (cols is not null) _doc.Columns.CopyFrom(cols);
                 _filterFilePath = path;
                 _state.AddRecentFilterFile(path);
             }
@@ -1347,12 +1390,6 @@ public sealed class MainForm : Form
         {
             MessageBox.Show(this, "Could not load filters:\n" + ex.Message, "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    private static void CopyColumnSpec(ColumnSpec from, ColumnSpec to)
-    {
-        to.Enabled = from.Enabled; to.Mode = from.Mode; to.Delimiter = from.Delimiter;
-        to.CollapseConsecutive = from.CollapseConsecutive; to.MaxSplits = from.MaxSplits; to.Template = from.Template;
     }
 
     private void AppendFilters()
@@ -1610,33 +1647,46 @@ public sealed class MainForm : Form
 
     private void ShowColumns()
     {
-        var before = Describe(_doc.Columns);
-        using var dlg = new ColumnsDialog(_doc.Columns, SampleLine());
+        string before = _doc.Columns.Describe();
+        var samples = SampleLines(out int caretAt);
+        using var dlg = new ColumnsDialog(_doc.Columns, samples, caretAt);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            CopyColumnSpec(dlg.Result, _doc.Columns);
-            _doc.Columns.Columns.Clear();
-            foreach (var c in dlg.Result.Columns) _doc.Columns.Columns.Add(c);
+            _doc.Columns.CopyFrom(dlg.Result);
             // Columns live in the filter file, so changing them is an unsaved change like any other.
-            if (Describe(_doc.Columns) != before) { _filtersDirty = true; UpdateTitle(); }
+            if (_doc.Columns.Describe() != before) { _filtersDirty = true; UpdateTitle(); }
+            FieldsChanged();
             _grid.RefreshView();
         }
     }
 
-    /// <summary>The line under the caret, which is what "auto-detect" and the column widths are read from.</summary>
-    private string SampleLine()
-        => _doc.CompletedLineCount > 0 ? _doc.GetLineText(Math.Max(0, _grid.CaretLine < 0 ? 0 : _grid.CaretLine)) : "";
+    /// <summary>The lines the dialog reads: the screenful in front of the reader, with the caret's own line
+    /// among them and <paramref name="caretAt"/> saying which it is. A whole window rather than one line,
+    /// because a template that happens to fit the line under the caret and nothing else is exactly the trap
+    /// the "lines that match" count exists to spring - but the caret's line is still the one the dialog
+    /// opens on, and the one Detect reads.</summary>
+    private List<string> SampleLines(out int caretAt)
+    {
+        caretAt = 0;
+        var lines = new List<string>();
+        if (_doc.CompletedLineCount <= 0) return [""];
 
-    /// <summary>Everything about the columns that is worth saving, as one string - so "did that change
-    /// anything?" is one comparison rather than a field-by-field walk that a new field could fall out of.</summary>
-    private static string Describe(ColumnSpec spec)
-        => string.Join('\u0001', new[] { spec.Enabled.ToString(), spec.Mode.ToString(), spec.Delimiter,
-                                         spec.CollapseConsecutive.ToString(), spec.MaxSplits.ToString(), spec.Template }
-            .Concat(spec.Columns.Select(c => $"{c.Name}/{c.Visible}/{c.Width}/{c.WidthChars}/{c.Align}/{c.Source}")));
+        long caret = _grid.CaretLine < 0 ? 0 : _grid.CaretLine;
+        long row = Math.Max(0, _doc.RowForLine(caret));
+        for (long i = row; i < _doc.RowCount && lines.Count < 200; i++)
+            lines.Add(_doc.GetLineText(_doc.RowToLine(i)));
+        for (long i = row - 1; i >= 0 && lines.Count < 200; i--)
+        {
+            lines.Insert(0, _doc.GetLineText(_doc.RowToLine(i)));
+            caretAt++;
+        }
 
-    /// <summary>Turns the column view on and off from the menu. Turning it on with nothing set up would
-    /// otherwise show an empty header, so the fields are read off the current line first - and if the line
-    /// does not offer any, the settings open instead of nothing happening.</summary>
+        return lines.Count == 0 ? [""] : lines;
+    }
+
+    /// <summary>Turns splitting on and off from the menu. Turning it on with nothing set up would otherwise
+    /// show an empty header, so the parts are read off the current line first - and if the line does not
+    /// offer any, the settings open instead of nothing happening.</summary>
     private void ToggleColumns()
     {
         if (_doc.Columns.Enabled)
@@ -1647,25 +1697,59 @@ public sealed class MainForm : Form
 
         if (_doc.Columns.Columns.Count == 0)
         {
-            string template = ColumnsDialog.DetectTemplate(SampleLine());
+            var samples = SampleLines(out int caretAt);
+            string template = LineTemplate.Detect(samples[caretAt]);
             if (template.Length == 0) { ShowColumns(); return; }
-            _doc.Columns.Mode = ColumnSplitMode.Template;
             _doc.Columns.Template = template;
-            _doc.Columns.SyncColumnsFromTemplate();
+            _doc.Columns.Reset();
         }
         SetColumnsEnabled(true);
     }
 
-    /// <summary>Turns the header on or off, keeping the line the reader is looking at exactly where it is.
-    /// The header takes a row off the top of the text, so without this the whole log appears to slide.</summary>
+    /// <summary>Puts the log into one layout or the other, turning splitting on if it was off.</summary>
+    private void SetLayout(FieldLayout layout)
+    {
+        if (_doc.Columns.Enabled && _doc.Columns.Layout == layout) return;
+        _doc.Columns.Layout = layout;
+        if (!_doc.Columns.Enabled) ToggleColumns();
+        else { FieldsChanged(); _grid.RefreshView(); _filtersDirty = true; UpdateTitle(); }
+    }
+
+    /// <summary>Re-ticks the menu to match the state. Called when the menu opens as well as after a change,
+    /// so it must not DO anything - see the callers for what a change itself has to put right.</summary>
+    private void SyncColumnsMenu()
+    {
+        bool on = _doc.Columns.Enabled;
+        _miColumns.Checked = on;
+        _miLayoutColumns.Checked = on && _doc.Columns.Layout == FieldLayout.Columns;
+        _miLayoutInline.Checked = on && _doc.Columns.Layout == FieldLayout.Inline;
+    }
+
+    /// <summary>What is on screen has changed, so a note about a match being out of sight no longer answers
+    /// for anything: it is worked out afresh the next time a search lands somewhere.</summary>
+    private void FieldsChanged()
+    {
+        _hiddenMatch = "";
+        SyncColumnsMenu();
+    }
+
+    /// <summary>Turns the header strip on or off, keeping the line the reader is looking at exactly where
+    /// it is. The strip takes a row off the top of the text - the header in one layout, the chips in the
+    /// other - so without this the whole log appears to slide.</summary>
     private void SetColumnsEnabled(bool on)
     {
-        _grid.KeepTextStillAcross(on ? 1 : -1, () =>
+        // What the strip is doing now against what it will be doing after, because "enabled" alone does not
+        // decide it: a spec with no parts, or a template that will not read, shows no strip either way.
+        bool now = _doc.Columns.Active;
+        bool next = on && _doc.Columns.Columns.Count > 0
+                       && _doc.Columns.Compiled.PartCount > 0 && _doc.Columns.Compiled.IsValid;
+
+        _grid.KeepTextStillAcross((next ? 1 : 0) - (now ? 1 : 0), () =>
         {
             _doc.Columns.Enabled = on;
             _grid.RefreshView();
         });
-        _miColumns.Checked = on;
+        FieldsChanged();
         _filtersDirty = true;
         UpdateTitle();
     }
@@ -1852,6 +1936,7 @@ public sealed class MainForm : Form
         if (found >= 0)
         {
             GoToLine(found + 1);
+            NoteIfMatchIsHidden(found);
             // Held down, the key repeats faster than an idle moment comes round: WM_PAINT and the refresh
             // timer both wait for one, so without this the view and the counts sit still until it is let go.
             UpdateStatus();
@@ -1870,6 +1955,15 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>Says so when a search has landed on a line whose match is inside a field that is not being
+    /// shown. The search runs on the whole raw line - deliberately, so nothing is ever unfindable - but
+    /// arriving at a line with nothing lit up reads as the search being broken unless it is explained.
+    /// It is said beside the search box, which is the one place that survives the next status refresh.</summary>
+    private void NoteIfMatchIsHidden(long line)
+        => _hiddenMatch = _grid.FindTermIsVisibleOn(line) ? "" : "match is in a hidden field";
+
+    private string _hiddenMatch = "";
+
     private void RepeatFind(bool forward)
     {
         if (_lastQuery is { } q) { DoFind(q, forward); return; }
@@ -1883,6 +1977,7 @@ public sealed class MainForm : Form
     private void ClearFind()
     {
         _lastQuery = null;
+        _hiddenMatch = "";
         // Release the sweep before repainting, not after. The minimap decides whether it has anything to
         // redraw by comparing the hit count it last drew against the document's - so repainting first asks
         // it that question while the hits are all still there, and it sits on them until something else
@@ -2144,7 +2239,13 @@ public sealed class MainForm : Form
         }
 
         // The count of what the term matched belongs beside the term, not at the far corner of the window.
-        _findBar.SetMessage(RefreshTally(), _tallyDetail);
+        string tally = RefreshTally();
+        if (_hiddenMatch.Length > 0)
+            _findBar.SetMessage(tally.Length > 0 ? $"{tally} \u2014 {_hiddenMatch}" : _hiddenMatch,
+                "The search runs on the whole line, including the fields you have hidden, so this line "
+                + "matches even though nothing on it is lit up.");
+        else
+            _findBar.SetMessage(tally, _tallyDetail);
 
         double Fraction(bool ix, bool ft)
         {
