@@ -312,8 +312,9 @@ public sealed class ColumnsPreview : Control
             int textAt = _table.Length;
             if (take > 0) _table.Append(_line, start, take);
             if (cut) _table.Append('\u2026');
+            int textLength = _table.Length - textAt;
             _table.Append(' ', slack - before);
-            _tableSpans.Add((cellStart, cell, textAt, _table.Length - textAt, column.Source));
+            _tableSpans.Add((cellStart, cell, textAt, textLength, column.Source));
         }
         _result = _table.ToString();
     }
