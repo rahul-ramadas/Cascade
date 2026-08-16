@@ -1456,6 +1456,7 @@ public sealed class LineGridControl : Control
         {
             if (_toggledChip == chip) { _doc!.Columns.Columns[chip].Visible = !_doc.Columns.Columns[chip].Visible; ColumnsEdited(); }
             _toggledChip = -1;
+            HideTip();
             BeginRename(chip);
             return true;
         }
@@ -1482,6 +1483,9 @@ public sealed class LineGridControl : Control
             return;
         }
         if (!_colMoved && Math.Abs(e.X - _colGrabX) < SystemInformation.DragSize.Width) return;
+        // Once the chip is actually travelling, whatever the tip was saying about where it sits is out of
+        // date with every pixel. A tip is for a chip standing still.
+        if (!_colMoved) HideTip();
         _colMoved = true;
 
         var chips = ChipRects();
@@ -1522,6 +1526,7 @@ public sealed class LineGridControl : Control
             if (def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1) { Invalidate(); return; }
             def.Visible = !def.Visible;
             _toggledChip = chip;
+            RefreshChipTip(chip);
         }
         ColumnsEdited();
     }
@@ -2364,12 +2369,19 @@ public sealed class LineGridControl : Control
     {
         var rect = index == OverflowChip ? _chipOverflowRect : ChipRectForTesting(index);
         if (rect.IsEmpty) return;
-        HandleChipMouseMove(new MouseEventArgs(MouseButtons.None, 0, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2, 0));
+        var at = new Point(rect.Left + rect.Width / 2, rect.Top + rect.Height / 2);
+        HandleChipMouseMove(new MouseEventArgs(MouseButtons.None, 0, at.X, at.Y, 0));
+        TrackHover(at);
     }
 
     internal int ChipUnderPointerForTesting => _chipUnderPointer;
     internal static int OverflowChipForTesting => OverflowChip;
     internal int ChipsOverflowingForTesting { get { ChipRects(); return _chipsOverflowing; } }
+
+    /// <summary>Skips the hover countdown and puts the tip up now, and reads back what it is saying - so a
+    /// check can watch the words themselves change rather than trusting that they would.</summary>
+    internal void ShowTipNowForTesting() => ShowTipNow();
+    internal string ShownTipForTesting => _tipShowing ? _tipText : "";
 
     /// <summary>How tall the text on a chip is drawn, which had better be no taller than the chip.</summary>
     internal int ChipLabelHeightForTesting
@@ -2750,8 +2762,25 @@ public sealed class LineGridControl : Control
     {
         _tipTimer.Stop();
         if (_tipRow >= 0 || _tipChip != -1) _tips.Hide(this);
+        _tipShowing = false;
+        _tipText = "";
         _tipRow = -1;
         _tipChip = -1;
+    }
+
+    /// <summary>Whether a tip is on screen at this moment, as against merely counting down to one. What a
+    /// chip's tip says depends on the state of that chip, so a click that changes the state has to put the
+    /// words right - but only if there are words up there to be wrong.</summary>
+    private bool _tipShowing;
+    private string _tipText = "";
+
+    /// <summary>Says the chip's tip again, now that clicking it has changed what there is to say. Left
+    /// alone, the tip that was open when the chip was clicked stayed open and went on offering to do the
+    /// thing that had just been done.</summary>
+    private void RefreshChipTip(int chip)
+    {
+        if (!_tipShowing || _tipChip != chip) return;
+        ShowTipNow();
     }
 
     private void ShowTipNow()
@@ -2762,28 +2791,40 @@ public sealed class LineGridControl : Control
         if (_tipChip >= 0)
         {
             if (_tipChip >= _doc.Columns.Columns.Count) return;
-            var def = _doc.Columns.Columns[_tipChip];
-            bool lastOne = def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1;
-            string what = lastOne
-                ? $"\u201c{def.Name}\u201d is the only field still shown, so it cannot be left out too.\nDrag to move it along the row, or double-click to rename it."
-                : def.Visible
-                    ? $"\u201c{def.Name}\u201d is being shown.\nClick to leave it out, drag to move it along the row, double-click to rename it."
-                    : $"\u201c{def.Name}\u201d is being left out.\nClick to bring it back, drag to move it along the row, double-click to rename it.";
-            _tips.Show(what, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+            Say(ChipTipText(_tipChip));
             return;
         }
 
         if (_tipChip == OverflowChip)
         {
-            _tips.Show($"{_chipsOverflowing} more field{(_chipsOverflowing == 1 ? "" : "s")} than there is room for.\nClick for the whole list.",
-                this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+            Say($"{_chipsOverflowing} more field{(_chipsOverflowing == 1 ? "" : "s")} than there is room for.\nClick for the whole list.");
             return;
         }
 
         if (_tipRow < 0 || _tipRow >= _doc.RowCount) return;
         string text = BuildTip(_tipRow);
         if (text.Length == 0) return;
-        _tips.Show(text, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+        Say(text);
+
+        void Say(string words)
+        {
+            _tips.Show(words, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+            _tipText = words;
+            _tipShowing = true;
+        }
+    }
+
+    /// <summary>What a chip's tip says, which is entirely about the state that chip is in - so it has to be
+    /// worked out afresh every time it is put up, and again whenever a click changes that state.</summary>
+    private string ChipTipText(int chip)
+    {
+        var def = _doc!.Columns.Columns[chip];
+        bool lastOne = def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1;
+        return lastOne
+            ? $"\u201c{def.Name}\u201d is the only field still shown, so it cannot be left out too.\nDrag to move it along the row, or double-click to rename it."
+            : def.Visible
+                ? $"\u201c{def.Name}\u201d is being shown.\nClick to leave it out, drag to move it along the row, double-click to rename it."
+                : $"\u201c{def.Name}\u201d is being left out.\nClick to bring it back, drag to move it along the row, double-click to rename it.";
     }
 
     /// <summary>What a hover says about a line: which filters matched it, and - when the template does not

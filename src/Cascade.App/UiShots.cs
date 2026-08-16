@@ -95,6 +95,25 @@ internal static class UiShots
         colsInline.Columns[2].Visible = false;
         ShotDialog(new ColumnsDialog(colsInline, columnSamples), outDir, "columns-inline");
 
+        // Fields carried out of the order the LINE has them, which is the state the second row of headings
+        // exists for: without names over the result, a reader is left matching colours to work out which
+        // value ended up where.
+        var reordered = cols.Clone();
+        reordered.Layout = FieldLayout.Inline;
+        var carried = reordered.Columns[3];
+        reordered.Columns.RemoveAt(3);
+        reordered.Columns.Insert(0, carried);
+        ShotDialog(new ColumnsDialog(reordered, columnSamples), outDir, "columns-reordered");
+
+        var reorderedTable = reordered.Clone();
+        reorderedTable.Layout = FieldLayout.Columns;
+        ShotDialog(new ColumnsDialog(reorderedTable, columnSamples), outDir, "columns-reordered-table");
+
+        // Mid-drag, with the line showing where the row would land - the one part of reordering by hand
+        // that cannot be seen in a still picture unless it is asked for.
+        ShotDialog(new ColumnsDialog(cols, columnSamples), outDir, "columns-dragging",
+                   d => d.ShowDropLineForTesting(2));
+
         // The two states this dialog goes wrong in, kept where a human will see them: at a large font, where
         // a fixed height cut the sample box in half and squeezed the field list out of existence; and with
         // the sample scrolled, where text drawn through GDI ignores the clip and lands on the gutter.

@@ -912,6 +912,8 @@ internal static class SelfTest
             ok &= Check($"and the space in front of it is written outside the braces ({dlg.TemplateForTesting})",
                         dlg.TemplateForTesting.EndsWith("} {*}", StringComparison.Ordinal),
                         dlg.TemplateForTesting);
+            ok &= Check($"and the field just made is the one selected ({dlg.SelectedRowForTesting} of {dlg.RowCountForTesting})",
+                        dlg.SelectedRowForTesting == dlg.RowCountForTesting - 1);
 
             // --- the columns of the result line up, width and alignment included ---
 
@@ -935,12 +937,132 @@ internal static class SelfTest
             for (int i = 0; i < dlg.RowCountForTesting; i++) dlg.SetCellForTesting(i, "show", true);
             Pump();
 
+            // --- a field is carried up and down the list by dragging as well as by the buttons ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+            Pump();
+            string OrderOf() => string.Join(",", dlg.Result.Columns.Select(c => c.Source));
+            dlg.DropRowForTesting(3, 0);          // the last field carried to the front
+            Pump();
+            ok &= Check($"a field dropped at the front of the list lands there ({OrderOf()})",
+                        dlg.Result.Columns[0].Source == 3);
+            ok &= Check("and the row that moved is the one left selected", dlg.SelectedRowForTesting == 0);
+            dlg.DropRowForTesting(0, 4);          // ...and back to the end, past every other row
+            Pump();
+            ok &= Check($"and dropped past the last row it lands at the end ({OrderOf()})",
+                        dlg.Result.Columns[^1].Source == 3);
+            dlg.DropRowForTesting(1, 1);
+            Pump();
+            ok &= Check($"dropping a row where it already is changes nothing ({OrderOf()})",
+                        OrderOf() == "0,1,2,3");
+
+            // --- pointing at the sample, or at the result, says which field it is ---
+
+            dlg.SelectRowForTesting(0);
+            Pump();
+            dlg.PreviewForTesting.ClickSampleForTesting(30);   // inside [api-gateway], the second field
+            Pump();
+            ok &= Check($"clicking a field in the sample picks its row out of the list ({dlg.SelectedRowForTesting})",
+                        dlg.SelectedRowForTesting == 1);
+            ok &= Check($"and the band drawn round that field moves with it ({dlg.PreviewForTesting.Highlight})",
+                        dlg.PreviewForTesting.Highlight == 1);
+            dlg.SetLayoutForTesting(FieldLayout.Inline);
+            dlg.DropRowForTesting(3, 0);          // Message to the front, so the result is in another order
+            dlg.SelectRowForTesting(3);
+            Pump();
+            dlg.PreviewForTesting.ClickResultForTesting(2);    // the first cell of the RESULT is now Message
+            Pump();
+            ok &= Check($"and clicking the result picks the field the RESULT has there ({dlg.SelectedRowForTesting})",
+                        dlg.SelectedRowForTesting == 0 && dlg.Result.Columns[0].Source == 3);
+            ok &= Check($"with the band moved to that one too ({dlg.PreviewForTesting.Highlight})",
+                        dlg.PreviewForTesting.Highlight == 3);
+            dlg.DropRowForTesting(0, 4);
+            dlg.SetLayoutForTesting(FieldLayout.Columns);
+            Pump();
+
             dlg.Close();
             Pump();
         }
 
-        // --- the dialog at a large font: everything on it still has room ---
+        // --- the dialog opens with room to work in, and in the middle of what opened it ---
 
+        using (var opener = new Form { StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(40, 40, 900, 700), Opacity = 0 })
+        {
+            opener.Show();
+            Pump();
+            using var sized = new ColumnsDialog(spec, samples);
+            sized.Opacity = 0;
+            // After the dialog has finished coming up, not during: sizing and centring are the last things
+            // OnShown does, and closing from inside the Shown event would cut them off half way.
+            sized.Shown += (_, _) => sized.BeginInvoke(sized.Close);
+            sized.ShowDialog(opener);
+            Pump();
+            ok &= Check($"the field list opens with room for the fields and a few spare ({sized.ListRoomInRowsForTesting} rows for {sized.RowCountForTesting} fields)",
+                        sized.ListRoomInRowsForTesting >= sized.RowCountForTesting + 2,
+                        $"{sized.ClientSize}");
+            var middle = new Point(sized.Left + sized.Width / 2, sized.Top + sized.Height / 2);
+            var screen = Screen.FromControl(opener).WorkingArea;
+            var want = new Point(screen.Left + screen.Width / 2, screen.Top + screen.Height / 2);
+            bool centred = Math.Abs(middle.X - want.X) <= 2 && Math.Abs(middle.Y - want.Y) <= 2;
+            ok &= Check($"and in the middle of the screen that window is on ({middle} vs {want})", centred,
+                        $"dialog {sized.Bounds}, owner {opener.Bounds}, screen {screen}");
+        }
+
+        // --- a dialog with more on it than the screen is tall ---
+
+        // The height is held between a floor (the rest of the dialog, plus enough list to read) and a
+        // ceiling (the screen). They are worked out separately, so on a screen too short for what is on the
+        // dialog the floor rises above the ceiling - and asking for a value between two bounds the wrong way
+        // round throws. This runs from OnShown, where there is nobody to catch it. A font this size puts any
+        // screen in that state.
+        using (var huge = new ColumnsDialog(spec, samples))
+        {
+            huge.Font = new Font(huge.Font.FontFamily, 40f);
+            huge.StartPosition = FormStartPosition.Manual;
+            huge.Location = new Point(0, 0);
+            huge.Opacity = 0;
+            string blew = "";
+            try { huge.Show(); Pump(); }
+            catch (Exception ex) { blew = $"{ex.GetType().Name}: {ex.Message}"; }
+            ok &= Check("a dialog with more on it than the screen is tall still opens", blew.Length == 0, blew);
+            if (blew.Length == 0)
+            {
+                var screen = Screen.FromControl(huge).WorkingArea;
+                ok &= Check($"and is no taller than the screen ({huge.Height} of {screen.Height})",
+                            huge.Height <= screen.Height);
+                ok &= Check($"and can still be dragged down to fit it ({huge.MinimumSize.Height})",
+                            huge.MinimumSize.Height <= screen.Height);
+
+                // ...and the list, which is what the leftover room went to, can be worked in whatever is
+                // left of it - including none at all, where a grid refuses to say which row comes first.
+                try
+                {
+                    huge.SetTemplateForTesting("{[*]}{[*]}{[*]}");
+                    Pump();
+                    huge.SelectSampleForTesting(42, 49);
+                    huge.AddFieldForTesting();
+                    Pump();
+                }
+                catch (Exception ex) { blew = $"{ex.GetType().Name}: {ex.Message}"; }
+                ok &= Check($"and a field can still be added to a list with no room to show one ({huge.RowCountForTesting} fields)",
+                            blew.Length == 0, blew);
+
+                var list = huge.ListForTesting;
+                try
+                {
+                    huge.DragOverForTesting(list.ClientSize.Width / 2, Math.Max(0, list.ClientSize.Height - 2));
+                    huge.DragOverForTesting(list.ClientSize.Width / 2, 1);
+                    Pump();
+                }
+                catch (Exception ex) { blew = $"{ex.GetType().Name}: {ex.Message}"; }
+                ok &= Check("and a row can be carried over its edges without the list objecting",
+                            blew.Length == 0, blew);
+            }
+            try { huge.Close(); } catch { /* it never opened */ }
+            Pump();
+        }
+
+        // --- the dialog at a large font: everything on it still has room ---
         using (var big = new ColumnsDialog(spec, samples))
         {
             big.Font = new Font(big.Font.FontFamily, 16f);
@@ -959,6 +1081,18 @@ internal static class SelfTest
             int rows = big.RowCountForTesting;
             ok &= Check($"and the field list still shows its rows ({list.ClientSize.Height}px for {rows} rows)",
                         list.ClientSize.Height >= 4 * 20, $"{list.Bounds} in {big.ClientSize}");
+
+            // The sentence beside a layout is the longest text on the dialog. A label sizes itself to one
+            // line however long that line is, so at this size the end of it used to leave the window
+            // altogether; told how much room there is, the same label wraps instead.
+            var says = big.LongestHelpForTesting;
+            ok &= Check($"the layout description wraps inside the dialog rather than off it ({says.Right} of {big.ClientSize.Width})",
+                        says.Right <= big.ClientSize.Width, $"{says} in {big.ClientSize}");
+            big.Width = big.MinimumSize.Width;
+            Pump();
+            says = big.LongestHelpForTesting;
+            ok &= Check($"and still does once the window is dragged as narrow as it goes ({says.Right} of {big.ClientSize.Width})",
+                        says.Right <= big.ClientSize.Width, $"{says} in {big.ClientSize}");
             big.Close();
             Pump();
         }
@@ -1028,6 +1162,36 @@ internal static class SelfTest
             // The strip starts where the text does, so the eye has something to line it up by.
             ok &= Check($"the first chip starts level with the text ({grid.ChipRectForTesting(0).Left} vs {grid.GutterWidthForTesting})",
                         grid.ChipRectForTesting(0).Left == grid.GutterWidthForTesting);
+
+            // --- a chip's tip answers for the state the chip is in NOW ---
+
+            grid.HoverChipForTesting(1);
+            grid.ShowTipNowForTesting();
+            Pump();
+            string saidBefore = grid.ShownTipForTesting;
+            static string First(string tip) => tip.Split('\n')[0];
+            ok &= Check($"resting on a chip says what clicking it would do (\"{First(saidBefore)}\")",
+                        saidBefore.Contains("is being shown", StringComparison.Ordinal) &&
+                        saidBefore.Contains("Click to leave it out", StringComparison.Ordinal), saidBefore);
+            grid.ClickChipForTesting(1);
+            Pump();
+            string saidAfter = grid.ShownTipForTesting;
+            // The tip does not move when the chip under it is clicked, so if it is not rewritten it goes on
+            // offering to do the thing that has just been done.
+            ok &= Check($"and clicking it rewrites the tip on the spot (\"{First(saidAfter)}\")",
+                        saidAfter.Contains("is being left out", StringComparison.Ordinal) &&
+                        saidAfter.Contains("Click to bring it back", StringComparison.Ordinal), saidAfter);
+            grid.ClickChipForTesting(1);
+            Pump();
+            ok &= Check($"and clicking it back says so again (\"{First(grid.ShownTipForTesting)}\")",
+                        grid.ShownTipForTesting.Contains("is being shown", StringComparison.Ordinal),
+                        grid.ShownTipForTesting);
+            grid.DragChipForTesting(1, 2);
+            Pump();
+            ok &= Check("but carrying it off takes the tip down rather than leaving it behind",
+                        grid.ShownTipForTesting.Length == 0, grid.ShownTipForTesting);
+            grid.DragChipForTesting(2, 1);
+            Pump();
 
             // --- renaming from a chip happens ON the chip ---
 

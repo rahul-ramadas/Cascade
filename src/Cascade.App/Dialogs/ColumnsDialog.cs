@@ -35,7 +35,6 @@ public sealed class ColumnsDialog : DialogBase
 
     private readonly RadioButton _asColumns = new() { Text = "&Columns", AutoSize = true };
     private readonly RadioButton _asInline = new() { Text = "&Inline", AutoSize = true };
-    private readonly Label _layoutHelp = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
 
     private readonly DataGridView _list = new()
     {
@@ -50,8 +49,10 @@ public sealed class ColumnsDialog : DialogBase
         MultiSelect = false,
         EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2,
         // The header is as tall as its own text needs, which at a large font is taller than the default it
-        // would otherwise keep - and a header cut in half is the first thing a reader notices.
+        // would otherwise keep - and a header cut in half is the first thing a reader notices. The rows go
+        // the same way, or the descender of a "g" is shaved off every name in the list.
         ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+        AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells,
         AutoGenerateColumns = false
     };
 
@@ -73,7 +74,11 @@ public sealed class ColumnsDialog : DialogBase
         AutoSizeMode = AutoSizeMode.GrowOnly;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
-        ClientSize = new Size(Dpi(940), Dpi(560));
+        // Opened big enough to hold the whole thing at once. Everything in here is read together - the
+        // template, what it does to the line, and the fields it found - so a dialog that starts small
+        // enough to need scrolling or dragging before any of that can be seen is starting in the wrong
+        // place. Trimmed to the screen in FitToContent, which is where the real room is known.
+        ClientSize = new Size(Dpi(1120), Dpi(820));
         MinimumSize = new Size(Dpi(720), Dpi(540));
 
         _template.Font = TemplateFont;
@@ -85,7 +90,6 @@ public sealed class ColumnsDialog : DialogBase
         _template.Text = _working.Template;
         _asInline.Checked = _working.Layout == FieldLayout.Inline;
         _asColumns.Checked = !_asInline.Checked;
-        UpdateLayoutHelp();
 
         Reparse();
         FillList();
@@ -96,35 +100,69 @@ public sealed class ColumnsDialog : DialogBase
     {
         base.OnShown(e);
         FitToContent();
+        CentreOnScreen();
         // A dialog hands focus to its first field and Windows selects the lot; the caret belongs at the end,
         // which is where typing carries on from.
         _template.Focus();
         _template.Select(_template.TextLength, 0);
     }
 
-    /// <summary>Grows the dialog until the field list has room for a few rows, and makes that the smallest
-    /// it can be dragged to. Worked out from what the list ACTUALLY got once laid out, so it holds at any
-    /// font size and any DPI - a figure written down here would only ever be right at one of them.</summary>
+    /// <summary>Sizes the dialog to what it wants and to what the screen has. The list is given room for
+    /// every field it holds AND a few rows beyond them, so that adding a field shows the new row where it
+    /// lands instead of somewhere below the bottom edge - and no more than that, so a short template does
+    /// not open a window two thirds of which is empty list.</summary>
     private void FitToContent()
     {
-        int room = Screen.FromControl(this).WorkingArea.Height;
-        for (int pass = 0; pass < 4; pass++)
+        var room = Screen.FromControl(Owner ?? this).WorkingArea;
+        int most = Math.Max(Dpi(300), room.Height - Dpi(16));
+        int widest = Math.Max(Dpi(320), room.Width - Dpi(16));
+        // Before the width is touched: a form will not go narrower than its own minimum, and on a screen
+        // narrower than that minimum the dialog would hang off the side rather than fit.
+        MinimumSize = new Size(Math.Min(MinimumSize.Width, widest), MinimumSize.Height);
+        Width = Math.Min(Width, widest);
+        for (int pass = 0; pass < 5; pass++)
         {
             PerformLayout();
-            int wanted = WantedListHeight - _list.ClientSize.Height;
-            if (wanted <= 0 || Height >= room) break;
-            Height = Math.Min(Height + wanted, room);
+            // Everything but the list is as tall as it needs to be, so the whole window is only ever the
+            // rest of it plus however much list is asked for - and never taller than the screen, which on a
+            // short one is less than the rest of it needs. Held to that either way round, and NOT with
+            // Math.Clamp: a floor above the ceiling is not a range, and Clamp throws rather than picking.
+            int least = Math.Min(Height - _list.ClientSize.Height + LeastListHeight, most);
+            int want = Math.Min(most, Math.Max(least, Height + WantedListHeight - _list.ClientSize.Height));
+            if (want == Height) break;
+            Height = want;
         }
         PerformLayout();
-        MinimumSize = new Size(MinimumSize.Width,
-                               Height - Math.Max(0, _list.ClientSize.Height - WantedListHeight));
+        int spare = Math.Max(0, _list.ClientSize.Height - LeastListHeight);
+        MinimumSize = new Size(MinimumSize.Width, Math.Min(most, Math.Max(Dpi(420), Height - spare)));
     }
 
-    /// <summary>Four rows and the header: enough of the list to see that it IS a list and to drag a row
-    /// about in it. Read off the list itself, because a row is as tall as the font makes it.</summary>
-    private int WantedListHeight
+    /// <summary>Puts the dialog in the middle of the screen the window that opened it is on. The middle of
+    /// the SCREEN, not of that window: this dialog is wider than a lot of windows people keep a log in, and
+    /// centring it on a small window only pushes it against the edge of the screen. Windows centres a dialog
+    /// when it is SHOWN, which here is before it has been sized, so left alone it grows downward out of the
+    /// middle and, on a short screen, off the bottom.</summary>
+    private void CentreOnScreen()
+    {
+        var area = Screen.FromControl(Owner ?? this).WorkingArea;
+        Location = new Point(
+            Math.Clamp(area.Left + (area.Width - Width) / 2, area.Left, Math.Max(area.Left, area.Right - Width)),
+            Math.Clamp(area.Top + (area.Height - Height) / 2, area.Top, Math.Max(area.Top, area.Bottom - Height)));
+    }
+
+    /// <summary>Every field the template found, and three rows of slack under them: a field added from the
+    /// sample appears at the end of the list, and a list already full to the last row would put it out of
+    /// sight at the moment it was created. Read off the list itself, because a row is as tall as the font
+    /// makes it, and capped so that a template with forty fields does not ask for a dialog taller than the
+    /// screen - FitToContent trims it to the screen in any case.</summary>
+    private int WantedListHeight => ListHeightFor(Math.Clamp(_list.Rows.Count + 3, 6, 14));
+
+    /// <summary>The least the list may be dragged down to and still read as a list: four rows and a header.</summary>
+    private int LeastListHeight => ListHeightFor(4);
+
+    private int ListHeightFor(int rows)
         => _list.ColumnHeadersHeight + Dpi(4) +
-           4 * Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
+           rows * Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
 
     // ---- layout ----
 
@@ -178,18 +216,20 @@ public sealed class ColumnsDialog : DialogBase
         Row(_preview, SizeType.AutoSize, 0, 6);
 
         Row(Heading("&Layout"), SizeType.AutoSize, 0, 12);
-        Row(Flow(_asColumns, _asInline), SizeType.AutoSize, 0, 2);
-        Row(_layoutHelp, SizeType.AutoSize, 0, 2);
+        Row(LayoutChoices(), SizeType.AutoSize, 0, 2);
 
         Row(Heading("&Fields"), SizeType.AutoSize, 0, 12);
         _list.Margin = new Padding(0);
         Row(_list, SizeType.Percent, 100, 2);
 
         // Below the list, not beside it: stacked at the side they need a fixed height the row cannot always
-        // spare, and at a large font they were pushed off the bottom of the dialog.
+        // spare, and at a large font they were pushed off the bottom of the dialog. The note beside them is
+        // what tells anyone the rows can simply be dragged - a grip says a row is draggable to whoever has
+        // already guessed, and this says it to whoever has not.
         _up.Margin = new Padding(0, 0, Dpi(6), 0);
         _down.Margin = new Padding(0);
-        Row(Flow(_up, _down), SizeType.AutoSize, 0, 6);
+        var dragNote = new Label { Text = "\u2026or drag a field up and down the list.", AutoSize = true, ForeColor = SystemColors.GrayText };
+        Row(Flow(_up, _down, Centred(dragNote, 10)), SizeType.AutoSize, 0, 6);
 
         var buttons = OkCancelRow(out var ok, out _);
         _ok = ok;
@@ -201,12 +241,78 @@ public sealed class ColumnsDialog : DialogBase
 
     private Button? _ok;
 
-    private Label Heading(string text) => new()
+    /// <summary>The two layouts, each with what it does written beside it. Both are on show at once rather
+    /// than one line that describes whichever is ticked: the reason to read either of them is to decide
+    /// between them, and a description that only appears once you have chosen is no help in choosing.</summary>
+    private TableLayoutPanel LayoutChoices()
     {
-        Text = text,
-        AutoSize = true,
-        Font = new Font(Font, FontStyle.Bold)
-    };
+        var grid = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = new Padding(0)
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        void Choice(RadioButton button, string says)
+        {
+            button.Margin = new Padding(0, Dpi(2), Dpi(12), Dpi(2));
+            // Top, not centred: once the sentence beside it wraps onto a second line, a centred button sits
+            // between the two lines instead of against the one it belongs to.
+            button.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            var told = new Label
+            {
+                Text = says,
+                AutoSize = true,
+                ForeColor = SystemColors.GrayText,
+                Anchor = AnchorStyles.Top | AnchorStyles.Left,
+                Margin = new Padding(0, Dpi(2), 0, Dpi(2))
+            };
+            _wrapping.Add(told);
+            grid.Controls.Add(button);
+            grid.Controls.Add(told);
+        }
+
+        Choice(_asColumns, "A table: every field gets a column, lined up under a header you can drag.");
+        Choice(_asInline, "Each row stays a line, shortened by whatever you have hidden. Best when one field is much longer than the rest.");
+        return grid;
+    }
+
+    /// <summary>The sentences beside the two layouts, which are the longest text in the dialog and the only
+    /// text that has to WRAP. A label sizes itself to one line however long that line is, so at a large font
+    /// - or in a window dragged narrow - the end of the sentence simply left the dialog. Telling it how much
+    /// room there is turns the same label into a wrapping one, and the row it sits in grows to suit.</summary>
+    private readonly List<Label> _wrapping = [];
+
+    protected override void OnClientSizeChanged(EventArgs e)
+    {
+        base.OnClientSizeChanged(e);
+        FitWrappingText();
+    }
+
+    private void FitWrappingText()
+    {
+        int aside = Math.Max(_asColumns.Width, _asInline.Width) + Dpi(12);
+        var room = new Size(Math.Max(Dpi(200), ClientSize.Width - Dpi(24) - aside), 0);
+        foreach (var label in _wrapping) label.MaximumSize = room;
+    }
+
+    /// <summary>A section heading. Bold, and rebuilt when the window's font changes - a font assigned to a
+    /// control is what stops that control following the window, so anything given one has to be given the
+    /// next one too.</summary>
+    private Label Heading(string text)
+    {
+        var label = new Label { Text = text, AutoSize = true, Font = BoldFont };
+        _headings.Add(label);
+        return label;
+    }
+
+    private readonly List<Label> _headings = [];
+    private Font? _bold;
+    private Font BoldFont => _bold ??= new Font(Font, FontStyle.Bold);
 
     /// <summary>The one thing a reader has to be told, shown rather than described: a line they recognise,
     /// and the template that reads it. No sentence around it - the arrow says what it is, and every mark in
@@ -277,12 +383,15 @@ public sealed class ColumnsDialog : DialogBase
     protected override void OnFontChanged(EventArgs e)
     {
         base.OnFontChanged(e);
-        var (staleMono, staleTemplate) = (_legendMono, _templateFont);
-        _legendMono = _templateFont = null;
+        var (staleMono, staleTemplate, staleBold) = (_legendMono, _templateFont, _bold);
+        _legendMono = _templateFont = _bold = null;
         _template.Font = TemplateFont;
         foreach (var bit in _monoBits) bit.Font = MonoFont;
+        foreach (var heading in _headings) heading.Font = BoldFont;
+        FitWrappingText();
         staleMono?.Dispose();
         staleTemplate?.Dispose();
+        staleBold?.Dispose();
     }
 
     /// <summary>A touch larger than the dialog's own text: the template is the thing being written here, and
@@ -311,37 +420,39 @@ public sealed class ColumnsDialog : DialogBase
         return flow;
     }
 
+    /// <summary>The list of fields. A grip in the first cell says a row can be dragged, and the two columns
+    /// whose meaning is not in their heading say it on the HEADING - not on the cells, which a DataGridView
+    /// pops up as the selection is walked with the arrow keys, tipping a reader who is only moving about.</summary>
     private void BuildList()
     {
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "swatch", HeaderText = "", Width = Dpi(30), ReadOnly = true,
+            Name = "swatch", HeaderText = "", Width = GripWidth + Dpi(30), ReadOnly = true,
             Resizable = DataGridViewTriState.False, SortMode = DataGridViewColumnSortMode.NotSortable
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "name", HeaderText = "Name", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-            ToolTipText = "What this field is called. Shown as the column header, and on the chip above the log."
+            SortMode = DataGridViewColumnSortMode.NotSortable
         });
         _list.Columns.Add(new DataGridViewCheckBoxColumn
         {
-            Name = "show", HeaderText = "Show", Width = HeaderRoom("Show", 34), SortMode = DataGridViewColumnSortMode.NotSortable,
-            ToolTipText = "Untick to leave this field out. Its punctuation goes with it."
+            Name = "show", HeaderText = "Show", Width = HeaderRoom("Show", 34), SortMode = DataGridViewColumnSortMode.NotSortable
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "width", HeaderText = "Width", Width = HeaderRoom("Width", 34), SortMode = DataGridViewColumnSortMode.NotSortable,
-            ToolTipText = "Width in pixels for the Columns layout, or blank to size it to what is in it."
+            Name = "width", HeaderText = "Width", Width = HeaderRoom("Width", 34), SortMode = DataGridViewColumnSortMode.NotSortable
         });
         var align = new DataGridViewComboBoxColumn
         {
             Name = "align", HeaderText = "Align", Width = HeaderRoom("Center", 40), FlatStyle = FlatStyle.Flat,
-            SortMode = DataGridViewColumnSortMode.NotSortable,
-            ToolTipText = "Which way the text sits in its column."
+            SortMode = DataGridViewColumnSortMode.NotSortable
         };
         align.Items.AddRange([nameof(ColumnAlign.Left), nameof(ColumnAlign.Right), nameof(ColumnAlign.Center)]);
         _list.Columns.Add(align);
+
+        _list.Columns["show"]!.HeaderCell.ToolTipText = "Untick to leave a field out of the row. Its punctuation goes with it.";
+        _list.Columns["width"]!.HeaderCell.ToolTipText = "Pixels, or blank to fit whatever is in it. Only used by the Columns layout.";
     }
 
     /// <summary>How wide a column has to be for its own heading to fit, with room for the tick or the
@@ -361,7 +472,7 @@ public sealed class ColumnsDialog : DialogBase
         _makeColumn.Click += (_, _) => MakeColumnFromSelection();
         _preview.SelectionChanged += UpdateMakeColumn;
 
-        _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); UpdateLayoutHelp(); Refresh0(); };
+        _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); Refresh0(); };
 
         _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); KeepOneShown(e.RowIndex); Refresh0(); } };
         _list.CurrentCellDirtyStateChanged += (_, _) =>
@@ -372,28 +483,20 @@ public sealed class ColumnsDialog : DialogBase
         _list.SelectionChanged += (_, _) => UpdateHighlight();
         _list.CellPainting += PaintSwatch;
         _list.DataError += (_, e) => e.ThrowException = false;
+        WireDragging();
 
         _up.Click += (_, _) => Reorder(-1);
         _down.Click += (_, _) => Reorder(+1);
+        _preview.PartPicked += SelectField;
 
-        _tips.SetToolTip(_template, "A picture of your line. Replace what changes with *, and wrap each field in { }.");
+        // Two tips, and both say something no label does. Everything else here explains itself where it
+        // stands - the marks under the template box, the description beside each layout, the words on the
+        // buttons - and a tip that repeats the thing it is pointing at only gets in the way of it.
         _tips.SetToolTip(_detect, "Read the [ ] groups off the line below and write a template for them.");
-        _tips.SetToolTip(_nextMisfit, "Step to the next sampled line the template does not match.");
-        _tips.SetToolTip(_makeColumn, "Drag across the sample line to pick out a field, then press this to add it.");
-        _tips.SetToolTip(_asColumns, "A table: every field gets a column, lined up under a header you can drag.");
-        _tips.SetToolTip(_asInline, "Each row stays a line, shortened by whatever you have hidden. Best when one field is much longer than the rest.");
-        _tips.SetToolTip(_up, "Draw this field earlier in the row.");
-        _tips.SetToolTip(_down, "Draw this field later in the row.");
+        _tips.SetToolTip(_makeColumn, "Adds a field for what is picked out in the sample, with the punctuation around it.");
     }
 
     // ---- the template ----
-
-    /// <summary>Says what the chosen layout will do, in the place the choice was made - so the radio labels
-    /// can stay short enough to sit on one line at any font size.</summary>
-    private void UpdateLayoutHelp()
-        => _layoutHelp.Text = _asInline.Checked
-            ? "Each row stays a line, shortened by whatever you have hidden. Best when one field is much longer than the rest."
-            : "A table: every field gets a column, lined up under a header you can drag.";
 
     private string Current => _samples[Math.Clamp(_sample, 0, _samples.Count - 1)];
 
@@ -481,18 +584,17 @@ public sealed class ColumnsDialog : DialogBase
         }
     }
 
+    /// <summary>Whether there is anything to add a field FOR. Parts are built left to right, so what is
+    /// picked out has to lie beyond the last one - a stretch inside a field the template already reads
+    /// cannot become a field of its own.</summary>
     private void UpdateMakeColumn()
     {
-        var (from, to) = _preview.Selection;
+        var (from, _) = _preview.Selection;
         if (from < 0) { _makeColumn.Enabled = false; return; }
 
         var match = new TemplateMatch();
         _working.Compiled.Match(Current, match);
-        // Parts are built left to right, so what is picked out has to lie beyond the last one.
         _makeColumn.Enabled = from >= match.TailStart;
-        _tips.SetToolTip(_makeColumn, _makeColumn.Enabled
-            ? "Add a field for what is picked out, with the punctuation around it."
-            : "Pick out something after the last field the template reaches, and this will add a field for it.");
     }
 
     /// <summary>Adds a part for the stretch picked out in the sample: the text before it becomes the part's
@@ -524,6 +626,16 @@ public sealed class ColumnsDialog : DialogBase
         WriteTemplate(_template.Text + added, _template.TextLength + added.Length);
         _preview.ClearSelection();
         FillList();
+        // The new field goes on the end of the list, which on a long template is past the bottom of it -
+        // and a field that appears somewhere you cannot see looks like nothing happened. Only if there is a
+        // whole row's worth of list to scroll, though: with none, "the first row on show" is not a thing
+        // the grid will be told.
+        if (_list.Rows.Count > 0)
+        {
+            _list.CurrentCell = _list.Rows[^1].Cells["name"];
+            int shown = _list.DisplayedRowCount(false);
+            if (shown > 0) _list.FirstDisplayedScrollingRowIndex = Math.Max(0, _list.Rows.Count - shown);
+        }
         Refresh0();
     }
 
@@ -610,6 +722,141 @@ public sealed class ColumnsDialog : DialogBase
         Refresh0();
     }
 
+    // ---- dragging a row up and down the list ----
+
+    private int _dragFrom = -1, _dropAt = -1;
+    private Point _grabbed;
+
+    /// <summary>Room in the first cell for the grip, left of the colour.</summary>
+    private int GripWidth => Dpi(14);
+
+    /// <summary>Reordering by dragging, which is what anyone tries first on a list whose order matters. The
+    /// buttons stay: a row is dragged with a mouse, and the same move has to be there for a keyboard.
+    ///
+    /// <para>The drag only starts once the pointer has actually travelled, so that a plain click still just
+    /// picks a row, and it is refused while a cell is being typed in - a drag begun mid-edit would carry the
+    /// row out from under the editor.</para></summary>
+    private void WireDragging()
+    {
+        _list.AllowDrop = true;
+
+        _list.MouseDown += (_, e) =>
+        {
+            var hit = _list.HitTest(e.X, e.Y);
+            // Only from the grip and the name. A drag begun on the tick or the dropdown would swallow the
+            // click that was meant to work them, and those two cells are the ones a pointer goes to in order
+            // to CHANGE something rather than to move the row.
+            bool grabbable = hit.ColumnIndex == _list.Columns["swatch"]!.Index ||
+                             hit.ColumnIndex == _list.Columns["name"]!.Index;
+            _dragFrom = e.Button == MouseButtons.Left && hit.RowIndex >= 0 && grabbable ? hit.RowIndex : -1;
+            _grabbed = e.Location;
+        };
+        _list.MouseMove += (_, e) =>
+        {
+            if (_dragFrom < 0 || e.Button != MouseButtons.Left) return;
+            var slack = SystemInformation.DragSize;
+            if (Math.Abs(e.X - _grabbed.X) < slack.Width && Math.Abs(e.Y - _grabbed.Y) < slack.Height) return;
+            int from = _dragFrom;
+            _dragFrom = -1;
+            // Whatever was being edited is finished with first: dropping rebuilds the rows, and a row pulled
+            // out from under an open editor takes the editor with it. A ticked box counts as an edit, so
+            // asking on the way DOWN whether one was open refused the drag after every tick.
+            _list.EndEdit();
+            // The line is taken down whatever happened. Escape, or a release over a window that is not a
+            // drop target, tells OLE to call nothing at all - and the line drawn where the row was going
+            // would then stay on the list for the rest of the dialog.
+            try { _list.DoDragDrop(from, DragDropEffects.Move); }
+            finally { if (_dropAt >= 0) { _dropAt = -1; _list.Invalidate(); } }
+        };
+        _list.MouseUp += (_, _) => _dragFrom = -1;
+
+        _list.DragOver += OnListDragOver;
+        _list.DragLeave += (_, _) => { _dropAt = -1; _list.Invalidate(); };
+        _list.DragDrop += OnListDragDrop;
+        // Drawn per row rather than from the Paint event: a DataGridView paints its cells over anything the
+        // event puts down, so the line would be laid and then covered.
+        _list.RowPostPaint += (_, e) => DrawDropLine(e.Graphics, e.RowIndex, e.RowBounds);
+    }
+
+    private void OnListDragOver(object? sender, DragEventArgs e)
+    {
+        ScrollTowardEdge(e);
+        int at = DropRow(e);
+        e.Effect = at < 0 ? DragDropEffects.None : DragDropEffects.Move;
+        if (at == _dropAt) return;
+        _dropAt = at;
+        _list.Invalidate();
+    }
+
+    private void OnListDragDrop(object? sender, DragEventArgs e)
+    {
+        int to = DropRow(e);
+        int from = e.Data?.GetData(typeof(int)) as int? ?? -1;
+        _dropAt = -1;
+        _list.Invalidate();
+        MoveRow(from, to);
+    }
+
+    /// <summary>Walks the list along while a row is held near its top or bottom edge, so that a field can be
+    /// carried past the rows on screen to one that is not. Nothing to do when every row is already on show -
+    /// nor when NONE of them is, which is not the same thing: a grid squeezed shorter than one row refuses
+    /// to be told which row comes first, and this runs on every DragOver.</summary>
+    private void ScrollTowardEdge(DragEventArgs e)
+    {
+        int shown = _list.DisplayedRowCount(false);
+        if (shown <= 0 || shown >= _list.Rows.Count) return;
+        var at = _list.PointToClient(new Point(e.X, e.Y));
+        int edge = Math.Max(Dpi(12), _list.Rows.Count > 0 ? _list.Rows[0].Height : Dpi(20));
+        int first = _list.FirstDisplayedScrollingRowIndex;
+        if (at.Y < _list.ColumnHeadersHeight + edge && first > 0)
+            _list.FirstDisplayedScrollingRowIndex = first - 1;
+        else if (at.Y > _list.ClientSize.Height - edge && first < _list.Rows.Count - 1)
+            _list.FirstDisplayedScrollingRowIndex = first + 1;
+    }
+
+    /// <summary>Which place in the list the pointer is offering the row to: the gap ABOVE the row it is in
+    /// the top half of, below it otherwise, so that dropping on the bottom half of the last row puts the
+    /// field at the end rather than one short of it.</summary>
+    private int DropRow(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(typeof(int)) != true) return -1;
+        var at = _list.PointToClient(new Point(e.X, e.Y));
+        var hit = _list.HitTest(at.X, at.Y);
+        if (hit.RowIndex < 0)
+            return at.Y > _list.ColumnHeadersHeight && _list.Rows.Count > 0 ? _list.Rows.Count : -1;
+        var box = _list.GetRowDisplayRectangle(hit.RowIndex, false);
+        return at.Y > box.Top + box.Height / 2 ? hit.RowIndex + 1 : hit.RowIndex;
+    }
+
+    /// <summary>Takes a field out of the list and puts it back at <paramref name="before"/>, which counts
+    /// the GAPS between rows - so lifting a row out first would shift every gap below it by one.</summary>
+    private void MoveRow(int from, int before)
+    {
+        if (from < 0 || from >= _working.Columns.Count || before < 0) return;
+        int to = before > from ? before - 1 : before;
+        if (to == from || to < 0 || to >= _working.Columns.Count) return;
+        var moved = _working.Columns[from];
+        _working.Columns.RemoveAt(from);
+        _working.Columns.Insert(to, moved);
+        FillList();
+        _list.CurrentCell = _list.Rows[to].Cells["name"];
+        Refresh0();
+    }
+
+    /// <summary>The line saying where a dragged row would land. Drawn inside the row it belongs against -
+    /// above that row, or along the bottom of the last one when the field is being carried to the end -
+    /// because a row post-paint may only mark its own row.</summary>
+    private void DrawDropLine(Graphics g, int row, Rectangle bounds)
+    {
+        if (_dropAt < 0) return;
+        bool last = _dropAt >= _list.Rows.Count;
+        if (last ? row != _list.Rows.Count - 1 : row != _dropAt) return;
+        int thick = Math.Max(2, Dpi(2));
+        int y = last ? bounds.Bottom - thick / 2 - 1 : bounds.Top + thick / 2;
+        using var pen = new Pen(SystemColors.Highlight, thick);
+        g.DrawLine(pen, bounds.Left, y, bounds.Right, y);
+    }
+
     private void UpdateHighlight()
     {
         int row = _list.CurrentRow?.Index ?? -1;
@@ -618,6 +865,9 @@ public sealed class ColumnsDialog : DialogBase
         _down.Enabled = row >= 0 && row < _working.Columns.Count - 1;
     }
 
+    /// <summary>The first cell of a row: a grip saying the row can be dragged, and the colour that ties the
+    /// row to a band in the sample above. Greyed out when the field is not being shown, which is the same
+    /// thing the sample does to a band it is leaving out.</summary>
     private void PaintSwatch(object? sender, DataGridViewCellPaintingEventArgs e)
     {
         if (e.RowIndex < 0 || e.ColumnIndex != _list.Columns["swatch"]!.Index) return;
@@ -625,14 +875,43 @@ public sealed class ColumnsDialog : DialogBase
         if (e.RowIndex < _working.Columns.Count)
         {
             var column = _working.Columns[e.RowIndex];
-            var box = new Rectangle(e.CellBounds.Left + Dpi(6), e.CellBounds.Top + Dpi(5),
-                                    e.CellBounds.Width - Dpi(12), e.CellBounds.Height - Dpi(10));
+            DrawGrip(e.Graphics!, new Rectangle(e.CellBounds.Left, e.CellBounds.Top, GripWidth, e.CellBounds.Height));
+            var box = new Rectangle(e.CellBounds.Left + GripWidth + Dpi(4), e.CellBounds.Top + Dpi(5),
+                                    e.CellBounds.Width - GripWidth - Dpi(10), e.CellBounds.Height - Dpi(10));
             using var brush = new SolidBrush(column.Visible ? ColumnsPreview.BandOf(column.Source) : SystemColors.ControlLight);
             e.Graphics!.FillRectangle(brush, box);
             using var pen = new Pen(SystemColors.ControlDark);
             e.Graphics.DrawRectangle(pen, box);
         }
         e.Handled = true;
+    }
+
+    /// <summary>Six dots, the mark every list that can be reordered by hand uses. Drawn on every row rather
+    /// than only the one under the pointer: it is there to be noticed before anyone thinks to point at it.</summary>
+    private void DrawGrip(Graphics g, Rectangle cell)
+    {
+        int dot = Math.Max(1, Dpi(2));
+        int gap = dot * 2;
+        int left = cell.Left + (cell.Width - (dot * 2 + gap)) / 2;
+        int top = cell.Top + (cell.Height - (dot * 3 + gap * 2)) / 2;
+        using var brush = new SolidBrush(SystemColors.ControlDark);
+        for (int row = 0; row < 3; row++)
+            for (int side = 0; side < 2; side++)
+                g.FillRectangle(brush, left + side * (dot + gap), top + row * (dot + gap), dot, dot);
+    }
+
+    /// <summary>Brings the row for a part forward, so that pointing at a field in the sample or the result
+    /// says which of the listed fields it is - the same tie the colours make, followed the other way.</summary>
+    private void SelectField(int part)
+    {
+        int row = -1;
+        for (int i = 0; i < _working.Columns.Count; i++) if (_working.Columns[i].Source == part) { row = i; break; }
+        if (row < 0 || row >= _list.Rows.Count) return;
+        _list.CurrentCell = _list.Rows[row].Cells["name"];
+        // Said outright rather than left to the list's own SelectionChanged: that fires while the grid is
+        // still moving its current cell, so reading the row back from it there gave the row BEFORE the one
+        // just picked - and the band drawn round the old field stayed drawn round it.
+        UpdateHighlight();
     }
 
     // ---- everything that has to be redone when anything changes ----
@@ -713,7 +992,7 @@ public sealed class ColumnsDialog : DialogBase
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _tips.Dispose(); _legendMono?.Dispose(); _templateFont?.Dispose(); }
+        if (disposing) { _tips.Dispose(); _legendMono?.Dispose(); _templateFont?.Dispose(); _bold?.Dispose(); }
         base.Dispose(disposing);
     }
 
@@ -726,11 +1005,42 @@ public sealed class ColumnsDialog : DialogBase
     internal void SetCellForTesting(int row, string column, object? value) => _list.Rows[row].Cells[column].Value = value;
     internal void SelectRowForTesting(int row) => _list.CurrentCell = _list.Rows[row].Cells["name"];
     internal void MoveForTesting(int by) => Reorder(by);
+    /// <summary>Drops a field into the gap before <paramref name="before"/>, as a drag onto that gap does.</summary>
+    internal void DropRowForTesting(int from, int before) => MoveRow(from, before);
+
+    /// <summary>The real drag-over and drop the grid raises, driven at a point in the list, so that a check
+    /// can hold a row over a place a mouse would hold it - including the edges, where the list scrolls.</summary>
+    internal void DragOverForTesting(int clientX, int clientY) => RaiseDrag(OnListDragOver, clientX, clientY);
+    internal void DropAtForTesting(int from, int clientX, int clientY) => RaiseDrag(OnListDragDrop, clientX, clientY, from);
+
+    private void RaiseDrag(Action<object?, DragEventArgs> to, int clientX, int clientY, int carried = 0)
+    {
+        var at = _list.PointToScreen(new Point(clientX, clientY));
+        to(_list, new DragEventArgs(new DataObject(carried), 0, at.X, at.Y, DragDropEffects.Move, DragDropEffects.None));
+    }
+    /// <summary>Leaves the insertion line where a drag would be showing it, so it can be looked at.</summary>
+    internal void ShowDropLineForTesting(int before) { _dropAt = before; _list.Invalidate(); }
+    internal void PickFieldForTesting(int part) => SelectField(part);
+    internal int SelectedRowForTesting => _list.CurrentRow?.Index ?? -1;
+    internal int ListRoomInRowsForTesting
+        => _list.ClientSize.Height / Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
     internal void DetectForTesting() => Detect();
     internal void ApplyForTesting() => Apply();
     internal void SetLayoutForTesting(FieldLayout layout) { _asInline.Checked = layout == FieldLayout.Inline; _asColumns.Checked = !_asInline.Checked; }
     internal int RowCountForTesting => _list.Rows.Count;
     internal bool WidthIsEditableForTesting => !_list.Columns["width"]!.ReadOnly;
+
+    /// <summary>Where the longest sentence on the dialog ends up, in the dialog's own coordinates. It is the
+    /// only text here that has to WRAP - a label sizes itself to one line however long that line is - so
+    /// where its right-hand edge lands is the thing worth checking.</summary>
+    internal Rectangle LongestHelpForTesting
+    {
+        get
+        {
+            var label = _wrapping[^1];
+            return RectangleToClient(label.Parent!.RectangleToScreen(label.Bounds));
+        }
+    }
 
     // ---- the sample, which is drawn rather than built out of controls ----
 
