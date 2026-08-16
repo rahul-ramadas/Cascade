@@ -925,6 +925,46 @@ internal static class SelfTest
             ok &= Check($"the result is a row of the table, in cells of its own (\"{row}\")",
                         row.Contains("     api-gateway", StringComparison.Ordinal), row);
 
+            // --- getting round the dialog with nothing but a keyboard ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+            dlg.SelectRowForTesting(0);
+            Pump();
+            var stops = dlg.TabStopsForTesting;
+            string walk = string.Join(" > ", stops);
+            ok &= Check($"the field list is one stop on the way round ({walk})",
+                        stops.Count(s => s == "fields") == 1, walk);
+            // Which the walk above cannot tell you on its own: a grid is one control either way, and then
+            // takes Tab at run time to move its own current cell along with. Tabbing out of a list of four
+            // fields by five columns took twenty presses.
+            ok &= Check("and Tab walks out of it rather than along its cells", dlg.TabLeavesListForTesting);
+            ok &= Check("and the template box is where the round begins",
+                        stops.Length > 0 && stops[0] == "template", walk);
+            int okAt = Array.IndexOf(stops, "OK"), cancelAt = Array.IndexOf(stops, "Cancel");
+            // The row flows right to left so that OK sits left of Cancel, which without saying otherwise
+            // makes Cancel the first of the two Tab reaches.
+            ok &= Check($"and OK is reached before Cancel ({okAt} then {cancelAt})",
+                        okAt >= 0 && cancelAt >= 0 && okAt < cancelAt, walk);
+            ok &= Check($"and the whole dialog is a short walk ({stops.Length} stops)", stops.Length <= 14, walk);
+
+            var mnemonics = dlg.MnemonicsForTesting;
+            var clashes = mnemonics.GroupBy(m => m[0]).Where(g => g.Count() > 1)
+                                   .Select(g => string.Join(" and ", g)).ToArray();
+            ok &= Check($"no two things on it claim the same Alt key ({string.Join(", ", mnemonics)})",
+                        clashes.Length == 0, string.Join("; ", clashes));
+
+            // Alt with an arrow carries a field up and down, as it does in the filter list.
+            dlg.SelectRowForTesting(0);
+            Pump();
+            dlg.PressListKeyForTesting(Keys.Alt | Keys.Down);
+            Pump();
+            ok &= Check($"Alt+Down carries the field down the list ({string.Join(",", dlg.Result.Columns.Select(c => c.Source))})",
+                        dlg.Result.Columns[1].Source == 0 && dlg.SelectedRowForTesting == 1);
+            dlg.PressListKeyForTesting(Keys.Alt | Keys.Up);
+            Pump();
+            ok &= Check($"and Alt+Up carries it back ({string.Join(",", dlg.Result.Columns.Select(c => c.Source))})",
+                        dlg.Result.Columns[0].Source == 0 && dlg.SelectedRowForTesting == 0);
+
             // --- renaming a field from the keyboard ---
 
             dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");

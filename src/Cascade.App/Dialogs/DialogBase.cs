@@ -39,11 +39,13 @@ public abstract class DialogBase : Form
         return base.ProcessDialogKey(keyData);
     }
 
-    /// <summary>Right-aligned OK/Cancel strip (OK left of Cancel).</summary>
+    /// <summary>Right-aligned OK/Cancel strip (OK left of Cancel). The row flows right to left, so Cancel is
+    /// added first to land on the right - which would also make it the first thing Tab reaches. The two are
+    /// given their tab order outright, so the keyboard walks them the way they are read.</summary>
     protected FlowLayoutPanel OkCancelRow(out Button ok, out Button cancel)
     {
-        ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, 0, 0) };
-        cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, 0, 0) };
+        ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, 0, 0), TabIndex = 0 };
+        cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true, MinimumSize = new Size(Dpi(84), Dpi(26)), Margin = new Padding(Dpi(6), 0, 0, 0), TabIndex = 1 };
         var row = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.RightToLeft,
