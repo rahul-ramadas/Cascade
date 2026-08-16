@@ -76,7 +76,7 @@ public sealed class ColumnsDialog : DialogBase
         ClientSize = new Size(Dpi(940), Dpi(560));
         MinimumSize = new Size(Dpi(720), Dpi(540));
 
-        _template.Font = new Font("Consolas", Font.SizeInPoints + 1f);
+        _template.Font = TemplateFont;
 
         Controls.Add(BuildRoot());
         BuildList();
@@ -159,16 +159,15 @@ public sealed class ColumnsDialog : DialogBase
         templateRow.Controls.Add(_detect, 1, 0);
         Row(templateRow, SizeType.AutoSize, 0, 3);
 
-        // Each part of the legend is its own label in a wrapping row, so that a narrow dialog - or a large
-        // font - breaks it BETWEEN the rules rather than through the middle of one.
-        Row(Legend(SystemColors.ControlDarkDark,
-                   "[12:03][INFO] hello   is   {[*]}{[*]} {*}",
-                   "*  the text that changes, up to whatever you wrote next",
-                   "{ }  one field, punctuation and all"), SizeType.AutoSize, 0, 6);
-        Row(Legend(SystemColors.GrayText,
-                   "A run of spaces matches any run of spaces.",
-                   "\\{  \\}  \\*  \\\\  match those characters themselves."), SizeType.AutoSize, 0, 1);
-        Row(_status, SizeType.AutoSize, 0, 6);
+        // A worked example, then the four rules in a grid so the symbols line up under one another. Written
+        // out as one wrapping paragraph it read as a run-on sentence with punctuation samples embedded in it.
+        Row(Example(), SizeType.AutoSize, 0, 8);
+        Row(Rules(
+                ("*", "the part that changes"),
+                ("{ }", "one field \u2014 moved and hidden whole, punctuation and all"),
+                ("space", "any run of spaces"),
+                ("\\", "the next character, exactly")), SizeType.AutoSize, 0, 4);
+        Row(_status, SizeType.AutoSize, 0, 8);
 
         var nav = Flow(_previous, _next, Centred(_which, 10), Centred(_fit, 20), _nextMisfit, _makeColumn);
         Row(nav, SizeType.AutoSize, 0, 10);
@@ -209,20 +208,86 @@ public sealed class ColumnsDialog : DialogBase
         Font = new Font(Font, FontStyle.Bold)
     };
 
-    /// <summary>A row of the syntax legend: one label per rule, wrapping between them.</summary>
-    private FlowLayoutPanel Legend(Color colour, params string[] parts)
+    /// <summary>The one thing a reader has to be told, shown rather than described: a line they recognise,
+    /// and the template that reads it. No sentence around it - the arrow says what it is, and every mark in
+    /// it is spelled out in the list underneath.</summary>
+    private FlowLayoutPanel Example()
     {
         var flow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0) };
-        foreach (string part in parts)
-            flow.Controls.Add(new Label
-            {
-                Text = part,
-                AutoSize = true,
-                ForeColor = colour,
-                Margin = new Padding(0, 0, Dpi(26), 0)
-            });
+        flow.Controls.Add(Bit("[12:03][INFO] hello", SystemColors.GrayText, true));
+        flow.Controls.Add(Bit("\u2192", SystemColors.GrayText, false));
+        flow.Controls.Add(Bit("{[*]}{[*]} {*}", SystemColors.ControlText, true));
         return flow;
     }
+
+    /// <summary>What each mark means, in a grid so that the marks line up in a column of their own instead
+    /// of being buried mid-sentence.</summary>
+    private TableLayoutPanel Rules(params (string Symbol, string Meaning)[] rules)
+    {
+        var grid = new TableLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 2,
+            RowCount = rules.Length,
+            Margin = new Padding(Dpi(2), 0, 0, 0)
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        foreach (var (symbol, meaning) in rules)
+        {
+            var mark = Bit(symbol, SystemColors.ControlText, true);
+            mark.Margin = new Padding(0, Dpi(1), Dpi(10), Dpi(1));
+            mark.Anchor = AnchorStyles.Right;
+            var says = Bit(meaning, SystemColors.GrayText, false);
+            says.Margin = new Padding(0, Dpi(1), 0, Dpi(1));
+            says.Anchor = AnchorStyles.Left;
+            grid.Controls.Add(mark);
+            grid.Controls.Add(says);
+        }
+        return grid;
+    }
+
+    /// <summary>One piece of the help text. The marks are set in the same fixed pitch as the template box,
+    /// so that <c>{ }</c> on the page and <c>{ }</c> in the box are plainly the same thing.</summary>
+    private Label Bit(string text, Color colour, bool mono)
+    {
+        var label = new Label
+        {
+            Text = text,
+            AutoSize = true,
+            ForeColor = colour,
+            Margin = new Padding(0, Dpi(2), Dpi(7), Dpi(2))
+        };
+        // Everything else is left to INHERIT the dialog's font: assigning it, even the same one, is what
+        // stops a control following the window when the window is read at another size.
+        if (mono) { label.Font = MonoFont; _monoBits.Add(label); }
+        return label;
+    }
+
+    private readonly List<Label> _monoBits = [];
+    private Font? _legendMono, _templateFont;
+
+    private Font MonoFont => _legendMono ??= new Font("Consolas", Font.SizeInPoints);
+
+    /// <summary>The two faces this dialog makes for itself are made from its own size, so they have to be
+    /// made again when that changes - which it does when the window is dragged to a screen at another
+    /// scaling. Left alone, the template and the marks explaining it stayed at the size the dialog was
+    /// built at while every label around them grew.</summary>
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        var (staleMono, staleTemplate) = (_legendMono, _templateFont);
+        _legendMono = _templateFont = null;
+        _template.Font = TemplateFont;
+        foreach (var bit in _monoBits) bit.Font = MonoFont;
+        staleMono?.Dispose();
+        staleTemplate?.Dispose();
+    }
+
+    /// <summary>A touch larger than the dialog's own text: the template is the thing being written here, and
+    /// every character of it has to be told apart from every other.</summary>
+    private Font TemplateFont => _templateFont ??= new Font("Consolas", Font.SizeInPoints + 1f);
 
     /// <summary>Puts a label on the same line as the buttons beside it, whatever the font: anchored to
     /// nothing, a flow layout centres it in the row rather than hanging it from the top.</summary>
@@ -648,7 +713,7 @@ public sealed class ColumnsDialog : DialogBase
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _tips.Dispose();
+        if (disposing) { _tips.Dispose(); _legendMono?.Dispose(); _templateFont?.Dispose(); }
         base.Dispose(disposing);
     }
 
