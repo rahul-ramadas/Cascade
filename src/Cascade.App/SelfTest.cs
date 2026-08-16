@@ -63,6 +63,7 @@ internal static class SelfTest
             ok &= Timed("machine state", RunMachineStateChecks);
             ok &= Timed("render", RunRenderChecks);
             ok &= Timed("columns", RunColumnChecks);
+            ok &= Timed("field settings", RunFieldSettingsChecks);
             ok &= Timed("column mode", RunColumnModeChecks);
             ok &= Timed("navigation", RunNavigationChecks);
             ok &= Timed("filter list", RunFilterListChecks);
@@ -820,6 +821,241 @@ internal static class SelfTest
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>
+    /// The Fields dialog and the chip strip, looked at the way a reader looks at them: is anything cut off,
+    /// does the sample stay inside its box when it is scrolled, do the columns in the result line up, and
+    /// does a field carried elsewhere take the space in front of it along.
+    /// </summary>
+    private static bool RunFieldSettingsChecks()
+    {
+        Line("-- the field settings dialog, and the chips --");
+
+        var samples = new[]
+        {
+            "[2026-08-05T05:00:02][api-gateway][INFO ] payment order 4417 accepted",
+            "[2026-08-05T05:00:03][payment-service][WARN ] retrying charge for order 4417",
+            "[2026-08-05T05:00:04][api-gateway][ERROR] " + string.Join(" ", Enumerable.Range(0, 60).Select(i => $"word{i}")),
+            "a line of quite another shape",
+        };
+
+        var spec = new ColumnSpec { Enabled = true, Template = "{[*]}{[*]}{[*]} {*}" };
+        spec.Reset();
+        spec.Columns[0].Name = "Time";
+        spec.Columns[1].Name = "Service";
+        spec.Columns[2].Name = "Level";
+        spec.Columns[3].Name = "Message";
+
+        bool ok = true;
+
+        using (var dlg = new ColumnsDialog(spec, samples))
+        {
+            dlg.StartPosition = FormStartPosition.Manual;
+            dlg.Location = new Point(0, 0);
+            dlg.Opacity = 0;
+            dlg.Show();
+            Pump();
+            var preview = dlg.PreviewForTesting;
+
+            // --- the sample box while it is scrolled ---
+
+            dlg.StepSampleForTesting(2);   // the long line, which is the one with anywhere to scroll to
+            Pump();
+            ok &= Check("a line too long for the box can be scrolled", preview.CanScrollForTesting());
+
+            var gutter = new Rectangle(0, 0, preview.GutterForTesting(), preview.Height - preview.ScrollBarHeightForTesting - 2);
+            using (var still = CaptureControl(preview))
+            {
+                preview.ScrollToForTesting(preview.FurthestScrollForTesting());
+                Pump();
+                using var scrolled = CaptureControl(preview);
+                // The words that name the two rows live to the left of the text. TextRenderer draws through
+                // GDI, which ignores the clip region unless told not to - and without that the scrolled
+                // sample was painted straight over them.
+                var differs = FirstDifference(still, scrolled, gutter);
+                ok &= Check("scrolling the sample leaves the words that name the rows untouched",
+                            differs is null, $"first difference at {differs}");
+                ok &= Check("and the sample itself did move", !SameRegion(still, scrolled,
+                            new Rectangle(gutter.Right + 4, 0, preview.Width - gutter.Right - 8, gutter.Height)));
+            }
+            preview.ScrollToForTesting(0);
+            dlg.StepSampleForTesting(-2);
+            Pump();
+
+            // --- nothing is said about a line not matching until there is a template to match it with ---
+
+            dlg.SetTemplateForTesting("");
+            Pump();
+            ok &= Check("an empty template is not reported as a line that does not match",
+                        !preview.SaysWhyNotForTesting);
+            dlg.SetTemplateForTesting("{[*]}{[*]");
+            Pump();
+            ok &= Check("nor is a half-written one", !preview.SaysWhyNotForTesting);
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+            dlg.StepSampleForTesting(3);
+            Pump();
+            ok &= Check("a line that really does not fit is", preview.SaysWhyNotForTesting);
+            dlg.StepSampleForTesting(-3);
+            Pump();
+
+            // --- a field picked out of the sample keeps the space in front of it as a SEPARATOR ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]}");
+            Pump();
+            dlg.SelectSampleForTesting(42, 49);          // "payment", which follows a space
+            Pump();
+            ok &= Check("a stretch picked out past the last field can be made into one",
+                        dlg.AddFieldEnabledForTesting);
+            dlg.AddFieldForTesting();
+            Pump();
+            ok &= Check($"and the space in front of it is written outside the braces ({dlg.TemplateForTesting})",
+                        dlg.TemplateForTesting.EndsWith("} {*}", StringComparison.Ordinal),
+                        dlg.TemplateForTesting);
+
+            // --- the columns of the result line up, width and alignment included ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+            dlg.SetLayoutForTesting(FieldLayout.Columns);
+            dlg.SetCellForTesting(1, "align", "Right");
+            Pump();
+            string row = dlg.ResultForTesting;
+            ok &= Check($"the result is a row of the table, in cells of its own (\"{row}\")",
+                        row.Contains("     api-gateway", StringComparison.Ordinal), row);
+
+            dlg.Close();
+            Pump();
+        }
+
+        // --- the dialog at a large font: everything on it still has room ---
+
+        using (var big = new ColumnsDialog(spec, samples))
+        {
+            big.Font = new Font(big.Font.FontFamily, 16f);
+            big.StartPosition = FormStartPosition.Manual;
+            big.Location = new Point(0, 0);
+            big.Opacity = 0;
+            big.Show();
+            Pump();
+
+            var preview = big.PreviewForTesting;
+            ok &= Check($"the sample box grows with the font ({preview.Height} vs {preview.PreferredHeight} wanted)",
+                        preview.Height >= preview.PreferredHeight - 1,
+                        $"{preview.Bounds}");
+
+            var list = big.ListForTesting;
+            int rows = big.RowCountForTesting;
+            ok &= Check($"and the field list still shows its rows ({list.ClientSize.Height}px for {rows} rows)",
+                        list.ClientSize.Height >= 4 * 20, $"{list.Bounds} in {big.ClientSize}");
+            big.Close();
+            Pump();
+        }
+
+        // --- the chips: a label has to fit inside the chip it is drawn in ---
+
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_chips_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(path, Enumerable.Range(1, 200)
+            .Select(i => $"[2026-08-05T09:31:{i % 60:00}][api-gateway][INFO ] request {i} handled"));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.Columns.Enabled = true;
+            doc.Columns.Layout = FieldLayout.Inline;
+            doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
+            doc.Columns.Reset();
+            string[] names = ["Time", "Provider", "Level", "Message"];
+            for (int i = 0; i < doc.Columns.Columns.Count && i < names.Length; i++)
+                doc.Columns.Columns[i].Name = names[i];
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(900, 320), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            foreach (var (family, size) in new[] { ("Consolas", 10f), ("Consolas", 8f), ("Consolas", 16f), ("Segoe UI", 10f) })
+            {
+                settings.FontFamily = family;
+                settings.FontSize = size;
+                grid.ApplySettings(settings);
+                grid.RefreshView();
+                Pump();
+
+                var rect = grid.ChipRectForTesting(1);
+                int text = grid.ChipLabelHeightForTesting;
+                ok &= Check($"a chip's label fits inside it at {family} {size}pt (label {text}, chip {rect.Height})",
+                            !rect.IsEmpty && text <= rect.Height,
+                            $"row {grid.RowPitch}, chip {rect}");
+                ok &= Check($"and the chip fits inside the one row the strip has ({rect.Height} of {grid.RowPitch})",
+                            rect.Height <= grid.RowPitch && rect.Height > 0);
+            }
+
+            settings.FontFamily = "Consolas";
+            settings.FontSize = 10f;
+            grid.ApplySettings(settings);
+            grid.RefreshView();
+            Pump();
+
+            // The strip starts where the text does, so the eye has something to line it up by.
+            ok &= Check($"the first chip starts level with the text ({grid.ChipRectForTesting(0).Left} vs {grid.GutterWidthForTesting})",
+                        grid.ChipRectForTesting(0).Left == grid.GutterWidthForTesting);
+
+            // --- renaming from a chip happens ON the chip ---
+
+            grid.DoubleClickChipForTesting(1);
+            Pump();
+            var chip = grid.ChipRectForTesting(1);
+            var box = grid.RenameBoxBoundsForTesting;
+            ok &= Check($"double-clicking a chip opens an edit box over it (chip {chip}, box {box})",
+                        grid.IsRenamingForTesting && box.Left == chip.Left && box.Top == chip.Top,
+                        $"{box} vs {chip}");
+            ok &= Check("and the field it names is still shown - the first of the two clicks put it away",
+                        doc.Columns.Columns[1].Visible);
+            grid.SetRenameTextForTesting("Service");
+            grid.EndRename(commit: true);
+            Pump();
+            ok &= Check($"and what is typed becomes its name ({grid.ChipNamesForTesting})",
+                        doc.Columns.Columns[1].Name == "Service");
+
+            // A hidden field still has a chip, so it can be renamed where it stands.
+            doc.Columns.Columns[1].Visible = false;
+            grid.RefreshView();
+            Pump();
+            using (var menu = grid.ColumnMenuForTesting(1))
+            {
+                var rename = menu.Items.OfType<ToolStripMenuItem>()
+                    .FirstOrDefault(i => (i.Text ?? "").StartsWith("&Rename", StringComparison.Ordinal));
+                ok &= Check("a hidden field can be renamed from its chip's menu",
+                            rename is { Enabled: true }, rename?.Text ?? "(no rename entry)");
+                var hide = menu.Items.OfType<ToolStripMenuItem>()
+                    .FirstOrDefault(i => (i.Text ?? "").StartsWith("&Hide", StringComparison.Ordinal));
+                ok &= Check("but not hidden again, which would do nothing", hide is { Enabled: false });
+            }
+            doc.Columns.Columns[1].Visible = true;
+            grid.RefreshView();
+            Pump();
+
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    private static Bitmap CaptureControl(Control c)
+    {
+        var bmp = new Bitmap(Math.Max(1, c.Width), Math.Max(1, c.Height));
+        c.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
+        return bmp;
     }
 
     /// <summary>Turning the column view on and off - from the keyboard, which is what it is here for, and

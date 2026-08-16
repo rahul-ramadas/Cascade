@@ -164,7 +164,10 @@ public class ColumnTests
         Assert.Equal("[INFO] [09:31] hello", Inline(spec, "[09:31][INFO] hello"));
     }
 
-    /// <summary>Text the template never reached is data, not punctuation, and is never dropped.</summary>
+    /// <summary>Text the template never reached is data, not punctuation, and is never dropped - bar the
+    /// blank the hidden field in front of it was separated by, which is a separator with nothing left to
+    /// separate. A row that began one space in would sit out of line with the lines the template does not
+    /// match, which are shown whole.</summary>
     [Fact]
     public void The_tail_the_template_never_reached_is_kept()
     {
@@ -172,7 +175,41 @@ public class ColumnTests
 
         var spec = Spec("{[*]}");
         spec.Columns[0].Visible = false;
-        Assert.Equal(" and the rest", Inline(spec, "[a] and the rest"));
+        Assert.Equal("and the rest", Inline(spec, "[a] and the rest"));
+    }
+
+    /// <summary>A field written with the space in front of it INSIDE its braces - which is what picking one
+    /// out of the sample used to write - carries that space wherever it is carried. At the front of the row
+    /// that leaves a line starting one space in, so the row drops it.</summary>
+    [Fact]
+    public void A_field_carried_to_the_front_does_not_bring_its_space_with_it()
+    {
+        var spec = Spec("{[*]}{[*]}{ *}");
+        const string line = "[09:31][INFO] hello world";
+        Assert.Equal(line, Inline(spec, line));
+
+        var message = spec.Columns[2];
+        spec.Columns.RemoveAt(2);
+        spec.Columns.Insert(0, message);
+        Assert.Equal("hello world [09:31][INFO]", Inline(spec, line));
+    }
+
+    /// <summary>...and it does not double up with the one the projection puts in either, wherever it lands.
+    /// Two spaces where the reader asked for one is how a row comes out looking mis-set.</summary>
+    [Fact]
+    public void A_field_that_carries_a_space_is_never_joined_with_a_second_one()
+    {
+        var spec = Spec("{[*]}{[*]}{ *}");
+        var message = spec.Columns[2];
+        spec.Columns.RemoveAt(2);
+        spec.Columns.Insert(1, message);
+        Assert.Equal("[09:31] hello world [INFO]", Inline(spec, "[09:31][INFO] hello world"));
+
+        var trailing = Spec("{[*] }{[*]}");
+        var second = trailing.Columns[1];
+        trailing.Columns.RemoveAt(1);
+        trailing.Columns.Insert(0, second);
+        Assert.Equal("[INFO] [09:31] ", Inline(trailing, "[09:31] [INFO]"));
     }
 
     /// <summary>A trailing literal in the template is part of the line too.</summary>
@@ -266,6 +303,34 @@ public class ColumnTests
 
         var (start, length) = match.Part(1);
         Assert.True(projection.IsContiguous(start, start + length));
+    }
+
+    /// <summary>Dropping the leading blank has to take the map with it, or every mark, selection and copy
+    /// on that row would land one character out.</summary>
+    [Fact]
+    public void The_map_survives_dropping_the_blank_a_carried_field_brought_with_it()
+    {
+        var spec = Spec("{[*]}{[*]}{ *}");
+        var message = spec.Columns[2];
+        spec.Columns.RemoveAt(2);
+        spec.Columns.Insert(0, message);
+
+        const string line = "[09:31][INFO] hello world";
+        var match = new TemplateMatch();
+        spec.Compiled.Match(line, match);
+        var projection = new LineProjection();
+        projection.Build(line, spec, match);
+
+        Assert.Equal("hello world [09:31][INFO]", projection.Text);
+        for (int i = 0; i < projection.Text.Length; i++)
+        {
+            int at = projection.ToLine(i);
+            if (at < 0) continue;                 // the joiner, which belongs to no line in the file
+            Assert.Equal(projection.Text[i], line[at]);
+            Assert.Equal(i, projection.FromLine(at));
+        }
+        // The space the field brought with it is not shown, so it maps to nothing at all.
+        Assert.Equal(-1, projection.FromLine(line.IndexOf(" hello", StringComparison.Ordinal)));
     }
 
     // ---- carrying the list across an edit to the template ----

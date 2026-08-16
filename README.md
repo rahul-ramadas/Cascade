@@ -110,12 +110,14 @@ Then pick a **layout**. **Columns** lines the fields up under a header: drag an 
 whole characters in a fixed-pitch font), double-click an edge to fit a column to its content, carry a
 header sideways to reorder, double-click a name to rename it, right-click for the tick list. **Inline**
 keeps every row a line and simply leaves out what you have hidden — better when one field is far longer
-than the rest — with a strip of chips above the log to click and drag instead of a header.
+than the rest — with a strip of chips above the log instead of a header: click one to put that field away
+or bring it back, drag it to move the field along the row, double-click it to rename it.
 
 Hiding a field takes its punctuation with it, so `[a][b][c]` closes up to `[a][c]` rather than leaving
-empty brackets behind. **View > Field Settings…** shows the template against real lines from the file: a
-coloured band per field, the row as it will actually be drawn, how many of the sampled lines match, and —
-for one that does not — the character where it stopped matching.
+empty brackets behind, and a field carried elsewhere leaves the space that separated it behind as well.
+**View > Field Settings…** shows the template against real lines from the file: a coloured band per field,
+the row as it will actually be drawn — cell by cell in the Columns layout, widths and alignment included —
+how many of the sampled lines match, and, for one that does not, the character where it stopped matching.
 
 Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
 A line the template does not match is shown whole and untouched, and Cascade says so when a search lands

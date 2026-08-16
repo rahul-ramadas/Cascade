@@ -12,7 +12,12 @@ public readonly record struct ProjectedSpan(int Start, int Length, int LineStart
 ///
 /// <para>What goes BETWEEN two parts is the text that separates them in the line - taken from the line
 /// itself, so padding and punctuation are whatever the log actually had. Only carrying a part BACKWARDS
-/// leaves no sensible answer, and there a single joiner goes in.</para>
+/// leaves no sensible answer, and there a single joiner goes in - unless one side already ends or begins
+/// with a blank, because a field can carry the space that separated it with it.</para>
+///
+/// <para>A row never BEGINS with a blank for the same reason: a field carried to the front would otherwise
+/// take the separator in front of it along, and the lines the template does not match - which are shown
+/// whole - would no longer start in the same column.</para>
 ///
 /// <para>The span map is the important part: everything downstream - the marks, the selection, the hit
 /// test, the clipboard - works in DISPLAY coordinates, and <see cref="ToLine"/> and <see cref="FromLine"/>
@@ -59,11 +64,11 @@ public sealed class LineProjection
             int source = column.Source;
             if (!column.Visible || source < 0 || source >= match.PartCount) continue;
 
+            var (start, length) = match.Part(source);
             if (previous < 0) { if (source == 0) TakeGapBefore(line, match, 0); }
             else if (source > previous) TakeGapBefore(line, match, source);
-            else Invent(Joiner);
+            else if (NeedsJoiner(line, start, length)) Invent(Joiner);
 
-            var (start, length) = match.Part(source);
             Take(line, start, length, source);
             previous = source;
         }
@@ -82,7 +87,43 @@ public sealed class LineProjection
         // copy of it. This is the ordinary state - fields on, nothing hidden - and the paint asks for one
         // of these per row per frame, so it is the allocation worth not making.
         IsWholeLine = CoversWholeLine(line);
+        if (!IsWholeLine) DropLeadingBlank();
         _built = IsWholeLine ? line : _text.ToString();
+    }
+
+    /// <summary>Whether a single space has to go in between what has been written and the part about to be.
+    /// It does not when either side already offers one: a field whose own text begins with the space that
+    /// used to separate it from what came before it brings that space with it wherever it is carried, and
+    /// two separators where the reader asked for one is how a row ends up looking mis-set.</summary>
+    private bool NeedsJoiner(string line, int start, int length)
+    {
+        if (_text.Length == 0 || IsBlank(_text[^1])) return false;
+        return !(length > 0 && start >= 0 && start < line.Length && IsBlank(line[start]));
+    }
+
+    private static bool IsBlank(char c) => c is ' ' or '\t';
+
+    /// <summary>Takes off the run of blanks a row would otherwise BEGIN with, and the spans with it. A
+    /// field's own text can start with the space that separated it from what came before it - carry that
+    /// field to the front of the row and every line would start one space in, out of line with the lines
+    /// the template does not match. Only ever done to a row that already differs from the file's line.</summary>
+    private void DropLeadingBlank()
+    {
+        int blank = 0;
+        while (blank < _text.Length && IsBlank(_text[blank])) blank++;
+        if (blank == 0) return;
+
+        _text.Remove(0, blank);
+        int at = 0;
+        while (at < _spans.Count)
+        {
+            var span = _spans[at];
+            if (span.Start + span.Length <= blank) { _spans.RemoveAt(at); continue; }
+            int cut = Math.Max(0, blank - span.Start);
+            _spans[at] = new ProjectedSpan(Math.Max(0, span.Start - blank), span.Length - cut,
+                                           span.Invented ? -1 : span.LineStart + cut, span.Part, span.Invented);
+            at++;
+        }
     }
 
     /// <summary>Whether the spans, in order, are exactly the line and nothing else.</summary>
