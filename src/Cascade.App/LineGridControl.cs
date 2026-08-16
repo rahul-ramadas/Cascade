@@ -65,10 +65,9 @@ public sealed class LineGridControl : Control
     private Font FontBold => _fonts[1];
     private Font FontItalic => _fonts[2];
     private FontFamily? _fontFamily;
-    /// <summary>The face the chips above the log are labelled in: the window's own UI font, brought down
-    /// until it fits inside a chip. The log's face is the wrong tool here - it is as tall as a row, and a
-    /// chip has to sit INSIDE a row, so its label came out with its top and tail cut off.</summary>
-    private Font? _chipFont;
+    /// <summary>How tall the text on a chip is drawn. Measured when the fonts are built rather than on
+    /// every paint - laying the strip out asks for it once per chip.</summary>
+    private int _chipTextHeight = 12;
     private int _rowHeight = 16;
     private int _charWidth = 8;
     private readonly int[] _charWidths = new int[8];
@@ -699,33 +698,20 @@ public sealed class LineGridControl : Control
         Invalidate();
     }
 
-    /// <summary>Makes the face the chips are labelled in fit the strip, which is one row tall whatever the
-    /// log is being read at. It follows the LOG's size, so zooming the log carries the chips with it, and is
-    /// then measured and brought down until it fits: at a small log font, or in a proportional one, the
-    /// difference between the row and the text is a couple of pixels, and a couple of pixels is the whole
-    /// descender.</summary>
+    /// <summary>
+    /// The face the chips above the log are labelled in: the WINDOW's own font, the one the menu bar and
+    /// every other piece of chrome uses.
+    ///
+    /// <para>The log's face is the wrong tool. A chip is a control, not log text - it is read at whatever
+    /// size the rest of the window is read at, and it does not shrink because someone chose a small fixed
+    /// pitch for their log or zoomed out. Sized from the log it came out a few pixels tall and unreadable,
+    /// and squeezed into a row of it, cropped.</para>
+    /// </summary>
+    private Font ChipFont => Font;
+
     private void BuildChipFont()
-    {
-        _chipFont?.Dispose();
-        _chipFont = null;
-
-        int room = Math.Max(LogicalToDeviceUnits(7), ChipHeight - LogicalToDeviceUnits(2));
-        float points = Math.Max(6f, _settings.EffectiveFontSize);
-        var family = Font.FontFamily;
-        for (int tries = 0; tries < 6; tries++)
-        {
-            var candidate = new Font(family, points, FontStyle.Regular, GraphicsUnit.Point);
-            int height = TextRenderer.MeasureText("Xg", candidate, new Size(int.MaxValue, int.MaxValue),
-                TextFormatFlags.NoPadding).Height;
-            if (height <= room || points <= 6f) { _chipFont = candidate; return; }
-            candidate.Dispose();
-            // Straight to the size that would have fitted, rather than creeping down by halves.
-            points = Math.Max(6f, points * room / height - 0.1f);
-        }
-        _chipFont = new Font(family, 6f, FontStyle.Regular, GraphicsUnit.Point);
-    }
-
-    private Font ChipFont => _chipFont ?? FontRegular;
+        => _chipTextHeight = TextRenderer.MeasureText("Xg", ChipFont, new Size(int.MaxValue, int.MaxValue),
+               TextFormatFlags.NoPadding).Height;
 
     /// <summary>Recomputes scrollbar ranges from the document and repaints. Call (on the UI thread)
     /// whenever counts change or the view mode/filters change.</summary>
@@ -824,10 +810,27 @@ public sealed class LineGridControl : Control
     /// <summary>Where the text starts: below anything sitting above it and below the header strip.</summary>
     private int TextTop => TopInset + HeaderHeight;
 
+    /// <summary>How many rows the strip above the text takes. Columns puts a draggable header there and one
+    /// row is its own line height, so one row is right. Inline puts CHIPS there, which are labelled in the
+    /// window's font rather than the log's - so at a small log font they need more than one of its rows.
+    ///
+    /// <para>A whole number of rows either way, and not a pixel more: everything that keeps the line under
+    /// the reader still while this appears and disappears works in rows, and half a row of strip would move
+    /// the whole log by half a line with no way to scroll it back.</para></summary>
+    internal int HeaderRows
+    {
+        get
+        {
+            if (!(_doc?.Columns.Active ?? false)) return 0;
+            if (_doc!.Columns.Layout != FieldLayout.Inline) return 1;
+            int wanted = ChipHeight + 2 * LogicalToDeviceUnits(2);
+            return Math.Max(1, (wanted + _rowHeight - 1) / Math.Max(1, _rowHeight));
+        }
+    }
+
     /// <summary>The strip above the text. Columns puts a draggable header there; Inline puts the chips that
-    /// show which parts are being kept. Either way it is one row, so turning splitting on or off moves the
-    /// text by the same amount whichever layout is in use.</summary>
-    private int HeaderHeight => (_doc?.Columns.Active ?? false) ? _rowHeight : 0;
+    /// show which parts are being kept.</summary>
+    private int HeaderHeight => HeaderRows * _rowHeight;
 
     /// <summary>Room the sideways scrollbar takes at the bottom. Nothing at all when it is hidden - a
     /// hidden docked control gives its space back, so counting its height anyway left a strip of the view
@@ -1297,13 +1300,12 @@ public sealed class LineGridControl : Control
     private int ChipPad => LogicalToDeviceUnits(7);
     private int ChipGap => LogicalToDeviceUnits(5);
 
-    /// <summary>How tall a chip is. The strip is one row, exactly as the header is, so a chip has to sit
-    /// inside a row with a hair of daylight above and below it.</summary>
-    private int ChipHeight => Math.Max(LogicalToDeviceUnits(9), _rowHeight - LogicalToDeviceUnits(3));
+    /// <summary>How tall a chip is: what its label needs, and a little either side of it. Sized from the
+    /// label rather than from a log row, because the label is not log text.</summary>
+    private int ChipHeight => _chipTextHeight + 2 * LogicalToDeviceUnits(3);
 
-    /// <summary>The colour patch on a chip, which shrinks with the chip rather than standing proud of it.</summary>
-    private int ChipSwatch => Math.Max(LogicalToDeviceUnits(5),
-                                       Math.Min(LogicalToDeviceUnits(9), ChipHeight - LogicalToDeviceUnits(8)));
+    /// <summary>The colour patch on a chip, a little smaller than the text beside it.</summary>
+    private int ChipSwatch => Math.Max(LogicalToDeviceUnits(6), _chipTextHeight - LogicalToDeviceUnits(4));
 
     /// <summary>Where every chip sits, in display order, and - when they do not all fit - where the button
     /// that opens the rest sits. Laid out from the left of the content area and NOT scrolled with the text:
@@ -1318,7 +1320,7 @@ public sealed class LineGridControl : Control
         // by, and the header in the other layout starts exactly there.
         int x = GutterWidth();
         int height = ChipHeight;
-        int top = TopInset + Math.Max(0, (_rowHeight - height) / 2);
+        int top = TopInset + Math.Max(0, (HeaderHeight - height) / 2);
         var spec = _doc.Columns;
         int room = TextRenderer.MeasureText("\u00bb 00", ChipFont, new Size(int.MaxValue, height),
             TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 2 * ChipPad + ChipGap;
@@ -1361,7 +1363,7 @@ public sealed class LineGridControl : Control
     private void DrawFieldChips(Graphics g)
     {
         int top = TopInset;
-        var strip = new Rectangle(0, top, ClientSize.Width - RightGutterWidth, _rowHeight);
+        var strip = new Rectangle(0, top, ClientSize.Width - RightGutterWidth, HeaderHeight);
         using (var brush = new SolidBrush(_settings.GutterBack)) g.FillRectangle(brush, strip);
         using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
             g.DrawLine(pen, 0, strip.Bottom - 1, strip.Width, strip.Bottom - 1);
@@ -2695,7 +2697,6 @@ public sealed class LineGridControl : Control
         {
             _tipTimer.Dispose(); _tips.Dispose();
             foreach (var f in _fonts) f?.Dispose();
-            _chipFont?.Dispose();
             foreach (var b in _brushes.Values) b.Dispose();
             _brushes.Clear();
             _fontFamily?.Dispose();
@@ -2947,6 +2948,21 @@ public sealed class LineGridControl : Control
         // next paint re-arms it at wherever this leaves the view.
         ClearViewAnchor();
         SetFirstRow(want);
+        Invalidate();
+        Update();
+    }
+
+    /// <summary>The same, for a change to the FIELDS - where how many rows the strip above the text will
+    /// take is the grid's own business and not something the caller should have to predict. It depends on
+    /// the layout being switched to and on the two fonts in play, and a caller that guessed one row would
+    /// slide the whole log the moment that stopped being true.</summary>
+    internal void KeepTextStillAcrossFieldChange(Action change)
+    {
+        int before = HeaderRows;
+        KeepTextStillAcross(0, () => { change(); });
+        int after = HeaderRows;
+        if (after == before) return;
+        SetFirstRow(_firstRow + (after - before));
         Invalidate();
         Update();
     }
