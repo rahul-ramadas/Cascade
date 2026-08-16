@@ -925,6 +925,34 @@ internal static class SelfTest
             ok &= Check($"the result is a row of the table, in cells of its own (\"{row}\")",
                         row.Contains("     api-gateway", StringComparison.Ordinal), row);
 
+            // --- renaming a field from the keyboard ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+            Pump();
+            dlg.SetCellForTesting(1, "name", "Service");
+            dlg.SelectRowForTesting(1);
+            Pump();
+            dlg.PressF2ForTesting();
+            Pump();
+            ok &= Check("F2 opens the field's name for typing", dlg.IsRenamingForTesting);
+            // Selected, not merely open: renaming a field almost always means a NEW name, and a caret left
+            // at the end makes the reader clear the old one out by hand first.
+            ok &= Check($"with the whole of it selected, ready to be typed over (\"{dlg.SelectedInEditorForTesting}\")",
+                        dlg.SelectedInEditorForTesting == "Service", dlg.SelectedInEditorForTesting);
+            dlg.TypeInEditorForTesting("Provider");
+            Pump();
+
+            // Escape belongs to the innermost thing it can close. While a name is being typed over that is
+            // the name - throwing the whole dialog away would take every other change with it.
+            ok &= Check("Escape while renaming is taken by the rename", dlg.PressDialogKeyForTesting(Keys.Escape));
+            Pump();
+            ok &= Check("which puts the editor away", !dlg.IsRenamingForTesting);
+            dlg.ApplyForTesting();
+            ok &= Check($"and leaves the name as it was ({dlg.Result.Columns[1].Name})",
+                        dlg.Result.Columns[1].Name == "Service");
+            ok &= Check("and the dialog is still open", dlg.Visible && dlg.DialogResult != DialogResult.Cancel,
+                        $"visible {dlg.Visible}, result {dlg.DialogResult}");
+
             // --- and a row has to show something ---
 
             for (int i = 0; i < dlg.RowCountForTesting; i++) dlg.SetCellForTesting(i, "show", false);
@@ -979,6 +1007,12 @@ internal static class SelfTest
             dlg.DropRowForTesting(0, 4);
             dlg.SetLayoutForTesting(FieldLayout.Columns);
             Pump();
+
+            // ...and with nothing being typed over, Escape means what it always did. Last of all, because
+            // what it means is that the dialog goes away.
+            ok &= Check("Escape with nothing being renamed is left to the dialog",
+                        dlg.PressDialogKeyForTesting(Keys.Escape) && dlg.DialogResult == DialogResult.Cancel,
+                        $"result {dlg.DialogResult}");
 
             dlg.Close();
             Pump();

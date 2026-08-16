@@ -483,6 +483,7 @@ public sealed class ColumnsDialog : DialogBase
         _list.SelectionChanged += (_, _) => UpdateHighlight();
         _list.CellPainting += PaintSwatch;
         _list.DataError += (_, e) => e.ThrowException = false;
+        _list.KeyDown += OnListKeyDown;
         WireDragging();
 
         _up.Click += (_, _) => Reorder(-1);
@@ -497,6 +498,38 @@ public sealed class ColumnsDialog : DialogBase
     }
 
     // ---- the template ----
+
+    /// <summary>F2 opens a cell for typing OVER, not for typing into. Renaming a field almost always means
+    /// a new name rather than an edit to the old one, so the old one arrives selected and the first
+    /// keystroke replaces it - which is what double-clicking a chip over the log has always done, and what
+    /// a reader who has done it there will expect here.
+    ///
+    /// <para>A DataGridView only selects the contents on F2 in the EditOnF2 mode, and that mode gives up
+    /// starting an edit when a letter is typed - so the behaviour is taken rather than the mode.</para></summary>
+    private void OnListKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode != Keys.F2 || e.Modifiers != Keys.None || _list.IsCurrentCellInEditMode) return;
+        if (_list.CurrentCell is not DataGridViewTextBoxCell cell || cell.ReadOnly) return;
+        e.Handled = true;
+        _list.BeginEdit(selectAll: true);
+    }
+
+    /// <summary>Escape belongs to the innermost thing it can close, and while a name is being typed over
+    /// that is the name - not the dialog. Left to the base, a reader correcting a typo and thinking better
+    /// of it threw away every other change they had made as well.
+    ///
+    /// <para>It has to be caught here rather than left to the grid: a dialog key is offered up the parent
+    /// chain before the key ever reaches the grid as a keystroke, so the dialog answered first.</para></summary>
+    protected override bool ProcessDialogKey(Keys keyData)
+    {
+        if (keyData == Keys.Escape && _list.IsCurrentCellInEditMode)
+        {
+            _list.CancelEdit();
+            _list.EndEdit();
+            return true;
+        }
+        return base.ProcessDialogKey(keyData);
+    }
 
     private string Current => _samples[Math.Clamp(_sample, 0, _samples.Count - 1)];
 
@@ -1005,6 +1038,20 @@ public sealed class ColumnsDialog : DialogBase
     internal void SetCellForTesting(int row, string column, object? value) => _list.Rows[row].Cells[column].Value = value;
     internal void SelectRowForTesting(int row) => _list.CurrentCell = _list.Rows[row].Cells["name"];
     internal void MoveForTesting(int by) => Reorder(by);
+
+    /// <summary>F2 on the list, and what the editor it opens is offering to type over.</summary>
+    internal void PressF2ForTesting() => OnListKeyDown(_list, new KeyEventArgs(Keys.F2));
+    internal bool IsRenamingForTesting => _list.IsCurrentCellInEditMode;
+    internal string SelectedInEditorForTesting => (_list.EditingControl as TextBox)?.SelectedText ?? "";
+    internal void TypeInEditorForTesting(string text)
+    {
+        if (_list.EditingControl is not TextBox box) return;
+        box.SelectedText = text;
+        _list.NotifyCurrentCellDirty(true);
+    }
+    /// <summary>Drives the dialog's own key handling, which is where Escape is decided.</summary>
+    internal bool PressDialogKeyForTesting(Keys keys) => ProcessDialogKey(keys);
+
     /// <summary>Drops a field into the gap before <paramref name="before"/>, as a drag onto that gap does.</summary>
     internal void DropRowForTesting(int from, int before) => MoveRow(from, before);
 
