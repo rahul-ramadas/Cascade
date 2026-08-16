@@ -94,6 +94,21 @@ internal static class UiShots
         colsInline.Columns[1].Visible = false;
         colsInline.Columns[2].Visible = false;
         ShotDialog(new ColumnsDialog(colsInline, columnSamples), outDir, "columns-inline");
+
+        // The two states this dialog goes wrong in, kept where a human will see them: at a large font, where
+        // a fixed height cut the sample box in half and squeezed the field list out of existence; and with
+        // the sample scrolled, where text drawn through GDI ignores the clip and lands on the gutter.
+        var big = new ColumnsDialog(cols, columnSamples);
+        big.Font = new Font(big.Font.FontFamily, 16f);
+        ShotDialog(big, outDir, "columns-16pt");
+
+        string[] longSamples =
+        [
+            "[2026-07-31T09:31:17][api-gateway][INFO] " + string.Join(" ", Enumerable.Range(0, 40).Select(i => $"word{i}")),
+            "[2026-07-31T09:31:18][payment-service][WARN] retrying charge for order 4417",
+        ];
+        ShotDialog(new ColumnsDialog(cols, longSamples), outDir, "columns-scrolled",
+                   d => d.PreviewForTesting.ScrollToForTesting(d.PreviewForTesting.FurthestScrollForTesting()));
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
         ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog((Cascade.Core.Updating.UpdateService?)null), outDir, "about");
@@ -432,7 +447,7 @@ internal static class UiShots
         host.Close();
     }
 
-    private static void ShotDialog(Form form, string dir, string name)
+    private static void ShotDialog(Form form, string dir, string name, Action<ColumnsDialog>? once = null)
     {
         form.StartPosition = FormStartPosition.Manual;
         form.Location = new Point(60, 60);
@@ -440,6 +455,13 @@ internal static class UiShots
         Application.DoEvents();
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 250) { Application.DoEvents(); Thread.Sleep(10); }
+        // Some states only exist once the dialog is up and laid out - a sample scrolled to its far end, say.
+        if (once is not null && form is ColumnsDialog columns)
+        {
+            once(columns);
+            sw.Restart();
+            while (sw.ElapsedMilliseconds < 120) { Application.DoEvents(); Thread.Sleep(10); }
+        }
 
         using var bmp = new Bitmap(Math.Max(1, form.Width), Math.Max(1, form.Height));
         form.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
