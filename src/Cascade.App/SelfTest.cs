@@ -6147,11 +6147,14 @@ internal static class SelfTest
             }
 
             // Everything is sized from the font and from DPI-scaled values, so at any scaling the frame has
-            // to be at least as big as what it holds. A fixed size would clip here first.
+            // to be at least as big as what it holds. A fixed size would clip here first. A dialog that can
+            // be RESIZED is exempt: its content is a minimum it grows past, and a wrapping row measured
+            // against no width at all answers with everything stacked one item to a line.
             var content = dlg.Controls.Count > 0 ? dlg.Controls[0].PreferredSize : Size.Empty;
             good &= Check($"{name}: nothing is clipped at this DPI " +
                           $"(frame {dlg.ClientSize.Width}x{dlg.ClientSize.Height}, content {content.Width}x{content.Height})",
-                          dlg.ClientSize.Width >= content.Width && dlg.ClientSize.Height >= content.Height);
+                          dlg.FormBorderStyle == FormBorderStyle.Sizable ||
+                          (dlg.ClientSize.Width >= content.Width && dlg.ClientSize.Height >= content.Height));
 
             dlg.Close();
             dlg.Dispose();
@@ -6167,6 +6170,11 @@ internal static class SelfTest
         ok &= CheckDialog("appearance", new AppearanceDialog(group, group,
                               new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false)),
                           "Text col&or", "&Background", "Bo&ld", "&Italic");
+
+        var fields = new ColumnSpec { Enabled = true, Template = "{[*]}{[*]} {*}" };
+        fields.Reset();
+        ok &= CheckDialog("fields", new ColumnsDialog(fields, ["[09:31][INFO] hello there", "[09:32][WARN] and again"]),
+                          "&Template", "&Detect", "&Layout", "&Columns", "&Inline", "&Fields", "Move &up", "Move d&own");
 
         // Those keys are pressed while writing the pattern, so they must not take the keyboard out of the
         // box - the same rule the find bar's two options follow.
