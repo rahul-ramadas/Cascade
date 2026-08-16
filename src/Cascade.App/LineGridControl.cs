@@ -2759,10 +2759,10 @@ public sealed class LineGridControl : Control
             var def = _doc.Columns.Columns[_tipChip];
             bool lastOne = def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1;
             string what = lastOne
-                ? $"\u201c{def.Name}\u201d is the only field still shown, so it cannot be left out too.\nDrag to move it along the row."
+                ? $"\u201c{def.Name}\u201d is the only field still shown, so it cannot be left out too.\nDrag to move it along the row, or double-click to rename it."
                 : def.Visible
-                    ? $"\u201c{def.Name}\u201d is being shown.\nClick to leave it out; drag to move it along the row."
-                    : $"\u201c{def.Name}\u201d is being left out.\nClick to bring it back; drag to move it along the row.";
+                    ? $"\u201c{def.Name}\u201d is being shown.\nClick to leave it out, drag to move it along the row, double-click to rename it."
+                    : $"\u201c{def.Name}\u201d is being left out.\nClick to bring it back, drag to move it along the row, double-click to rename it.";
             _tips.Show(what, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
             return;
         }
