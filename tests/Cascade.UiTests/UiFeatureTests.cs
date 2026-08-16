@@ -984,18 +984,23 @@ public class UiFeatureTests
         var grid = app.Grid();
         int rowsBefore = app.Rows().Length;
 
-        // Both layouts are offered, and the settings they lead to.
+        // The two layouts are offered as refinements UNDER the switch that turns splitting on, not beside
+        // it; the settings stay at the top of the View menu.
         var items = app.MenuItemNames("View");
-        Check("the menu offers the layouts and the settings", 
-              items.Any(i => i.Contains("Lay Out as Columns", StringComparison.Ordinal)) &&
-              items.Any(i => i.Contains("Lay Out Inline", StringComparison.Ordinal)) &&
+        Check("the menu offers the switch and the settings",
+              items.Any(i => i.Contains("Split Lines Into Fields", StringComparison.Ordinal)) &&
               items.Any(i => i.Contains("Field Settings", StringComparison.Ordinal)),
               string.Join(" | ", items));
+        var under = app.MenuItemNames("View", "Split Lines Into Fields");
+        Check("and the layouts sit underneath it",
+              under.Any(i => i.Contains("Lay Out as Columns", StringComparison.Ordinal)) &&
+              under.Any(i => i.Contains("Lay Out Inline", StringComparison.Ordinal)),
+              string.Join(" | ", under));
 
         // Inline straight from the menu turns the splitting on as well as choosing the layout. The chips are
         // labelled in the window's font rather than the log's, so how many rows they take is theirs to say -
         // what matters is that they take some and that the log is still being drawn.
-        app.ClickMenuOrThrow("View", "Lay Out Inline");
+        app.ClickMenuOrThrow("View", "Split Lines Into Fields", "Lay Out Inline");
         bool took = Retry.WhileFalse(() => app.Rows().Length < rowsBefore && app.Rows().Length > 0,
                                      TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
         int inlineRows = app.Rows().Length;
@@ -1007,7 +1012,7 @@ public class UiFeatureTests
         Check("and with nothing hidden a row is the line unchanged", shown.Contains("[INFO ]", StringComparison.Ordinal), shown);
 
         // ...and back to columns, whose header is one line of the log.
-        app.ClickMenuOrThrow("View", "Lay Out as Columns");
+        app.ClickMenuOrThrow("View", "Split Lines Into Fields", "Lay Out as Columns");
         bool stayed = Retry.WhileFalse(() => app.Rows().Length == rowsBefore - 1,
                                        TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
         Check("the columns header takes exactly one row", stayed, $"{app.Rows().Length} rows");

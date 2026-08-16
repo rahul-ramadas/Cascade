@@ -831,13 +831,24 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Top-level menu names (e.g. File, Edit, View, Filters, Help).</summary>
     public string[] TopMenuNames() => TopItems().Select(m => m.Name ?? "").ToArray();
 
-    /// <summary>Opens a top menu and returns its item names (WinForms dropdowns only exist once open).</summary>
-    public string[] MenuItemNames(string topMenu)
+    /// <summary>Opens a menu (or a submenu inside one) and returns the item names it offers. WinForms
+    /// dropdowns only exist once open, so each level of the path is expanded on the way down and the whole
+    /// lot closed again afterwards.</summary>
+    public string[] MenuItemNames(params string[] path)
     {
-        var top = TopItems().FirstOrDefault(m => Norm(m.Name) == Norm(topMenu));
+        var top = TopItems().FirstOrDefault(m => Norm(m.Name) == Norm(path[0]));
         if (top is null) return Array.Empty<string>();
         Expand(top);
+        var opened = new List<AutomationElement>();
+        for (int i = 1; i < path.Length; i++)
+        {
+            var item = FindOpenMenuItem(path[i]);
+            if (item is null) { Collapse(top); return Array.Empty<string>(); }
+            Expand(item);
+            opened.Add(item);
+        }
         var names = OpenDropDownItems().Select(m => m.Name ?? "").Where(n => n.Length > 0).ToArray();
+        for (int i = opened.Count - 1; i >= 0; i--) Collapse(opened[i]);
         Collapse(top);
         return names;
     }

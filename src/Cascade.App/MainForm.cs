@@ -122,10 +122,14 @@ public sealed class MainForm : Form
     internal bool FindBarIsOpenForTesting => _findBar.Visible;
     internal bool FindBarRedrawsInOneGoForTesting => _findBar.MessageRedrawsInOneGoForTesting;
     internal FindBar FindBarForTesting => _findBar;
-    /// <summary>Drives the form's own shortcut handling, which is where Tab and Escape are decided.</summary>
+    /// <summary>Drives the form's own shortcut handling, which is where Tab and Escape are decided - and,
+    /// through the form, the menu's. The message has to carry a window for that second part: the shortcut
+    /// manager starts from the control the key arrived at, and a message from nowhere is not offered to any
+    /// menu item at all.</summary>
     internal bool PressCmdKeyForTesting(Keys keys)
     {
         Message m = default;
+        m.HWnd = Handle;
         return ProcessCmdKey(ref m, keys);
     }
     internal string FocusedAreaForTesting =>
@@ -351,6 +355,7 @@ public sealed class MainForm : Form
         if (keyData == Keys.Escape && (_findBar.Visible || _lastQuery is not null)
             && (_findBar.ContainsFocus || !IsTextInputFocused())) { CloseFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
+        if (keyData == SwitchLayoutKey && SwitchLayout()) return true;
         if (!IsTextInputFocused())
         {
             switch (keyData)
@@ -478,7 +483,11 @@ public sealed class MainForm : Form
         { Checked = _settings.ShowFilterTooltips };
         view.DropDownItems.Add(_miFilterTips);
         view.DropDownItems.Add(BuildMarkersMenu());
-        _miColumns = new ToolStripMenuItem("Split Li&nes Into Fields", null, (_, _) => ToggleColumns())
+        // The two layouts are not separate commands sitting beside the switch - they are the two ways the
+        // switch can be thrown, and reading them as a flat list of three left it unclear that turning the
+        // middle one on turned the top one on too. Nested, the shape says it: one thing, with a choice
+        // inside it. Clicking the parent still throws the switch, and each layout is still one click away.
+        _miColumns = new CommandWithSubmenu("Split Li&nes Into Fields", (_, _) => ToggleColumns())
         { Checked = _doc.Columns.Enabled, ShortcutKeys = Keys.Control | Keys.Shift | Keys.C };
         view.DropDownItems.Add(_miColumns);
 
@@ -486,11 +495,12 @@ public sealed class MainForm : Form
         { ToolTipText = "A table: every field gets a column, lined up under a header you can drag." };
         _miLayoutInline = new ToolStripMenuItem("La&y Out Inline", null, (_, _) => SetLayout(FieldLayout.Inline))
         { ToolTipText = "Each row stays a line, shortened by whatever you have hidden." };
-        view.DropDownItems.Add(_miLayoutColumns);
-        view.DropDownItems.Add(_miLayoutInline);
+        _miColumns.DropDownItems.Add(_miLayoutColumns);
+        _miColumns.DropDownItems.Add(_miLayoutInline);
+        _miColumns.DropDownItems.Add(new ToolStripSeparator());
 
-        _miFitColumns = Mi("Fit Column&s to Window", (_, _) => _grid.FitColumnsToWindow());
-        view.DropDownItems.Add(_miFitColumns);
+        _miFitColumns = Mi("&Fit Columns to Window", (_, _) => _grid.FitColumnsToWindow());
+        _miColumns.DropDownItems.Add(_miFitColumns);
         view.DropDownItems.Add(Mi("Field Settin&gs…", (_, _) => ShowColumns()));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
@@ -1725,13 +1735,33 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Re-ticks the menu to match the state. Called when the menu opens as well as after a change,
-    /// so it must not DO anything - see the callers for what a change itself has to put right.</summary>
+    /// so it must not DO anything - see the callers for what a change itself has to put right.
+    ///
+    /// <para>The key that switches layout is shown against the layout it would switch TO, which is the only
+    /// place it can be read without a sentence explaining it: the ticked one is where you are, and the key
+    /// beside the other one is how you get there. It is drawn, not registered - the form itself answers the
+    /// key, so nothing has to be shuffled between two items every time the layout changes.</para></summary>
     private void SyncColumnsMenu()
     {
         bool on = _doc.Columns.Enabled;
         _miColumns.Checked = on;
-        _miLayoutColumns.Checked = on && _doc.Columns.Layout == FieldLayout.Columns;
+        bool grid = on && _doc.Columns.Layout == FieldLayout.Columns;
+        _miLayoutColumns.Checked = grid;
         _miLayoutInline.Checked = on && _doc.Columns.Layout == FieldLayout.Inline;
+        _miLayoutColumns.ShortcutKeyDisplayString = on && !grid ? SwitchLayoutKeyName : null;
+        _miLayoutInline.ShortcutKeyDisplayString = grid ? SwitchLayoutKeyName : null;
+    }
+
+    private const Keys SwitchLayoutKey = Keys.Control | Keys.Shift | Keys.X;
+    private const string SwitchLayoutKeyName = "Ctrl+Shift+X";
+
+    /// <summary>Flips between the two layouts. Only while fields are being split: with splitting off there
+    /// is no layout to be in, and turning it on from a key that says "switch" would be a surprise.</summary>
+    private bool SwitchLayout()
+    {
+        if (!_doc.Columns.Enabled) return false;
+        SetLayout(_doc.Columns.Layout == FieldLayout.Columns ? FieldLayout.Inline : FieldLayout.Columns);
+        return true;
     }
 
     /// <summary>What is on screen has changed, so a note about a match being out of sight no longer answers
