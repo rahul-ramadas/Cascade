@@ -244,11 +244,11 @@ internal static class SelfTest
 
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
-            doc.Columns.Mode = ColumnSplitMode.Delimiter;
-            doc.Columns.Delimiter = "]";
+            doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
             doc.Columns.Columns.Clear();
+            int at = 0;
             foreach (var (n, w) in new[] { ("Time", 190), ("Provider", 90), ("Id", 55), ("Message", 360) })
-                doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w });
+                doc.Columns.Columns.Add(new ColumnDef { Name = n, Width = w, Source = at++ });
 
             grid.ScrollHorizontallyTo(0);
             grid.RefreshView();
@@ -323,9 +323,12 @@ internal static class SelfTest
             doc.WaitForIndex();
 
             doc.Columns.Enabled = true;
-            doc.Columns.Mode = ColumnSplitMode.Template;
-            doc.Columns.Template = "[[time]][[service]][[level]] [message]";
-            doc.Columns.SyncColumnsFromTemplate();
+            doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
+            doc.Columns.Reset();
+            doc.Columns.Columns[0].Name = "time";
+            doc.Columns.Columns[1].Name = "service";
+            doc.Columns.Columns[2].Name = "level";
+            doc.Columns.Columns[3].Name = "message";
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
@@ -608,10 +611,15 @@ internal static class SelfTest
 
             // --- renaming from the dialog, which is the only way to reach a hidden column's name ---
 
-            doc.Columns.Columns[1].Visible = false;
-            using (var dlg = new ColumnsDialog(doc.Columns, doc.GetLineText(0)))
+            var samples = new[]
             {
-                ok &= Check("the columns dialog offers the name for typing", dlg.NameIsEditableForTesting);
+                doc.GetLineText(0), doc.GetLineText(1), doc.GetLineText(2),
+                "a line of quite another shape entirely"
+            };
+
+            doc.Columns.Columns[1].Visible = false;
+            using (var dlg = new ColumnsDialog(doc.Columns, samples))
+            {
                 dlg.SetCellForTesting(1, "name", "  Service  ");
                 dlg.ApplyForTesting();
                 ok &= Check($"and what is typed becomes the column's name (\"{dlg.Result.Columns[1].Name}\")",
@@ -630,7 +638,7 @@ internal static class SelfTest
 
             // The buttons are one row, so they belong at one height - a flow panel positions each control
             // by its own top margin, and a default margin on one of them is enough to knock it out of line.
-            using (var dlg = new ColumnsDialog(doc.Columns, doc.GetLineText(0)))
+            using (var dlg = new ColumnsDialog(doc.Columns, samples))
             {
                 dlg.StartPosition = FormStartPosition.Manual;
                 dlg.Location = new Point(0, 0);
@@ -648,55 +656,162 @@ internal static class SelfTest
                             okR.Right < cancelR.Left && cancelR.Left - okR.Right <= dlg.LogicalToDeviceUnits(12));
                 ok &= Check($"and the row ends where the list above it does ({cancelR.Right} vs {listR.Right})",
                             Math.Abs(cancelR.Right - listR.Right) <= 1,
-                            $"client {dlg.ClientSize}, row pad {cancelBtn.Parent!.Padding}, " +
-                            $"Cancel margin {cancelBtn.Margin}, grid host pad {list.Parent!.Padding}");
+                            $"client {dlg.ClientSize}, Cancel margin {cancelBtn.Margin}");
 
-                // Turning the splitting off greys everything else on the dialog, and a DataGridView draws
-                // exactly the same whether it is enabled or not - so whether the list LOOKS out of reach is
-                // a question about pixels, not about Enabled.
-                Rectangle listArea = listR;
-                double Fraction(Color want)
-                {
-                    dlg.Refresh();
-                    using var shot = Capture(dlg);
-                    int hits = 0, total = 0;
-                    for (int y = listArea.Top + 3; y < listArea.Bottom - 3; y += 3)
-                        for (int x = listArea.Left + 3; x < listArea.Right - 3; x += 3)
-                        {
-                            if (x < 0 || y < 0 || x >= shot.Width || y >= shot.Height) continue;
-                            total++;
-                            var c = shot.GetPixel(x, y);
-                            if (Math.Abs(c.R - want.R) < 6 && Math.Abs(c.G - want.G) < 6 && Math.Abs(c.B - want.B) < 6) hits++;
-                        }
-                    return total == 0 ? 0 : (double)hits / total;
-                }
+                // Everything on the dialog has to sit inside it, at any font size or DPI - a row that
+                // overflows is how a dialog ends up with its buttons off the bottom edge.
+                var stray = AllControls(dlg).Where(c => c.Visible && c.Parent is not null)
+                    .Select(c => (c, r: Where(c)))
+                    .Where(t => t.r.Right > dlg.ClientSize.Width + 1 || t.r.Bottom > dlg.ClientSize.Height + 1)
+                    .ToList();
+                ok &= Check("nothing on the dialog hangs off its edge",
+                            stray.Count == 0,
+                            string.Join(", ", stray.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
 
-                ok &= Check("the theme tells a live control from a dead one by colour at all",
-                            SystemColors.Window != SystemColors.Control);
-                dlg.SetSplittingForTesting(true);
+                // Width and alignment mean nothing to the Inline layout, so they are put out of reach
+                // rather than left looking as though they do something.
+                dlg.SetLayoutForTesting(FieldLayout.Columns);
                 Pump();
-                double liveWindow = Fraction(SystemColors.Window);
-                dlg.SetSplittingForTesting(false);
+                ok &= Check("a width can be typed while the layout is columns", dlg.WidthIsEditableForTesting);
+                dlg.SetLayoutForTesting(FieldLayout.Inline);
                 Pump();
-                double deadWindow = Fraction(SystemColors.Window), deadGrey = Fraction(SystemColors.Control);
-                ok &= Check($"the list is the window's own colour while the splitting is on ({liveWindow:P0})",
-                            liveWindow > 0.8);
-                ok &= Check($"and greyed with the rest of the dialog when it is off " +
-                            $"({deadGrey:P0} grey, {deadWindow:P0} still window colour)",
-                            deadGrey > 0.8 && deadWindow < 0.05);
+                ok &= Check("and not while it is inline, where it would do nothing", !dlg.WidthIsEditableForTesting);
+
+                // The count of lines that fit is the thing that stops a template being trusted because it
+                // happened to suit the one line the caret was on.
+                ok &= Check($"the dialog says how many of the sampled lines fit (\"{dlg.FitForTesting}\")",
+                            dlg.FitForTesting.Contains($"of {samples.Length}", StringComparison.Ordinal));
+
+                // A template that cannot be read says so, rather than quietly splitting nothing.
+                dlg.SetTemplateForTesting("{[*]");
+                Pump();
+                ok &= Check($"a template that cannot be read is refused out loud (\"{dlg.StatusForTesting}\")",
+                            dlg.StatusForTesting.Contains("never closed", StringComparison.OrdinalIgnoreCase));
+                dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+                Pump();
+                ok &= Check($"and a good one says what it found (\"{dlg.StatusForTesting}\")",
+                            dlg.StatusForTesting.Contains("4 fields", StringComparison.Ordinal));
 
                 dlg.Close();
                 Pump();
             }
 
+            // The same dialog at a much larger font: every row has to give way rather than push its
+            // neighbours off the edge, which is how a dialog ends up with its buttons out of reach.
+            using (var big = new ColumnsDialog(doc.Columns, samples))
+            {
+                big.Font = new Font(big.Font.FontFamily, 16f);
+                big.StartPosition = FormStartPosition.Manual;
+                big.Location = new Point(0, 0);
+                big.Opacity = 0;
+                big.Show();
+                Pump();
+                Rectangle Where(Control c) => big.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                var over = AllControls(big).Where(c => c.Visible && c.Parent is not null)
+                    .Select(c => (c, r: Where(c)))
+                    .Where(t => t.r.Right > big.ClientSize.Width + 1 || t.r.Bottom > big.ClientSize.Height + 1)
+                    .ToList();
+                ok &= Check("at 16pt nothing on the dialog is pushed off its edge",
+                            over.Count == 0,
+                            string.Join(", ", over.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
+
+                var okBig = AllControls(big).OfType<Button>().First(b => b.Text == "OK");
+                ok &= Check($"and the buttons are still on it ({Where(okBig)} in {big.ClientSize})",
+                            Where(okBig).Bottom <= big.ClientSize.Height);
+                big.Close();
+                Pump();
+            }
+
             // --- what turning columns on with nothing set up offers ---
 
-            string detected = ColumnsDialog.DetectTemplate(
-                "[2026-08-04T09:31:17][api-gateway][INFO ] a message");
-            ok &= Check($"the fields of a bracketed line are read off it and named for what is in them ({detected})",
-                        detected == "[[Time]][[Field2]][[Level]] [Message]");
+            string detected = LineTemplate.Detect("[2026-08-04T09:31:17][api-gateway][INFO ] a message");
+            ok &= Check($"the parts of a bracketed line are read off it ({detected})",
+                        detected == "{[*]}{[*]}{[*]} {*}");
             ok &= Check("a line with nothing to split on offers nothing rather than an empty header",
-                        ColumnsDialog.DetectTemplate("plain text with no fields").Length == 0);
+                        LineTemplate.Detect("plain text with no fields").Length == 0);
+
+            // --- the chip strip: how parts are hidden and carried about while the layout is Inline ---
+
+            for (int i = 0; i < doc.Columns.Columns.Count; i++) doc.Columns.Columns[i].Visible = true;
+            doc.Columns.Layout = FieldLayout.Inline;
+            grid.RefreshView();
+            Pump();
+
+            ok &= Check($"the strip still takes one row, as the header did ({grid.HeaderHeightForTesting})",
+                        grid.HeaderHeightForTesting > 0);
+
+            string whole = grid.DisplayTextForTesting(0);
+            ok &= Check($"nothing hidden leaves the line exactly as it was (\"{whole}\")",
+                        whole == doc.GetLineText(doc.RowToLine(0)));
+
+            grid.ClickChipForTesting(1);      // the service field
+            Pump();
+            ok &= Check($"clicking a chip puts that part away ({grid.ChipNamesForTesting})",
+                        !doc.Columns.Columns[1].Visible);
+            string shortened = grid.DisplayTextForTesting(0);
+            ok &= Check($"and the row loses it, brackets and all (\"{shortened}\")",
+                        shortened.Length < whole.Length && !shortened.Contains("[api]", StringComparison.Ordinal));
+
+            grid.ClickChipForTesting(1);
+            Pump();
+            ok &= Check($"clicking it again brings the part back ({grid.ChipNamesForTesting})",
+                        doc.Columns.Columns[1].Visible && grid.DisplayTextForTesting(0) == whole);
+
+            string orderBefore = string.Join(",", doc.Columns.Columns.Select(c => c.Name));
+            grid.DragChipForTesting(0, 1);
+            Pump();
+            string orderAfter = string.Join(",", doc.Columns.Columns.Select(c => c.Name));
+            ok &= Check($"carrying a chip sideways moves that part along the row ({orderBefore} -> {orderAfter})",
+                        orderAfter != orderBefore);
+
+            // Everything hidden would leave a row with nothing in it, and no chip to bring anything back.
+            for (int i = 0; i < doc.Columns.Columns.Count; i++)
+                if (doc.Columns.Columns.Count(c => c.Visible) > 1) grid.ClickChipForTesting(i);
+            Pump();
+            ok &= Check($"the last part standing cannot be put away too ({grid.ChipNamesForTesting})",
+                        doc.Columns.Columns.Count(c => c.Visible) == 1);
+
+            for (int i = 0; i < doc.Columns.Columns.Count; i++) doc.Columns.Columns[i].Visible = true;
+            doc.Columns.Layout = FieldLayout.Columns;
+            grid.RefreshView();
+            Pump();
+
+            // --- a search can find what the layout is not showing, and the app has to say so ---
+
+            // The file's lines are [time][api][INFO ] short message N, so "api" is the value of part 1 -
+            // which by now may sit anywhere in the list, the checks above having carried it about.
+            grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("api", Regex: false, CaseSensitive: false)));
+            ok &= Check("with everything shown, a match is visible", grid.FindTermIsVisibleOn(0));
+
+            var service = doc.Columns.Columns.First(c => c.Source == 1);
+            service.Visible = false;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("hiding the field it is in makes it invisible, laid out in columns",
+                        !grid.FindTermIsVisibleOn(0));
+            doc.Columns.Layout = FieldLayout.Inline;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("and inline as well", !grid.FindTermIsVisibleOn(0));
+
+            // A pattern that leans on what surrounds a field still has to be judged against the whole line:
+            // asked of the field's own text alone, the bracket it looks ahead to is not there.
+            service.Visible = true;
+            doc.Columns.Layout = FieldLayout.Columns;
+            grid.RefreshView();
+            Pump();
+            grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery(@"api(?=\])", Regex: true, CaseSensitive: false)));
+            ok &= Check("a pattern that reaches outside its own field is still seen",
+                        grid.FindTermIsVisibleOn(0));
+
+            // ...and a term that runs across two fields is visible while both of them are.
+            grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("api][INFO", Regex: false, CaseSensitive: false)));
+            ok &= Check("a term running across two shown fields is seen", grid.FindTermIsVisibleOn(0));
+
+            grid.SetFindHighlight(null);
+            for (int i = 0; i < doc.Columns.Columns.Count; i++) doc.Columns.Columns[i].Visible = true;
+            grid.RefreshView();
+            Pump();
             return ok;
         }
         finally
@@ -744,8 +859,8 @@ internal static class SelfTest
             int yBefore = ScreenYOf(watched);
 
             bool ok = Check("the columns start off", !doc.Columns.Enabled);
-            ok &= Check("View > Split Into Columns turns them on",
-                        form.ClickMenuForTesting("View", "Split Into Columns") && doc.Columns.Enabled);
+            ok &= Check("View > Split Lines Into Fields turns them on",
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields") && doc.Columns.Enabled);
             Pump();
             ok &= Check($"the fields of the line are read off it ({doc.Columns.Columns.Count} columns: " +
                         $"{string.Join(", ", doc.Columns.Columns.Select(c => c.Name))})",
@@ -756,18 +871,36 @@ internal static class SelfTest
                         ScreenYOf(watched) == yBefore);
 
             ok &= Check("and the same item turns them off again",
-                        form.ClickMenuForTesting("View", "Split Into Columns") && !doc.Columns.Enabled);
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields") && !doc.Columns.Enabled);
             Pump();
             ok &= Check($"which hands the row back ({grid.FirstRowForTesting})",
                         grid.FirstRowForTesting == firstBefore);
             ok &= Check($"and still nothing has moved on screen ({ScreenYOf(watched)})",
                         ScreenYOf(watched) == yBefore);
 
+            // The Inline layout has a strip of its own above the log, so it costs the same row and has to
+            // hand it back the same way. It did not, until the compensation stopped asking about the layout.
+            doc.Columns.Layout = FieldLayout.Inline;
+            ok &= Check("laid out inline, turning fields on still takes exactly one row",
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields") &&
+                        grid.FirstRowForTesting == firstBefore + 1,
+                        $"{firstBefore} -> {grid.FirstRowForTesting}");
+            Pump();
+            ok &= Check($"and the line being read has not moved on screen either ({ScreenYOf(watched)})",
+                        ScreenYOf(watched) == yBefore);
+            ok &= Check("and turning them off hands it back",
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields") &&
+                        grid.FirstRowForTesting == firstBefore,
+                        $"{grid.FirstRowForTesting}");
+            Pump();
+            ok &= Check($"with nothing moved on screen ({ScreenYOf(watched)})", ScreenYOf(watched) == yBefore);
+            doc.Columns.Layout = FieldLayout.Columns;
+
             // The menu is where the key is discovered, so it has to say so - and stay in step with the state.
             // That the key itself reaches the item is WinForms' own shortcut handling, covered end to end by
             // UiFeatureTests.Ctrl_shift_c_splits_the_log_into_columns_and_back.
             var item = AllMenuItems(form.MainMenuStrip!.Items)
-                .FirstOrDefault(m => (m.Text ?? "").Replace("&", "") == "Split Into Columns");
+                .FirstOrDefault(m => (m.Text ?? "").Replace("&", "") == "Split Lines Into Fields");
             ok &= Check("the menu offers it", item is not null);
             if (item is not null)
             {
@@ -778,8 +911,8 @@ internal static class SelfTest
                 Pump();
                 ok &= Check("and is unticked while the columns are off", !item.Checked);
                 ok &= Check("and ticked once they are on",
-                            form.ClickMenuForTesting("View", "Split Into Columns") && item.Checked);
-                form.ClickMenuForTesting("View", "Split Into Columns");
+                            form.ClickMenuForTesting("View", "Split Lines Into Fields") && item.Checked);
+                form.ClickMenuForTesting("View", "Split Lines Into Fields");
             }
             return ok;
         }
@@ -3364,9 +3497,12 @@ internal static class SelfTest
             doc.Open(path);
             doc.WaitForIndex();
             doc.Columns.Enabled = true;
-            doc.Columns.Mode = ColumnSplitMode.Template;
-            doc.Columns.Template = "[[time]][[service]][[level]] [message]";
-            doc.Columns.SyncColumnsFromTemplate();
+            doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
+            doc.Columns.Reset();
+            doc.Columns.Columns[0].Name = "time";
+            doc.Columns.Columns[1].Name = "service";
+            doc.Columns.Columns[2].Name = "level";
+            doc.Columns.Columns[3].Name = "message";
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
@@ -8350,7 +8486,7 @@ internal static class SelfTest
 
         // A command with a key must say so where it is offered. These two run the same thing from different
         // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
-        string[] shortcuts = ["Find Filter\tCtrl+E", "Split Into Columns\tCtrl+Shift+C"];
+        string[] shortcuts = ["Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C"];
         var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
         var advertised = AllMenuItems(bar.Items)
             .Select(m => (m.Text ?? "").Replace("&", "") + "\t" +

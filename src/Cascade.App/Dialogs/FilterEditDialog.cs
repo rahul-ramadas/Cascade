@@ -46,9 +46,26 @@ public sealed class FilterEditDialog : DialogBase
     private readonly SteadyLabel _note = new() { AutoSize = false, AutoEllipsis = false };
     private readonly ToolTip _noteTip = new();
 
-    /// <summary>What is inherited, in the place a bad pattern complains from. The two never both apply: a
-    /// pattern that will not compile is the more urgent thing to say, and the note is always true anyway.
-    /// </summary>
+    /// <summary>An extra word of warning from whoever opened the dialog - said in the note line, above the
+    /// standing remark about inheritance but below a pattern that will not compile, which is more urgent.
+    /// Used when a filter is seeded from a line the Inline layout has shortened, where the text on screen
+    /// is not the text in the file.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public string Caution
+    {
+        get => _caution;
+        set { _caution = value ?? ""; _cautionFor = _text.Text; ValidateRegex(); }
+    }
+
+    private string _caution = "";
+
+    /// <summary>The pattern the caution was about. Edit the pattern and the caution no longer applies to
+    /// what is in the box, so it goes.</summary>
+    private string _cautionFor = "";
+
+    /// <summary>What is inherited, in the place a bad pattern complains from. The three never all apply: a
+    /// pattern that will not compile is the most urgent thing to say, a caution from the caller comes next,
+    /// and the remark about inheritance is always true anyway.</summary>
     private const string InheritNote =
         "Unchecked colors, and styles left neither on nor off, come from the parent filter.";
 
@@ -411,8 +428,11 @@ public sealed class FilterEditDialog : DialogBase
             catch (ArgumentException ex) { message = "Invalid regex: " + ex.Message; }
         }
         bool bad = message.Length > 0;
-        _note.ForeColor = bad ? Color.Firebrick : Color.Gray;
-        string wording = bad ? message : InheritNote;
+        if (_caution.Length > 0 && _text.Text != _cautionFor) _caution = "";
+        string wording = bad ? message : _caution.Length > 0 ? _caution : InheritNote;
+        _note.ForeColor = bad ? Color.Firebrick
+                        : _caution.Length > 0 ? Color.FromArgb(176, 110, 0)
+                        : Color.Gray;
         _note.Message = wording;
         if (_noteTip.GetToolTip(_note) != wording) _noteTip.SetToolTip(_note, wording);
     }

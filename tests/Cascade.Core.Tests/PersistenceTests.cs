@@ -57,8 +57,8 @@ public class PersistenceTests
         filters.Add(parent);
         filters.Add(child, parent);
 
-        var cols = new ColumnSpec { Enabled = true, Mode = ColumnSplitMode.Template, Template = "[a] [b]" };
-        cols.SyncColumnsFromTemplate();
+        var cols = new ColumnSpec { Enabled = true, Template = "{*} {*}" };
+        cols.Reset();
         cols.Columns[1].Visible = false;
 
         string path = Path.Combine(Path.GetTempPath(), "cascade_" + Guid.NewGuid().ToString("N") + ".cascade");
@@ -81,7 +81,7 @@ public class PersistenceTests
             Assert.Null(ch.Style.Background);
 
             Assert.NotNull(loadedCols);
-            Assert.Equal(ColumnSplitMode.Template, loadedCols!.Mode);
+            Assert.Equal("{*} {*}", loadedCols!.Template);
             Assert.Equal(2, loadedCols.Columns.Count);
             Assert.False(loadedCols.Columns[1].Visible);
         }
@@ -126,8 +126,8 @@ public class PersistenceTests
     [Fact]
     public void Cascade_round_trip_preserves_how_the_columns_were_laid_out()
     {
-        var cols = new ColumnSpec { Enabled = true, Mode = ColumnSplitMode.Template, Template = "[a] [b] [c]" };
-        cols.SyncColumnsFromTemplate();
+        var cols = new ColumnSpec { Enabled = true, Layout = FieldLayout.Inline, Template = "{*} {*} {*}" };
+        cols.Reset();
         cols.Columns[0].Name = "When";            // renamed in the header
         cols.Columns[0].WidthChars = 24;          // dragged, with a fixed-pitch font
         cols.Columns[0].Width = 192;
@@ -145,8 +145,9 @@ public class PersistenceTests
             var loaded = CascadeFile.Load(path).Columns;
 
             Assert.NotNull(loaded);
-            Assert.Equal(["c", "When", "b"], loaded!.Columns.Select(c => c.Name));
-            Assert.Equal([2, 0, 1], loaded.Columns.Select(c => c.Source));   // each still shows its own field
+            Assert.Equal(FieldLayout.Inline, loaded!.Layout);
+            Assert.Equal(["Col 3", "When", "Col 2"], loaded.Columns.Select(c => c.Name));
+            Assert.Equal([2, 0, 1], loaded.Columns.Select(c => c.Source));   // each still shows its own part
             Assert.Equal(24, loaded.Columns[1].WidthChars);
             Assert.Equal(192, loaded.Columns[1].Width);
             Assert.Equal(0, loaded.Columns[2].WidthChars);
@@ -158,7 +159,8 @@ public class PersistenceTests
     }
 
     /// <summary>A file written before a column could be carried away from its own field has to keep
-    /// meaning what it did: each column showing the field at its own place in the list.</summary>
+    /// meaning what it did: each column showing the field at its own place in the list. The delimiter it
+    /// was split on becomes a template that splits it the same way.</summary>
     [Fact]
     public void A_file_that_predates_column_sources_still_shows_the_right_fields()
     {
@@ -181,8 +183,119 @@ public class PersistenceTests
             var loaded = CascadeFile.Load(path).Columns;
             Assert.NotNull(loaded);
             Assert.Equal([0, 1], loaded!.Columns.Select(c => c.Source));
+            Assert.Equal("{*,}{*}", loaded.Template);
+            Assert.True(loaded.Compiled.IsValid);
+            Assert.Equal(["1", "2"], Split(loaded, "1,2"));
         }
         finally { File.Delete(path); }
+    }
+
+    /// <summary>A bracket template from an older build becomes the same split written the new way, with the
+    /// brackets drawn INTO the part - so hiding a field still takes its brackets with it.</summary>
+    [Theory]
+    [InlineData("[[time]][[level]] [message]", "{[*]}{[*]} {*}")]
+    [InlineData("[time] [level] [message]", "{*} {*} {*}")]
+    [InlineData("[a]-[b]", "{*}-{*}")]
+    [InlineData("(x) (y)", "")]
+    // The nine-field trace template a real filter file was found carrying.
+    [InlineData("[[Time]][[Field2]][[Field3]][[Field4]][[Field5]][[Field6]][[Field7]][[Field8]][[Field9]] [message]",
+                "{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]} {*}")]
+    public void A_bracket_template_from_an_older_build_is_rewritten(string old, string expected)
+        => Assert.Equal(expected, LegacyColumns.FromBracketTemplate(old));
+
+    /// <summary>A whole v1 file, of the shape one was actually found in: an old bracket template, columns
+    /// renamed and several of them hidden. All of it has to survive, or the reader's work is lost the first
+    /// time they open the file with a newer build.</summary>
+    [Fact]
+    public void A_real_version_1_file_keeps_its_names_and_what_was_hidden()
+    {
+        const string json = """
+        {
+          "schemaVersion": 1,
+          "filters": [],
+          "columns": {
+            "enabled": false,
+            "mode": "Template",
+            "delimiter": "\t",
+            "template": "[[Time]][[Field2]][[Field3]][[Field4]][[Field5]][[Field6]][[Field7]][[Field8]][[Field9]] [message]",
+            "columns": [
+              { "name": "Time", "visible": true, "source": 0 },
+              { "name": "Provider", "visible": true, "source": 1 },
+              { "name": "CPU", "visible": false, "source": 2 },
+              { "name": "Proc", "visible": false, "source": 3 },
+              { "name": "Thrd", "visible": false, "source": 4 },
+              { "name": "File", "visible": false, "source": 5 },
+              { "name": "Function", "visible": true, "source": 6 },
+              { "name": "Level", "visible": false, "source": 7 },
+              { "name": "Flag", "visible": false, "source": 8 },
+              { "name": "Message", "visible": true, "source": 9 }
+            ]
+          }
+        }
+        """;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_" + Guid.NewGuid().ToString("N") + ".cascade");
+        try
+        {
+            File.WriteAllText(path, json);
+            var loaded = CascadeFile.Load(path).Columns;
+
+            Assert.NotNull(loaded);
+            Assert.Equal("{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]}{[*]} {*}", loaded!.Template);
+            Assert.True(loaded.Compiled.IsValid);
+            Assert.Equal(10, loaded.Columns.Count);
+            Assert.Equal(["Time", "Provider", "CPU", "Proc", "Thrd", "File", "Function", "Level", "Flag", "Message"],
+                         loaded.Columns.Select(c => c.Name));
+            Assert.Equal(["CPU", "Proc", "Thrd", "File", "Level", "Flag"],
+                         loaded.Columns.Where(c => !c.Visible).Select(c => c.Name));
+
+            const string line =
+                "[2026-08-05T05:00:02.0472099][BthPort][6][0EF8][1590][rundown_cpp142][PerformWppRundown][INFO][TFLAG_RUNDOWN] WDF PnP state";
+            Assert.Equal(
+                ["2026-08-05T05:00:02.0472099", "BthPort", "6", "0EF8", "1590",
+                 "rundown_cpp142", "PerformWppRundown", "INFO", "TFLAG_RUNDOWN", "WDF PnP state"],
+                Split(loaded, line));
+
+            // ...and what the reader had hidden is what the Inline layout leaves out.
+            loaded.Layout = FieldLayout.Inline;
+            var match = new TemplateMatch();
+            loaded.Compiled.Match(line, match);
+            var projection = new LineProjection();
+            projection.Build(line, loaded, match);
+            Assert.Equal("[2026-08-05T05:00:02.0472099][BthPort][PerformWppRundown] WDF PnP state", projection.Text);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_migrated_bracket_template_splits_a_line_the_way_it_used_to()
+    {
+        var spec = new ColumnSpec
+        {
+            Enabled = true,
+            Template = LegacyColumns.FromBracketTemplate("[[time]][[level]] [message]")
+        };
+        spec.Reset();
+        Assert.Equal(["09:31", "INFO", "hello there"], Split(spec, "[09:31][INFO] hello there"));
+    }
+
+    /// <summary>Text that is special in a template has to survive the rewrite as text.</summary>
+    [Fact]
+    public void Migration_escapes_what_the_template_language_would_otherwise_read()
+    {
+        string migrated = LegacyColumns.FromDelimiter("*", 2);
+        Assert.Equal(@"{*\*}{*}", migrated);
+        var spec = new ColumnSpec { Enabled = true, Template = migrated };
+        spec.Reset();
+        Assert.Equal(["a", "b"], Split(spec, "a*b"));
+    }
+
+    private static List<string> Split(ColumnSpec spec, string line)
+    {
+        var match = new TemplateMatch();
+        Assert.True(spec.Compiled.Match(line, match));
+        return Enumerable.Range(0, match.ValueCount)
+            .Select(i => { var (s, l) = match.Value(i); return line.Substring(s, l); })
+            .ToList();
     }
 
     /// <summary>A copy has to carry the width in characters too - the dialog edits a clone and hands it
@@ -190,8 +303,8 @@ public class PersistenceTests
     [Fact]
     public void Cloning_a_spec_keeps_every_column_property()
     {
-        var spec = new ColumnSpec { Enabled = true, Delimiter = "|" };
-        spec.Columns.Add(new ColumnDef { Name = "n", Visible = false, Width = 77, WidthChars = 9, Align = ColumnAlign.Center });
+        var spec = new ColumnSpec { Enabled = true, Template = "{*}|{*}" };
+        spec.Columns.Add(new ColumnDef { Name = "n", Visible = false, Width = 77, WidthChars = 9, Align = ColumnAlign.Center, Source = 0 });
         var clone = spec.Clone().Columns[0];
         Assert.Equal("n", clone.Name);
         Assert.False(clone.Visible);
