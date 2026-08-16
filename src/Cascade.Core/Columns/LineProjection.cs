@@ -12,8 +12,9 @@ public readonly record struct ProjectedSpan(int Start, int Length, int LineStart
 ///
 /// <para>What goes BETWEEN two parts is the text that separates them in the line - taken from the line
 /// itself, so padding and punctuation are whatever the log actually had. Only carrying a part BACKWARDS
-/// leaves no sensible answer, and there a single joiner goes in - unless one side already ends or begins
-/// with a blank, because a field can carry the space that separated it with it.</para>
+/// leaves no such text, and there a single joiner goes in - but ONLY where the two would otherwise run
+/// together into one word. <c>[a][b]</c> is how a bracketed line reads already, and a space invented
+/// between them is one the reader can see is not in the file.</para>
 ///
 /// <para>A row never BEGINS with a blank for the same reason: a field carried to the front would otherwise
 /// take the separator in front of it along, and the lines the template does not match - which are shown
@@ -91,15 +92,27 @@ public sealed class LineProjection
         _built = IsWholeLine ? line : _text.ToString();
     }
 
-    /// <summary>Whether a single space has to go in between what has been written and the part about to be.
-    /// It does not when either side already offers one: a field whose own text begins with the space that
-    /// used to separate it from what came before it brings that space with it wherever it is carried, and
-    /// two separators where the reader asked for one is how a row ends up looking mis-set.</summary>
+    /// <summary>Whether a single space has to go in between what has been written and the field about to be.
+    ///
+    /// <para>The joiner exists for one reason: to stop two fields that were never neighbours running
+    /// together into something that reads as one word. So it goes in only where the join is not already
+    /// punctuated on BOTH sides - <c>[a][b]</c> is exactly how a bracketed line reads already, and a space
+    /// invented there is one the reader can see is not in the file. Nor does it go in where either side is
+    /// already blank, which would simply double the separator.</para></summary>
     private bool NeedsJoiner(string line, int start, int length)
     {
-        if (_text.Length == 0 || IsBlank(_text[^1])) return false;
-        return !(length > 0 && start >= 0 && start < line.Length && IsBlank(line[start]));
+        if (_text.Length == 0) return false;
+        char left = _text[^1];
+        if (IsBlank(left)) return false;
+        if (length <= 0 || start < 0 || start >= line.Length) return false;
+        char right = line[start];
+        if (IsBlank(right)) return false;
+        return IsWordish(left) || IsWordish(right);
     }
+
+    /// <summary>Whether a character runs into the one beside it. Punctuation does not - it is doing the
+    /// separating itself.</summary>
+    private static bool IsWordish(char c) => char.IsLetterOrDigit(c);
 
     private static bool IsBlank(char c) => c is ' ' or '\t';
 

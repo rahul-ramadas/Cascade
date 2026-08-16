@@ -153,15 +153,45 @@ public class ColumnTests
             Inline(spec, Trace));
     }
 
-    /// <summary>Carrying a part backwards leaves no separator that means anything, so one is put in.</summary>
+    /// <summary>Carrying a part backwards leaves no separator that means anything, so one is put in - but
+    /// only where the two would otherwise run together into something that reads as one word.</summary>
     [Fact]
-    public void Carrying_a_part_to_the_front_joins_with_a_single_space()
+    public void Carrying_a_part_backwards_joins_with_a_single_space()
+    {
+        var spec = Spec("{*} {*} {*}");
+        var third = spec.Columns[2];
+        spec.Columns.RemoveAt(2);
+        spec.Columns.Insert(0, third);
+        Assert.Equal("c a b", Inline(spec, "a b c"));
+    }
+
+    /// <summary>...and NOT between two fields that are punctuated already. A bracketed line reads
+    /// <c>[a][b]</c> throughout, so a space invented between two of its fields is one the reader can see is
+    /// not in the file - which is exactly how it was noticed.</summary>
+    [Fact]
+    public void Carrying_a_bracketed_part_backwards_invents_no_space()
     {
         var spec = Spec("{[*]}{[*]} {*}");
         var level = spec.Columns[1];
         spec.Columns.RemoveAt(1);
         spec.Columns.Insert(0, level);
-        Assert.Equal("[INFO] [09:31] hello", Inline(spec, "[09:31][INFO] hello"));
+        Assert.Equal("[INFO][09:31] hello", Inline(spec, "[09:31][INFO] hello"));
+    }
+
+    /// <summary>The shape the trace this was found on actually has: ten bracketed fields, most of them
+    /// hidden, and one carried from the front of the line to the back of the row.</summary>
+    [Fact]
+    public void A_bracketed_field_carried_past_the_others_lands_flush_against_them()
+    {
+        var spec = Spec(Nine);
+        // Provider is the second field; the reader dragged it to sit just before the message.
+        var provider = spec.Columns[1];
+        spec.Columns.RemoveAt(1);
+        spec.Columns.Insert(8, provider);
+        foreach (int hide in new[] { 2, 3, 4, 5, 7, 8 }) spec.Columns.Single(c => c.Source == hide).Visible = false;
+
+        Assert.Equal("[2026-08-05T05:00:02.0472099][PerformWppRundown][BthPort] WDF PnP state: WdfDevStatePnpStarted",
+                     Inline(spec, Trace));
     }
 
     /// <summary>Text the template never reached is data, not punctuation, and is never dropped - bar the
@@ -209,7 +239,7 @@ public class ColumnTests
         var second = trailing.Columns[1];
         trailing.Columns.RemoveAt(1);
         trailing.Columns.Insert(0, second);
-        Assert.Equal("[INFO] [09:31] ", Inline(trailing, "[09:31] [INFO]"));
+        Assert.Equal("[INFO][09:31] ", Inline(trailing, "[09:31] [INFO]"));
     }
 
     /// <summary>A trailing literal in the template is part of the line too.</summary>
@@ -276,19 +306,22 @@ public class ColumnTests
     [Fact]
     public void Invented_text_belongs_to_no_line_and_a_selection_across_it_is_not_contiguous()
     {
-        var spec = Spec("{[*]}{[*]} {*}");
+        // Word-separated, so carrying a field backwards really does have to invent a space.
+        var spec = Spec("{*} {*} {*}");
         var level = spec.Columns[1];
         spec.Columns.RemoveAt(1);
         spec.Columns.Insert(0, level);
 
+        const string line = "09:31 INFO hello";
         var match = new TemplateMatch();
-        spec.Compiled.Match("[09:31][INFO] hello", match);
+        spec.Compiled.Match(line, match);
         var projection = new LineProjection();
-        projection.Build("[09:31][INFO] hello", spec, match);
+        projection.Build(line, spec, match);
 
-        int joiner = projection.Text.IndexOf("] [", StringComparison.Ordinal) + 1;
+        Assert.Equal("INFO 09:31 hello", projection.Text);
+        int joiner = projection.Text.IndexOf("INFO ", StringComparison.Ordinal) + "INFO".Length;
         Assert.Equal(-1, projection.ToLine(joiner));
-        Assert.False(projection.IsContiguous(0, "[09:31][INFO]".Length));
+        Assert.False(projection.IsContiguous(0, "09:31 INFO".Length));
     }
 
     [Fact]
