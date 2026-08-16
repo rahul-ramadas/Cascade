@@ -991,6 +991,10 @@ internal static class SelfTest
             host.Show();
             Pump();
 
+            // A chip is a control, not log text: it is read at the size the rest of the window is read at,
+            // whatever the log has been set to, and it must not be cropped to make that fit.
+            int windowText = TextRenderer.MeasureText("Xg", host.Font, new Size(int.MaxValue, int.MaxValue),
+                TextFormatFlags.NoPadding).Height;
             foreach (var (family, size) in new[] { ("Consolas", 10f), ("Consolas", 8f), ("Consolas", 16f), ("Segoe UI", 10f) })
             {
                 settings.FontFamily = family;
@@ -1004,8 +1008,15 @@ internal static class SelfTest
                 ok &= Check($"a chip's label fits inside it at {family} {size}pt (label {text}, chip {rect.Height})",
                             !rect.IsEmpty && text <= rect.Height,
                             $"row {grid.RowPitch}, chip {rect}");
-                ok &= Check($"and the chip fits inside the one row the strip has ({rect.Height} of {grid.RowPitch})",
-                            rect.Height <= grid.RowPitch && rect.Height > 0);
+                ok &= Check($"and is drawn no smaller than the rest of the window ({text} vs {windowText})",
+                            text >= windowText, $"log font {family} {size}pt");
+                ok &= Check($"and the chip fits in the strip ({rect.Height} of {grid.HeaderHeightForTesting})",
+                            rect.Height > 0 && rect.Height <= grid.HeaderHeightForTesting,
+                            $"{grid.HeaderRows} rows of {grid.RowPitch}px");
+                // The strip is chrome, and chrome is a whole number of log lines - as the find bar is - so
+                // that showing it can be paid for by scrolling and nothing on screen shifts by half a line.
+                ok &= Check($"and the strip is a whole number of lines ({grid.HeaderHeightForTesting} of {grid.RowPitch})",
+                            grid.HeaderHeightForTesting % grid.RowPitch == 0);
             }
 
             settings.FontFamily = "Consolas";
@@ -1155,17 +1166,32 @@ internal static class SelfTest
             ok &= Check($"and still nothing has moved on screen ({ScreenYOf(watched)})",
                         ScreenYOf(watched) == yBefore);
 
-            // The Inline layout has a strip of its own above the log, so it costs the same row and has to
-            // hand it back the same way. It did not, until the compensation stopped asking about the layout.
+            // The Inline layout has a strip of its own above the log. It need not be the same height as the
+            // header - the chips are labelled in the window's font, the header in the log's - so what has to
+            // hold is that whatever it takes, it takes in whole rows and hands every one of them back.
             doc.Columns.Layout = FieldLayout.Inline;
-            ok &= Check("laid out inline, turning fields on still takes exactly one row",
-                        form.ClickMenuForTesting("View", "Split Lines Into Fields") &&
-                        grid.FirstRowForTesting == firstBefore + 1,
-                        $"{firstBefore} -> {grid.FirstRowForTesting}");
+            bool turnedOn = form.ClickMenuForTesting("View", "Split Lines Into Fields");
             Pump();
+            int inlineRows = grid.HeaderRows;
+            ok &= Check($"laid out inline, the strip costs a whole number of rows ({inlineRows})",
+                        turnedOn && inlineRows >= 1 &&
+                        grid.FirstRowForTesting == firstBefore + inlineRows,
+                        $"{firstBefore} -> {grid.FirstRowForTesting}, strip {inlineRows} rows");
             ok &= Check($"and the line being read has not moved on screen either ({ScreenYOf(watched)})",
                         ScreenYOf(watched) == yBefore);
-            ok &= Check("and turning them off hands it back",
+
+            // ...and switching between the two layouts pays the difference, rather than letting the log slide
+            // by however much taller one strip is than the other.
+            ok &= Check("switching to columns keeps it where it is",
+                        form.ClickMenuForTesting("View", "Lay Out as Columns") &&
+                        ScreenYOf(watched) == yBefore,
+                        $"{ScreenYOf(watched)} vs {yBefore}, strip {grid.HeaderRows} rows");
+            Pump();
+            ok &= Check("and switching back does too",
+                        form.ClickMenuForTesting("View", "Lay Out Inline") && ScreenYOf(watched) == yBefore,
+                        $"{ScreenYOf(watched)} vs {yBefore}, strip {grid.HeaderRows} rows");
+            Pump();
+            ok &= Check("and turning them off hands every row back",
                         form.ClickMenuForTesting("View", "Split Lines Into Fields") &&
                         grid.FirstRowForTesting == firstBefore,
                         $"{grid.FirstRowForTesting}");

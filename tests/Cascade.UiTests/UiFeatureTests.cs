@@ -966,8 +966,9 @@ public class UiFeatureTests
     }
 
     /// <summary>The two layouts, driven the way a reader drives them: the keyboard for the split, the menu
-    /// for the layout. Inline puts its own strip of chips where the header would be, so it costs the same
-    /// row - and the rows themselves lose the fields that are hidden, which is what the whole layout is for.
+    /// for the layout. Each puts its own strip where the header would be - a draggable header in one, a row
+    /// of chips in the other - and each costs the log whole rows it hands back in full. The rows themselves
+    /// lose the fields that are hidden, which is what the whole layout is for.
     /// </summary>
     [Fact]
     public void The_two_field_layouts_can_be_chosen_from_the_menu()
@@ -991,28 +992,31 @@ public class UiFeatureTests
               items.Any(i => i.Contains("Field Settings", StringComparison.Ordinal)),
               string.Join(" | ", items));
 
-        // Inline straight from the menu turns the splitting on as well as choosing the layout.
+        // Inline straight from the menu turns the splitting on as well as choosing the layout. The chips are
+        // labelled in the window's font rather than the log's, so how many rows they take is theirs to say -
+        // what matters is that they take some and that the log is still being drawn.
         app.ClickMenuOrThrow("View", "Lay Out Inline");
-        bool took = Retry.WhileFalse(() => app.Rows().Length == rowsBefore - 1,
+        bool took = Retry.WhileFalse(() => app.Rows().Length < rowsBefore && app.Rows().Length > 0,
                                      TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
-        Check("inline takes a row for its chip strip, as the header does", took,
-              $"{rowsBefore} rows -> {app.Rows().Length}");
+        int inlineRows = app.Rows().Length;
+        Check("inline takes room for its chip strip, as the header does", took,
+              $"{rowsBefore} rows -> {inlineRows}");
 
         // Nothing is hidden yet, so every row still reads exactly as the file has it.
         string shown = app.Rows().Select(r => r.Name ?? "").FirstOrDefault(n => n.Contains("[api-gateway]", StringComparison.Ordinal)) ?? "";
         Check("and with nothing hidden a row is the line unchanged", shown.Contains("[INFO ]", StringComparison.Ordinal), shown);
 
-        // ...and back to columns, which costs the same row and so changes nothing about the count.
+        // ...and back to columns, whose header is one line of the log.
         app.ClickMenuOrThrow("View", "Lay Out as Columns");
         bool stayed = Retry.WhileFalse(() => app.Rows().Length == rowsBefore - 1,
                                        TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
-        Check("switching layout does not change how many rows fit", stayed, $"{app.Rows().Length} rows");
+        Check("the columns header takes exactly one row", stayed, $"{app.Rows().Length} rows");
 
-        // Turning the whole thing off hands the row back.
+        // Turning the whole thing off hands every row back.
         app.SendKeyAsDialogKey(grid, VirtualKeyShort.KEY_C, VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
         bool back = Retry.WhileFalse(() => app.Rows().Length == rowsBefore,
                                      TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
-        Check("and turning fields off hands the row back", back, $"{app.Rows().Length} rows");
+        Check("and turning fields off hands the rows back", back, $"{app.Rows().Length} rows");
 
         Assert.True(fails.Count == 0, "Field layout failures:\n  " + string.Join("\n  ", fails));
     }

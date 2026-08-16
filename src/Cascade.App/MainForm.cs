@@ -1706,13 +1706,22 @@ public sealed class MainForm : Form
         SetColumnsEnabled(true);
     }
 
-    /// <summary>Puts the log into one layout or the other, turning splitting on if it was off.</summary>
+    /// <summary>Puts the log into one layout or the other, turning splitting on if it was off. The two
+    /// strips need not be the same height - the chips are labelled in the window's font, the header in the
+    /// log's - so the switch keeps the line being read where it is, as turning fields on does.</summary>
     private void SetLayout(FieldLayout layout)
     {
         if (_doc.Columns.Enabled && _doc.Columns.Layout == layout) return;
-        _doc.Columns.Layout = layout;
-        if (!_doc.Columns.Enabled) ToggleColumns();
-        else { FieldsChanged(); _grid.RefreshView(); _filtersDirty = true; UpdateTitle(); }
+        if (!_doc.Columns.Enabled) { _doc.Columns.Layout = layout; ToggleColumns(); return; }
+
+        _grid.KeepTextStillAcrossFieldChange(() =>
+        {
+            _doc.Columns.Layout = layout;
+            _grid.RefreshView();
+        });
+        FieldsChanged();
+        _filtersDirty = true;
+        UpdateTitle();
     }
 
     /// <summary>Re-ticks the menu to match the state. Called when the menu opens as well as after a change,
@@ -1734,17 +1743,11 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Turns the header strip on or off, keeping the line the reader is looking at exactly where
-    /// it is. The strip takes a row off the top of the text - the header in one layout, the chips in the
+    /// it is. The strip takes rows off the top of the text - the header in one layout, the chips in the
     /// other - so without this the whole log appears to slide.</summary>
     private void SetColumnsEnabled(bool on)
     {
-        // What the strip is doing now against what it will be doing after, because "enabled" alone does not
-        // decide it: a spec with no parts, or a template that will not read, shows no strip either way.
-        bool now = _doc.Columns.Active;
-        bool next = on && _doc.Columns.Columns.Count > 0
-                       && _doc.Columns.Compiled.PartCount > 0 && _doc.Columns.Compiled.IsValid;
-
-        _grid.KeepTextStillAcross((next ? 1 : 0) - (now ? 1 : 0), () =>
+        _grid.KeepTextStillAcrossFieldChange(() =>
         {
             _doc.Columns.Enabled = on;
             _grid.RefreshView();
