@@ -119,9 +119,9 @@ empty brackets behind, and a field carried elsewhere leaves the space that separ
 **View > Field Settings…** shows the template against real lines from the file: a coloured band per field,
 and beneath it the row as it will actually be drawn — cell by cell in the Columns layout, widths and
 alignment included. Both rows are named, so a row whose fields have been moved about still says which
-value is which. Click a field in either row to pick its entry out of the list; drag an entry up or down the
-list, or use the buttons, to move the field along the row. The dialog also says how many of the sampled
-lines match, and, for one that does not, the character where it stopped matching.
+value is which. Click a field in either row to pick its entry out of the list; move a field along the row by
+dragging its entry, by the buttons, or with `Alt+↑` / `Alt+↓`, and rename one with `F2`. The dialog also says
+how many of the sampled lines match, and, for one that does not, the character where it stopped matching.
 
 Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
 A line the template does not match is shown whole and untouched, and Cascade says so when a search lands

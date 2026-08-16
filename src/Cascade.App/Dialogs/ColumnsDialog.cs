@@ -48,11 +48,16 @@ public sealed class ColumnsDialog : DialogBase
         SelectionMode = DataGridViewSelectionMode.FullRowSelect,
         MultiSelect = false,
         EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2,
+        // Tab belongs to the DIALOG. Left alone a grid takes it for itself and walks the current cell along,
+        // so tabbing out of a four-by-five list meant twenty presses; the cells are walked with the arrow
+        // keys, which is what anyone reaches for in a grid anyway.
+        StandardTab = true,
         // The header is as tall as its own text needs, which at a large font is taller than the default it
         // would otherwise keep - and a header cut in half is the first thing a reader notices. The rows go
         // the same way, or the descender of a "g" is shaved off every name in the list.
         ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
         AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells,
+        ShowCellToolTips = false,
         AutoGenerateColumns = false
     };
 
@@ -228,7 +233,7 @@ public sealed class ColumnsDialog : DialogBase
         // already guessed, and this says it to whoever has not.
         _up.Margin = new Padding(0, 0, Dpi(6), 0);
         _down.Margin = new Padding(0);
-        var dragNote = new Label { Text = "\u2026or drag a field up and down the list.", AutoSize = true, ForeColor = SystemColors.GrayText };
+        var dragNote = new Label { Text = "\u2026or drag a field up and down the list, or press Alt+\u2191 / Alt+\u2193.", AutoSize = true, ForeColor = SystemColors.GrayText };
         Row(Flow(_up, _down, Centred(dragNote, 10)), SizeType.AutoSize, 0, 6);
 
         var buttons = OkCancelRow(out var ok, out _);
@@ -388,6 +393,7 @@ public sealed class ColumnsDialog : DialogBase
         _template.Font = TemplateFont;
         foreach (var bit in _monoBits) bit.Font = MonoFont;
         foreach (var heading in _headings) heading.Font = BoldFont;
+        if (_list.Columns.Count > 0) MeasureListColumns();
         FitWrappingText();
         staleMono?.Dispose();
         staleTemplate?.Dispose();
@@ -420,14 +426,15 @@ public sealed class ColumnsDialog : DialogBase
         return flow;
     }
 
-    /// <summary>The list of fields. A grip in the first cell says a row can be dragged, and the two columns
-    /// whose meaning is not in their heading say it on the HEADING - not on the cells, which a DataGridView
-    /// pops up as the selection is walked with the arrow keys, tipping a reader who is only moving about.</summary>
+    /// <summary>The list of fields. A grip in the first cell says a row can be dragged, and a width left
+    /// empty says "auto" in the cell itself rather than in a tip - a tip on a cell is popped up as the
+    /// selection is walked with the arrow keys, tipping a reader who is only moving about, and it is
+    /// switched off here for that reason.</summary>
     private void BuildList()
     {
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "swatch", HeaderText = "", Width = GripWidth + Dpi(30), ReadOnly = true,
+            Name = "swatch", HeaderText = "", ReadOnly = true,
             Resizable = DataGridViewTriState.False, SortMode = DataGridViewColumnSortMode.NotSortable
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
@@ -437,22 +444,31 @@ public sealed class ColumnsDialog : DialogBase
         });
         _list.Columns.Add(new DataGridViewCheckBoxColumn
         {
-            Name = "show", HeaderText = "Show", Width = HeaderRoom("Show", 34), SortMode = DataGridViewColumnSortMode.NotSortable
+            Name = "show", HeaderText = "Show", SortMode = DataGridViewColumnSortMode.NotSortable
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "width", HeaderText = "Width", Width = HeaderRoom("Width", 34), SortMode = DataGridViewColumnSortMode.NotSortable
+            Name = "width", HeaderText = "Width (px)", SortMode = DataGridViewColumnSortMode.NotSortable
         });
         var align = new DataGridViewComboBoxColumn
         {
-            Name = "align", HeaderText = "Align", Width = HeaderRoom("Center", 40), FlatStyle = FlatStyle.Flat,
+            Name = "align", HeaderText = "Align", FlatStyle = FlatStyle.Flat,
             SortMode = DataGridViewColumnSortMode.NotSortable
         };
         align.Items.AddRange([nameof(ColumnAlign.Left), nameof(ColumnAlign.Right), nameof(ColumnAlign.Center)]);
         _list.Columns.Add(align);
+        MeasureListColumns();
+    }
 
-        _list.Columns["show"]!.HeaderCell.ToolTipText = "Untick to leave a field out of the row. Its punctuation goes with it.";
-        _list.Columns["width"]!.HeaderCell.ToolTipText = "Pixels, or blank to fit whatever is in it. Only used by the Columns layout.";
+    /// <summary>How wide the fixed columns have to be for their own headings to fit. Measured again whenever
+    /// the window's font changes, not once when it was built: a column sized for 9pt has its heading wrapped
+    /// onto two lines at 16, and the dialog is read at whatever size the screen it is dragged to says.</summary>
+    private void MeasureListColumns()
+    {
+        _list.Columns["swatch"]!.Width = GripWidth + Dpi(30);
+        _list.Columns["show"]!.Width = HeaderRoom("Show", 34);
+        _list.Columns["width"]!.Width = HeaderRoom("Width (px)", 34);
+        _list.Columns["align"]!.Width = HeaderRoom("Center", 40);
     }
 
     /// <summary>How wide a column has to be for its own heading to fit, with room for the tick or the
@@ -481,7 +497,7 @@ public sealed class ColumnsDialog : DialogBase
                 _list.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
         _list.SelectionChanged += (_, _) => UpdateHighlight();
-        _list.CellPainting += PaintSwatch;
+        _list.CellPainting += PaintCell;
         _list.DataError += (_, e) => e.ThrowException = false;
         _list.KeyDown += OnListKeyDown;
         WireDragging();
@@ -502,12 +518,21 @@ public sealed class ColumnsDialog : DialogBase
     /// <summary>F2 opens a cell for typing OVER, not for typing into. Renaming a field almost always means
     /// a new name rather than an edit to the old one, so the old one arrives selected and the first
     /// keystroke replaces it - which is what double-clicking a chip over the log has always done, and what
-    /// a reader who has done it there will expect here.
+    /// a reader who has done it there will expect here. Alt with an arrow carries the row, as it does in the
+    /// filter list.
     ///
     /// <para>A DataGridView only selects the contents on F2 in the EditOnF2 mode, and that mode gives up
     /// starting an edit when a letter is typed - so the behaviour is taken rather than the mode.</para></summary>
     private void OnListKeyDown(object? sender, KeyEventArgs e)
     {
+        // The same keys the filter list is reordered with, so the one gesture is learned once. The buttons
+        // say "Move up" and "Move down" with Alt keys of their own; these are for hands already in the list.
+        if (e.Alt && e.KeyCode is Keys.Up or Keys.Down)
+        {
+            e.Handled = e.SuppressKeyPress = true;
+            Reorder(e.KeyCode == Keys.Up ? -1 : +1);
+            return;
+        }
         if (e.KeyCode != Keys.F2 || e.Modifiers != Keys.None || _list.IsCurrentCellInEditMode) return;
         if (_list.CurrentCell is not DataGridViewTextBoxCell cell || cell.ReadOnly) return;
         e.Handled = true;
@@ -901,9 +926,13 @@ public sealed class ColumnsDialog : DialogBase
     /// <summary>The first cell of a row: a grip saying the row can be dragged, and the colour that ties the
     /// row to a band in the sample above. Greyed out when the field is not being shown, which is the same
     /// thing the sample does to a band it is leaving out.</summary>
-    private void PaintSwatch(object? sender, DataGridViewCellPaintingEventArgs e)
+    /// <summary>The cells this dialog draws itself: the first one, which carries the grip and the colour,
+    /// and a width nobody has set, which says "auto" rather than sitting empty.</summary>
+    private void PaintCell(object? sender, DataGridViewCellPaintingEventArgs e)
     {
-        if (e.RowIndex < 0 || e.ColumnIndex != _list.Columns["swatch"]!.Index) return;
+        if (e.RowIndex < 0) return;
+        if (e.ColumnIndex == _list.Columns["width"]!.Index) { PaintWidth(e); return; }
+        if (e.ColumnIndex != _list.Columns["swatch"]!.Index) return;
         e.PaintBackground(e.CellBounds, true);
         if (e.RowIndex < _working.Columns.Count)
         {
@@ -916,6 +945,29 @@ public sealed class ColumnsDialog : DialogBase
             using var pen = new Pen(SystemColors.ControlDark);
             e.Graphics.DrawRectangle(pen, box);
         }
+        e.Handled = true;
+    }
+
+    /// <summary>A width nobody has set says so, in the cell, in grey: "auto". What an empty box means is
+    /// exactly the sort of thing that used to be explained in a tip nobody reads until they are already
+    /// puzzled - written where the answer is wanted, it needs no explaining at all. Typing over it works as
+    /// it always did, because there is nothing there to type over.
+    ///
+    /// <para>Drawn half way between the ink and the paper of whatever state the cell is in, so it reads as
+    /// a placeholder rather than a value on a plain row, on the selected row, and while the column is greyed
+    /// out for the Inline layout alike.</para></summary>
+    private void PaintWidth(DataGridViewCellPaintingEventArgs e)
+    {
+        if (Convert.ToString(e.Value)?.Trim() is { Length: > 0 }) return;
+        e.PaintBackground(e.CellBounds, true);
+        var style = e.CellStyle!;
+        bool picked = e.State.HasFlag(DataGridViewElementStates.Selected);
+        var ink = picked ? style.SelectionForeColor : style.ForeColor;
+        var paper = picked ? style.SelectionBackColor : style.BackColor;
+        TextRenderer.DrawText(e.Graphics!, "auto", style.Font ?? Font, e.CellBounds,
+            Color.FromArgb((ink.R + paper.R) / 2, (ink.G + paper.G) / 2, (ink.B + paper.B) / 2),
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix |
+            TextFormatFlags.EndEllipsis | TextFormatFlags.LeftAndRightPadding);
         e.Handled = true;
     }
 
@@ -1049,8 +1101,62 @@ public sealed class ColumnsDialog : DialogBase
         box.SelectedText = text;
         _list.NotifyCurrentCellDirty(true);
     }
+
     /// <summary>Drives the dialog's own key handling, which is where Escape is decided.</summary>
     internal bool PressDialogKeyForTesting(Keys keys) => ProcessDialogKey(keys);
+
+    /// <summary>Drives a key at the field list, as a hand already in it would.</summary>
+    internal void PressListKeyForTesting(Keys keys) => OnListKeyDown(_list, new KeyEventArgs(keys));
+
+    /// <summary>Whether Tab walks out of the field list rather than along its cells. The walk below cannot
+    /// see this - a grid reports itself as one control either way, and then takes the key at run time.</summary>
+    internal bool TabLeavesListForTesting => _list.StandardTab;
+
+    /// <summary>Everywhere Tab stops, in the order it reaches them and named as a reader would name them.
+    /// Anything disabled or hidden is left out, because Tab passes over it.</summary>
+    internal string[] TabStopsForTesting
+    {
+        get
+        {
+            var stops = new List<string>();
+            Control? at = this;
+            for (int i = 0; i < 200; i++)
+            {
+                at = GetNextControl(at, true);
+                if (at is null) break;
+                if (at.TabStop && at.CanSelect) stops.Add(NameOf(at));
+            }
+            return [.. stops];
+        }
+    }
+
+    private string NameOf(Control c)
+        => ReferenceEquals(c, _template) ? "template"
+         : ReferenceEquals(c, _list) ? "fields"
+         : c.AccessibleName is { Length: > 0 } named ? named
+         : (c.Text ?? "").Replace("&", "");
+
+    /// <summary>Every Alt key the dialog claims, so that no two of them claim the same letter.</summary>
+    internal string[] MnemonicsForTesting
+    {
+        get
+        {
+            var claimed = new List<string>();
+            void Walk(Control parent)
+            {
+                foreach (Control c in parent.Controls)
+                {
+                    string text = c.Text ?? "";
+                    int at = text.IndexOf('&', StringComparison.Ordinal);
+                    if (at >= 0 && at + 1 < text.Length && text[at + 1] != '&')
+                        claimed.Add($"{char.ToLowerInvariant(text[at + 1])}:{text.Replace("&", "")}");
+                    Walk(c);
+                }
+            }
+            Walk(this);
+            return [.. claimed];
+        }
+    }
 
     /// <summary>Drops a field into the gap before <paramref name="before"/>, as a drag onto that gap does.</summary>
     internal void DropRowForTesting(int from, int before) => MoveRow(from, before);
