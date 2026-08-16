@@ -26,7 +26,7 @@ public sealed class ColumnsPreview : Control
 
     public static Color BandOf(int part) => Bands[(part % Bands.Length + Bands.Length) % Bands.Length];
 
-    private readonly HScrollBar _scroll = new() { Dock = DockStyle.Bottom, SmallChange = 1, LargeChange = 20, Minimum = 0 };
+    private readonly HScrollBar _scroll = new() { SmallChange = 1, LargeChange = 20, Minimum = 0 };
     private readonly TemplateMatch _match = new();
     private readonly LineProjection _projection = new();
 
@@ -36,6 +36,7 @@ public sealed class ColumnsPreview : Control
     private string _line = "";
     private ColumnSpec? _spec;
     private bool _fits;
+    private bool _asked;
     private int _selectFrom = -1, _selectTo = -1;
     private bool _dragging;
 
@@ -45,6 +46,9 @@ public sealed class ColumnsPreview : Control
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
         BackColor = SystemColors.Window;
         TabStop = false;
+        // Its height follows the font, and a table layout only asks a child what it wants when the child
+        // says its size is its own business.
+        AutoSize = true;
         Controls.Add(_scroll);
         _scroll.ValueChanged += (_, _) => Invalidate();
         _scroll.AccessibleName = "Scroll the sample line sideways";
@@ -66,6 +70,11 @@ public sealed class ColumnsPreview : Control
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Dictionary<int, int> ColumnWidths { get; } = [];
 
+    /// <summary>The columns whose width the reader has set by hand, in characters. Those are held to - and
+    /// a value too long for one is cut, exactly as the table cuts it - while the rest grow to fit.</summary>
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public Dictionary<int, int> FixedWidths { get; } = [];
+
     /// <summary>What is picked out in the sample line, as indices into it, or (-1,-1) for nothing.</summary>
     public (int From, int To) Selection => _selectFrom < 0 || _selectTo <= _selectFrom ? (-1, -1) : (_selectFrom, _selectTo);
 
@@ -76,6 +85,8 @@ public sealed class ColumnsPreview : Control
         _mono?.Dispose();
         _name?.Dispose();
         _small?.Dispose();
+        // Measured in the old face, so worth nothing in the new one.
+        _cellsForChar.Clear();
         _mono = new Font("Consolas", Font.SizeInPoints + 0.5f, FontStyle.Regular, GraphicsUnit.Point);
         _name = new Font(Font.FontFamily, Math.Max(6.5f, Font.SizeInPoints - 1.5f), FontStyle.Bold, GraphicsUnit.Point);
         _small = new Font(Font.FontFamily, Math.Max(7f, Font.SizeInPoints - 1f), GraphicsUnit.Point);
@@ -85,19 +96,33 @@ public sealed class ColumnsPreview : Control
         _lineHeight = TextRenderer.MeasureText("Xg", _mono, big, TextFormatFlags.NoPadding).Height + Dpi(4);
         _nameHeight = TextRenderer.MeasureText("Xg", _name, big, TextFormatFlags.NoPadding).Height + Dpi(2);
         _smallHeight = TextRenderer.MeasureText("Xg", _small, big, TextFormatFlags.NoPadding).Height + Dpi(2);
+        // Wide enough for the words that name the two rows, whatever font the dialog is being read in.
+        // Fixed at 48 they were cut in half the moment anyone raised the font size.
+        _gutter = Pad + Math.Max(TextRenderer.MeasureText(SampleLabel, _small, big, TextFormatFlags.NoPadding).Width,
+                                 TextRenderer.MeasureText(ResultLabel, _small, big, TextFormatFlags.NoPadding).Width) + Pad;
     }
 
+    private const string SampleLabel = "sample";
+    private const string ResultLabel = "result";
+
     private int Dpi(int logical) => LogicalToDeviceUnits(logical);
-    private int Gutter => Dpi(48);
+    private int Gutter => _gutter;
     private int Pad => Dpi(6);
+    private int _gutter;
+
+    /// <summary>How wide one character of the sample is drawn, so the dialog can say what a width in pixels
+    /// comes to in characters - which is what the preview lays its columns out in.</summary>
+    public int CharWidth => Math.Max(1, _charWidth);
 
     /// <summary>Room the scrollbar is taking, which is none while there is nothing to scroll.</summary>
-    private int ScrollSpace => _scroll.Visible ? _scroll.Height : 0;
+    private int ScrollSpace => _scroll.Visible ? _scroll.Height + Dpi(2) : 0;
 
     protected override void OnFontChanged(EventArgs e)
     {
         base.OnFontChanged(e);
         BuildFonts();
+        // The maps were built in cells of the old face; the line is redrawn from them.
+        Remeasure();
         Invalidate();
     }
 
@@ -105,13 +130,26 @@ public sealed class ColumnsPreview : Control
     {
         base.OnDpiChangedAfterParent(e);
         BuildFonts();
+        Remeasure();
         Invalidate();
     }
 
-    /// <summary>How tall this wants to be: the names, the two lines of text, and the row that carries the
-    /// reason when a line does not fit. That row is kept even when everything fits, so the dialog does not
-    /// jump about as the reader steps through the sample.</summary>
-    public int PreferredHeight => Pad + _nameHeight + _lineHeight + Dpi(4) + _lineHeight + _smallHeight + Pad + _scroll.Height;
+    /// <summary>Works the line out again in the face now in use, without asking the dialog for it.</summary>
+    private void Remeasure()
+    {
+        if (_spec is not null) ShowLine(_line, _spec);
+        else UpdateScroll();
+    }
+
+    /// <summary>How tall this wants to be: the names, and the two lines of text. The row that carries the
+    /// reason a line does not fit takes the result's place rather than a row of its own, so that stepping
+    /// through the sample does not make the dialog jump about.</summary>
+    public int PreferredHeight => Pad + _nameHeight + _lineHeight + Dpi(4) + _lineHeight + Pad + _scroll.Height + Dpi(2);
+
+    /// <summary>What a layout panel asks for, so the row this sits in follows the font instead of being
+    /// measured once, at the default font, before the dialog has even said what font it is using.</summary>
+    public override Size GetPreferredSize(Size proposedSize)
+        => new(Math.Max(proposedSize.Width, Dpi(200)), PreferredHeight);
 
     public void ShowLine(string line, ColumnSpec spec)
     {
@@ -119,19 +157,120 @@ public sealed class ColumnsPreview : Control
         if (!ReferenceEquals(_line, line)) ClearSelection();
         _line = line ?? "";
         _spec = spec;
-        _fits = spec.Compiled.IsValid && spec.Compiled.PartCount > 0 && spec.Compiled.Match(_line, _match);
-        if (spec.Layout == FieldLayout.Columns) BuildTable(); else _projection.Build(_line, spec, _match);
+        _sampleCells.Build(_line, CellsFor);
+        // Whether the template is in a state to be asked about the line at all. Without this, a template
+        // that is empty or half-written reported every line as one that "does not match", pointing at
+        // character 0 and naming nothing - an error where the reader has simply not finished typing.
+        _asked = spec.Compiled.IsValid && spec.Compiled.PartCount > 0;
+        _fits = _asked && spec.Compiled.Match(_line, _match);
+        if (spec.Layout == FieldLayout.Columns)
+        {
+            BuildTable();
+            _resultCells.Build(_result, CellsFor);
+        }
+        else
+        {
+            _projection.Build(_line, spec, _match);
+            _result = _projection.Text;
+            _resultCells.Build(_result, CellsFor);
+        }
         UpdateScroll();
         Invalidate();
     }
 
-    /// <summary>The Columns layout does NOT rebuild the line - it draws the captured values, padded to line
-    /// up. Showing the reconstructed line here instead would promise a row the table will never draw:
-    /// the real one leaves the punctuation behind, because the punctuation is not in any value.</summary>
+    /// <summary>How many cells of the fixed-pitch grid one character takes. One, for the ASCII most logs
+    /// are; two for a CJK glyph or an emoji; and a tab is given a cell rather than a tab stop, because the
+    /// point here is that the text sits in the cells the coloured bands were drawn for.</summary>
+    private int CellsFor(char c)
+    {
+        if (c is >= ' ' and <= '~') return 1;
+        if (_cellsForChar.TryGetValue(c, out int cells)) return cells;
+        int width = TextRenderer.MeasureText(c.ToString(), _mono, new Size(int.MaxValue, int.MaxValue),
+            TextFormatFlags.NoPadding).Width;
+        cells = Math.Clamp((width + _charWidth - 1) / Math.Max(1, _charWidth), 1, 4);
+        _cellsForChar[c] = cells;
+        return cells;
+    }
+
+    private readonly Dictionary<char, int> _cellsForChar = [];
+    private readonly CellMap _sampleCells = new();
+    private readonly CellMap _resultCells = new();
+    private string _result = "";
+
+    /// <summary>
+    /// Where each character of a string sits, counted in cells of the fixed-pitch grid the preview is laid
+    /// out on. Ordinary text is a character to a cell and the map is the index itself; a tab, a CJK glyph or
+    /// an emoji is not, and without this the text walks away from the bands drawn behind it.
+    /// </summary>
+    private sealed class CellMap
+    {
+        /// <summary>Long enough for any line worth looking at one character at a time, short enough that
+        /// building the map for a line of megabytes is never attempted.</summary>
+        private const int Most = 64 * 1024;
+
+        private int[] _cells = [];
+        private bool _plain = true;
+        private int _length;
+
+        /// <summary>How many cells the whole string takes.</summary>
+        public int Total { get; private set; }
+
+        public void Build(string text, Func<char, int> cellsFor)
+        {
+            _plain = true;
+            _length = text.Length;
+            Total = text.Length;
+            if (text.Length == 0 || text.Length > Most) return;
+
+            bool wide = false;
+            foreach (char c in text) if (c is < ' ' or > '~') { wide = true; break; }
+            if (!wide) return;
+
+            if (_cells.Length < text.Length + 1) _cells = new int[Math.Max(text.Length + 1, 256)];
+            int at = 0;
+            for (int i = 0; i < text.Length; i++)
+            {
+                _cells[i] = at;
+                at += cellsFor(text[i]);
+            }
+            _cells[text.Length] = at;
+            _plain = false;
+            Total = at;
+        }
+
+        /// <summary>The cell a character starts in.</summary>
+        public int Of(int index)
+        {
+            index = Math.Clamp(index, 0, _length);
+            return _plain ? index : _cells[index];
+        }
+
+        /// <summary>The character in a cell - which is what the pointer is over.</summary>
+        public int IndexAt(int cell)
+        {
+            if (_plain) return Math.Clamp(cell, 0, _length);
+            int lo = 0, hi = _length;
+            while (lo < hi)
+            {
+                int mid = (lo + hi + 1) / 2;
+                if (_cells[mid] <= cell) lo = mid; else hi = mid - 1;
+            }
+            return lo;
+        }
+    }
+
+    /// <summary>The Columns layout does NOT rebuild the line - it draws the captured values in cells, each
+    /// as wide as that column will be, so what is on show here is a row of the table and not a line with the
+    /// punctuation left in. A value too long for its cell is cut with an ellipsis exactly as the table cuts
+    /// it, which is the whole point of setting a width by hand.
+    ///
+    /// <para>Everything here is counted in CELLS rather than characters, so that a value with a wide glyph
+    /// in it still ends where the column does.</para></summary>
     private void BuildTable()
     {
         _table.Clear();
         _tableSpans.Clear();
+        _result = "";
         if (!_fits) return;
 
         var template = _spec!.Compiled;
@@ -142,12 +281,25 @@ public sealed class ColumnsPreview : Control
             int value = template.PartAt(column.Source).Value;
             if (value < 0) continue;
 
-            if (!first) _table.Append("  ");
+            // One cell between columns, as the table leaves a little room either side of a cell's text.
+            if (!first) _table.Append(' ');
             first = false;
 
             var (start, length) = _match.Value(value);
-            int want = ColumnWidths.TryGetValue(column.Source, out int w) ? Math.Max(w, length) : length;
-            int slack = Math.Max(0, want - length);
+            int valueCells = _sampleCells.Of(start + length) - _sampleCells.Of(start);
+            // A width set by hand is held to, and the value cut to fit it as the table would; a column left
+            // to itself is as wide as the sample needs, so nothing is ever cut that the table would show.
+            int cell = FixedWidths.TryGetValue(column.Source, out int fixedWidth)
+                ? Math.Max(1, fixedWidth)
+                : Math.Max(1, Math.Max(ColumnWidths.GetValueOrDefault(column.Source), valueCells));
+
+            bool cut = valueCells > cell;
+            int room = cut ? cell - 1 : cell;           // a cell is kept for the ellipsis
+            int take = 0, taken = 0;
+            while (take < length && taken + CellsFor(_line[start + take]) <= room)
+                taken += CellsFor(_line[start + take++]);
+
+            int slack = Math.Max(0, cell - taken - (cut ? 1 : 0));
             int before = column.Align switch
             {
                 ColumnAlign.Right => slack,
@@ -155,17 +307,24 @@ public sealed class ColumnsPreview : Control
                 _ => 0
             };
 
+            int cellStart = _table.Length;
             _table.Append(' ', before);
-            _tableSpans.Add((_table.Length, length, column.Source));
-            _table.Append(_line, start, length);
+            int textAt = _table.Length;
+            if (take > 0) _table.Append(_line, start, take);
+            if (cut) _table.Append('\u2026');
             _table.Append(' ', slack - before);
+            _tableSpans.Add((cellStart, cell, textAt, _table.Length - textAt, column.Source));
         }
+        _result = _table.ToString();
     }
 
     private readonly System.Text.StringBuilder _table = new();
-    private readonly List<(int Start, int Length, int Part)> _tableSpans = [];
+
+    /// <summary>Each cell of the Columns preview: where the cell begins in the built row and how wide it is
+    /// (which is what makes the columns line up), and where its text sits inside it. Both are indices into
+    /// the row's characters; the cells they fall in come from the map.</summary>
+    private readonly List<(int Start, int Width, int TextAt, int TextLength, int Part)> _tableSpans = [];
     private bool AsTable => _spec is not null && _spec.Layout == FieldLayout.Columns;
-    private string Result => AsTable ? _table.ToString() : _projection.Text;
 
     public void ClearSelection()
     {
@@ -179,9 +338,14 @@ public sealed class ColumnsPreview : Control
 
     private void UpdateScroll()
     {
-        int widest = Math.Max(_line.Length, Result.Length);
+        int widest = Math.Max(_sampleCells.Total, _resultCells.Total);
         int over = Math.Max(0, widest - VisibleChars);
-        _scroll.LargeChange = Math.Max(1, VisibleChars / 2);
+        int large = Math.Max(1, VisibleChars / 2);
+        // Maximum first, and read back what the scrollbar actually took: LargeChange is clamped to the
+        // range, so setting it against the OLD maximum and then working the new one out from what came back
+        // could leave a bar that is on screen with nowhere to go.
+        _scroll.Maximum = over + large - 1;
+        _scroll.LargeChange = large;
         _scroll.Maximum = over + _scroll.LargeChange - 1;
         // Out of the way entirely when there is nothing to scroll: a dead scrollbar is one more thing on a
         // dialog that already has plenty to look at.
@@ -192,12 +356,25 @@ public sealed class ColumnsPreview : Control
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        PlaceScrollBar();
         UpdateScroll();
     }
 
+    /// <summary>Puts the scrollbar just inside the border rather than docked across the bottom of the
+    /// control, where its own background cut the box in two - the box is meant to read as one panel.</summary>
+    private void PlaceScrollBar()
+        => _scroll.SetBounds(1, Math.Max(0, ClientSize.Height - 1 - _scroll.Height),
+                             Math.Max(0, ClientSize.Width - 2), _scroll.Height);
+
     // ---- picking a stretch of the sample out, to make a column of it ----
 
-    private int CharAt(int x) => Math.Clamp((x - Gutter + _scroll.Value * _charWidth + _charWidth / 2) / _charWidth, 0, _line.Length);
+    /// <summary>Which character of the sample the pointer is over: the cell it is in, and then the character
+    /// that sits in that cell.</summary>
+    private int CharAt(int x)
+    {
+        int cell = (x - Gutter + _scroll.Value * _charWidth + _charWidth / 2) / Math.Max(1, _charWidth);
+        return _sampleCells.IndexAt(Math.Max(0, cell));
+    }
 
     private int SampleTop => Pad + _nameHeight;
 
@@ -233,7 +410,7 @@ public sealed class ColumnsPreview : Control
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
-        if (_scroll.Enabled)
+        if (_scroll.Visible)
         {
             int step = e.Delta > 0 ? -3 : 3;
             int most = Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1);
@@ -244,25 +421,40 @@ public sealed class ColumnsPreview : Control
 
     // ---- drawing ----
 
+    /// <summary>
+    /// How every piece of the scrolled text is drawn.
+    ///
+    /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is the load-bearing one: TextRenderer draws
+    /// through GDI, which ignores the GDI+ clip region set on the Graphics unless it is asked not to.
+    /// Without it, a sample scrolled sideways starts at a negative x and is painted straight over the
+    /// words that name the two rows - the SetClip around the call looks like it should prevent that,
+    /// and does not.
+    /// </summary>
+    private const TextFormatFlags ScrolledText =
+        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
         g.Clear(BackColor);
         using (var pen = new Pen(SystemColors.ControlDark))
-            g.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - ScrollSpace - 1);
+            g.DrawRectangle(pen, 0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
 
         if (_spec is null) return;
 
         int nameY = Pad;
         int sampleY = SampleTop;
         int resultY = sampleY + _lineHeight + Dpi(4);
-        int noteY = resultY + _lineHeight;
 
-        TextRenderer.DrawText(g, "sample", _small, new Point(Pad, sampleY + Dpi(2)), SystemColors.GrayText);
-        if (_fits) TextRenderer.DrawText(g, "result", _small, new Point(Pad, resultY + Dpi(2)), SystemColors.GrayText);
+        TextRenderer.DrawText(g, SampleLabel, _small, new Point(Pad, sampleY + Dpi(2)), SystemColors.GrayText,
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        if (_fits)
+            TextRenderer.DrawText(g, ResultLabel, _small, new Point(Pad, resultY + Dpi(2)), SystemColors.GrayText,
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
 
         var saved = g.Clip;
-        g.SetClip(new Rectangle(Gutter, 0, Math.Max(0, ClientSize.Width - Gutter - Pad), ClientSize.Height));
+        g.SetClip(new Rectangle(Gutter, 0, Math.Max(0, ClientSize.Width - Gutter - Pad),
+                                Math.Max(0, ClientSize.Height - ScrollSpace)));
         int x0 = Gutter - _scroll.Value * _charWidth;
 
         DrawSample(g, x0, nameY, sampleY);
@@ -270,7 +462,10 @@ public sealed class ColumnsPreview : Control
         g.Clip = saved;
         saved.Dispose();
 
-        if (!_fits) DrawWhyNot(g, x0, sampleY, noteY);
+        // In the place the result would have taken, not a row below it: a reader who has just been told the
+        // line does not fit should not have to hunt down the page for the reason. Only when there is a
+        // template to fail, though - "expected nothing at character 0" is no way to greet an empty box.
+        if (_asked && !_fits) DrawWhyNot(g, x0, sampleY, resultY + Dpi(2));
     }
 
     private void DrawSample(Graphics g, int x0, int nameY, int y)
@@ -290,7 +485,8 @@ public sealed class ColumnsPreview : Control
                 var (start, length) = _match.Part(part);
                 if (length <= 0) continue;
                 bool off = hidden.Contains(part);
-                var rect = new Rectangle(x0 + start * _charWidth, y, length * _charWidth, _lineHeight);
+                int from = _sampleCells.Of(start), to = _sampleCells.Of(start + length);
+                var rect = new Rectangle(x0 + from * _charWidth, y, (to - from) * _charWidth, _lineHeight);
                 if (rect.Right < Gutter || rect.Left > ClientSize.Width) continue;
 
                 using (var brush = new SolidBrush(off ? SystemColors.ControlLight : BandOf(part)))
@@ -303,10 +499,13 @@ public sealed class ColumnsPreview : Control
                 if (names.TryGetValue(part, out var name) && name.Length > 0)
                 {
                     var size = TextRenderer.MeasureText(name, _name, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
-                    if (size.Width <= rect.Width)
+                    // With room to spare on both sides, so that two names over neighbouring bands are told
+                    // apart by the gap between them rather than running into one another.
+                    if (size.Width + Dpi(8) <= rect.Width)
                         TextRenderer.DrawText(g, name, _name, new Rectangle(rect.X, nameY, rect.Width, _nameHeight),
                             off ? SystemColors.GrayText : SystemColors.ControlDarkDark,
-                            TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
+                            TextFormatFlags.PreserveGraphicsClipping);
                 }
             }
         }
@@ -314,7 +513,8 @@ public sealed class ColumnsPreview : Control
         var (selectFrom, selectTo) = Selection;
         if (selectFrom >= 0)
         {
-            var rect = new Rectangle(x0 + selectFrom * _charWidth, y, (selectTo - selectFrom) * _charWidth, _lineHeight);
+            int from = _sampleCells.Of(selectFrom), to = _sampleCells.Of(selectTo);
+            var rect = new Rectangle(x0 + from * _charWidth, y, (to - from) * _charWidth, _lineHeight);
             using var brush = new SolidBrush(Color.FromArgb(90, SystemColors.Highlight));
             g.FillRectangle(brush, rect);
         }
@@ -342,40 +542,79 @@ public sealed class ColumnsPreview : Control
     {
         if (length <= 0 || start >= _line.Length) return;
         length = Math.Min(length, _line.Length - start);
-        int x = x0 + start * _charWidth;
-        if (x + length * _charWidth < Gutter || x > ClientSize.Width) return;
+        int from = _sampleCells.Of(start), to = _sampleCells.Of(start + length);
+        int x = x0 + from * _charWidth;
+        if (x + (to - from) * _charWidth < Gutter || x > ClientSize.Width) return;
 
-        TextRenderer.DrawText(g, _line.AsSpan(start, length), _mono, new Point(x, y + Dpi(2)), colour,
-            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+        DrawCells(g, _line.AsSpan(start, length), x, y + Dpi(2), colour);
 
         if (struck)
             using (var pen = new Pen(SystemColors.GrayText))
-                g.DrawLine(pen, x, y + _lineHeight / 2, x + length * _charWidth, y + _lineHeight / 2);
+                g.DrawLine(pen, x, y + _lineHeight / 2, x + (to - from) * _charWidth, y + _lineHeight / 2);
+    }
+
+    /// <summary>Draws a stretch of text into the cells the bands were drawn for. Everything here is laid out
+    /// a character to a cell, which one call to the renderer gives you free for ordinary text - but a tab, a
+    /// CJK glyph or an emoji is not one cell wide, and left to itself the text walks away from the colours
+    /// behind it. Those are placed cell by cell instead, and only for the line actually on show.</summary>
+    private void DrawCells(Graphics g, ReadOnlySpan<char> text, int x, int y, Color colour)
+    {
+        if (AllOneCell(text))
+        {
+            TextRenderer.DrawText(g, text, _mono, new Point(x, y), colour, ScrolledText);
+            return;
+        }
+
+        int cell = 0;
+        for (int i = 0; i < text.Length; i++)
+        {
+            int cx = x + cell * _charWidth;
+            if (cx > ClientSize.Width) break;      // and everything after it is further right still
+            // A surrogate pair is one glyph over two cells: drawn as a pair, or it comes out as two boxes.
+            int take = char.IsHighSurrogate(text[i]) && i + 1 < text.Length ? 2 : 1;
+            int cells = take == 2 ? CellsFor(text[i]) + CellsFor(text[i + 1]) : CellsFor(text[i]);
+            if (cx + cells * _charWidth >= Gutter)
+                TextRenderer.DrawText(g, text.Slice(i, take), _mono, new Point(cx, y), colour, ScrolledText);
+            cell += cells;
+            i += take - 1;
+        }
+    }
+
+    /// <summary>Whether every character is one cell wide in a fixed-pitch face, which is true of the plain
+    /// ASCII most logs are and lets the whole stretch go out in one call.</summary>
+    private static bool AllOneCell(ReadOnlySpan<char> text)
+    {
+        foreach (char c in text) if (c < ' ' || c > '~') return false;
+        return true;
     }
 
     private void DrawResult(Graphics g, int x0, int y)
     {
         if (AsTable)
         {
-            string table = _table.ToString();
-            foreach (var (start, length, part) in _tableSpans)
+            // Cell by cell rather than one long string: the cell is the thing that has to line up, and a
+            // band drawn round the value alone says nothing about where the column ends.
+            foreach (var (start, width, textAt, textLength, part) in _tableSpans)
             {
-                var cell = new Rectangle(x0 + start * _charWidth, y, length * _charWidth, _lineHeight);
+                int from = _resultCells.Of(start);
+                var cell = new Rectangle(x0 + from * _charWidth, y, width * _charWidth, _lineHeight);
                 if (cell.Right < Gutter || cell.Left > ClientSize.Width) continue;
-                using var brush = new SolidBrush(BandOf(part));
-                g.FillRectangle(brush, cell);
+                using (var brush = new SolidBrush(BandOf(part)))
+                    g.FillRectangle(brush, cell);
                 if (part == Highlight)
                     using (var pen = new Pen(SystemColors.WindowText, Dpi(2)))
                         g.DrawRectangle(pen, cell.X + 1, cell.Y + 1, cell.Width - 2, cell.Height - 2);
+                if (textLength > 0)
+                    DrawCells(g, _result.AsSpan(textAt, textLength), x0 + _resultCells.Of(textAt) * _charWidth,
+                              y + Dpi(2), SystemColors.WindowText);
             }
-            TextRenderer.DrawText(g, table, _mono, new Point(x0, y + Dpi(2)), SystemColors.WindowText,
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
             return;
         }
 
         foreach (var span in _projection.Spans)
         {
-            var rect = new Rectangle(x0 + span.Start * _charWidth, y, span.Length * _charWidth, _lineHeight);
+            int from = _resultCells.Of(span.Start), to = _resultCells.Of(span.Start + span.Length);
+            var rect = new Rectangle(x0 + from * _charWidth, y, (to - from) * _charWidth, _lineHeight);
             if (rect.Right < Gutter || rect.Left > ClientSize.Width) continue;
 
             if (span.Part >= 0)
@@ -393,16 +632,14 @@ public sealed class ColumnsPreview : Control
                 g.FillRectangle(brush, rect);
             }
 
-            TextRenderer.DrawText(g, _projection.Text.AsSpan(span.Start, span.Length), _mono,
-                new Point(rect.X, y + Dpi(2)), SystemColors.WindowText,
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            DrawCells(g, _result.AsSpan(span.Start, span.Length), rect.X, y + Dpi(2), SystemColors.WindowText);
         }
     }
 
     private void DrawWhyNot(Graphics g, int x0, int sampleY, int noteY)
     {
         int at = _match.FailurePosition;
-        int x = x0 + at * _charWidth;
+        int x = x0 + _sampleCells.Of(at) * _charWidth;
         var red = Color.FromArgb(192, 32, 32);
 
         if (x >= Gutter && x <= ClientSize.Width)
@@ -411,8 +648,34 @@ public sealed class ColumnsPreview : Control
 
         string wanted = _match.FailureExpected == " " ? "a space" : $"\u201c{_match.FailureExpected}\u201d";
         TextRenderer.DrawText(g, $"This line does not match: expected {wanted} at character {at}.", _small,
-            new Point(Gutter, noteY), red, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            new Rectangle(Gutter, noteY, Math.Max(0, ClientSize.Width - Gutter - Pad), _smallHeight + _lineHeight),
+            red, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordEllipsis);
     }
+
+    /// <summary>Picks a stretch of the sample out, as a drag across it does, so the dialog can be driven
+    /// without a mouse.</summary>
+    internal void SelectForTesting(int from, int to)
+    {
+        _selectFrom = Math.Clamp(from, 0, _line.Length);
+        _selectTo = Math.Clamp(to, 0, _line.Length);
+        SelectionChanged?.Invoke();
+        Invalidate();
+    }
+
+    internal int ScrollValueForTesting() => _scroll.Value;
+
+    internal void ScrollToForTesting(int value)
+        => _scroll.Value = Math.Clamp(value, _scroll.Minimum, Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1));
+
+    internal bool CanScrollForTesting() => _scroll.Visible;
+    internal int FurthestScrollForTesting() => Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1);
+    internal int GutterForTesting() => Gutter;
+    internal string ResultForTesting() => _result;
+
+    /// <summary>Whether the box is telling the reader the line does not fit the template.</summary>
+    internal bool SaysWhyNotForTesting => _asked && !_fits;
+
+    internal int ScrollBarHeightForTesting => _scroll.Visible ? _scroll.Height : 0;
 
     protected override void Dispose(bool disposing)
     {

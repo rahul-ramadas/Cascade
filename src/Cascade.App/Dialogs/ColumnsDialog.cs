@@ -22,8 +22,6 @@ public sealed class ColumnsDialog : DialogBase
 
     private readonly TextBox _template = new() { Dock = DockStyle.Fill };
     private readonly Button _detect = new() { Text = "&Detect", AutoSize = true };
-    private readonly Label _syntax = new() { AutoSize = true, ForeColor = SystemColors.ControlDarkDark };
-    private readonly Label _syntaxMore = new() { AutoSize = true, ForeColor = SystemColors.GrayText };
     private readonly Label _status = new() { AutoSize = true };
 
     private readonly Button _previous = new() { Text = "◀", AutoSize = true, AccessibleName = "Previous sample line" };
@@ -51,6 +49,9 @@ public sealed class ColumnsDialog : DialogBase
         SelectionMode = DataGridViewSelectionMode.FullRowSelect,
         MultiSelect = false,
         EditMode = DataGridViewEditMode.EditOnKeystrokeOrF2,
+        // The header is as tall as its own text needs, which at a large font is taller than the default it
+        // would otherwise keep - and a header cut in half is the first thing a reader notices.
+        ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
         AutoGenerateColumns = false
     };
 
@@ -76,10 +77,6 @@ public sealed class ColumnsDialog : DialogBase
         MinimumSize = new Size(Dpi(720), Dpi(540));
 
         _template.Font = new Font("Consolas", Font.SizeInPoints + 1f);
-        _syntax.Text = "[12:03][INFO] hello   is   {[*]}{[*]} {*}       "
-                     + "*  the text that changes, up to whatever you wrote next       "
-                     + "{ }  one field, punctuation and all";
-        _syntaxMore.Text = "A run of spaces matches any run of spaces.   \\{  \\}  \\*  \\\\  match those characters themselves.";
 
         Controls.Add(BuildRoot());
         BuildList();
@@ -94,6 +91,40 @@ public sealed class ColumnsDialog : DialogBase
         FillList();
         Refresh0();
     }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        FitToContent();
+        // A dialog hands focus to its first field and Windows selects the lot; the caret belongs at the end,
+        // which is where typing carries on from.
+        _template.Focus();
+        _template.Select(_template.TextLength, 0);
+    }
+
+    /// <summary>Grows the dialog until the field list has room for a few rows, and makes that the smallest
+    /// it can be dragged to. Worked out from what the list ACTUALLY got once laid out, so it holds at any
+    /// font size and any DPI - a figure written down here would only ever be right at one of them.</summary>
+    private void FitToContent()
+    {
+        int room = Screen.FromControl(this).WorkingArea.Height;
+        for (int pass = 0; pass < 4; pass++)
+        {
+            PerformLayout();
+            int wanted = WantedListHeight - _list.ClientSize.Height;
+            if (wanted <= 0 || Height >= room) break;
+            Height = Math.Min(Height + wanted, room);
+        }
+        PerformLayout();
+        MinimumSize = new Size(MinimumSize.Width,
+                               Height - Math.Max(0, _list.ClientSize.Height - WantedListHeight));
+    }
+
+    /// <summary>Four rows and the header: enough of the list to see that it IS a list and to drag a row
+    /// about in it. Read off the list itself, because a row is as tall as the font makes it.</summary>
+    private int WantedListHeight
+        => _list.ColumnHeadersHeight + Dpi(4) +
+           4 * Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
 
     // ---- layout ----
 
@@ -128,14 +159,24 @@ public sealed class ColumnsDialog : DialogBase
         templateRow.Controls.Add(_detect, 1, 0);
         Row(templateRow, SizeType.AutoSize, 0, 3);
 
-        Row(_syntax, SizeType.AutoSize, 0, 6);
-        Row(_syntaxMore, SizeType.AutoSize, 0, 1);
+        // Each part of the legend is its own label in a wrapping row, so that a narrow dialog - or a large
+        // font - breaks it BETWEEN the rules rather than through the middle of one.
+        Row(Legend(SystemColors.ControlDarkDark,
+                   "[12:03][INFO] hello   is   {[*]}{[*]} {*}",
+                   "*  the text that changes, up to whatever you wrote next",
+                   "{ }  one field, punctuation and all"), SizeType.AutoSize, 0, 6);
+        Row(Legend(SystemColors.GrayText,
+                   "A run of spaces matches any run of spaces.",
+                   "\\{  \\}  \\*  \\\\  match those characters themselves."), SizeType.AutoSize, 0, 1);
         Row(_status, SizeType.AutoSize, 0, 6);
 
-        var nav = Flow(_previous, _next, Spacer(_which, 10, 5), Spacer(_fit, 20, 5), _nextMisfit, _makeColumn);
+        var nav = Flow(_previous, _next, Centred(_which, 10), Centred(_fit, 20), _nextMisfit, _makeColumn);
         Row(nav, SizeType.AutoSize, 0, 10);
 
-        Row(_preview, SizeType.Absolute, _preview.PreferredHeight, 6);
+        // AutoSize, not a height measured here and then frozen: this control is built before the dialog has
+        // said what font it is being read in, so a fixed height was right at 9pt and cut the sample in half
+        // at 12 - taking the field list with it.
+        Row(_preview, SizeType.AutoSize, 0, 6);
 
         Row(Heading("&Layout"), SizeType.AutoSize, 0, 12);
         Row(Flow(_asColumns, _asInline), SizeType.AutoSize, 0, 2);
@@ -168,9 +209,27 @@ public sealed class ColumnsDialog : DialogBase
         Font = new Font(Font, FontStyle.Bold)
     };
 
-    private static Control Spacer(Control child, int left, int top)
+    /// <summary>A row of the syntax legend: one label per rule, wrapping between them.</summary>
+    private FlowLayoutPanel Legend(Color colour, params string[] parts)
     {
-        child.Margin = new Padding(child.Margin.Left + left, top, child.Margin.Right, child.Margin.Bottom);
+        var flow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, Margin = new Padding(0) };
+        foreach (string part in parts)
+            flow.Controls.Add(new Label
+            {
+                Text = part,
+                AutoSize = true,
+                ForeColor = colour,
+                Margin = new Padding(0, 0, Dpi(26), 0)
+            });
+        return flow;
+    }
+
+    /// <summary>Puts a label on the same line as the buttons beside it, whatever the font: anchored to
+    /// nothing, a flow layout centres it in the row rather than hanging it from the top.</summary>
+    private static Control Centred(Control child, int left)
+    {
+        child.Anchor = AnchorStyles.None;
+        child.Margin = new Padding(child.Margin.Left + left, 0, child.Margin.Right, 0);
         return child;
     }
 
@@ -202,23 +261,29 @@ public sealed class ColumnsDialog : DialogBase
         });
         _list.Columns.Add(new DataGridViewCheckBoxColumn
         {
-            Name = "show", HeaderText = "Show", Width = Dpi(58), SortMode = DataGridViewColumnSortMode.NotSortable,
+            Name = "show", HeaderText = "Show", Width = HeaderRoom("Show", 34), SortMode = DataGridViewColumnSortMode.NotSortable,
             ToolTipText = "Untick to leave this field out. Its punctuation goes with it."
         });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
-            Name = "width", HeaderText = "Width", Width = Dpi(70), SortMode = DataGridViewColumnSortMode.NotSortable,
+            Name = "width", HeaderText = "Width", Width = HeaderRoom("Width", 34), SortMode = DataGridViewColumnSortMode.NotSortable,
             ToolTipText = "Width in pixels for the Columns layout, or blank to size it to what is in it."
         });
         var align = new DataGridViewComboBoxColumn
         {
-            Name = "align", HeaderText = "Align", Width = Dpi(84), FlatStyle = FlatStyle.Flat,
+            Name = "align", HeaderText = "Align", Width = HeaderRoom("Center", 40), FlatStyle = FlatStyle.Flat,
             SortMode = DataGridViewColumnSortMode.NotSortable,
             ToolTipText = "Which way the text sits in its column."
         };
         align.Items.AddRange([nameof(ColumnAlign.Left), nameof(ColumnAlign.Right), nameof(ColumnAlign.Center)]);
         _list.Columns.Add(align);
     }
+
+    /// <summary>How wide a column has to be for its own heading to fit, with room for the tick or the
+    /// dropdown arrow beside it. Measured rather than written down, because at 16pt "Width" is half again
+    /// as wide as the figure that suited 9.</summary>
+    private int HeaderRoom(string text, int extra)
+        => TextRenderer.MeasureText(text, Font).Width + Dpi(extra);
 
     private void Wire()
     {
@@ -271,10 +336,24 @@ public sealed class ColumnsDialog : DialogBase
     /// takes a new row at that place rather than shoving every name along by one.</summary>
     private void Reparse()
     {
-        int caret = _template.SelectionStart;
+        // Where the caret WILL be, when the dialog is the one writing: assigning Text puts the caret back to
+        // the start before this is raised, and a part added at the end would then be taken for one added at
+        // the front - handing every existing name to the part next door.
+        int caret = _caretAfterEdit >= 0 ? _caretAfterEdit : _template.SelectionStart;
         _working.Template = _template.Text;
         _working.Sync(_working.Compiled.PartIndexAtOffset(caret));
         UpdateStatus();
+    }
+
+    private int _caretAfterEdit = -1;
+
+    /// <summary>Writes the template on the reader's behalf, leaving the caret where they would have left it.</summary>
+    private void WriteTemplate(string text, int caret)
+    {
+        _caretAfterEdit = Math.Clamp(caret, 0, text.Length);
+        try { _template.Text = text; }
+        finally { _caretAfterEdit = -1; }
+        _template.SelectionStart = Math.Clamp(caret, 0, _template.TextLength);
     }
 
     private void UpdateStatus()
@@ -314,8 +393,7 @@ public sealed class ColumnsDialog : DialogBase
                          + "across the sample below and press \u201cAdd field\u201d for each field in turn.";
             return;
         }
-        _template.Text = found;
-        _template.SelectionStart = _template.TextLength;
+        WriteTemplate(found, found.Length);
         FillList();
         Refresh0();
     }
@@ -354,7 +432,8 @@ public sealed class ColumnsDialog : DialogBase
 
     /// <summary>Adds a part for the stretch picked out in the sample: the text before it becomes the part's
     /// lead-in, and any closing punctuation straight after it comes along too - which is what makes hiding
-    /// the part take its brackets with it.</summary>
+    /// the part take its brackets with it. Whatever spaces stand in front of that lead-in are a SEPARATOR
+    /// and are written outside the braces, so that they stay behind when the field is carried elsewhere.</summary>
     private void MakeColumnFromSelection()
     {
         var (from, to) = _preview.Selection;
@@ -369,10 +448,15 @@ public sealed class ColumnsDialog : DialogBase
         int after = to;
         while (after < line.Length && closing.Contains(line[after], StringComparison.Ordinal)) after++;
 
-        string lead = LineTemplate.Escape(line[match.TailStart..from]);
+        int leadFrom = match.TailStart;
+        int leadIn = leadFrom;
+        while (leadIn < from && line[leadIn] == ' ') leadIn++;
+
+        string between = LineTemplate.Escape(line[leadFrom..leadIn]);
+        string lead = LineTemplate.Escape(line[leadIn..from]);
         string trail = LineTemplate.Escape(line[to..after]);
-        _template.Text += $"{{{lead}*{trail}}}";
-        _template.SelectionStart = _template.TextLength;
+        string added = $"{between}{{{lead}*{trail}}}";
+        WriteTemplate(_template.Text + added, _template.TextLength + added.Length);
         _preview.ClearSelection();
         FillList();
         Refresh0();
@@ -499,11 +583,13 @@ public sealed class ColumnsDialog : DialogBase
         UpdateHighlight();
     }
 
-    /// <summary>How wide each field's value runs across the sample, so the Columns preview lines up the way
-    /// the real table will.</summary>
+    /// <summary>How wide each field's column runs, in characters, so the Columns preview lines up the way
+    /// the real table will: a width set by hand is what that column gets - shown in characters, since that
+    /// is what the preview is laid out in - and one left to itself takes what the sampled lines need.</summary>
     private void MeasureColumnWidths()
     {
         _preview.ColumnWidths.Clear();
+        _preview.FixedWidths.Clear();
         if (_working.Layout != FieldLayout.Columns) return;
 
         var template = _working.Compiled;
@@ -522,6 +608,16 @@ public sealed class ColumnsDialog : DialogBase
                     Math.Max(_preview.ColumnWidths.GetValueOrDefault(column.Source), want);
             }
         }
+
+        // A width typed in pixels is shown as the characters it comes to, because the preview is laid out
+        // in characters - which is also how a width is kept once dragged in a fixed-pitch font.
+        foreach (var column in _working.Columns)
+        {
+            int chars = column.WidthChars > 0 ? column.WidthChars
+                      : column.Width > 0 ? Math.Max(1, (int)Math.Round(column.Width / (double)_preview.CharWidth))
+                      : 0;
+            if (chars > 0) _preview.FixedWidths[column.Source] = Math.Min(chars, 120);
+        }
     }
 
     private void Apply()
@@ -535,15 +631,6 @@ public sealed class ColumnsDialog : DialogBase
         _working.Enabled = _working.Compiled.IsValid && _working.Compiled.PartCount > 0;
     }
 
-    protected override void OnShown(EventArgs e)
-    {
-        base.OnShown(e);
-        // A dialog hands focus to its first field and Windows selects the lot; the caret belongs at the end,
-        // which is where typing carries on from.
-        _template.Focus();
-        _template.Select(_template.TextLength, 0);
-    }
-
     protected override void Dispose(bool disposing)
     {
         if (disposing) _tips.Dispose();
@@ -552,7 +639,7 @@ public sealed class ColumnsDialog : DialogBase
 
     // ---- seams, so the dialog can be driven without a mouse ----
 
-    internal void SetTemplateForTesting(string text) { _template.Text = text; _template.SelectionStart = _template.TextLength; }
+    internal void SetTemplateForTesting(string text) => WriteTemplate(text, text.Length);
     internal string TemplateForTesting => _template.Text;
     internal string StatusForTesting => _status.Text;
     internal string FitForTesting => _fit.Text;
@@ -564,4 +651,16 @@ public sealed class ColumnsDialog : DialogBase
     internal void SetLayoutForTesting(FieldLayout layout) { _asInline.Checked = layout == FieldLayout.Inline; _asColumns.Checked = !_asInline.Checked; }
     internal int RowCountForTesting => _list.Rows.Count;
     internal bool WidthIsEditableForTesting => !_list.Columns["width"]!.ReadOnly;
+
+    // ---- the sample, which is drawn rather than built out of controls ----
+
+    internal void SelectSampleForTesting(int from, int to) => _preview.SelectForTesting(from, to);
+    internal bool AddFieldEnabledForTesting => _makeColumn.Enabled;
+    internal void AddFieldForTesting() => MakeColumnFromSelection();
+    internal string ResultForTesting => _preview.ResultForTesting();
+    internal void StepSampleForTesting(int by) => StepSample(by);
+    internal void StepToMisfitForTesting() => StepToMisfit();
+    internal string WhichSampleForTesting => _which.Text;
+    internal ColumnsPreview PreviewForTesting => _preview;
+    internal Control ListForTesting => _list;
 }

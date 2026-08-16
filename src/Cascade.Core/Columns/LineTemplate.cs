@@ -495,8 +495,9 @@ public sealed class LineTemplate
 
         if (found == 0) return "";
 
-        // Whatever spaces stand between the last group and the message belong to the message's part, so
-        // that hiding the message takes them with it.
+        // The spaces between the last group and the message are a SEPARATOR, so they are written outside
+        // the message's braces: inside them they would be part of the field and would travel with it, and
+        // a message carried to the front of the row would push every line one space in.
         int from = i;
         while (i < sample.Length && sample[i] == ' ') i++;
         if (i < sample.Length || i > from) sb.Append(Escape(sample[from..i])).Append("{*}");

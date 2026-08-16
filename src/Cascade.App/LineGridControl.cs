@@ -65,6 +65,10 @@ public sealed class LineGridControl : Control
     private Font FontBold => _fonts[1];
     private Font FontItalic => _fonts[2];
     private FontFamily? _fontFamily;
+    /// <summary>The face the chips above the log are labelled in: the window's own UI font, brought down
+    /// until it fits inside a chip. The log's face is the wrong tool here - it is as tall as a row, and a
+    /// chip has to sit INSIDE a row, so its label came out with its top and tail cut off.</summary>
+    private Font? _chipFont;
     private int _rowHeight = 16;
     private int _charWidth = 8;
     private readonly int[] _charWidths = new int[8];
@@ -676,9 +680,38 @@ public sealed class LineGridControl : Control
         // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
         _monospaced = TextRenderer.MeasureText("iiiiiiiiii", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
                    == TextRenderer.MeasureText("WWWWWWWWWW", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        BuildChipFont();
         _naturalKey = null;   // the widths the content asks for are measured in this font
         Invalidate();
     }
+
+    /// <summary>Makes the face the chips are labelled in fit the strip, which is one row tall whatever the
+    /// log is being read at. It follows the LOG's size, so zooming the log carries the chips with it, and is
+    /// then measured and brought down until it fits: at a small log font, or in a proportional one, the
+    /// difference between the row and the text is a couple of pixels, and a couple of pixels is the whole
+    /// descender.</summary>
+    private void BuildChipFont()
+    {
+        _chipFont?.Dispose();
+        _chipFont = null;
+
+        int room = Math.Max(LogicalToDeviceUnits(7), ChipHeight - LogicalToDeviceUnits(2));
+        float points = Math.Max(6f, _settings.EffectiveFontSize);
+        var family = Font.FontFamily;
+        for (int tries = 0; tries < 6; tries++)
+        {
+            var candidate = new Font(family, points, FontStyle.Regular, GraphicsUnit.Point);
+            int height = TextRenderer.MeasureText("Xg", candidate, new Size(int.MaxValue, int.MaxValue),
+                TextFormatFlags.NoPadding).Height;
+            if (height <= room || points <= 6f) { _chipFont = candidate; return; }
+            candidate.Dispose();
+            // Straight to the size that would have fitted, rather than creeping down by halves.
+            points = Math.Max(6f, points * room / height - 0.1f);
+        }
+        _chipFont = new Font(family, 6f, FontStyle.Regular, GraphicsUnit.Point);
+    }
+
+    private Font ChipFont => _chipFont ?? FontRegular;
 
     /// <summary>Recomputes scrollbar ranges from the document and repaints. Call (on the UI thread)
     /// whenever counts change or the view mode/filters change.</summary>
@@ -1214,8 +1247,10 @@ public sealed class LineGridControl : Control
             if (_colGesture == ColumnGesture.Reorder && i == _colIndex && _colMoved)
                 using (var b = new SolidBrush(Color.FromArgb(60, _settings.SelectionBack)))
                     g.FillRectangle(b, x, top, w, _rowHeight - 1);
-            TextRenderer.DrawText(g, def.Name, FontBold, new Rectangle(x + 3, top + 1, w - 6, _rowHeight - 2),
-                Color.FromArgb(80, 80, 80), CellFlags(ColumnAlign.Left, x, w, gutter, right));
+            // The full row height, centred: in a box two pixels shorter the descenders of a proportional
+            // face were shaved off the bottom of every name that had one.
+            TextRenderer.DrawText(g, def.Name, FontBold, new Rectangle(x + 3, top, w - 6, _rowHeight),
+                Color.FromArgb(80, 80, 80), CellFlags(ColumnAlign.Left, x, w, gutter, right) | TextFormatFlags.VerticalCenter);
             // A hairline on every edge: without one there is nothing to aim the resize pointer at.
             using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
                 g.DrawLine(pen, x + w - 1, top + 2, x + w - 1, top + _rowHeight - 3);
@@ -1237,7 +1272,14 @@ public sealed class LineGridControl : Control
     /// <summary>Room either side of a chip's label, and between one chip and the next.</summary>
     private int ChipPad => LogicalToDeviceUnits(7);
     private int ChipGap => LogicalToDeviceUnits(5);
-    private int ChipSwatch => LogicalToDeviceUnits(8);
+
+    /// <summary>How tall a chip is. The strip is one row, exactly as the header is, so a chip has to sit
+    /// inside a row with a hair of daylight above and below it.</summary>
+    private int ChipHeight => Math.Max(LogicalToDeviceUnits(9), _rowHeight - LogicalToDeviceUnits(3));
+
+    /// <summary>The colour patch on a chip, which shrinks with the chip rather than standing proud of it.</summary>
+    private int ChipSwatch => Math.Max(LogicalToDeviceUnits(5),
+                                       Math.Min(LogicalToDeviceUnits(9), ChipHeight - LogicalToDeviceUnits(8)));
 
     /// <summary>Where every chip sits, in display order, and - when they do not all fit - where the button
     /// that opens the rest sits. Laid out from the left of the content area and NOT scrolled with the text:
@@ -1248,17 +1290,19 @@ public sealed class LineGridControl : Control
         if (_doc is null) return result;
 
         int right = ClientSize.Width - RightGutterWidth;
-        int x = GutterWidth() + ChipGap;
-        int top = TopInset + LogicalToDeviceUnits(2);
-        int height = _rowHeight - LogicalToDeviceUnits(4);
+        // Level with the text below, not a gap further in: the first chip is what the eye lines the strip up
+        // by, and the header in the other layout starts exactly there.
+        int x = GutterWidth();
+        int height = ChipHeight;
+        int top = TopInset + Math.Max(0, (_rowHeight - height) / 2);
         var spec = _doc.Columns;
-        int room = TextRenderer.MeasureText("\u00bb 00", FontRegular, new Size(int.MaxValue, height),
+        int room = TextRenderer.MeasureText("\u00bb 00", ChipFont, new Size(int.MaxValue, height),
             TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width + 2 * ChipPad + ChipGap;
 
         for (int i = 0; i < spec.Columns.Count; i++)
         {
             string name = spec.Columns[i].Name;
-            int text = TextRenderer.MeasureText(name, FontRegular, new Size(int.MaxValue, height),
+            int text = TextRenderer.MeasureText(name, ChipFont, new Size(int.MaxValue, height),
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
             int width = ChipPad + ChipSwatch + LogicalToDeviceUnits(5) + text + ChipPad;
 
@@ -1273,7 +1317,7 @@ public sealed class LineGridControl : Control
             if (x + width > right - (last ? 0 : room))
             {
                 _chipsOverflowing = spec.Columns.Count - result.Count;
-                int at = Math.Min(x, Math.Max(GutterWidth() + ChipGap, right - room));
+                int at = Math.Min(x, Math.Max(GutterWidth(), right - room));
                 _chipOverflowRect = new Rectangle(at, top, room - ChipGap, height);
                 return result;
             }
@@ -1311,7 +1355,7 @@ public sealed class LineGridControl : Control
 
             // A chip has to read as something to press, not as a key to the colours: it lifts under the
             // pointer, and its edge darkens, which is what says "this does something".
-            using (var brush = new SolidBrush(def.Visible ? (under ? SystemColors.Window : SystemColors.Window) : _settings.GutterBack))
+            using (var brush = new SolidBrush(def.Visible ? SystemColors.Window : _settings.GutterBack))
                 g.FillRectangle(brush, rect);
             if (under)
                 using (var brush = new SolidBrush(Color.FromArgb(40, _settings.SelectionBack)))
@@ -1329,7 +1373,7 @@ public sealed class LineGridControl : Control
             using (var pen = new Pen(Color.FromArgb(160, 160, 160))) g.DrawRectangle(pen, swatch);
 
             int textLeft = swatch.Right + LogicalToDeviceUnits(5);
-            TextRenderer.DrawText(g, def.Name, FontRegular,
+            TextRenderer.DrawText(g, def.Name, ChipFont,
                 new Rectangle(textLeft, rect.Top, rect.Right - ChipPad - textLeft, rect.Height),
                 def.Visible ? Color.FromArgb(60, 60, 60) : Color.FromArgb(150, 150, 150),
                 TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
@@ -1347,7 +1391,7 @@ public sealed class LineGridControl : Control
                 g.FillRectangle(brush, _chipOverflowRect);
             using (var pen = new Pen(Color.FromArgb(under ? 110 : 170, under ? 110 : 170, under ? 110 : 170)))
                 g.DrawRectangle(pen, _chipOverflowRect);
-            TextRenderer.DrawText(g, $"\u00bb {_chipsOverflowing}", FontRegular, _chipOverflowRect,
+            TextRenderer.DrawText(g, $"\u00bb {_chipsOverflowing}", ChipFont, _chipOverflowRect,
                 Color.FromArgb(60, 60, 60),
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
         }
@@ -1370,8 +1414,10 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>The gesture the pointer starts on the chip strip. A click puts a part away or brings it
-    /// back; a drag carries it to another place in the row.</summary>
-    private bool HandleChipMouseDown(MouseEventArgs e)
+    /// back; a drag carries it to another place in the row; a double-click renames it, as it does on the
+    /// header - and the toggle the first click of the pair had already made is taken back, so that renaming
+    /// never leaves a field hidden behind the box being typed in.</summary>
+    private bool HandleChipMouseDown(MouseEventArgs e, int clicks)
     {
         if (e.Button == MouseButtons.Right) { ShowColumnMenu(e.Location); return true; }
         if (e.Button != MouseButtons.Left) return true;
@@ -1380,6 +1426,14 @@ public sealed class LineGridControl : Control
         if (chip == OverflowChip) { ShowColumnMenu(e.Location); return true; }
         if (chip < 0) return true;
 
+        if (clicks >= 2)
+        {
+            if (_toggledChip == chip) { _doc!.Columns.Columns[chip].Visible = !_doc.Columns.Columns[chip].Visible; ColumnsEdited(); }
+            _toggledChip = -1;
+            BeginRename(chip);
+            return true;
+        }
+
         _colGesture = ColumnGesture.Reorder;
         _colIndex = chip;
         _colGrabX = e.X;
@@ -1387,6 +1441,10 @@ public sealed class LineGridControl : Control
         Capture = true;
         return true;
     }
+
+    /// <summary>Which chip the last click put away or brought back, so a second click that turns out to be
+    /// half of a double-click can undo it.</summary>
+    private int _toggledChip = -1;
 
     private void HandleChipMouseMove(MouseEventArgs e)
     {
@@ -1404,7 +1462,7 @@ public sealed class LineGridControl : Control
         int from = chips.FindIndex(c => c.Column == _colIndex);
         if (from < 0) return;
         var widths = chips.Select(c => c.Rect.Width + ChipGap).ToList();
-        int to = ColumnLayout.DropTarget(widths, from, e.X - (GutterWidth() + ChipGap));
+        int to = ColumnLayout.DropTarget(widths, from, e.X - GutterWidth());
         if (to != from && to >= 0 && to < _doc!.Columns.Columns.Count)
         {
             var moved = _doc.Columns.Columns[_colIndex];
@@ -1426,6 +1484,7 @@ public sealed class LineGridControl : Control
         _colGesture = ColumnGesture.None;
         _colIndex = -1;
         _colMoved = false;
+        _toggledChip = -1;
         Capture = false;
         SetCursorTo(Cursors.Default);
 
@@ -1436,6 +1495,7 @@ public sealed class LineGridControl : Control
             // would be no chip left to bring anything back with.
             if (def.Visible && _doc.Columns.Columns.Count(c => c.Visible) <= 1) { Invalidate(); return; }
             def.Visible = !def.Visible;
+            _toggledChip = chip;
         }
         ColumnsEdited();
     }
@@ -1918,7 +1978,7 @@ public sealed class LineGridControl : Control
         if (_doc is null || !InColumnHeader(e.Y)) return false;
         EndRename(commit: true);
 
-        if (InlineOn) return HandleChipMouseDown(e);
+        if (InlineOn) return HandleChipMouseDown(e, clicks);
 
         if (e.Button == MouseButtons.Right)
         {
@@ -2006,14 +2066,16 @@ public sealed class LineGridControl : Control
 
     // ---- renaming, in place ----
 
-    /// <summary>Puts an edit box over the header cell, which is where the name is read, so renaming needs
-    /// no dialog and no hunting for the setting.</summary>
+    /// <summary>Puts an edit box over the header cell - or, laid out inline, over the CHIP - which is where
+    /// the name is read, so renaming needs no dialog and no hunting for the setting.</summary>
     internal void BeginRename(int index)
     {
         if (_doc is null || index < 0 || index >= _doc.Columns.Columns.Count) return;
-        if (!_doc.Columns.Columns[index].Visible) return;
+        // A hidden field has no header to type over, but it does have a chip - and that chip is exactly
+        // where a reader would expect to rename it.
+        if (!InlineOn && !_doc.Columns.Columns[index].Visible) return;
         EndRename(commit: true);
-        var rect = ColumnHeaderRect(index);
+        var rect = RenameRect(index);
         if (rect.Width <= 0) return;
         _renameIndex = index;
         _renameBox = new TextBox
@@ -2021,7 +2083,7 @@ public sealed class LineGridControl : Control
             Text = _doc.Columns.Columns[index].Name,
             Bounds = rect,
             BorderStyle = BorderStyle.FixedSingle,
-            Font = FontRegular
+            Font = InlineOn ? ChipFont : FontRegular
         };
         _renameBox.KeyDown += (_, ke) =>
         {
@@ -2063,6 +2125,28 @@ public sealed class LineGridControl : Control
 
     internal bool IsRenamingForTesting => _renameBox is not null;
 
+    /// <summary>Where the edit box goes. Over the header cell where there is one; over the chip where the
+    /// strip is chips, because that is the thing the reader pressed - and wide enough to type a name into
+    /// even when the chip itself is a stub, without running off the end of the strip.</summary>
+    private Rectangle RenameRect(int index)
+    {
+        if (!InlineOn) return ColumnHeaderRect(index);
+
+        var rect = ChipRectFor(index);
+        if (rect.IsEmpty) rect = _chipOverflowRect;
+        if (rect.IsEmpty) return Rectangle.Empty;
+
+        int right = ClientSize.Width - RightGutterWidth - ChipGap;
+        int width = Math.Min(Math.Max(rect.Width, LogicalToDeviceUnits(110)), Math.Max(LogicalToDeviceUnits(40), right - rect.Left));
+        return new Rectangle(rect.Left, rect.Top, width, rect.Height);
+    }
+
+    private Rectangle ChipRectFor(int index)
+    {
+        foreach (var (column, rect) in ChipRects()) if (column == index) return rect;
+        return Rectangle.Empty;
+    }
+
     // ---- the header's own menu: everything about a column, where the column is ----
 
     private void ShowColumnMenu(Point at)
@@ -2091,7 +2175,7 @@ public sealed class LineGridControl : Control
         // Every column, ticked or not - a hidden column has no header to right-click, so this list is the
         // only way back to one.
         var ticks = new List<ToolStripMenuItem>();
-        var forThisColumn = new List<(ToolStripMenuItem Item, bool NeedsAnother)>();
+        var forThisColumn = new List<(ToolStripMenuItem Item, bool NeedsAnother, bool NeedsVisible)>();
         void SyncTicks()
         {
             // The last column standing may not be hidden, so a tick is not always honoured; and every row's
@@ -2102,10 +2186,13 @@ public sealed class LineGridControl : Control
                 ticks[i].Enabled = !spec.Columns[i].Visible || VisibleColumnIndices().Count > 1;
             }
             // Because the menu outlives a tick, the column it was opened over can be hidden while it is
-            // still up - and renaming or fitting a column nobody can see does nothing.
-            bool shown = index >= 0 && spec.Columns[index].Visible;
-            foreach (var (item, needsAnother) in forThisColumn)
-                item.Enabled = shown && (!needsAnother || VisibleColumnIndices().Count > 1);
+            // still up - and hiding or fitting a column nobody can see does nothing. Renaming is the one
+            // exception while the layout is inline: a hidden field still has a chip, so there is somewhere
+            // to type its new name.
+            bool visible = index >= 0 && spec.Columns[index].Visible;
+            foreach (var (item, needsAnother, needsVisible) in forThisColumn)
+                item.Enabled = index >= 0 && (visible || (!needsVisible && InlineOn))
+                                          && (!needsAnother || VisibleColumnIndices().Count > 1);
         }
 
         for (int i = 0; i < spec.Columns.Count; i++)
@@ -2127,8 +2214,8 @@ public sealed class LineGridControl : Control
             menu.Items.Add(new ToolStripSeparator());
             var rename = Entry($"&Rename \"{name}\"…", () => BeginRename(index));
             var hide = Entry($"&Hide \"{name}\"", () => SetColumnVisible(index, false));
-            forThisColumn.Add((rename, false));
-            forThisColumn.Add((hide, true));
+            forThisColumn.Add((rename, false, false));
+            forThisColumn.Add((hide, true, true));
             menu.Items.Add(rename);
             menu.Items.Add(hide);
 
@@ -2145,8 +2232,8 @@ public sealed class LineGridControl : Control
                     item.Click += (_, _) => { menu.Close(); SetColumnAlign(index, a); };
                     align.DropDownItems.Add(item);
                 }
-                forThisColumn.Add((fit, false));
-                forThisColumn.Add((align, false));
+                forThisColumn.Add((fit, false, true));
+                forThisColumn.Add((align, false, true));
                 menu.Items.Add(fit);
                 menu.Items.Add(align);
             }
@@ -2204,11 +2291,7 @@ public sealed class LineGridControl : Control
 
     // ---- the chip strip, which no automation pattern can reach: a click and a drag on owner-drawn boxes ----
 
-    internal Rectangle ChipRectForTesting(int index)
-    {
-        foreach (var (column, rect) in ChipRects()) if (column == index) return rect;
-        return Rectangle.Empty;
-    }
+    internal Rectangle ChipRectForTesting(int index) => ChipRectFor(index);
 
     /// <summary>A press and a release on a chip, with nothing in between - which is a click, and what puts
     /// a part away or brings it back.</summary>
@@ -2232,6 +2315,37 @@ public sealed class LineGridControl : Control
         HandleHeaderMouseMove(new MouseEventArgs(MouseButtons.Left, 0, target, y, 0));
         EndColumnGesture();
     }
+
+    /// <summary>Two clicks on a chip in quick succession, which is how a field is renamed where it stands.</summary>
+    internal void DoubleClickChipForTesting(int index)
+    {
+        var rect = ChipRectForTesting(index);
+        if (rect.IsEmpty) return;
+        int x = rect.Left + rect.Width / 2, y = rect.Top + rect.Height / 2;
+        HandleHeaderMouseDown(new MouseEventArgs(MouseButtons.Left, 1, x, y, 0), 1);
+        EndColumnGesture();
+        HandleHeaderMouseDown(new MouseEventArgs(MouseButtons.Left, 2, x, y, 0), 2);
+        EndColumnGesture();
+    }
+
+    /// <summary>The pointer resting on a chip, which is what lifts it and offers what it does.</summary>
+    internal void HoverChipForTesting(int index)
+    {
+        var rect = index == OverflowChip ? _chipOverflowRect : ChipRectForTesting(index);
+        if (rect.IsEmpty) return;
+        HandleChipMouseMove(new MouseEventArgs(MouseButtons.None, 0, rect.Left + rect.Width / 2, rect.Top + rect.Height / 2, 0));
+    }
+
+    internal int ChipUnderPointerForTesting => _chipUnderPointer;
+    internal static int OverflowChipForTesting => OverflowChip;
+    internal int ChipsOverflowingForTesting { get { ChipRects(); return _chipsOverflowing; } }
+
+    /// <summary>How tall the text on a chip is drawn, which had better be no taller than the chip.</summary>
+    internal int ChipLabelHeightForTesting
+        => TextRenderer.MeasureText("Xg", ChipFont, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding).Height;
+
+    /// <summary>Where the rename box sits, so a check can say it landed on the thing that was pressed.</summary>
+    internal Rectangle RenameBoxBoundsForTesting => _renameBox?.Bounds ?? Rectangle.Empty;
 
     internal string ChipNamesForTesting
         => _doc is null ? "" : string.Join(",", _doc.Columns.Columns.Select(c => c.Visible ? c.Name : "(" + c.Name + ")"));
@@ -2549,6 +2663,7 @@ public sealed class LineGridControl : Control
         {
             _tipTimer.Dispose(); _tips.Dispose();
             foreach (var f in _fonts) f?.Dispose();
+            _chipFont?.Dispose();
             foreach (var b in _brushes.Values) b.Dispose();
             _brushes.Clear();
             _fontFamily?.Dispose();
@@ -3121,6 +3236,21 @@ public sealed class LineGridControl : Control
     }
 
     protected override void OnResize(EventArgs e) { base.OnResize(e); RefreshView(); }
+
+    /// <summary>The chips are labelled in the window's own font, so they have to be re-cut when it changes -
+    /// which it does when the reader moves the window to a screen at another scaling.</summary>
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        BuildChipFont();
+        Invalidate();
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        RebuildFonts();
+    }
 
     // ---- accessibility (UI Automation) ----
     // The log view is fully owner-drawn, so it exposes a proper accessibility tree: the control is a
