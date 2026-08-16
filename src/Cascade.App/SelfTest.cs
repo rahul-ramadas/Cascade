@@ -923,6 +923,18 @@ internal static class SelfTest
             ok &= Check($"the result is a row of the table, in cells of its own (\"{row}\")",
                         row.Contains("     api-gateway", StringComparison.Ordinal), row);
 
+            // --- and a row has to show something ---
+
+            for (int i = 0; i < dlg.RowCountForTesting; i++) dlg.SetCellForTesting(i, "show", false);
+            Pump();
+            dlg.ApplyForTesting();
+            ok &= Check($"the last field standing cannot be unticked either ({string.Join(",", dlg.Result.Columns.Select(c => $"{c.Name}:{c.Visible}"))})",
+                        dlg.Result.Columns.Count(c => c.Visible) == 1);
+            ok &= Check($"and the dialog says why (\"{dlg.StatusForTesting}\")",
+                        dlg.StatusForTesting.Contains("only field left", StringComparison.Ordinal));
+            for (int i = 0; i < dlg.RowCountForTesting; i++) dlg.SetCellForTesting(i, "show", true);
+            Pump();
+
             dlg.Close();
             Pump();
         }

@@ -298,7 +298,7 @@ public sealed class ColumnsDialog : DialogBase
 
         _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); UpdateLayoutHelp(); Refresh0(); };
 
-        _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); Refresh0(); } };
+        _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); KeepOneShown(e.RowIndex); Refresh0(); } };
         _list.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_list.IsCurrentCellDirty && _list.CurrentCell is DataGridViewCheckBoxCell or DataGridViewComboBoxCell)
@@ -517,6 +517,21 @@ public sealed class ColumnsDialog : DialogBase
 
             column.Align = Enum.TryParse<ColumnAlign>(Convert.ToString(row.Cells["align"].Value), out var a) ? a : ColumnAlign.Left;
         }
+    }
+
+    /// <summary>The last field standing cannot be put away: a row with nothing in it says nothing, and the
+    /// chips above the log refuse it too. The tick springs back, and the reason is said out loud rather than
+    /// left as a tick that would not take.</summary>
+    private void KeepOneShown(int row)
+    {
+        if (_working.Columns.Count == 0 || _working.Columns.Any(c => c.Visible)) return;
+        if (row < 0 || row >= _working.Columns.Count) return;
+
+        _working.Columns[row].Visible = true;
+        FillList();
+        _status.ForeColor = Color.FromArgb(180, 120, 0);
+        _status.Text = $"\u201c{_working.Columns[row].Name}\u201d is the only field left, so it cannot be "
+                     + "left out too - a row has to show something.";
     }
 
     private void Reorder(int by)
