@@ -12,9 +12,13 @@ public readonly record struct ProjectedSpan(int Start, int Length, int LineStart
 ///
 /// <para>What goes BETWEEN two parts is the text that separates them in the line - taken from the line
 /// itself, so padding and punctuation are whatever the log actually had. Only carrying a part BACKWARDS
-/// leaves no such text, and there a single joiner goes in - but ONLY where the two would otherwise run
-/// together into one word. <c>[a][b]</c> is how a bracketed line reads already, and a space invented
-/// between them is one the reader can see is not in the file.</para>
+/// leaves no such text, and there a single joiner goes in - but ONLY where nothing already separates the
+/// two. A bracket or a quote on either side does, so <c>[a][b]</c> is left flush, exactly as a bracketed
+/// line reads; a space invented there is one the reader can see is not in the file.</para>
+///
+/// <para>Some separator is needed at all because there are only N-1 separators for N fields: whichever
+/// field came first in the line has nothing in front of it, so any order that moves it away from the front
+/// leaves two fields with nothing between them, however the template was written.</para>
 ///
 /// <para>A row never BEGINS with a blank for the same reason: a field carried to the front would otherwise
 /// take the separator in front of it along, and the lines the template does not match - which are shown
@@ -95,10 +99,16 @@ public sealed class LineProjection
     /// <summary>Whether a single space has to go in between what has been written and the field about to be.
     ///
     /// <para>The joiner exists for one reason: to stop two fields that were never neighbours running
-    /// together into something that reads as one word. So it goes in only where the join is not already
-    /// punctuated on BOTH sides - <c>[a][b]</c> is exactly how a bracketed line reads already, and a space
-    /// invented there is one the reader can see is not in the file. Nor does it go in where either side is
-    /// already blank, which would simply double the separator.</para></summary>
+    /// together into something that reads as one word. A bracket or a quote on EITHER side of the join is
+    /// already doing that job - <c>[a][b]</c> is exactly how a bracketed line reads, and so is
+    /// <c>text[a]</c> - so nothing is invented there.</para>
+    ///
+    /// <para>Not just any punctuation, though: <c>.</c> <c>-</c> <c>:</c> and their like JOIN rather than
+    /// separate, and <c>hello</c> against <c>.5ms</c> would read as one token. Only the characters that
+    /// open or close something count.</para>
+    ///
+    /// <para>Nor does a joiner go in where either side is already blank, which would double the
+    /// separator.</para></summary>
     private bool NeedsJoiner(string line, int start, int length)
     {
         if (_text.Length == 0) return false;
@@ -107,12 +117,14 @@ public sealed class LineProjection
         if (length <= 0 || start < 0 || start >= line.Length) return false;
         char right = line[start];
         if (IsBlank(right)) return false;
-        return IsWordish(left) || IsWordish(right);
+        return !Closes(left) && !Opens(right);
     }
 
-    /// <summary>Whether a character runs into the one beside it. Punctuation does not - it is doing the
-    /// separating itself.</summary>
-    private static bool IsWordish(char c) => char.IsLetterOrDigit(c);
+    /// <summary>Characters that end something, and so separate it from whatever follows.</summary>
+    private static bool Closes(char c) => c is ')' or ']' or '}' or '>' or '"' or '\'';
+
+    /// <summary>...and the ones that begin something.</summary>
+    private static bool Opens(char c) => c is '(' or '[' or '{' or '<' or '"' or '\'';
 
     private static bool IsBlank(char c) => c is ' ' or '\t';
 

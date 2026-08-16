@@ -154,7 +154,7 @@ public class ColumnTests
     }
 
     /// <summary>Carrying a part backwards leaves no separator that means anything, so one is put in - but
-    /// only where the two would otherwise run together into something that reads as one word.</summary>
+    /// only where nothing already separates the two.</summary>
     [Fact]
     public void Carrying_a_part_backwards_joins_with_a_single_space()
     {
@@ -165,9 +165,37 @@ public class ColumnTests
         Assert.Equal("c a b", Inline(spec, "a b c"));
     }
 
-    /// <summary>...and NOT between two fields that are punctuated already. A bracketed line reads
-    /// <c>[a][b]</c> throughout, so a space invented between two of its fields is one the reader can see is
-    /// not in the file - which is exactly how it was noticed.</summary>
+    /// <summary>Why a joiner is needed at all, and why writing the separators INTO the fields would not do
+    /// instead: there are only N-1 separators for N fields, so whichever field came first in the line has
+    /// none of its own. Move it out of the front and two fields end up with nothing between them - however
+    /// the template was written.</summary>
+    [Theory]
+    [InlineData("{*} {*}")]      // the separator is a literal between the fields
+    [InlineData("{*}{ *}")]      // ...or captured inside the second one
+    [InlineData("{*}{ *}{ *}")]  // ...or inside every one of them
+    public void The_field_that_came_first_has_no_separator_of_its_own(string template)
+    {
+        var spec = Spec(template);
+        string line = spec.Columns.Count == 3 ? "a b c" : "a b";
+
+        // The first field carried to the back, which is the order that exposes it.
+        var first = spec.Columns[0];
+        spec.Columns.RemoveAt(0);
+        spec.Columns.Add(first);
+
+        string shown = Inline(spec, line);
+        // Every field here is a single letter, so two letters side by side is two fields welded together.
+        for (int i = 1; i < shown.Length; i++)
+            Assert.False(char.IsLetter(shown[i - 1]) && char.IsLetter(shown[i]),
+                         $"<{template}> gave <{shown}>, with two fields run together at {i}");
+        // ...and every field is still there, exactly once.
+        foreach (string field in line.Split(' '))
+            Assert.Equal(1, shown.Split(field).Length - 1);
+    }
+
+    /// <summary>...and NOT where anything already separates the two. A bracket on EITHER side does the job,
+    /// so a bracketed line is left flush exactly as it reads - which is how the invented space was noticed:
+    /// no other field in the line had one.</summary>
     [Fact]
     public void Carrying_a_bracketed_part_backwards_invents_no_space()
     {
@@ -176,6 +204,34 @@ public class ColumnTests
         spec.Columns.RemoveAt(1);
         spec.Columns.Insert(0, level);
         Assert.Equal("[INFO][09:31] hello", Inline(spec, "[09:31][INFO] hello"));
+    }
+
+    /// <summary>One side is enough: a word against an opening bracket is no more one word than two brackets
+    /// are, so nothing is invented there either.</summary>
+    [Fact]
+    public void A_bracket_on_one_side_of_the_join_is_enough()
+    {
+        var spec = Spec("{[*]}{[*]} {*}");
+        var message = spec.Columns[2];
+        spec.Columns.RemoveAt(2);
+        spec.Columns.Insert(0, message);
+        Assert.Equal("hello[09:31][INFO]", Inline(spec, "[09:31][INFO] hello"));
+    }
+
+    /// <summary>But only punctuation that actually separates. A full stop or a dash JOINS what it sits
+    /// between, so leaving those flush would weld two fields into one token: <c>hello.5ms</c> reads as a
+    /// single value, and it is not one.</summary>
+    [Theory]
+    [InlineData(".5ms", "hello .5ms 09:31")]
+    [InlineData("-1ms", "hello -1ms 09:31")]
+    [InlineData(":x", "hello :x 09:31")]
+    public void Punctuation_that_joins_rather_than_separates_still_gets_a_space(string middle, string expected)
+    {
+        // Reversed, so every join is a backwards one - and the middle field, whose first character is the
+        // punctuation under test, lands straight after the word.
+        var spec = Spec("{*} {*} {*}");
+        spec.Columns.Reverse();
+        Assert.Equal(expected, Inline(spec, $"09:31 {middle} hello"));
     }
 
     /// <summary>The shape the trace this was found on actually has: ten bracketed fields, most of them
@@ -221,7 +277,8 @@ public class ColumnTests
         var message = spec.Columns[2];
         spec.Columns.RemoveAt(2);
         spec.Columns.Insert(0, message);
-        Assert.Equal("hello world [09:31][INFO]", Inline(spec, line));
+        // Flush against the bracket that follows: the bracket separates them, so nothing is invented.
+        Assert.Equal("hello world[09:31][INFO]", Inline(spec, line));
     }
 
     /// <summary>...and it does not double up with the one the projection puts in either, wherever it lands.
@@ -233,7 +290,7 @@ public class ColumnTests
         var message = spec.Columns[2];
         spec.Columns.RemoveAt(2);
         spec.Columns.Insert(1, message);
-        Assert.Equal("[09:31] hello world [INFO]", Inline(spec, "[09:31][INFO] hello world"));
+        Assert.Equal("[09:31] hello world[INFO]", Inline(spec, "[09:31][INFO] hello world"));
 
         var trailing = Spec("{[*] }{[*]}");
         var second = trailing.Columns[1];
@@ -339,7 +396,8 @@ public class ColumnTests
     }
 
     /// <summary>Dropping the leading blank has to take the map with it, or every mark, selection and copy
-    /// on that row would land one character out.</summary>
+    /// on that row would land one character out. Nothing is invented here - the bracket that follows does
+    /// the separating - so every character on show has to trace back to the file.</summary>
     [Fact]
     public void The_map_survives_dropping_the_blank_a_carried_field_brought_with_it()
     {
@@ -354,11 +412,11 @@ public class ColumnTests
         var projection = new LineProjection();
         projection.Build(line, spec, match);
 
-        Assert.Equal("hello world [09:31][INFO]", projection.Text);
+        Assert.Equal("hello world[09:31][INFO]", projection.Text);
         for (int i = 0; i < projection.Text.Length; i++)
         {
             int at = projection.ToLine(i);
-            if (at < 0) continue;                 // the joiner, which belongs to no line in the file
+            Assert.True(at >= 0, $"character {i} came from nowhere");
             Assert.Equal(projection.Text[i], line[at]);
             Assert.Equal(i, projection.FromLine(at));
         }
