@@ -1072,6 +1072,16 @@ internal static class SelfTest
             grid.RefreshView();
             Pump();
 
+            // A column built in code says nothing about which part it shows. The table settles that while it
+            // measures its widths; inline has no such pass, and a column showing no part draws nothing at
+            // all - so the rows came out empty.
+            foreach (var column in doc.Columns.Columns) column.Source = -1;
+            grid.RefreshView();
+            Pump();
+            ok &= Check($"a spec that never said which part each field shows still draws (\"{grid.DisplayTextForTesting(0)}\")",
+                        grid.DisplayTextForTesting(0) == doc.GetLineText(doc.RowToLine(0)),
+                        grid.DisplayTextForTesting(0));
+
             return ok;
         }
         finally

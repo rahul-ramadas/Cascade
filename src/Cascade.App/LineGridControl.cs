@@ -734,6 +734,11 @@ public sealed class LineGridControl : Control
         long rows = _doc?.RowCount ?? 0;
         int visible = EffectiveVisibleRows;
 
+        // A spec built in code, or read from a file written before a column said which part it shows, may
+        // not have settled that yet. The table layout does it while measuring its widths; inline has no such
+        // pass, and a column that shows no part is simply left out - a row of nothing at all.
+        if (_doc is not null && _doc.Columns.Enabled) _doc.Columns.NormalizeSources();
+
         // A rename box belongs to a header that may no longer be there.
         if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
         // Nor does a selection outlive the mode it was made in: split into cells the indices are into the
