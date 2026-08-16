@@ -1183,14 +1183,17 @@ internal static class SelfTest
             // ...and switching between the two layouts pays the difference, rather than letting the log slide
             // by however much taller one strip is than the other.
             ok &= Check("switching to columns keeps it where it is",
-                        form.ClickMenuForTesting("View", "Lay Out as Columns") &&
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields", "Lay Out as Columns") &&
                         ScreenYOf(watched) == yBefore,
                         $"{ScreenYOf(watched)} vs {yBefore}, strip {grid.HeaderRows} rows");
             Pump();
             ok &= Check("and switching back does too",
-                        form.ClickMenuForTesting("View", "Lay Out Inline") && ScreenYOf(watched) == yBefore,
+                        form.ClickMenuForTesting("View", "Split Lines Into Fields", "Lay Out Inline") && ScreenYOf(watched) == yBefore,
                         $"{ScreenYOf(watched)} vs {yBefore}, strip {grid.HeaderRows} rows");
             Pump();
+            // The two layouts are nested UNDER the switch, so clicking the switch itself must still throw it
+            // rather than only opening what is beneath it - which is the one thing WinForms could reasonably
+            // have decided either way.
             ok &= Check("and turning them off hands every row back",
                         form.ClickMenuForTesting("View", "Split Lines Into Fields") &&
                         grid.FirstRowForTesting == firstBefore,
@@ -1198,6 +1201,31 @@ internal static class SelfTest
             Pump();
             ok &= Check($"with nothing moved on screen ({ScreenYOf(watched)})", ScreenYOf(watched) == yBefore);
             doc.Columns.Layout = FieldLayout.Columns;
+
+            // A key that switches between the layouts, and says so beside the layout it would switch TO.
+            ok &= Check("the layout key does nothing while the fields are off", !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.X));
+            // The switch is a menu item with items nested under it, and WinForms hands an item like that
+            // neither its shortcut nor the drawing of it - so the key is worth pressing here rather than
+            // trusting that clicking the item stands in for it.
+            ok &= Check("Ctrl+Shift+C reaches the switch even though it has a submenu now",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.C) && doc.Columns.Enabled);
+            Pump();
+            ok &= Check("the key switches layout once they are on",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.X) &&
+                        doc.Columns.Layout == FieldLayout.Inline);
+            Pump();
+            ok &= Check("and switches back",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.X) &&
+                        doc.Columns.Layout == FieldLayout.Columns);
+            form.ClickMenuForTesting("View");   // the strings are put right as the menu opens
+            Pump();
+            var columnsItem = AllMenuItems(form.MainMenuStrip!.Items).First(m => (m.Text ?? "").Replace("&", "") == "Lay Out as Columns");
+            var inlineItem = AllMenuItems(form.MainMenuStrip!.Items).First(m => (m.Text ?? "").Replace("&", "") == "Lay Out Inline");
+            ok &= Check("the key is offered against the layout it goes to, not the one already showing",
+                        columnsItem.ShortcutKeyDisplayString is null && inlineItem.ShortcutKeyDisplayString == "Ctrl+Shift+X",
+                        $"columns=\"{columnsItem.ShortcutKeyDisplayString}\" inline=\"{inlineItem.ShortcutKeyDisplayString}\"");
+            form.ClickMenuForTesting("View", "Split Lines Into Fields");
+            Pump();
 
             // The menu is where the key is discovered, so it has to say so - and stay in step with the state.
             // That the key itself reaches the item is WinForms' own shortcut handling, covered end to end by
@@ -1208,8 +1236,11 @@ internal static class SelfTest
             if (item is not null)
             {
                 var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
+                // WinForms stops DRAWING a shortcut once an item has children, so having the key is no
+                // longer proof that anyone can read it: the item has to be the kind that draws its own.
                 ok &= Check($"and advertises the key beside it ({keys.ConvertToString(item.ShortcutKeys)})",
-                            item.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.C) && item.ShowShortcutKeys);
+                            item.ShortcutKeys == (Keys.Control | Keys.Shift | Keys.C) && item.ShowShortcutKeys &&
+                            (!item.HasDropDownItems || item is CommandWithSubmenu));
                 form.ClickMenuForTesting("View");   // the tick is set as the menu opens
                 Pump();
                 ok &= Check("and is unticked while the columns are off", !item.Checked);
