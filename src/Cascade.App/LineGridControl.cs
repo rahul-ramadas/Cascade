@@ -836,9 +836,10 @@ public sealed class LineGridControl : Control
 
     private int GutterWidth() => MarkerGutterWidth + LineNumberGutterWidth;
 
-    /// <summary>Whether lines are broken to fit the width. Not offered while they are split into columns:
-    /// wrapping inside a cell is a different feature, and the menu says so by greying out.</summary>
-    internal bool Wrapping => _settings.WordWrap && !(_doc?.Columns.Enabled ?? false);
+    /// <summary>Whether lines are broken to fit the width. Not offered while they are laid out in COLUMNS:
+    /// wrapping inside a cell is a different feature, and the menu says so by greying out. Inline is only a
+    /// shorter line, so it wraps like any other - which the menu offers, and had better mean.</summary>
+    internal bool Wrapping => _settings.WordWrap && !ColumnsOn;
 
     /// <summary>How tall one line is drawn, and how much of the control is not text. Between them they say
     /// what heights this control can be given without a strip of dead space at the bottom.</summary>

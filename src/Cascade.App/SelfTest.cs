@@ -4396,6 +4396,26 @@ internal static class SelfTest
             grid.ScrollToRow(0);
             grid.RefreshView();
             Pump();
+
+            // Laid out inline a row is still a line, so it wraps like any other - which is what the menu
+            // offers. It did not: anything with fields turned on refused to wrap at all, columns or not.
+            doc.Columns.Enabled = true;
+            doc.Columns.Layout = FieldLayout.Inline;
+            doc.Columns.Template = "{[*]} {*}";
+            doc.Columns.Reset();
+            grid.RefreshView();
+            Pump();
+            ok &= Check("a long line still wraps while the fields are laid out inline",
+                        grid.SegmentsForTesting(1) > 1, $"{grid.SegmentsForTesting(1)} segments");
+            doc.Columns.Layout = FieldLayout.Columns;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("and laid out in columns it does not, because a cell is not a line",
+                        grid.SegmentsForTesting(1) == 1, $"{grid.SegmentsForTesting(1)} segments");
+            doc.Columns.Enabled = false;
+            grid.RefreshView();
+            Pump();
+
             settings.WordWrap = false;
             grid.RefreshView();
             Pump();
