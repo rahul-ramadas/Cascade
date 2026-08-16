@@ -106,18 +106,22 @@ template:   {[*]}{[*]}{[*]} {*}
 | anything else | has to be there, except a run of spaces, which matches any run of spaces |
 | `\` | makes `{ } * \` ordinary |
 
-Then pick a **layout**. **Columns** lines the fields up under a header: drag an edge to resize (snapping to
-whole characters in a fixed-pitch font), double-click an edge to fit a column to its content, carry a
-header sideways to reorder, double-click a name to rename it, right-click for the tick list. **Inline**
-keeps every row a line and simply leaves out what you have hidden — better when one field is far longer
-than the rest — with a strip of chips above the log instead of a header: click one to put that field away
-or bring it back, drag it to move the field along the row, double-click it to rename it.
+Then pick a **layout**, from the two items under **View > Split Lines Into Fields** or with `Ctrl+Shift+X`,
+which switches between them. **Columns** lines the fields up under a header: drag an edge to resize
+(snapping to whole characters in a fixed-pitch font), double-click an edge to fit a column to its content,
+carry a header sideways to reorder, double-click a name to rename it, right-click for the tick list.
+**Inline** keeps every row a line and simply leaves out what you have hidden — better when one field is far
+longer than the rest — with a strip of chips above the log instead of a header: click one to put that field
+away or bring it back, drag it to move the field along the row, double-click it to rename it.
 
 Hiding a field takes its punctuation with it, so `[a][b][c]` closes up to `[a][c]` rather than leaving
 empty brackets behind, and a field carried elsewhere leaves the space that separated it behind as well.
 **View > Field Settings…** shows the template against real lines from the file: a coloured band per field,
-the row as it will actually be drawn — cell by cell in the Columns layout, widths and alignment included —
-how many of the sampled lines match, and, for one that does not, the character where it stopped matching.
+and beneath it the row as it will actually be drawn — cell by cell in the Columns layout, widths and
+alignment included. Both rows are named, so a row whose fields have been moved about still says which
+value is which. Click a field in either row to pick its entry out of the list; drag an entry up or down the
+list, or use the buttons, to move the field along the row. The dialog also says how many of the sampled
+lines match, and, for one that does not, the character where it stopped matching.
 
 Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
 A line the template does not match is shown whole and untouched, and Cascade says so when a search lands
@@ -188,6 +192,7 @@ registry keys, and updates itself.
 | `Ctrl+N` | New filter from the selection or the current line |
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / split lines into fields |
+| `Ctrl+Shift+X` | Switch between the Columns and Inline field layouts |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |

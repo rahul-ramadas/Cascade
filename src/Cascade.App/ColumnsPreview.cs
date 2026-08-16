@@ -141,10 +141,12 @@ public sealed class ColumnsPreview : Control
         else UpdateScroll();
     }
 
-    /// <summary>How tall this wants to be: the names, and the two lines of text. The row that carries the
-    /// reason a line does not fit takes the result's place rather than a row of its own, so that stepping
-    /// through the sample does not make the dialog jump about.</summary>
-    public int PreferredHeight => Pad + _nameHeight + _lineHeight + Dpi(4) + _lineHeight + Pad + _scroll.Height + Dpi(2);
+    /// <summary>How tall this wants to be: a row of names over the sample, the sample, a row of names over
+    /// the result, and the result. The row that carries the reason a line does not fit takes the result's
+    /// place rather than a row of its own, so that stepping through the sample does not make the dialog
+    /// jump about.</summary>
+    public int PreferredHeight
+        => Pad + _nameHeight + _lineHeight + Dpi(10) + _nameHeight + _lineHeight + Pad + _scroll.Height + Dpi(2);
 
     /// <summary>What a layout panel asks for, so the row this sits in follows the font instead of being
     /// measured once, at the default font, before the dialog has even said what font it is using.</summary>
@@ -379,20 +381,38 @@ public sealed class ColumnsPreview : Control
 
     private int SampleTop => Pad + _nameHeight;
 
+    /// <summary>Where the names over the RESULT are drawn, and where the result itself is. The result gets
+    /// names of its own because it is not the sample with pieces greyed out - the fields can be in another
+    /// order entirely, so one row of headings over the sample would be a heading over the wrong thing.</summary>
+    private int ResultNameTop => SampleTop + _lineHeight + Dpi(10);
+    private int ResultTop => ResultNameTop + _nameHeight;
+
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left || e.Y < SampleTop || e.Y > SampleTop + _lineHeight) return;
-        _dragging = true;
-        _selectFrom = _selectTo = CharAt(e.X);
-        Capture = true;
-        Invalidate();
+        if (e is null || e.Button != MouseButtons.Left) return;
+        if (InSample(e.Y))
+        {
+            _dragging = true;
+            _selectFrom = _selectTo = CharAt(e.X);
+            Capture = true;
+            Invalidate();
+            return;
+        }
+        // A press on the result is not a drag - the result cannot be picked out of, only pointed at - so it
+        // is remembered and answered on the way up, where a click properly is one.
+        if (InResult(e.Y)) _pressedResult = e.X;
     }
+
+    private int _pressedResult = int.MinValue;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        Cursor = e.Y >= SampleTop && e.Y <= SampleTop + _lineHeight ? Cursors.IBeam : Cursors.Default;
+        if (e is null) return;
+        Cursor = InSample(e.Y) ? Cursors.IBeam
+               : InResult(e.Y) && PartAtResult(e.X) >= 0 ? Cursors.Hand
+               : Cursors.Default;
         if (!_dragging) return;
         _selectTo = CharAt(e.X);
         Invalidate();
@@ -401,12 +421,74 @@ public sealed class ColumnsPreview : Control
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (!_dragging) return;
+        if (e is not null && _pressedResult != int.MinValue)
+        {
+            int was = _pressedResult;
+            _pressedResult = int.MinValue;
+            if (InResult(e.Y) && Math.Abs(e.X - was) <= SystemInformation.DragSize.Width)
+                Pick(PartAtResult(e.X));
+            return;
+        }
+        if (!_dragging || e is null) return;
         _dragging = false;
         Capture = false;
         if (_selectTo < _selectFrom) (_selectFrom, _selectTo) = (_selectTo, _selectFrom);
+        // A press and release in the same place picked nothing out, so it was a click: it says which field
+        // was pointed at instead, which is how the sample and the list are tied together in both directions.
+        // Only over the text, though - the words naming the rows sit to the left of it, and pointing at
+        // those is pointing at nothing.
+        if (_selectTo == _selectFrom && e.X >= Gutter) Pick(PartAtSample(_selectFrom));
         SelectionChanged?.Invoke();
         Invalidate();
+    }
+
+    /// <summary>Raised with the part a click landed on, so the list can bring that field's row forward.</summary>
+    public event Action<int>? PartPicked;
+
+    private void Pick(int part)
+    {
+        if (part >= 0) PartPicked?.Invoke(part);
+    }
+
+    private bool InSample(int y) => y >= SampleTop && y <= SampleTop + _lineHeight;
+    private bool InResult(int y) => _fits && y >= ResultTop && y <= ResultTop + _lineHeight;
+
+    /// <summary>Which part of the template covers a character of the sample, or -1 for the text between
+    /// parts and the tail beyond the last of them.</summary>
+    private int PartAtSample(int index)
+    {
+        if (!_fits) return -1;
+        for (int part = 0; part < _match.PartCount; part++)
+        {
+            var (start, length) = _match.Part(part);
+            if (length > 0 && index >= start && index < start + length) return part;
+        }
+        return -1;
+    }
+
+    /// <summary>Which part the result draws at a point - a whole cell in the table, a field's own text
+    /// inline - or -1 where nothing of the log's is drawn there.</summary>
+    private int PartAtResult(int x)
+    {
+        if (!_fits || x < Gutter) return -1;
+        int cell = (x - Gutter + _scroll.Value * _charWidth) / Math.Max(1, _charWidth);
+        if (cell < 0) return -1;
+        if (AsTable)
+        {
+            foreach (var (start, width, _, _, part) in _tableSpans)
+            {
+                int from = _resultCells.Of(start);
+                if (cell >= from && cell < from + width) return part;
+            }
+            return -1;
+        }
+        foreach (var span in _projection.Spans)
+        {
+            if (span.Part < 0) continue;
+            int from = _resultCells.Of(span.Start), to = _resultCells.Of(span.Start + span.Length);
+            if (cell >= from && cell < to) return span.Part;
+        }
+        return -1;
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -445,7 +527,7 @@ public sealed class ColumnsPreview : Control
 
         int nameY = Pad;
         int sampleY = SampleTop;
-        int resultY = sampleY + _lineHeight + Dpi(4);
+        int resultY = ResultTop;
 
         TextRenderer.DrawText(g, SampleLabel, _small, new Point(Pad, sampleY + Dpi(2)), SystemColors.GrayText,
             TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
@@ -459,7 +541,7 @@ public sealed class ColumnsPreview : Control
         int x0 = Gutter - _scroll.Value * _charWidth;
 
         DrawSample(g, x0, nameY, sampleY);
-        if (_fits) DrawResult(g, x0, resultY);
+        if (_fits) DrawResult(g, x0, ResultNameTop, resultY);
         g.Clip = saved;
         saved.Dispose();
 
@@ -497,17 +579,7 @@ public sealed class ColumnsPreview : Control
                     using (var pen = new Pen(SystemColors.WindowText, Dpi(2)))
                         g.DrawRectangle(pen, rect.X + 1, rect.Y + 1, rect.Width - 2, rect.Height - 2);
 
-                if (names.TryGetValue(part, out var name) && name.Length > 0)
-                {
-                    var size = TextRenderer.MeasureText(name, _name, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
-                    // With room to spare on both sides, so that two names over neighbouring bands are told
-                    // apart by the gap between them rather than running into one another.
-                    if (size.Width + Dpi(8) <= rect.Width)
-                        TextRenderer.DrawText(g, name, _name, new Rectangle(rect.X, nameY, rect.Width, _nameHeight),
-                            off ? SystemColors.GrayText : SystemColors.ControlDarkDark,
-                            TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
-                            TextFormatFlags.PreserveGraphicsClipping);
-                }
+                DrawName(g, names.GetValueOrDefault(part), rect, nameY, off);
             }
         }
 
@@ -537,6 +609,20 @@ public sealed class ColumnsPreview : Control
         if (at < _line.Length)
             DrawText(g, x0, y, at, _line.Length - at,
                 _fits ? SystemColors.WindowText : SystemColors.GrayText, false);
+    }
+
+    /// <summary>Puts a field's name over the band drawn for it, centred, and only where the band is wide
+    /// enough to hold it with room to spare on both sides - so two names over neighbouring bands are told
+    /// apart by the gap between them rather than running into one another.</summary>
+    private void DrawName(Graphics g, string? name, Rectangle band, int y, bool off)
+    {
+        if (string.IsNullOrEmpty(name)) return;
+        var size = TextRenderer.MeasureText(name, _name, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPadding);
+        if (size.Width + Dpi(8) > band.Width) return;
+        TextRenderer.DrawText(g, name, _name, new Rectangle(band.X, y, band.Width, _nameHeight),
+            off ? SystemColors.GrayText : SystemColors.ControlDarkDark,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
+            TextFormatFlags.PreserveGraphicsClipping);
     }
 
     private void DrawText(Graphics g, int x0, int y, int start, int length, Color colour, bool struck)
@@ -589,8 +675,15 @@ public sealed class ColumnsPreview : Control
         return true;
     }
 
-    private void DrawResult(Graphics g, int x0, int y)
+    /// <summary>The result, with a row of names over it. The names are what makes a reordered row readable:
+    /// the sample's headings sit over the fields where the LINE has them, and once the fields have been
+    /// moved about those headings answer for the wrong things - a table whose header row does not match its
+    /// body is worse than no header at all.</summary>
+    private void DrawResult(Graphics g, int x0, int nameY, int y)
     {
+        var names = new Dictionary<int, string>();
+        foreach (var column in _spec!.Columns) names[column.Source] = column.Name;
+
         if (AsTable)
         {
             // Cell by cell rather than one long string: the cell is the thing that has to line up, and a
@@ -608,6 +701,7 @@ public sealed class ColumnsPreview : Control
                 if (textLength > 0)
                     DrawCells(g, _result.AsSpan(textAt, textLength), x0 + _resultCells.Of(textAt) * _charWidth,
                               y + Dpi(2), SystemColors.WindowText);
+                DrawName(g, names.GetValueOrDefault(part), cell, nameY, false);
             }
             return;
         }
@@ -625,6 +719,7 @@ public sealed class ColumnsPreview : Control
                 if (span.Part == Highlight)
                     using (var pen = new Pen(SystemColors.WindowText, Dpi(2)))
                         g.DrawRectangle(pen, rect.X + 1, rect.Y + 1, rect.Width - 2, rect.Height - 2);
+                DrawName(g, names.GetValueOrDefault(span.Part), rect, nameY, false);
             }
             else if (span.Invented)
             {
@@ -667,6 +762,10 @@ public sealed class ColumnsPreview : Control
 
     internal void ScrollToForTesting(int value)
         => _scroll.Value = Math.Clamp(value, _scroll.Minimum, Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1));
+
+    /// <summary>Points at a character of the sample, or a cell of the result, as a click on it does.</summary>
+    internal void ClickSampleForTesting(int index) => Pick(PartAtSample(index));
+    internal void ClickResultForTesting(int cell) => Pick(PartAtResult(Gutter + (cell - _scroll.Value) * _charWidth));
 
     internal bool CanScrollForTesting() => _scroll.Visible;
     internal int FurthestScrollForTesting() => Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1);
