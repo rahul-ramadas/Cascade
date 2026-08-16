@@ -210,6 +210,20 @@ public sealed class LineGridControl : Control
         Invalidate();
     }
 
+    /// <summary>Which fields are being shown, and in what order, as one number - so a selection made against
+    /// one arrangement can be told apart from the same numbers under another.</summary>
+    private int FieldsShape()
+    {
+        if (_doc is null || !_doc.Columns.Active) return 0;
+        int shape = _doc.Columns.Layout == FieldLayout.Inline ? 17 : 31;
+        foreach (var column in _doc.Columns.Columns)
+            shape = shape * 31 + (column.Visible ? column.Source + 1 : -(column.Source + 1));
+        return shape;
+    }
+
+    /// <summary>The arrangement the part-of-a-line selection was made against.</summary>
+    private int _charShape;
+
     /// <summary>Whether the log is being shown split into cells rather than as whole lines. Only the
     /// Columns layout does that; Inline keeps every row a line and simply leaves parts out of it.</summary>
     private bool ColumnsOn => _doc is not null && _doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns;
@@ -724,7 +738,11 @@ public sealed class LineGridControl : Control
         if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
         // Nor does a selection outlive the mode it was made in: split into cells the indices are into the
         // line itself and belong to one cell, whole lines they are into the line with its tabs expanded.
-        if (_charLine >= 0 && ColumnsOn != (_charColumn >= 0)) ClearCharSelection();
+        // Nor the ARRANGEMENT it was made in: hiding a field or carrying one along the row moves every
+        // character after it, so a range kept across that would pick out text nobody chose - and it is what
+        // a filter made from the selection would be built out of.
+        if (_charLine >= 0 && (ColumnsOn != (_charColumn >= 0) || FieldsShape() != _charShape))
+            ClearCharSelection();
 
         _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
@@ -2396,6 +2414,7 @@ public sealed class LineGridControl : Control
         var (start, end) = CellRangeForTesting(row, column);
         _charLine = LineAt(row);
         _charColumn = column;
+        _charShape = FieldsShape();
         _charAnchor = Math.Clamp(start + from, start, end);
         _charFocus = Math.Clamp(start + to, start, end);
         _sel.SetSingle(_charLine);
@@ -2600,6 +2619,7 @@ public sealed class LineGridControl : Control
             _charOriginRow = row;
             _charAnchor = _charFocus = _charOriginAt = CharIndexAt(row, e.X, e.Y, out _charColumn);
             _charOriginColumn = _charColumn;
+            _charShape = FieldsShape();
         }
         Invalidate();
         SelectionChanged?.Invoke();
@@ -2622,6 +2642,7 @@ public sealed class LineGridControl : Control
                 _charLine = LineAt(row);
                 _charColumn = _charOriginColumn;
                 _charAnchor = _charOriginAt;
+                _charShape = FieldsShape();
                 int at = _charColumn >= 0 ? CharIndexIn(row, _charColumn, e.X)
                                           : CharIndexAt(row, e.X, e.Y);
                 if (at != _charFocus || _caretRow != row || _sel.LineCount != 1)

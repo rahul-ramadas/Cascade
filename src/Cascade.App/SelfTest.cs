@@ -1053,6 +1053,25 @@ internal static class SelfTest
             grid.RefreshView();
             Pump();
 
+            // A selection made against one arrangement of the fields cannot survive another: hiding a field
+            // moves every character after it, and what is picked out is what a filter would be made from.
+            doc.Columns.Layout = FieldLayout.Columns;
+            grid.RefreshView();
+            Pump();
+            grid.SelectPartOfCellForTesting(0, 3, 0, 4);
+            Pump();
+            bool picked = grid.CharColumnForTesting >= 0;
+            doc.Columns.Columns[2].Visible = false;
+            grid.RefreshView();
+            Pump();
+            ok &= Check("a selection does not outlive the arrangement it was made against",
+                        picked && grid.CharColumnForTesting < 0,
+                        $"picked {picked}, now column {grid.CharColumnForTesting}");
+            doc.Columns.Columns[2].Visible = true;
+            doc.Columns.Layout = FieldLayout.Inline;
+            grid.RefreshView();
+            Pump();
+
             return ok;
         }
         finally
