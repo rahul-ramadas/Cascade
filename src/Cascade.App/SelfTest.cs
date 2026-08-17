@@ -738,6 +738,10 @@ internal static class SelfTest
             // by scrolling to it, because a dialog whose OK button is off the bottom edge cannot be answered.
             using (var squashed = new ColumnsDialog(doc.Columns, samples))
             {
+                // At a large font AND with too little room, which is the pair a build machine's screen puts
+                // together: the scroll bar the one needs takes width from the other, and text fitted before
+                // it appeared runs on underneath it.
+                squashed.Font = new Font(squashed.Font.FontFamily, 16f);
                 squashed.StartPosition = FormStartPosition.Manual;
                 squashed.Location = new Point(0, 0);
                 squashed.Opacity = 0;
@@ -745,6 +749,7 @@ internal static class SelfTest
                 Pump();
                 squashed.MinimumSize = new Size(squashed.MinimumSize.Width, 0);
                 squashed.Height = squashed.Height / 4;
+                squashed.Width = squashed.MinimumSize.Width;
                 squashed.PerformLayout();
                 Pump();
 
