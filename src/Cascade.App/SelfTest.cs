@@ -2409,6 +2409,30 @@ internal static class SelfTest
                         resolvedSliding * 4 < resolvedCold,
                         $"{resolvedSliding} rows read after a 400-row scroll, {resolvedCold} from cold");
 
+            // ---- and remembered for the whole file, not just the window ----
+            // Reading a log is dragging up and down it, and a drag moves the window by more than its own
+            // height on every mouse report - so what makes a drag affordable is that the way back costs
+            // nothing. The colours must be the same ones, too: a block of the file is a block of the file
+            // wherever the window happens to be sitting when it is asked about.
+            grid.ScrollToRow(HalfMap() + 4_000);
+            map.RebuildForTesting();
+            var wasHere = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            grid.ScrollToRow(lines - HalfMap() - 1);   // the far end, well past anything this window covers
+            map.RebuildForTesting();
+            int beforeReturn = map.ColoursResolvedForTesting;
+            grid.ScrollToRow(HalfMap() + 4_000);
+            map.RebuildForTesting();
+            var backHere = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            int changed = Enumerable.Range(0, Math.Min(wasHere.Length, backHere.Length))
+                                    .FirstOrDefault(i => wasHere[i] != backHere[i], -1);
+            ok &= Check("coming back to a stretch it has been over reads nothing at all",
+                        map.ColoursResolvedForTesting == beforeReturn,
+                        $"{map.ColoursResolvedForTesting - beforeReturn} rows read on the way back");
+            ok &= Check("and shows exactly the colours it showed the first time",
+                        wasHere.Length == backHere.Length && changed < 0,
+                        changed < 0 ? $"{wasHere.Length} pixels agree"
+                                    : $"pixel {changed}: {Color.FromArgb(wasHere[changed])} vs {Color.FromArgb(backHere[changed])}");
+
             // A change of settings has to reach the map: what counts as "no colour at all" is one of them,
             // so the colours it remembered were worked out against the settings that were in force.
             int beforeSettings = map.ColoursResolvedForTesting;
