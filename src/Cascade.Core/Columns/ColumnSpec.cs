@@ -143,8 +143,9 @@ public sealed class ColumnSpec
     }
 
     /// <summary>Settles which part each column shows for any that has not been told, and drops any left
-    /// pointing past the end of the template. Columns built in code, or read from a file written by an
-    /// older build, show the part at their own place in the list - which is what they used to do.</summary>
+    /// pointing past the end of the template - or at a part another column already shows. Columns built in
+    /// code, or read from a file written by an older build, show the part at their own place in the list -
+    /// which is what they used to do.</summary>
     public void NormalizeSources()
     {
         for (int i = 0; i < Columns.Count; i++)
@@ -152,6 +153,11 @@ public sealed class ColumnSpec
 
         int parts = Compiled.PartCount;
         if (parts > 0) Columns.RemoveAll(c => c.Source >= parts);
+
+        // Two columns showing one part would draw that part's text twice, which is text the line never had.
+        // Nothing the dialog does can make that happen; a hand-edited file can.
+        var seen = new HashSet<int>();
+        Columns.RemoveAll(c => !seen.Add(c.Source));
     }
 
     /// <summary>Everything worth saving, as one string - so "did that change anything?" is one comparison

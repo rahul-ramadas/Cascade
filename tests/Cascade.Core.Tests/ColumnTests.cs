@@ -112,6 +112,22 @@ public class ColumnTests
         Assert.Equal(["a"], spec.Columns.Select(c => c.Name));
     }
 
+    /// <summary>Two columns showing ONE part would draw that part's text twice, so the row would hold text
+    /// the line never had - the one thing the projection promises never to do. Nothing in the dialog can
+    /// arrange it; a hand-edited or half-written file can, so the later one is dropped.</summary>
+    [Fact]
+    public void Two_columns_showing_the_same_part_are_not_both_kept()
+    {
+        var spec = new ColumnSpec { Enabled = true, Template = "{*} {*}" };
+        spec.Columns.Add(new ColumnDef { Name = "a", Source = 0 });
+        spec.Columns.Add(new ColumnDef { Name = "again", Source = 0 });
+        spec.Columns.Add(new ColumnDef { Name = "b", Source = 1 });
+        spec.NormalizeSources();
+        Assert.Equal(["a", "b"], spec.Columns.Select(c => c.Name));
+        Assert.Equal(["1", "2"], Cells(spec, "1 2"));
+        Assert.Equal("1 2", Inline(spec, "1 2"));
+    }
+
     // ---- the inline layout ----
 
     /// <summary>The property that makes the layout safe to leave on: until something is hidden it changes

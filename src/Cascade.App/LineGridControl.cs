@@ -727,13 +727,7 @@ public sealed class LineGridControl : Control
 
         // A rename box belongs to a header that may no longer be there.
         if (_renameBox is not null && HeaderHeight == 0) EndRename(commit: false);
-        // Nor does a selection outlive the mode it was made in: split into cells the indices are into the
-        // line itself and belong to one cell, whole lines they are into the line with its tabs expanded.
-        // Nor the ARRANGEMENT it was made in: hiding a field or carrying one along the row moves every
-        // character after it, so a range kept across that would pick out text nobody chose - and it is what
-        // a filter made from the selection would be built out of.
-        if (_charLine >= 0 && (ColumnsOn != (_charColumn >= 0) || FieldsShape() != _charShape))
-            ClearCharSelection();
+        DropSelectionIfArrangementChanged();
 
         _firstRow = ClampFirstRow(_firstRow);
         if (_caretRow >= rows) _caretRow = rows - 1;
@@ -1368,7 +1362,9 @@ public sealed class LineGridControl : Control
         using (var pen = new Pen(Color.FromArgb(210, 210, 210)))
             g.DrawLine(pen, 0, strip.Bottom - 1, strip.Width, strip.Bottom - 1);
 
-        var clip = g.Clip;
+        // Disposed once the strip is drawn: Graphics.Clip hands back a Region around a native handle, and
+        // one of those a frame is one the finalizer has to clean up.
+        using var clip = g.Clip;
         g.SetClip(strip);
 
         var spec = _doc!.Columns;
@@ -1835,12 +1831,13 @@ public sealed class LineGridControl : Control
     private void EnsureColumnLayout()
     {
         var spec = _doc!.Columns;
+        // A column added in code says nothing about which field it shows; settle that here, once, rather
+        // than leaving every such spec drawing empty cells. Before the count is taken, because settling can
+        // DROP a column that points past the end of the template.
+        spec.NormalizeSources();
         int n = spec.Columns.Count;
         if (_colWidths.Length != n) _colWidths = new int[n];
         if (n == 0) return;
-        // A column added in code says nothing about which field it shows; settle that here, once, rather
-        // than leaving every such spec drawing empty cells.
-        spec.NormalizeSources();
         EnsureNaturalWidths();
 
         var wanted = new List<int>(n);
@@ -1921,6 +1918,23 @@ public sealed class LineGridControl : Control
     /// <summary>Raised by the header's "Columns…" entry, so the full settings still have one home.</summary>
     internal event Action? ColumnSettingsRequested;
 
+    /// <summary>Drops a part-of-a-line selection that no longer means what it did when it was made.
+    ///
+    /// <para>Not the MODE it was made in: split into cells the indices are into the line itself and belong
+    /// to one cell, whole lines they are into the line with its tabs expanded. Nor the ARRANGEMENT: hiding
+    /// a field or carrying one along the row moves every character after it, so a range kept across that
+    /// would pick out text nobody chose - and it is what a filter made from the selection would be built
+    /// out of.</para>
+    ///
+    /// <para>Every path that can rearrange the fields has to come through here: <see cref="RefreshView"/>
+    /// for the ones that redraw the world, and <see cref="ColumnsEdited"/> for the ones done in the view
+    /// itself - a chip clicked or dragged, the header's tick list - which never call it.</para></summary>
+    private void DropSelectionIfArrangementChanged()
+    {
+        if (_charLine >= 0 && (ColumnsOn != (_charColumn >= 0) || FieldsShape() != _charShape))
+            ClearCharSelection();
+    }
+
     /// <summary>One place every in-view column edit ends: the drawn widths are stale, the header and every
     /// row have to be redrawn, and whoever owns the file has to know it now differs from what is on disk.
     /// It does NOT re-measure the content - the measurement's own key covers the changes that could affect
@@ -1928,6 +1942,7 @@ public sealed class LineGridControl : Control
     private void ColumnsEdited()
     {
         _maxContentWidth = 0;
+        DropSelectionIfArrangementChanged();
         EnsureColumnLayout();
         UpdateHScroll();
         Invalidate();
