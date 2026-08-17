@@ -306,23 +306,39 @@ internal static class SelfTest
             // A cell takes the same short road a whole line does when its text is plain ASCII in a
             // fixed-pitch face and fits its box - placed by arithmetic where the layout would have put it,
             // aligned as its column asks. Against the layout, pixel for pixel, in all three alignments.
+            //
+            // With and without the line-number margin, because the two are not the same drawing at all.
+            // Narrowing the clip to the text area saves the whole device context and puts it back, which
+            // puts the selected face back with it - and a margin drawn before that happens hides the fault,
+            // because drawing the number selects the face again on every row.
             grid.ScrollHorizontallyTo(0);
             for (int i = 0; i < doc.Columns.Columns.Count; i++)
-                doc.Columns.Columns[i].Align = (ColumnAlign)(i % 3);
-            grid.RefreshView();
-            grid.DrawTextTheLongWayForTesting = true;
-            Pump();
-            using (var cellsLaidOut = Capture(host))
             {
+                doc.Columns.Columns[i].Align = (ColumnAlign)(i % 3);
+                // Wide enough for what is in them at any font size, or every cell asks for the ellipsis
+                // instead and none of them takes the short road this is here to check.
+                doc.Columns.Columns[i].Width = 400;
+            }
+            foreach (bool numbers in (bool[])[true, false])
+            {
+                settings.ShowLineNumbers = numbers;
+                grid.ApplySettings(settings);
+                grid.RefreshView();
+                grid.DrawTextTheLongWayForTesting = true;
+                Pump();
+                using var cellsLaidOut = Capture(host);
                 grid.DrawTextTheLongWayForTesting = false;
                 Pump();
                 using var cellsDirect = Capture(host);
                 var cellDiff = FirstDifference(cellsLaidOut, cellsDirect,
                     new Rectangle(0, 0, cellsLaidOut.Width, cellsLaidOut.Height));
-                ok &= Check("a cell drawn straight onto the device context is the same picture too" +
+                ok &= Check($"a cell drawn straight onto the device context is the same picture too " +
+                            $"({(numbers ? "with" : "without")} line numbers)" +
                             (cellDiff is null ? "" : $" [first differs at x={cellDiff.Value.X},y={cellDiff.Value.Y}]"),
                             cellDiff is null);
             }
+            settings.ShowLineNumbers = true;
+            grid.ApplySettings(settings);
             foreach (var column in doc.Columns.Columns) column.Align = ColumnAlign.Left;
             grid.RefreshView();
             Pump();

@@ -27,7 +27,7 @@ internal sealed class GdiCanvas : IDeviceContext
     private IntPtr _font;
     private int _fore = Unset, _back = Unset, _mode;
 
-    private const int Unset = 1;   // no COLORREF has its top byte set, so this can never be a real colour
+    private const int Unset = -1;   // a COLORREF made here is three bytes, so none of them is ever negative
 
     /// <summary>Takes the context out of the Graphics. Nothing may touch that Graphics again until
     /// <see cref="Release"/> - GDI+ holds it locked meanwhile, and drawing on it throws.</summary>
@@ -135,7 +135,7 @@ internal sealed class GdiCanvas : IDeviceContext
             TextRenderer.DrawText(this, text, font, new Point(x, y), fore,
                 TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
         }
-        finally { RestoreDC(_hdc, saved); }
+        finally { RestoreDC(_hdc, saved); Forget(); }
     }
 
     /// <summary>Text laid out inside a box - right-aligned line numbers, aligned column cells - over a
@@ -156,21 +156,45 @@ internal sealed class GdiCanvas : IDeviceContext
 
     /// <summary>Narrows the clip to a box for as long as the returned scope lives. Used where drawing is
     /// laid out per cell but must not reach past the text area as a whole.</summary>
-    public ClipScope Clip(Rectangle box) => new(_hdc, box);
+    public ClipScope Clip(Rectangle box) => new(this, box);
 
+    /// <summary>
+    /// A narrowed clip, put back when it goes out of scope.
+    ///
+    /// <para>It is narrowed by saving the whole device context and restoring it, which is the cheap way to
+    /// do it - and which also puts back the face and the colours that were selected when it was saved. So
+    /// the canvas has to forget what it believes is selected on the way out, or the next piece of text
+    /// would be told it need not select the face it is already using, and would come out in whatever the
+    /// context reverted to. That is a row of cells in the system font, and it happened for real: a log
+    /// split into fields, with the line-number margin turned off, drew every row but the first that
+    /// way.</para>
+    /// </summary>
     internal readonly struct ClipScope : IDisposable
     {
-        private readonly IntPtr _hdc;
+        private readonly GdiCanvas _canvas;
         private readonly int _saved;
 
-        public ClipScope(IntPtr hdc, Rectangle box)
+        public ClipScope(GdiCanvas canvas, Rectangle box)
         {
-            _hdc = hdc;
-            _saved = SaveDC(hdc);
-            IntersectClipRect(hdc, box.Left, box.Top, box.Right, box.Bottom);
+            _canvas = canvas;
+            _saved = SaveDC(canvas._hdc);
+            IntersectClipRect(canvas._hdc, box.Left, box.Top, box.Right, box.Bottom);
         }
 
-        public void Dispose() => RestoreDC(_hdc, _saved);
+        public void Dispose()
+        {
+            RestoreDC(_canvas._hdc, _saved);
+            _canvas.Forget();
+        }
+    }
+
+    /// <summary>Lets go of what the canvas believes the context has selected, because something has put the
+    /// context back to how it was.</summary>
+    private void Forget()
+    {
+        _font = IntPtr.Zero;
+        _fore = _back = Unset;
+        _mode = 0;
     }
 
     private void Use(IntPtr font, Color fore, Color back, bool opaque)
