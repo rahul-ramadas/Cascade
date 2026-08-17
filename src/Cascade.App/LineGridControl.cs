@@ -2493,11 +2493,44 @@ public sealed class LineGridControl : Control
     /// content is, which is what the horizontal scrollbar's range is built from.</summary>
     private int DrawSegment(Graphics g, string text, int from, int to, int gutter, int y, Color fore, Font font, int charWidth)
     {
-        string part = text[from..to];
+        var part = text.AsSpan(from, to - from);
         int x = gutter - (Wrapping ? 0 : _hScroll);
-        TextRenderer.DrawText(g, part, font, new Point(x, y), fore, TextFlags);
+        bool plain = charWidth > 0 && part.IndexOfAnyExceptInRange(' ', '~') < 0;
+        var (shownFrom, shownTo) = plain ? OnScreenPart(part.Length, x, charWidth) : (0, part.Length);        if (shownTo > shownFrom)
+            TextRenderer.DrawText(g, part[shownFrom..shownTo], font,
+                new Point(x + shownFrom * charWidth, y), fore, TextFlags);
         if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
-        return DrawnWidth(part, font, charWidth) + 8;
+        return (plain ? part.Length * charWidth : DrawnWidth(part, font, charWidth)) + 8;
+    }
+
+    /// <summary>
+    /// Which characters of a fixed-pitch stretch of text starting at <paramref name="x"/> can land in the
+    /// window, with one character of slack at each end for a slanted face's overhang.
+    ///
+    /// <para>GDI lays out and rasterises every character it is handed, whether or not the result falls
+    /// inside the clip - so drawing a whole line costs what the whole line costs, and a log line is
+    /// routinely three or four times the width of the window it is being read in. Handing over only the
+    /// part that can be seen measured a 400-character log at less than half its cost, and cannot change a
+    /// pixel of what appears: what is left out is outside the clip either way.</para>
+    /// </summary>
+    private (int From, int To) OnScreenPart(int length, int x, int charWidth)
+    {
+        if (_wholeLines) return (0, length);
+        int left = GutterWidth(), right = left + ContentWidth;
+        int first = Math.Clamp((left - x) / charWidth - 1, 0, length);
+        int last = Math.Clamp((right - x) / charWidth + 2, first, length);
+        return (first, last);
+    }
+
+    private bool _wholeLines;
+
+    /// <summary>Test seam: hand GDI the whole of every line, as this used to, so a check can prove that
+    /// drawing only the part that shows draws the same picture.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool DrawWholeLinesForTesting
+    {
+        get => _wholeLines;
+        set { _wholeLines = value; Invalidate(); }
     }
 
     /// <summary>

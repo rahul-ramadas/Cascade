@@ -243,6 +243,23 @@ internal static class SelfTest
                 WriteRenderDiagnostics("scrolling right leaves the line-number margin untouched",
                     host, grid, margin, diff.Value, unscrolled, scrolled);
 
+            // Only the stretch of a line that can land in the window is handed to GDI, which lays out
+            // everything it is given whether or not it shows. What is left out is outside the clip either
+            // way, so the two must draw the same picture - here, with a line running off BOTH edges, which
+            // is where a character of overhang at either end would show up.
+            grid.DrawWholeLinesForTesting = true;
+            Pump();
+            using (var whole = Capture(host))
+            {
+                grid.DrawWholeLinesForTesting = false;
+                Pump();
+                using var clipped = Capture(host);
+                var partDiff = FirstDifference(whole, clipped, new Rectangle(0, 0, whole.Width, whole.Height));
+                ok &= Check("drawing only the part of a line that shows draws what drawing all of it does" +
+                            (partDiff is null ? "" : $" [first differs at x={partDiff.Value.X},y={partDiff.Value.Y}]"),
+                            partDiff is null);
+            }
+
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
             doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
