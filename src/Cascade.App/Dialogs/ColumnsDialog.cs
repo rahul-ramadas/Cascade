@@ -64,6 +64,23 @@ public sealed class ColumnsDialog : DialogBase
     private readonly Button _down = new() { Text = "Move d&own", AutoSize = true };
     private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
 
+    /// <summary>Everything on the dialog, in one column, inside the panel that scrolls it. Kept because how
+    /// short the content may be drawn is what decides whether the dialog scrolls at all; see
+    /// <see cref="GiveTheContentAFloor"/>.</summary>
+    private readonly TableLayoutPanel _root;
+
+    /// <summary>What the content sits in, so that a screen with less room than the dialog needs can be
+    /// scrolled rather than losing the rows at the bottom - the OK button among them. A form will not
+    /// scroll over a child docked to fill it, which is what the content otherwise is.</summary>
+    private readonly Panel _scroll = new() { Dock = DockStyle.Fill, AutoScroll = true };
+
+    /// <summary>The least the content may be drawn in and still show every row.</summary>
+    private int _contentFloor;
+
+    /// <summary>Set while the content is being resized, so that the panel laying itself out again does not
+    /// come straight back round and do it a second time.</summary>
+    private bool _sizingContent;
+
     public ColumnSpec Result => _working;
 
     public ColumnsDialog(ColumnSpec spec, IReadOnlyList<string> samples, int startSample = 0)
@@ -87,7 +104,11 @@ public sealed class ColumnsDialog : DialogBase
 
         _template.Font = TemplateFont;
 
-        Controls.Add(BuildRoot());
+        _root = BuildRoot();
+        _root.Dock = DockStyle.Top;
+        _scroll.Controls.Add(_root);
+        _scroll.ClientSizeChanged += (_, _) => SizeContentToRoom();
+        Controls.Add(_scroll);
         BuildList();
         Wire();
 
@@ -139,6 +160,54 @@ public sealed class ColumnsDialog : DialogBase
         PerformLayout();
         int spare = Math.Max(0, _list.ClientSize.Height - LeastListHeight);
         MinimumSize = new Size(MinimumSize.Width, Math.Min(most, Math.Max(Dpi(420), Height - spare)));
+        GiveTheContentAFloor();
+    }
+
+    /// <summary>Works out the least room the content can be drawn in and still show every row of itself,
+    /// then gives it that much whatever the window has.
+    ///
+    /// <para>On a screen too short for everything on here, the window is the screen's height and the list -
+    /// the one row that gives way - is squeezed to nothing, which leaves the rows BELOW it, the OK button
+    /// among them, pushed off the bottom edge with no way to reach them: a dialog that cannot be answered.
+    /// Held to what it needs instead, the content keeps its height and the panel around it scrolls.</para>
+    ///
+    /// <para>Added up row by row rather than read off the panel, because the panel is whatever height it was
+    /// last given - and a figure worked out from that would grow every time it was applied. Every row but
+    /// the list is as tall as it needs to be whatever room there is, so this is the same number at any window
+    /// size. Twice, since a scroll bar takes width off the wrapping text, which may then want another line
+    /// for it.</para></summary>
+    private void GiveTheContentAFloor()
+    {
+        for (int pass = 0; pass < 2; pass++)
+        {
+            int stack = _root.Padding.Vertical + _list.Margin.Vertical + LeastListHeight;
+            foreach (Control child in _root.Controls)
+                if (child != _list) stack += child.Height + child.Margin.Vertical;
+            if (stack == _contentFloor) return;
+            _contentFloor = stack;
+            SizeContentToRoom();
+            PerformLayout();
+        }
+    }
+
+    /// <summary>Gives the content the room the window has, or the least it needs, whichever is more. More
+    /// than the window has is what puts the scroll bar there.
+    ///
+    /// <para>The panel is told to lay out again afterwards because it works out how far it scrolls from
+    /// where its child ends, and it does not notice that on its own when the child is simply resized: left
+    /// to itself it keeps the room the dialog wanted when it opened, and shows a scroll bar over content
+    /// that has since been made to fit.</para></summary>
+    private void SizeContentToRoom()
+    {
+        if (_sizingContent) return;
+        _sizingContent = true;
+        try
+        {
+            int height = Math.Max(_scroll.ClientSize.Height, _contentFloor);
+            if (_root.Height != height) _root.Height = height;
+            _scroll.PerformLayout();
+        }
+        finally { _sizingContent = false; }
     }
 
     /// <summary>Puts the dialog in the middle of the screen the window that opened it is on. The middle of
@@ -300,7 +369,10 @@ public sealed class ColumnsDialog : DialogBase
     private void FitWrappingText()
     {
         int aside = Math.Max(_asColumns.Width, _asInline.Width) + Dpi(12);
-        var room = new Size(Math.Max(Dpi(200), ClientSize.Width - Dpi(24) - aside), 0);
+        // The room inside the panel that scrolls, not the window: once a scroll bar is there it is the
+        // panel that is narrower, and text measured against the window would wrap under the bar.
+        int width = _scroll.ClientSize.Width > 0 ? _scroll.ClientSize.Width : ClientSize.Width;
+        var room = new Size(Math.Max(Dpi(200), width - Dpi(24) - aside), 0);
         foreach (var label in _wrapping) label.MaximumSize = room;
     }
 
@@ -1031,6 +1103,15 @@ public sealed class ColumnsDialog : DialogBase
     // ---- seams, so the dialog can be driven without a mouse ----
 
     internal void SetTemplateForTesting(string text) => WriteTemplate(text, text.Length);
+
+    /// <summary>The panel the content scrolls inside, so a check can confirm that whatever a short screen
+    /// leaves off the bottom can still be reached rather than being lost.</summary>
+    internal ScrollableControl ContentScrollForTesting => _scroll;
+
+    internal string ContentFloorForTesting
+        => $"floor {_contentFloor}, root {_root.Height}, list {_list.Height}, least {LeastListHeight}, " +
+           $"rows {string.Join('+', _root.Controls.Cast<Control>().Select(c => c == _list ? $"[list {c.Height}]" : $"{c.Height}"))}";
+
     internal string TemplateForTesting => _template.Text;
     internal string StatusForTesting => _status.Text;
     internal string FitForTesting => _fit.Text;

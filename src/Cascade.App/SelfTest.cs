@@ -665,9 +665,15 @@ internal static class SelfTest
                     .Select(c => (c, r: Where(c)))
                     .Where(t => t.r.Right > dlg.ClientSize.Width + 1 || t.r.Bottom > dlg.ClientSize.Height + 1)
                     .ToList();
-                ok &= Check("nothing on the dialog hangs off its edge",
-                            stray.Count == 0,
+                ok &= Check("nothing on the dialog hangs off its edge", stray.Count == 0,
                             string.Join(", ", stray.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
+
+                // Opened at its own size it fits, so there must be no scroll bar: one that is always there
+                // takes width off the content and says the dialog is bigger than it is.
+                var fits = dlg.ContentScrollForTesting;
+                ok &= Check("and at its own size there is nothing to scroll",
+                            !fits.VerticalScroll.Visible && !fits.HorizontalScroll.Visible,
+                            $"content {fits.DisplayRectangle} in {fits.ClientSize}; {dlg.ContentFloorForTesting}");
 
                 // Width and alignment mean nothing to the Inline layout, so they are put out of reach
                 // rather than left looking as though they do something.
@@ -698,7 +704,9 @@ internal static class SelfTest
             }
 
             // The same dialog at a much larger font: every row has to give way rather than push its
-            // neighbours off the edge, which is how a dialog ends up with its buttons out of reach.
+            // neighbours off the edge, which is how a dialog ends up with its buttons out of reach. Measured
+            // against the CONTENT rather than the window, because a window with less room than the content
+            // needs scrolls over it, and what has been scrolled past is not lost - see the check below.
             using (var big = new ColumnsDialog(doc.Columns, samples))
             {
                 big.Font = new Font(big.Font.FontFamily, 16f);
@@ -707,19 +715,66 @@ internal static class SelfTest
                 big.Opacity = 0;
                 big.Show();
                 Pump();
-                Rectangle Where(Control c) => big.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
-                var over = AllControls(big).Where(c => c.Visible && c.Parent is not null)
+                var room = big.ContentScrollForTesting;
+                Rectangle Where(Control c) => room.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                var over = AllControls(big).Where(c => c.Visible && c.Parent is not null && c != room)
                     .Select(c => (c, r: Where(c)))
-                    .Where(t => t.r.Right > big.ClientSize.Width + 1 || t.r.Bottom > big.ClientSize.Height + 1)
+                    .Where(t => t.r.Right > room.ClientSize.Width + 1 || t.r.Bottom > room.DisplayRectangle.Bottom + 1)
                     .ToList();
                 ok &= Check("at 16pt nothing on the dialog is pushed off its edge",
                             over.Count == 0,
                             string.Join(", ", over.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
 
                 var okBig = AllControls(big).OfType<Button>().First(b => b.Text == "OK");
-                ok &= Check($"and the buttons are still on it ({Where(okBig)} in {big.ClientSize})",
-                            Where(okBig).Bottom <= big.ClientSize.Height);
+                ok &= Check($"and the buttons are on the content ({Where(okBig)} in {room.DisplayRectangle})",
+                            Where(okBig).Bottom <= room.DisplayRectangle.Bottom + 1);
                 big.Close();
+                Pump();
+            }
+
+            // And with less room than it needs at all. The size at which that happens is the SCREEN's, so on a
+            // large monitor opening it normally never reaches it, while a build machine's screen does - hence
+            // forcing it here rather than trusting the font to do it. Whatever will not fit has to be reachable
+            // by scrolling to it, because a dialog whose OK button is off the bottom edge cannot be answered.
+            using (var squashed = new ColumnsDialog(doc.Columns, samples))
+            {
+                squashed.StartPosition = FormStartPosition.Manual;
+                squashed.Location = new Point(0, 0);
+                squashed.Opacity = 0;
+                squashed.Show();
+                Pump();
+                squashed.MinimumSize = new Size(squashed.MinimumSize.Width, 0);
+                squashed.Height = squashed.Height / 4;
+                squashed.PerformLayout();
+                Pump();
+
+                var okSquashed = AllControls(squashed).OfType<Button>().First(b => b.Text == "OK");
+                Rectangle Seen(Control c) => squashed.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                var scroller = squashed.ContentScrollForTesting;
+                ok &= Check($"a dialog with less room than it needs can be scrolled ({squashed.ClientSize} client)",
+                            scroller.VerticalScroll.Visible, $"content {scroller.DisplayRectangle.Height} in {scroller.ClientSize.Height}");
+
+                // The list is the row that gives way, and it may not give way to nothing: squeezed out
+                // altogether it takes the rows below it off the bottom with it.
+                ok &= Check($"and the field list is still a list ({squashed.ListForTesting.ClientSize.Height}px for {squashed.RowCountForTesting} rows)",
+                            squashed.ListForTesting.ClientSize.Height >= 4 * 20,
+                            $"{squashed.ListForTesting.Bounds} in {squashed.ClientSize}");
+
+                Rectangle Inside(Control c) => scroller.RectangleToClient(c.Parent!.RectangleToScreen(c.Bounds));
+                var spilled = AllControls(squashed).Where(c => c.Visible && c.Parent is not null && c != scroller)
+                    .Select(c => (c, r: Inside(c)))
+                    .Where(t => t.r.Right > scroller.ClientSize.Width + 1 || t.r.Bottom > scroller.DisplayRectangle.Bottom + 1)
+                    .ToList();
+                ok &= Check("and nothing has been pushed off the content it scrolls over",
+                            spilled.Count == 0,
+                            string.Join(", ", spilled.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
+
+                scroller.VerticalScroll.Value = scroller.VerticalScroll.Maximum;
+                scroller.PerformLayout();
+                Pump();
+                ok &= Check($"and scrolling down reaches the buttons ({Seen(okSquashed)} in {squashed.ClientSize})",
+                            Seen(okSquashed).Bottom <= squashed.ClientSize.Height + 1);
+                squashed.Close();
                 Pump();
             }
 
