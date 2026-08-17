@@ -708,15 +708,21 @@ internal sealed class MiniMapControl : Control
             _builtGeneration != doc.FilterGeneration || _builtMarkers != doc.Markers.Version ||
             _builtFindHits != doc.FindHitCount || _drawnSelection != _grid.SelectionVersion)
         {
-            if (repaint) Invalidate();
+            if (repaint) { _owed = false; Invalidate(); } else _owed = true;
             return;
         }
         if (_slots <= 0) return;
         long rows = doc.RowCount;
         long before = _top;
         if (rows > 0) TrackView(rows, SlotCapacity);
-        if (repaint && (_top != before || Geometry() != _drawnViewport)) Invalidate();
+        // Whether it is out of date, counting the times it was told so on a frame that was not drawn: the
+        // window it is over is moved by the telling, so by the next one it looks as though nothing happened.
+        bool stale = _owed || _top != before || Geometry() != _drawnViewport;
+        if (!repaint) { _owed = stale; return; }
+        if (stale) { _owed = false; Invalidate(); }
     }
+
+    private bool _owed;
 
     // ---- interaction ----
 

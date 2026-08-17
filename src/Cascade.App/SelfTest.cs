@@ -302,6 +302,30 @@ internal static class SelfTest
             ok &= Check("scrolling right actually moved the columns",
                         !SameRegion(colUnscrolled, colScrolled,
                             new Rectangle(gutter, colMargin.Top, colUnscrolled.Width - gutter - 20, colMargin.Height)));
+
+            // A cell takes the same short road a whole line does when its text is plain ASCII in a
+            // fixed-pitch face and fits its box - placed by arithmetic where the layout would have put it,
+            // aligned as its column asks. Against the layout, pixel for pixel, in all three alignments.
+            grid.ScrollHorizontallyTo(0);
+            for (int i = 0; i < doc.Columns.Columns.Count; i++)
+                doc.Columns.Columns[i].Align = (ColumnAlign)(i % 3);
+            grid.RefreshView();
+            grid.DrawTextTheLongWayForTesting = true;
+            Pump();
+            using (var cellsLaidOut = Capture(host))
+            {
+                grid.DrawTextTheLongWayForTesting = false;
+                Pump();
+                using var cellsDirect = Capture(host);
+                var cellDiff = FirstDifference(cellsLaidOut, cellsDirect,
+                    new Rectangle(0, 0, cellsLaidOut.Width, cellsLaidOut.Height));
+                ok &= Check("a cell drawn straight onto the device context is the same picture too" +
+                            (cellDiff is null ? "" : $" [first differs at x={cellDiff.Value.X},y={cellDiff.Value.Y}]"),
+                            cellDiff is null);
+            }
+            foreach (var column in doc.Columns.Columns) column.Align = ColumnAlign.Left;
+            grid.RefreshView();
+            Pump();
             var colDiff = FirstDifference(colUnscrolled, colScrolled, colMargin);
             ok &= Check("scrolling right with columns leaves the margin untouched" +
                         (colDiff is null ? "" : $" [first differs at x={colDiff.Value.X},y={colDiff.Value.Y}]"),

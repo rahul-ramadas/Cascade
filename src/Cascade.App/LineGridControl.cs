@@ -1307,7 +1307,7 @@ public sealed class LineGridControl : Control
                 {
                     ink.Fill(contentRect, back);
                     using (ink.Clip(contentRect))
-                        DrawColumns(ink, text, row, gutter, y, fore, fontIndex, charSel, selected);
+                        DrawColumns(ink, text, row, gutter, y, fore, back, fontIndex, charSel, selected);
                 }
                 else
                 {
@@ -1657,8 +1657,8 @@ public sealed class LineGridControl : Control
     /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
     /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
     /// once from <see cref="TotalColumnsWidth"/> rather than once per row.</summary>
-    private void DrawColumns(GdiCanvas ink, string text, long row, int gutter, int y, Color fore, int fontIndex,
-                             bool charSel, string? selected)
+    private void DrawColumns(GdiCanvas ink, string text, long row, int gutter, int y, Color fore, Color back,
+                             int fontIndex, bool charSel, string? selected)
     {
         var template = _doc!.Columns.Compiled;
         var font = _fonts[fontIndex];
@@ -1692,7 +1692,7 @@ public sealed class LineGridControl : Control
             var span = CellText(text, def, _match);
             if (!marks)
             {
-                ink.TextIn(span, cell, fore, font, CellFlags(def.Align, x, w, gutter, right));
+                DrawCell(ink, span, cell, fore, back, font, fontIndex, def.Align, CellFlags(def.Align, x, w, gutter, right));
             }
             else
             {
@@ -1705,6 +1705,30 @@ public sealed class LineGridControl : Control
             }
             x += w;
         }
+    }
+
+    /// <summary>Draws one cell's text. Plain ASCII in a fixed-pitch face that fits its box goes by the same
+    /// short road a whole line does - one call that lays the background down with the text - and is placed
+    /// by arithmetic, which is exactly where the layout would have put it. Anything else (a proportional
+    /// face, a script that needs shaping, or text too long for its box and so wanting the ellipsis) goes
+    /// through the layout, over the fill the row has already had.</summary>
+    private void DrawCell(GdiCanvas ink, ReadOnlySpan<char> span, Rectangle cell, Color fore, Color back,
+                          Font font, int fontIndex, ColumnAlign align, TextFormatFlags flags)
+    {
+        int charWidth = CharWidthOf(fontIndex);
+        int width = span.Length * charWidth;
+        if (!Plain(span, fontIndex) || width > cell.Width)
+        {
+            ink.TextIn(span, cell, fore, font, flags);
+            return;
+        }
+        int x = align switch
+        {
+            ColumnAlign.Right => cell.Right - width,
+            ColumnAlign.Center => cell.Left + (cell.Width - width) / 2,
+            _ => cell.Left
+        };
+        ink.Text(span, x, cell.Top, cell, fore, back, font, _faces[fontIndex], plain: true);
     }
 
     /// <summary>Where a character of a cell's text sits on screen.</summary>

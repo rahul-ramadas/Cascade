@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using Cascade.Core.Columns;
 using Cascade.Core.Model;
 
 namespace Cascade.App;
@@ -48,6 +49,9 @@ internal static class ScrollBench
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
         // A drag over ground the minimap has never been over, which is what the first pass down a file is.
         bool cold = args.Any(a => a.Equals("--cold", StringComparison.OrdinalIgnoreCase));
+        // Every piece of text through the general layout, as it went before the direct path existed. The
+        // before half of a before-and-after.
+        bool longWay = args.Any(a => a.Equals("--longway", StringComparison.OrdinalIgnoreCase));
 
         // Measuring against whatever else the machine feels like doing is how a change of 20% hides inside
         // the noise. This asks for the scheduler's attention for the couple of minutes it runs.
@@ -88,6 +92,7 @@ internal static class ScrollBench
             for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 120_000 && doc.IsBusy;) Pump();
 
             var probe = form.GridForTesting;
+            probe.DrawTextTheLongWayForTesting = longWay;
             string sample = doc.GetLineText(doc.CompletedLineCount / 2);
             Console.WriteLine($"indexed {doc.CompletedLineCount:N0} lines, {probe.VisibleRowCountForTesting} rows on screen, " +
                               $"row {probe.RowHeightForTesting}px tall");
@@ -424,6 +429,37 @@ internal static class ScrollBench
             filters.ShowOnlyFilteredLines = true;
             doc.SetFilters(filters);
         });
+        yield return ("fields, in columns", () =>
+        {
+            doc.Filters.ShowOnlyFilteredLines = false;
+            doc.SetFilters(Filters());
+            SplitIntoFields(doc, FieldLayout.Columns);
+            form.GridForTesting.RefreshView();
+        });
+        yield return ("fields, inline", () =>
+        {
+            SplitIntoFields(doc, FieldLayout.Inline);
+            form.GridForTesting.RefreshView();
+        });
+        yield return ("word wrap", () =>
+        {
+            doc.Columns.Enabled = false;
+            form.GridForTesting.ApplySettings(new AppSettings { WordWrap = true });
+            form.GridForTesting.RefreshView();
+        });
+    }
+
+    /// <summary>Splits the fixture's lines the way a reader would: a field per part of the line, under the
+    /// template that describes it.</summary>
+    private static void SplitIntoFields(Cascade.Core.Document.CascadeDocument doc, FieldLayout layout)
+    {
+        doc.Columns.Enabled = true;
+        doc.Columns.Layout = layout;
+        doc.Columns.Template = "{*} {*} {[*]} {*} {*} {*}";
+        doc.Columns.Columns.Clear();
+        string[] names = ["Date", "Time", "Thread", "Level", "Service", "Message"];
+        for (int i = 0; i < names.Length; i++)
+            doc.Columns.Columns.Add(new ColumnDef { Name = names[i], Source = i });   // 0: sized to fit
     }
 
     /// <summary>A filter set of the shape people actually keep: a few colours over a fair share of the
