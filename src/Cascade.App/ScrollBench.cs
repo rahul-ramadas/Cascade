@@ -41,6 +41,7 @@ internal static class ScrollBench
         int payload = IntArg(args, "--payload=", 0);
         string only = Arg(args, "--only=") ?? "";
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
+        bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
 
         // Measuring against whatever else the machine feels like doing is how a change of 20% hides inside
         // the noise. This asks for the scheduler's attention for the couple of minutes it runs.
@@ -89,6 +90,20 @@ internal static class ScrollBench
                               $"in {probe.Bounds.Width - probe.GutterWidthForTesting - probe.MapWidthForTesting - probe.ScrollBarWidthForTesting}px of room");
             Console.WriteLine();
 
+            if (micro)
+            {
+                // Against filters, because that is the state a reader is in - and the paint costs more in it.
+                foreach (var (name, prepare) in Scenarios(form))
+                {
+                    if (!name.Contains("dim", StringComparison.OrdinalIgnoreCase)) continue;
+                    prepare();
+                    for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 120_000 && doc.IsBusy;) Pump();
+                    Pump();
+                }
+                DrawingWays(form);
+                return 0;
+            }
+
             foreach (var (name, prepare) in Scenarios(form))
             {
                 if (only.Length > 0 && !name.Contains(only, StringComparison.OrdinalIgnoreCase)) continue;
@@ -124,9 +139,240 @@ internal static class ScrollBench
         return 0;
     }
 
-    /// <summary>The states worth measuring, each set up through the same wiring the menus use.</summary>
-    private static IEnumerable<(string Name, Action Prepare)> Scenarios(MainForm form)
+    /// <summary>
+    /// The ways a screenful of text can be put on a device context, timed against each other. The frame is
+    /// dominated by GDI text, so what matters is how much of that is the glyphs themselves and how much is
+    /// the road each call takes to reach them - a GDI+ Graphics hands its device context out and takes it
+    /// back on every single call, and applies the clip region while it is at it.
+    /// </summary>
+    private static void DrawingWays(MainForm form)
     {
+        var grid = form.GridForTesting;
+        var doc = form.DocForTesting;
+        var font = grid.FontForTesting;
+        int rowHeight = grid.RowHeightForTesting;
+        int rows = Math.Max(1, grid.VisibleRowCountForTesting);
+        int width = Math.Max(1, grid.Bounds.Width), height = Math.Max(1, grid.Bounds.Height);
+        int gutter = grid.GutterWidthForTesting;
+
+        var lines = new string[rows];
+        var numbers = new string[rows];
+        for (int i = 0; i < rows; i++) { lines[i] = doc.GetLineText(i); numbers[i] = (i + 1).ToString(CultureInfo.InvariantCulture); }
+        Console.WriteLine($"  a screenful is {rows} rows of {lines[0].Length} characters, {width}x{height}");
+
+        // What a screenful costs before a pixel is drawn: decoding the lines out of the mapped file and
+        // asking the filters what colour each of them is.
+        Time("reading and colouring a screenful", () =>
+        {
+            var colouring = doc.ColouringSnapshot();
+            for (int i = 0; i < rows; i++)
+            {
+                string text = doc.GetLineText(i);
+                colouring.Evaluate(text, i);
+            }
+        });
+
+        Time("the whole paint, as it stands", () => { grid.Invalidate(); grid.Update(); });
+
+        const TextFormatFlags Today = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
+        const TextFormatFlags Plain = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+        var fore = Color.Black;
+        var back = Color.White;
+
+        // On a Graphics made over the window's own device context, as a paint gets - not one made over a
+        // Bitmap, where every GetHdc has to reconcile GDI+'s idea of the pixels with GDI's and costs ten
+        // times what the drawing does.
+        using var canvas = grid.CreateGraphics();
+        using (var wipe = new SolidBrush(back)) canvas.FillRectangle(wipe, 0, 0, width, height);
+
+        Time("as today (Graphics, clip preserved)", () =>
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                canvas.SetClip(new Rectangle(gutter, i * rowHeight, width - gutter, rowHeight));
+                TextRenderer.DrawText(canvas, lines[i], font, new Point(gutter, i * rowHeight), fore, Today);
+                canvas.ResetClip();
+                TextRenderer.DrawText(canvas, numbers[i], font, new Point(0, i * rowHeight), fore, Plain);
+            }
+        });
+
+        Time("Graphics, no clip at all", () =>
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                TextRenderer.DrawText(canvas, lines[i], font, new Point(gutter, i * rowHeight), fore, Plain);
+                TextRenderer.DrawText(canvas, numbers[i], font, new Point(0, i * rowHeight), fore, Plain);
+            }
+        });
+
+        // The same calls, but told what is behind the text instead of being left to blend with whatever it
+        // finds there. ClearType over an unknown background has to read every destination pixel back.
+        Time("Graphics, text over its own fill", () =>
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                TextRenderer.DrawText(canvas, lines[i], font,
+                    new Rectangle(gutter, i * rowHeight, width - gutter, rowHeight), fore, back, Plain);
+                TextRenderer.DrawText(canvas, numbers[i], font,
+                    new Rectangle(0, i * rowHeight, gutter, rowHeight), fore, back, Plain | TextFormatFlags.Right);
+            }
+        });
+
+        IntPtr hfont = font.ToHfont();
+        try
+        {
+            Time("one device context, DrawTextEx", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    IntPtr was = SelectObject(hdc, hfont);
+                    SetBkMode(hdc, TransparentBackground);
+                    SetTextColor(hdc, ColorRef(fore));
+                    for (int i = 0; i < rows; i++)
+                    {
+                        var rect = new Rect(gutter, i * rowHeight, width, (i + 1) * rowHeight);
+                        DrawTextEx(hdc, lines[i], lines[i].Length, ref rect, DtSingleLine | DtNoPrefix | DtNoClip, IntPtr.Zero);
+                        var numberRect = new Rect(0, i * rowHeight, gutter, (i + 1) * rowHeight);
+                        DrawTextEx(hdc, numbers[i], numbers[i].Length, ref numberRect, DtSingleLine | DtNoPrefix | DtRight, IntPtr.Zero);
+                    }
+                    SelectObject(hdc, was);
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+
+            Time("one device context, ExtTextOut", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    IntPtr was = SelectObject(hdc, hfont);
+                    SetBkMode(hdc, TransparentBackground);
+                    SetTextColor(hdc, ColorRef(fore));
+                    for (int i = 0; i < rows; i++)
+                    {
+                        ExtTextOut(hdc, gutter, i * rowHeight, 0, IntPtr.Zero, lines[i], (uint)lines[i].Length, IntPtr.Zero);
+                        ExtTextOut(hdc, 0, i * rowHeight, 0, IntPtr.Zero, numbers[i], (uint)numbers[i].Length, IntPtr.Zero);
+                    }
+                    SelectObject(hdc, was);
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+
+            Time("one device context, DrawTextEx over its own fill", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    IntPtr was = SelectObject(hdc, hfont);
+                    SetBkMode(hdc, OpaqueBackground);
+                    SetBkColor(hdc, ColorRef(back));
+                    SetTextColor(hdc, ColorRef(fore));
+                    for (int i = 0; i < rows; i++)
+                    {
+                        var rect = new Rect(gutter, i * rowHeight, width, (i + 1) * rowHeight);
+                        DrawTextEx(hdc, lines[i], lines[i].Length, ref rect, DtSingleLine | DtNoPrefix | DtNoClip, IntPtr.Zero);
+                        var numberRect = new Rect(0, i * rowHeight, gutter, (i + 1) * rowHeight);
+                        DrawTextEx(hdc, numbers[i], numbers[i].Length, ref numberRect, DtSingleLine | DtNoPrefix | DtRight, IntPtr.Zero);
+                    }
+                    SelectObject(hdc, was);
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+
+            Time("one device context, TextRenderer over its fill", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    var held = new HeldDc(hdc);
+                    for (int i = 0; i < rows; i++)
+                    {
+                        TextRenderer.DrawText(held, lines[i], font,
+                            new Rectangle(gutter, i * rowHeight, width - gutter, rowHeight), fore, back, Plain);
+                        TextRenderer.DrawText(held, numbers[i], font,
+                            new Rectangle(0, i * rowHeight, gutter, rowHeight), fore, back, Plain | TextFormatFlags.Right);
+                    }
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+
+            Time("one device context, text over its own fill", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    IntPtr was = SelectObject(hdc, hfont);
+                    SetBkMode(hdc, OpaqueBackground);
+                    SetBkColor(hdc, ColorRef(back));
+                    SetTextColor(hdc, ColorRef(fore));
+                    for (int i = 0; i < rows; i++)
+                    {
+                        var rect = new Rect(gutter, i * rowHeight, width, (i + 1) * rowHeight);
+                        ExtTextOut(hdc, gutter, i * rowHeight, EtoOpaque, ref rect, lines[i], (uint)lines[i].Length, IntPtr.Zero);
+                        var numberRect = new Rect(0, i * rowHeight, gutter, (i + 1) * rowHeight);
+                        ExtTextOut(hdc, 0, i * rowHeight, EtoOpaque, ref numberRect, numbers[i], (uint)numbers[i].Length, IntPtr.Zero);
+                    }
+                    SelectObject(hdc, was);
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+        }
+        finally { DeleteObject(hfont); }
+
+        using var brush = new SolidBrush(back);
+        Time("the fills alone, Graphics", () =>
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                canvas.FillRectangle(brush, 0, i * rowHeight, width, rowHeight);
+                canvas.FillRectangle(brush, 0, i * rowHeight, gutter, rowHeight);
+            }
+        });
+
+        IntPtr hbrush = CreateSolidBrush(ColorRef(back));
+        try
+        {
+            Time("the fills alone, one device context", () =>
+            {
+                IntPtr hdc = canvas.GetHdc();
+                try
+                {
+                    for (int i = 0; i < rows; i++)
+                    {
+                        var rect = new Rect(0, i * rowHeight, width, (i + 1) * rowHeight);
+                        FillRect(hdc, ref rect, hbrush);
+                        var gutterRect = new Rect(0, i * rowHeight, gutter, (i + 1) * rowHeight);
+                        FillRect(hdc, ref gutterRect, hbrush);
+                    }
+                }
+                finally { canvas.ReleaseHdc(hdc); }
+            });
+        }
+        finally { DeleteObject(hbrush); }
+
+        static void Time(string what, Action frame)
+        {
+            for (int i = 0; i < 20; i++) frame();
+            var clock = Stopwatch.StartNew();
+            const int Frames = 200;
+            for (int i = 0; i < Frames; i++) frame();
+            clock.Stop();
+            Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / Frames,6:F2} ms/screenful");
+        }
+    }
+
+    /// <summary>A device context someone else owns, handed to <see cref="TextRenderer"/> so it does not
+    /// fetch and return one of its own on every call.</summary>
+    private sealed class HeldDc(IntPtr hdc) : IDeviceContext
+    {
+        public IntPtr GetHdc() => hdc;
+        public void ReleaseHdc() { }
+        public void Dispose() { }
+    }
+
+    /// <summary>The states worth measuring, each set up through the same wiring the menus use.</summary>
+    private static IEnumerable<(string Name, Action Prepare)> Scenarios(MainForm form)    {
         var doc = form.DocForTesting;
         yield return ("no filters", () =>
         {
@@ -254,8 +500,14 @@ internal static class ScrollBench
         long stride = Math.Max(1, rows / 40);   // a 24px move on a full-height bar is about a fortieth of the file
 
         Report("text", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Update(); }));
+        Report("text, standing still", Measure(steps, rows, stride, _ => { grid.Invalidate(); grid.Update(); }));
         if (map is not null)
+        {
+            map.Visible = false;
+            Report("text, map hidden", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Update(); }));
+            map.Visible = true;
             Report("minimap", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); map.Invalidate(); map.Update(); }));
+        }
         Report("scrollbar", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); bar.Invalidate(); bar.Update(); }));
         Report("nothing", Measure(steps, rows, stride, grid.ScrollToRow));
 
@@ -369,6 +621,61 @@ internal static class ScrollBench
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
+
+    // ---- what the micro-benchmark draws through ----
+
+    private const int TransparentBackground = 1;
+    private const int OpaqueBackground = 2;
+    private const uint EtoOpaque = 0x0002;
+    private const uint DtRight = 0x0002;
+    private const uint DtSingleLine = 0x0020;
+    private const uint DtNoClip = 0x0100;
+    private const uint DtNoPrefix = 0x0800;
+
+    private static uint ColorRef(Color colour) => (uint)(colour.R | (colour.G << 8) | (colour.B << 16));
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left, Top, Right, Bottom;
+        public Rect(int left, int top, int right, int bottom)
+        {
+            Left = left; Top = top; Right = right; Bottom = bottom;
+        }
+    }
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeleteObject(IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    private static extern void SetBkMode(IntPtr hdc, int mode);
+
+    [DllImport("gdi32.dll")]
+    private static extern void SetBkColor(IntPtr hdc, uint colour);
+
+    [DllImport("gdi32.dll")]
+    private static extern void SetTextColor(IntPtr hdc, uint colour);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateSolidBrush(uint colour);
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    private static extern void ExtTextOut(IntPtr hdc, int x, int y, uint options, IntPtr rect,
+        string text, uint count, IntPtr spacing);
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+    private static extern void ExtTextOut(IntPtr hdc, int x, int y, uint options, ref Rect rect,
+        string text, uint count, IntPtr spacing);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern void DrawTextEx(IntPtr hdc, string text, int count, ref Rect rect, uint format, IntPtr parameters);
+
+    [DllImport("user32.dll")]
+    private static extern void FillRect(IntPtr hdc, ref Rect rect, IntPtr brush);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentThread();

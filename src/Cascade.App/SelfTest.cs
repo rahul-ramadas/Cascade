@@ -260,6 +260,26 @@ internal static class SelfTest
                             partDiff is null);
             }
 
+            // Plain ASCII in a fixed-pitch face goes to GDI by the shortest road there is: the text draws
+            // its own background in one call, and the line number is placed by arithmetic rather than by
+            // asking for it to be right-aligned. Both are worth half the paint, and both are only allowed
+            // because they put exactly the same pixels on the screen as the general path does.
+            grid.ScrollHorizontallyTo(0);
+            grid.DrawTextTheLongWayForTesting = true;
+            Pump();
+            using (var longWay = Capture(host))
+            {
+                grid.DrawTextTheLongWayForTesting = false;
+                Pump();
+                using var direct = Capture(host);
+                var inkDiff = FirstDifference(longWay, direct, new Rectangle(0, 0, longWay.Width, longWay.Height));
+                ok &= Check("text drawn straight onto the device context is the same picture as text laid out" +
+                            (inkDiff is null ? "" : $" [first differs at x={inkDiff.Value.X},y={inkDiff.Value.Y}: " +
+                                                    $"{longWay.GetPixel(inkDiff.Value.X, inkDiff.Value.Y)} -> " +
+                                                    $"{direct.GetPixel(inkDiff.Value.X, inkDiff.Value.Y)}]"),
+                            inkDiff is null);
+            }
+
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
             doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";
