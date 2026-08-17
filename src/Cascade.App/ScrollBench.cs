@@ -42,6 +42,8 @@ internal static class ScrollBench
         string only = Arg(args, "--only=") ?? "";
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
+        // A drag over ground the minimap has never been over, which is what the first pass down a file is.
+        bool cold = args.Any(a => a.Equals("--cold", StringComparison.OrdinalIgnoreCase));
 
         // Measuring against whatever else the machine feels like doing is how a change of 20% hides inside
         // the noise. This asks for the scheduler's attention for the couple of minutes it runs.
@@ -112,6 +114,7 @@ internal static class ScrollBench
                 Pump();
 
                 Drag(form, steps: 40, jump);   // warm the caches this scenario will lean on
+                if (cold) { form.GridForTesting.InvalidateMatchMap(); Pump(); }
                 if (seconds > 0)
                 {
                     // A profiler needs something to sample, so drag for as long as it is being watched.
@@ -122,6 +125,7 @@ internal static class ScrollBench
                 var best = Measurement.Worst;
                 for (int i = 0; i < repeats; i++)
                 {
+                    if (cold) { form.GridForTesting.InvalidateMatchMap(); Pump(); }
                     var run = Drag(form, steps, jump);
                     Console.WriteLine($"  {name,-22} {run}");
                     if (run.CpuPerFrameMs < best.CpuPerFrameMs) best = run;
@@ -171,6 +175,16 @@ internal static class ScrollBench
                 colouring.Evaluate(text, i);
             }
         });
+
+        // And what the minimap asks for on a mouse report of a drag over ground it has not seen: the
+        // colour of every row the window slid over, worked out across the cores.
+        foreach (int many in (int[])[500, 5_500, 30_000])
+        {
+            var want = new long[many];
+            var got = new Filter?[many];
+            for (int i = 0; i < many; i++) want[i] = i * 7 % Math.Max(1, doc.CompletedLineCount);
+            TimeWithCpu($"colouring {many:N0} rows the map's way", () => doc.ColouringFilters(want, many, got), 60);
+        }
 
         Time("the whole paint, as it stands", () => { grid.Invalidate(); grid.Update(); });
 
@@ -359,6 +373,20 @@ internal static class ScrollBench
             for (int i = 0; i < Frames; i++) frame();
             clock.Stop();
             Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / Frames,6:F2} ms/screenful");
+        }
+
+        /// <summary>The same, for work that is shared out across the cores - where the wall clock says how
+        /// long the reader waits and the processor time says what it cost the machine.</summary>
+        static void TimeWithCpu(string what, Action work, int times)
+        {
+            for (int i = 0; i < 10; i++) work();
+            var process = Process.GetCurrentProcess();
+            long cpu0 = process.TotalProcessorTime.Ticks;
+            var clock = Stopwatch.StartNew();
+            for (int i = 0; i < times; i++) work();
+            clock.Stop();
+            double cpu = (process.TotalProcessorTime.Ticks - cpu0) / (double)TimeSpan.TicksPerMillisecond / times;
+            Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / times,6:F2} ms wall | {cpu,6:F2} ms cpu");
         }
     }
 
