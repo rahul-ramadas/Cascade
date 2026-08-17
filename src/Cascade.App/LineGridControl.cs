@@ -176,7 +176,7 @@ public sealed class LineGridControl : Control
             // timer is left running while a drag is in flight rather than being restarted per report:
             // starting one destroys and recreates a window, which at a few hundred reports a second costs
             // more than the frames it is there to catch.
-            if (!_missedFrame) { _catchUp.Stop(); return; }
+            if (!MissedFrame) { _catchUp.Stop(); return; }
             ShowAtScreenRate();
         };
         TabStop = true;
@@ -500,6 +500,23 @@ public sealed class LineGridControl : Control
     private long _screenAskedAt;
     private int _screenHz = 60;
     private bool _missedFrame;
+    private static int _owing;
+
+    /// <summary>Whether any view is holding a frame it has not drawn yet. A drag's last frame is drawn by a
+    /// timer, and a timer arrives when Windows feels like it - so a harness that waits for the window to go
+    /// quiet has to know the difference between quiet and finished.</summary>
+    internal static bool AnyViewOwesAFrameForTesting => _owing > 0;
+
+    private bool MissedFrame
+    {
+        get => _missedFrame;
+        set
+        {
+            if (_missedFrame == value) return;
+            _missedFrame = value;
+            _owing += value ? 1 : -1;
+        }
+    }
 
     /// <summary>
     /// Puts the view on screen after a scroll, but never more often than the screen can show a new frame.
@@ -526,7 +543,7 @@ public sealed class LineGridControl : Control
         }
         // Too soon to be seen. The view has moved all the same, so something has to draw it in case this
         // report is the last one.
-        _missedFrame = true;
+        MissedFrame = true;
         ViewMoved(onScreen: false);
         if (!_catchUp.Enabled) _catchUp.Start();
     }
@@ -1348,7 +1365,7 @@ public sealed class LineGridControl : Control
         DrawFocusBar(g);
 
         _shownAt = System.Diagnostics.Stopwatch.GetTimestamp();
-        _missedFrame = false;
+        MissedFrame = false;
 
         if (columns) runningMaxWidth = TotalColumnsWidth();
         if (runningMaxWidth != _maxContentWidth)
@@ -2928,6 +2945,7 @@ public sealed class LineGridControl : Control
         if (disposing)
         {
             _tipTimer.Dispose(); _tips.Dispose();
+            MissedFrame = false;
             _catchUp.Dispose();
             foreach (var f in _fonts) f?.Dispose();
             ReleaseFaces();

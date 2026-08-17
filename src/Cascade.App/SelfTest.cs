@@ -9604,13 +9604,18 @@ internal static class SelfTest
 
     /// <summary>Lets the UI finish whatever it has queued, and comes back as soon as it goes quiet. It used
     /// to wait a flat 250ms every time; the drag checks alone call it about 190 times, so nearly the whole
-    /// self-test was spent sitting idle. The old wait is kept as the cap.</summary>
+    /// self-test was spent sitting idle. The old wait is kept as the cap.
+    /// <para>Quiet is not the same as finished: the last frame of a drag is drawn by a timer, and a timer
+    /// arrives when Windows feels like it - up to two of its ticks later. So the view is asked whether it
+    /// still owes a frame, rather than the wait being lengthened to cover the worst case, which would be
+    /// paid by every one of the thousand calls this makes.</para></summary>
     private static void Pump()
     {
         for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;)
         {
             Application.DoEvents();
             if (PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) { Thread.Sleep(1); continue; }
+            if (LineGridControl.AnyViewOwesAFrameForTesting) { Thread.Sleep(1); continue; }
             // Quiet once is not the same as settled - a timer may be about to post. Ask again after a pause.
             Thread.Sleep(15);
             Application.DoEvents();
