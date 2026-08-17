@@ -213,6 +213,14 @@ public sealed class CascadeDocument : IDisposable
 
     private Action<long>? _filterCheckpoint;
 
+    /// <summary>Test seam: runs on a find sweep before each block, so a test can hold a search at a known
+    /// point and exercise what happens while one is still reading the file. The sibling of
+    /// <see cref="FilterCheckpointForTesting"/> for the search path, and the only way to hold a sweep
+    /// deterministically - a pattern that merely takes a long time is at the mercy of whatever the regular
+    /// expression engine of the day optimises away. Read live, so clearing it lets the next search run
+    /// freely. Once per BLOCK, not per line: never in the way of the scan itself.</summary>
+    public Action<long>? FindCheckpointForTesting { get; set; }
+
     /// <summary>File lines below this value are fully resolved in the current view: every visible line before
     /// it has been discovered, so <see cref="RowForLine"/> is authoritative for them. Because a filter pass
     /// updates the visible set in place, this is the whole file as soon as one pass has covered it — only the
@@ -634,6 +642,8 @@ public sealed class CascadeDocument : IDisposable
 
         void ScanRange(long from, long count, List<FindHit> hits, CancellationToken ct)
         {
+            FindCheckpointForTesting?.Invoke(from);
+
             // Below this a pass is over before threads could be handed out, and the first block of a sweep
             // is deliberately small so the first result lands at once - that latency must not be traded away
             // for throughput that only matters much later.
