@@ -1500,6 +1500,7 @@ public sealed class MainForm : Form
         var anchor = _grid.CaptureViewAnchor();
         _doc.Filters.ShowOnlyFilteredLines = !_doc.Filters.ShowOnlyFilteredLines;
         _filtersDirty = true;
+        UpdateTitle();
         SyncFilteredModeMenu();
         // Filtered vs. dim is a display-only mode: the matched set is unchanged, so there is no need to
         // re-run filtering (which would blank the view). Just re-map the view, holding the line where it
