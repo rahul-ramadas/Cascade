@@ -114,6 +114,18 @@ internal static class UiShots
         ShotDialog(new ColumnsDialog(cols, columnSamples), outDir, "columns-dragging",
                    d => d.ShowDropLineForTesting(2));
 
+        // A header that does not begin with a bracket: what stands in front of the first one is a field of
+        // its own, and Detect reads round brackets and angle brackets as well as square.
+        var mixed = new ColumnSpec();
+        string[] mixedSamples =
+        [
+            "2026-07-31 09:31:17.123 [INFO] (api-gateway) payment order message text",
+            "2026-07-31 09:31:18.907 [WARN] (payment-service) retrying charge for order 4417",
+            "2026-07-31 09:31:19.244 [ERROR] (api-gateway) charge declined for order 4417",
+        ];
+        ShotDialog(new ColumnsDialog(mixed, mixedSamples), outDir, "columns-detect",
+                   d => d.DetectForTesting());
+
         // The two states this dialog goes wrong in, kept where a human will see them: at a large font, where
         // a fixed height cut the sample box in half and squeezed the field list out of existence; and with
         // the sample scrolled, where text drawn through GDI ignores the clip and lands on the gutter.

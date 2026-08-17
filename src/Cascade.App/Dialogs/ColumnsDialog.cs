@@ -29,7 +29,6 @@ public sealed class ColumnsDialog : DialogBase
     private readonly Label _which = new() { AutoSize = true };
     private readonly Label _fit = new() { AutoSize = true };
     private readonly Button _nextMisfit = new() { Text = "Next line that does not &match", AutoSize = true };
-    private readonly Button _makeColumn = new() { Text = "&Add field", AutoSize = true, Enabled = false };
 
     private readonly ColumnsPreview _preview = new() { Dock = DockStyle.Fill };
 
@@ -212,7 +211,7 @@ public sealed class ColumnsDialog : DialogBase
                 ("\\", "the next character, exactly")), SizeType.AutoSize, 0, 4);
         Row(_status, SizeType.AutoSize, 0, 8);
 
-        var nav = Flow(_previous, _next, Centred(_which, 10), Centred(_fit, 20), _nextMisfit, _makeColumn);
+        var nav = Flow(_previous, _next, Centred(_which, 10), Centred(_fit, 20), _nextMisfit);
         Row(nav, SizeType.AutoSize, 0, 10);
 
         // AutoSize, not a height measured here and then frozen: this control is built before the dialog has
@@ -485,8 +484,6 @@ public sealed class ColumnsDialog : DialogBase
         _previous.Click += (_, _) => StepSample(-1);
         _next.Click += (_, _) => StepSample(+1);
         _nextMisfit.Click += (_, _) => StepToMisfit();
-        _makeColumn.Click += (_, _) => MakeColumnFromSelection();
-        _preview.SelectionChanged += UpdateMakeColumn;
 
         _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); Refresh0(); };
 
@@ -506,11 +503,11 @@ public sealed class ColumnsDialog : DialogBase
         _down.Click += (_, _) => Reorder(+1);
         _preview.PartPicked += SelectField;
 
-        // Two tips, and both say something no label does. Everything else here explains itself where it
-        // stands - the marks under the template box, the description beside each layout, the words on the
-        // buttons - and a tip that repeats the thing it is pointing at only gets in the way of it.
-        _tips.SetToolTip(_detect, "Read the [ ] groups off the line below and write a template for them.");
-        _tips.SetToolTip(_makeColumn, "Adds a field for what is picked out in the sample, with the punctuation around it.");
+        // One tip, and it says something no label does: "Detect" alone gives no clue what it will read or
+        // what it will do with it. Everything else here explains itself where it stands - the marks under
+        // the template box, the description beside each layout, the words on the buttons - and a tip that
+        // repeats the thing it is pointing at only gets in the way of it.
+        _tips.SetToolTip(_detect, DetectSays);
     }
 
     // ---- the template ----
@@ -594,8 +591,7 @@ public sealed class ColumnsDialog : DialogBase
         else if (template.PartCount == 0)
         {
             _status.ForeColor = SystemColors.GrayText;
-            _status.Text = "Nothing is being split yet. Press Detect, or drag across the sample below and press "
-                         + "\u201cAdd field\u201d for each field in turn.";
+            _status.Text = "Nothing is being split yet. Press Detect, or write the template above.";
         }
         else
         {
@@ -609,14 +605,21 @@ public sealed class ColumnsDialog : DialogBase
 
     private static string Count(int n, string what) => n == 1 ? $"1 {what}" : $"{n} {what}s";
 
+    /// <summary>What Detect will and will not read, said on the button rather than found out by pressing
+    /// it: a header held together by brackets is a reading, and one held together by spaces is a guess.</summary>
+    private const string DetectSays =
+        "Reads a header of bracketed groups - [ ], ( ) or < > - off the start of the line below, "
+        + "with anything before the first bracket as a field of its own. A header separated by nothing but "
+        + "spaces has to be written by hand.";
+
     private void Detect()
     {
         string found = LineTemplate.Detect(Current);
         if (found.Length == 0)
         {
             _status.ForeColor = Color.FromArgb(180, 120, 0);
-            _status.Text = "This line has no [ ] groups at its start to read. Step to another line, or drag "
-                         + "across the sample below and press \u201cAdd field\u201d for each field in turn.";
+            _status.Text = "There are no bracketed groups at the start of this line to read. Step to another "
+                         + "line, or write the template above - the marks it is made of are listed there.";
             return;
         }
         WriteTemplate(found, found.Length);
@@ -640,61 +643,6 @@ public sealed class ColumnsDialog : DialogBase
             int at = (_sample + i) % _samples.Count;
             if (!_working.Compiled.Match(_samples[at], match)) { _sample = at; Refresh0(); return; }
         }
-    }
-
-    /// <summary>Whether there is anything to add a field FOR. Parts are built left to right, so what is
-    /// picked out has to lie beyond the last one - a stretch inside a field the template already reads
-    /// cannot become a field of its own.</summary>
-    private void UpdateMakeColumn()
-    {
-        var (from, _) = _preview.Selection;
-        if (from < 0) { _makeColumn.Enabled = false; return; }
-
-        var match = new TemplateMatch();
-        _working.Compiled.Match(Current, match);
-        _makeColumn.Enabled = from >= match.TailStart;
-    }
-
-    /// <summary>Adds a part for the stretch picked out in the sample: the text before it becomes the part's
-    /// lead-in, and any closing punctuation straight after it comes along too - which is what makes hiding
-    /// the part take its brackets with it. Whatever spaces stand in front of that lead-in are a SEPARATOR
-    /// and are written outside the braces, so that they stay behind when the field is carried elsewhere.</summary>
-    private void MakeColumnFromSelection()
-    {
-        var (from, to) = _preview.Selection;
-        if (from < 0) return;
-
-        string line = Current;
-        var match = new TemplateMatch();
-        _working.Compiled.Match(line, match);
-        if (from < match.TailStart) return;
-
-        const string closing = ")]}>\"'";
-        int after = to;
-        while (after < line.Length && closing.Contains(line[after], StringComparison.Ordinal)) after++;
-
-        int leadFrom = match.TailStart;
-        int leadIn = leadFrom;
-        while (leadIn < from && line[leadIn] == ' ') leadIn++;
-
-        string between = LineTemplate.Escape(line[leadFrom..leadIn]);
-        string lead = LineTemplate.Escape(line[leadIn..from]);
-        string trail = LineTemplate.Escape(line[to..after]);
-        string added = $"{between}{{{lead}*{trail}}}";
-        WriteTemplate(_template.Text + added, _template.TextLength + added.Length);
-        _preview.ClearSelection();
-        FillList();
-        // The new field goes on the end of the list, which on a long template is past the bottom of it -
-        // and a field that appears somewhere you cannot see looks like nothing happened. Only if there is a
-        // whole row's worth of list to scroll, though: with none, "the first row on show" is not a thing
-        // the grid will be told.
-        if (_list.Rows.Count > 0)
-        {
-            _list.CurrentCell = _list.Rows[^1].Cells["name"];
-            int shown = _list.DisplayedRowCount(false);
-            if (shown > 0) _list.FirstDisplayedScrollingRowIndex = Math.Max(0, _list.Rows.Count - shown);
-        }
-        Refresh0();
     }
 
     // ---- the list ----
@@ -1023,7 +971,6 @@ public sealed class ColumnsDialog : DialogBase
         _nextMisfit.Enabled = usable && fit < _samples.Count;
         _previous.Enabled = _next.Enabled = _samples.Count > 1;
         if (_ok is not null) _ok.Enabled = template.IsValid;
-        UpdateMakeColumn();
         UpdateHighlight();
     }
 
@@ -1197,9 +1144,7 @@ public sealed class ColumnsDialog : DialogBase
 
     // ---- the sample, which is drawn rather than built out of controls ----
 
-    internal void SelectSampleForTesting(int from, int to) => _preview.SelectForTesting(from, to);
-    internal bool AddFieldEnabledForTesting => _makeColumn.Enabled;
-    internal void AddFieldForTesting() => MakeColumnFromSelection();
+    internal void SelectSampleForTesting(int index) => _preview.ClickSampleForTesting(index);
     internal string ResultForTesting => _preview.ResultForTesting();
     internal void StepSampleForTesting(int by) => StepSample(by);
     internal void StepToMisfitForTesting() => StepToMisfit();

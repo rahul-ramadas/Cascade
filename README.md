@@ -116,12 +116,15 @@ away or bring it back, drag it to move the field along the row, double-click it 
 
 Hiding a field takes its punctuation with it, so `[a][b][c]` closes up to `[a][c]` rather than leaving
 empty brackets behind, and a field carried elsewhere leaves the space that separated it behind as well.
-**View > Field Settings…** shows the template against real lines from the file: a coloured band per field,
-and beneath it the row as it will actually be drawn — cell by cell in the Columns layout, widths and
-alignment included. Both rows are named, so a row whose fields have been moved about still says which
-value is which. Click a field in either row to pick its entry out of the list; move a field along the row by
-dragging its entry, by the buttons, or with `Alt+↑` / `Alt+↓`, and rename one with `F2`. The dialog also says
-how many of the sampled lines match, and, for one that does not, the character where it stopped matching.
+**View > Field Settings…** (`Ctrl+Shift+D`) shows the template against real lines from the file: a coloured
+band per field, and beneath it the row as it will actually be drawn — cell by cell in the Columns layout,
+widths and alignment included. Both rows are named, so a row whose fields have been moved about still says
+which value is which. Click a field in either row to pick its entry out of the list; move a field along the
+row by dragging its entry, by the buttons, or with `Alt+↑` / `Alt+↓`, and rename one with `F2`. The dialog
+also says how many of the sampled lines match, and, for one that does not, the character where it stopped
+matching. **Detect** writes the template for you when the line has a header of bracketed groups — `[ ]`,
+`( )` or `< >`, with anything before the first bracket taken as a field of its own; a header held together
+by nothing but spaces has to be written by hand.
 
 Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
 A line the template does not match is shown whole and untouched, and Cascade says so when a search lands
@@ -193,6 +196,7 @@ registry keys, and updates itself.
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / split lines into fields |
 | `Ctrl+Shift+X` | Switch between the Columns and Inline field layouts |
+| `Ctrl+Shift+D` | Field settings |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |
