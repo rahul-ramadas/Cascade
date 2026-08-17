@@ -341,18 +341,45 @@ public class SelfUpdateTests
     /// <summary>How far the update actually got, for when one of these fails somewhere it cannot be
     /// reproduced. The request counts separate "never asked" from "asked but the download or the verify
     /// step refused it", the app's own update log gives the reason it settled on, and the directory listing
-    /// shows whether a part file or a staged build survived.</summary>
+    /// shows whether a part file or a staged build survived.
+    ///
+    /// <para>Every read here has to tolerate the file going away underneath it. This is built EAGERLY, as
+    /// the message argument of an assert that is polled while two live instances fight over the install
+    /// directory - so a lock file listed a moment ago may be gone by the time it is measured, and a
+    /// diagnostic that threw would fail a test whose own condition had just passed.</para></summary>
     private static string Progress(StubGitHub github, string dir)
     {
-        var files = Directory.GetFiles(dir)
-            .Select(f => $"{Path.GetFileName(f)} ({new FileInfo(f).Length:N0}b)")
-            .OrderBy(s => s);
+        var files = Directory.EnumerateFiles(dir)
+            .Select(f =>
+            {
+                try { return $"{Path.GetFileName(f)} ({new FileInfo(f).Length:N0}b)"; }
+                catch (FileNotFoundException) { return $"{Path.GetFileName(f)} (gone)"; }
+                catch (DirectoryNotFoundException) { return $"{Path.GetFileName(f)} (gone)"; }
+                catch (IOException) { return $"{Path.GetFileName(f)} (in use)"; }
+            })
+            .OrderBy(s => s, StringComparer.Ordinal)
+            .ToList();
         string log = Path.Combine(dir, "update.log");
         string crash = Path.Combine(Path.GetTempPath(), "cascade_crash.log");
         return $"release requests={github.ReleaseRequests}, asset requests={github.AssetRequests}, " +
                $"asset bytes sent={github.AssetBytesSent:N0}; install dir: {string.Join(", ", files)}" +
-               $"; update log: {(File.Exists(log) ? File.ReadAllText(log).Trim() : "(empty)")}" +
-               (File.Exists(crash) ? $"; crash log: {File.ReadAllText(crash)}" : "");
+               $"; update log: {ReadOrElse(log, "(empty)")}" +
+               (File.Exists(crash) ? $"; crash log: {ReadOrElse(crash, "(gone)")}" : "");
+    }
+
+    /// <summary>Reads a file that another process may be writing, or may delete at any moment.</summary>
+    private static string ReadOrElse(string path, string fallback)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                              FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            string text = reader.ReadToEnd().Trim();
+            return text.Length == 0 ? fallback : text;
+        }
+        catch (IOException) { return fallback; }
+        catch (UnauthorizedAccessException) { return fallback; }
     }
 
     private static void TryDeleteDir(string dir)
