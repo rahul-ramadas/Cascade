@@ -1219,11 +1219,21 @@ public sealed class MainForm : Form
     /// exact one: does this seed actually occur in the line it came from? Hiding a field at the FRONT still
     /// leaves the rest of the line in one piece, and warning about that would be crying wolf.</summary>
     private string CautionAboutShownText(string seed, long line)
-    {
-        if (!_doc.Columns.Active || line < 0 || seed.Length == 0) return "";
-        if (_doc.GetLineText(line).Contains(seed, StringComparison.Ordinal)) return "";
-        return RawLineCaution;
-    }
+        => line >= 0 && ShownTextNeedsCaution(_doc.Columns.Active, seed, _doc.GetLineText(line))
+           ? RawLineCaution : "";
+
+    /// <summary>The whole rule, in one line: warn when what was taken off the screen is not IN the line it
+    /// was taken from, and never otherwise.
+    ///
+    /// <para>This is why the warning comes and goes. With the fields off, or laid out in COLUMNS - where a
+    /// selection is indices into the raw line and the cells are only a way of drawing it - the seed is
+    /// always the file's own text, so nothing is ever said. Laid out INLINE it is said only when the seed
+    /// crosses somewhere the row was changed: a gap left by a field hidden in the middle, a join made by
+    /// carrying a field elsewhere, or a space the projection had to invent. A seed lying wholly inside one
+    /// surviving stretch is the file's own text and will match, and saying otherwise would teach the reader
+    /// to ignore the warning for the times it matters.</para></summary>
+    internal static bool ShownTextNeedsCaution(bool fieldsOn, string seed, string rawLine)
+        => fieldsOn && seed is { Length: > 0 } && !rawLine.Contains(seed, StringComparison.Ordinal);
 
     /// <summary>Said wherever text taken off the screen is about to be matched against the file. Fields
     /// change what a line LOOKS like and change nothing about what it IS, and that is the whole of it.</summary>
