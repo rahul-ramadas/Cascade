@@ -107,7 +107,7 @@ public sealed class ColumnsDialog : DialogBase
         _root = BuildRoot();
         _root.Dock = DockStyle.Top;
         _scroll.Controls.Add(_root);
-        _scroll.ClientSizeChanged += (_, _) => SizeContentToRoom();
+        _scroll.ClientSizeChanged += (_, _) => GiveTheContentAFloor();
         Controls.Add(_scroll);
         BuildList();
         Wire();
@@ -178,36 +178,41 @@ public sealed class ColumnsDialog : DialogBase
     /// for it.</para></summary>
     private void GiveTheContentAFloor()
     {
-        for (int pass = 0; pass < 2; pass++)
+        if (_sizingContent) return;
+        _sizingContent = true;
+        try
         {
-            int stack = _root.Padding.Vertical + _list.Margin.Vertical + LeastListHeight;
-            foreach (Control child in _root.Controls)
-                if (child != _list) stack += child.Height + child.Margin.Vertical;
-            if (stack == _contentFloor) return;
-            _contentFloor = stack;
-            SizeContentToRoom();
-            PerformLayout();
+            for (int pass = 0; pass < 3; pass++)
+            {
+                ApplyContentRoom();
+                PerformLayout();
+                int stack = _root.Padding.Vertical + _list.Margin.Vertical + LeastListHeight;
+                foreach (Control child in _root.Controls)
+                    if (child != _list) stack += child.Height + child.Margin.Vertical;
+                if (stack == _contentFloor) return;
+                _contentFloor = stack;
+            }
+            ApplyContentRoom();
         }
+        finally { _sizingContent = false; }
     }
 
     /// <summary>Gives the content the room the window has, or the least it needs, whichever is more. More
     /// than the window has is what puts the scroll bar there.
     ///
+    /// <para>The wrapping text is re-fitted first, because a scroll bar takes width off the content without
+    /// the WINDOW changing size at all - and text measured before that appeared runs on under the bar.</para>
+    ///
     /// <para>The panel is told to lay out again afterwards because it works out how far it scrolls from
     /// where its child ends, and it does not notice that on its own when the child is simply resized: left
     /// to itself it keeps the room the dialog wanted when it opened, and shows a scroll bar over content
     /// that has since been made to fit.</para></summary>
-    private void SizeContentToRoom()
+    private void ApplyContentRoom()
     {
-        if (_sizingContent) return;
-        _sizingContent = true;
-        try
-        {
-            int height = Math.Max(_scroll.ClientSize.Height, _contentFloor);
-            if (_root.Height != height) _root.Height = height;
-            _scroll.PerformLayout();
-        }
-        finally { _sizingContent = false; }
+        FitWrappingText();
+        int height = Math.Max(_scroll.ClientSize.Height, _contentFloor);
+        if (_root.Height != height) _root.Height = height;
+        _scroll.PerformLayout();
     }
 
     /// <summary>Puts the dialog in the middle of the screen the window that opened it is on. The middle of
