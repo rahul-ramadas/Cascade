@@ -109,50 +109,106 @@ public class UiFeatureTests
                     $"of {rows} visible):\n  " + string.Join("\n  ", fails));
     }
 
+    /// <summary>
+    /// Where a jumped-to line lands, which is the whole of the reveal's contract: coming from below it
+    /// settles AT the bottom of the middle half, from above at the top of it, and one that is already
+    /// inside that band does not move the view at all - so stepping through nearby matches does not drag
+    /// the log about.
+    ///
+    /// <para>Every distance is measured off the viewport rather than written down. The version before this
+    /// scrolled to a fixed line and jumped a fixed twenty further on, which is only "below the view" on a
+    /// short window: on a tall one the line was already on screen and already inside the band, the view
+    /// correctly stayed where it was, and the test failed over behaviour that was right. At 32 and 33 rows
+    /// it passed while exercising no scrolling whatsoever. So each case now parks the view itself and says
+    /// out loud what it needs to be true, rather than quietly testing nothing.</para>
+    ///
+    /// <para>The two cases that must NOT move the view sit exactly on the edges of the band, which is where
+    /// an off-by-one in either comparison would show itself.</para>
+    /// </summary>
     [Fact]
     public void Jumping_to_a_line_leaves_room_to_read_around_it()
     {
-        // A find used to scroll the bare minimum, so the line you were looking for arrived jammed against
-        // the top or bottom edge with none of the surrounding log visible.
         using var app = CascadeApp.Launch();
         var fails = new List<string>();
         void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
 
-        int OffsetRows()
-        {
-            var sel = app.SelectedRow();
-            return sel is null ? -1 : app.Rows().Count(r => r.BoundingRectangle.Top < sel.Value.bounds.Top);
-        }
-
-        // Deep enough into the file that neither end can clamp the result and hide a regression.
-        // Open the bar first: it takes a couple of rows off the top of the log, so anything measured before
-        // it appears is measuring a viewport that is about to change size.
+        // The bar takes a couple of rows off the top of the log, so the viewport can only be measured once
+        // it is up.
         app.OpenFind();
-
-        app.ScrollVerticalTo(497);
-        app.SelectLine(501);
-        Check("selects line 501", app.CaretLine() == 501, $"line {app.CaretLine()}");
 
         int rows = app.Rows().Length;
         int top = rows / 4;
         int bottom = Math.Max(top, rows * 3 / 4 - 1);
         Check("the view is tall enough for a middle half to mean anything", rows >= 9, $"{rows} rows");
+        Check("and the file is long enough to jump a whole viewport about in",
+              rows * 2 + 80 <= TestData.LineCount, $"{rows} rows, {TestData.LineCount} lines");
 
-        // Forwards to a line below the view: it should settle at the bottom of the band, not the last row.
-        app.FindWith("line 520", forward: true);
-        bool wentDown = app.WaitCaretLine(521);
-        int down = OffsetRows();
-        Check("found line 521", wentDown, $"line {app.CaretLine()}");
+        int CaretOffset()
+        {
+            var sel = app.SelectedRow();
+            return sel is null ? -1 : app.Rows().Count(r => r.BoundingRectangle.Top < sel.Value.bounds.Top);
+        }
+
+        // "line N" is the text on file line N+1. Every N used here has three digits, so it matches exactly
+        // one line - "line 46" would also be found inside "line 460".
+        bool JumpTo(int line, bool forward)
+        {
+            app.FindWith($"line {line - 1}", forward);
+            return app.WaitCaretLine(line);
+        }
+
+        // Each case parks the view itself, so none of them depends on where the one before left it - and
+        // the four targets stay far enough apart to be different lines whatever the window size.
+        int Park(int row) { app.ScrollVerticalTo(row); return app.FirstVisibleLine(); }
+
+        // ---- from below the band: settles at the bottom of it, not hard against the last row ----
+        int first = Park(300);
+        app.SelectLine(first + 1);
+        int target = first + rows + 5;
+        Check("the line jumped to really is below the view", target > first + rows - 1,
+              $"target {target}, view {first}..{first + rows - 1}");
+        Check($"found line {target}", JumpTo(target, forward: true), $"line {app.CaretLine()}");
+        int offset = CaretOffset(), landed = app.FirstVisibleLine();
         Check("a line found below arrives at the bottom of the middle half",
-              down == bottom, $"offset {down}, band {top}..{bottom} of {rows}");
+              offset == bottom, $"offset {offset}, band {top}..{bottom} of {rows}");
+        Check("and the view moved by exactly what that takes",
+              landed == target - bottom, $"first line {landed}, wanted {target - bottom}");
 
-        // Backwards to a line above it: the top of the band this time.
-        app.FindWith("line 500", forward: false);
-        bool wentUp = app.WaitCaretLine(501);
-        int up = OffsetRows();
-        Check("found line 501 going back", wentUp, $"line {app.CaretLine()}");
+        // ---- from above it: the top of the band, the same way ----
+        first = Park(500);
+        app.SelectLine(first + rows - 2);
+        target = first - 5;
+        Check("the line jumped back to really is above the view", target < first,
+              $"target {target}, view starts at {first}");
+        Check($"found line {target} going back", JumpTo(target, forward: false), $"line {app.CaretLine()}");
+        offset = CaretOffset(); landed = app.FirstVisibleLine();
         Check("a line found above arrives at the top of the middle half",
-              up == top, $"offset {up}, band {top}..{bottom} of {rows}");
+              offset == top, $"offset {offset}, band {top}..{bottom} of {rows}");
+        Check("and the view moved by exactly what that takes",
+              landed == target - top, $"first line {landed}, wanted {target - top}");
+
+        // ---- already inside, on the far edge of the band: the view must not budge ----
+        first = Park(700);
+        app.SelectLine(first + 1);
+        target = first + bottom;
+        Check("the line jumped to really is inside the view", target <= first + rows - 1,
+              $"target {target}, view {first}..{first + rows - 1}");
+        Check($"found line {target} inside the band", JumpTo(target, forward: true), $"line {app.CaretLine()}");
+        offset = CaretOffset(); landed = app.FirstVisibleLine();
+        Check("a line already on the bottom edge of the band leaves the view alone",
+              landed == first, $"first line {landed}, was {first}");
+        Check("and it is shown where it was found", offset == bottom, $"offset {offset}, wanted {bottom}");
+
+        // ---- and on the near edge, arrived at from the other direction ----
+        first = Park(200);
+        app.SelectLine(first + bottom);
+        target = first + top;
+        Check($"found line {target} inside the band going back", JumpTo(target, forward: false),
+              $"line {app.CaretLine()}");
+        offset = CaretOffset(); landed = app.FirstVisibleLine();
+        Check("a line already on the top edge of the band leaves the view alone too",
+              landed == first, $"first line {landed}, was {first}");
+        Check("and it is shown where it was found", offset == top, $"offset {offset}, wanted {top}");
 
         Assert.True(fails.Count == 0,
                     $"Reveal failures (band {top}..{bottom} of {rows} rows):\n  " + string.Join("\n  ", fails));
