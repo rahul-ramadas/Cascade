@@ -519,13 +519,27 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>
-    /// Puts the view on screen after a scroll, but never more often than the screen can show a new frame.
+    /// Puts the view on screen after a scroll, but leaves a refresh interval of the screen's own between
+    /// one frame and the next.
     ///
     /// <para>A drag on the scrollbar or the map reports as fast as the mouse does - a thousand times a
     /// second on a modern one - and every report used to repaint the whole window there and then. Painting
-    /// faster than the screen refreshes cannot be seen by anyone: the compositor shows the newest frame at
-    /// the next refresh and throws the rest away. Measured on a 1000 Hz mouse against a 144 Hz screen, that
-    /// was 287 repaints a second and two thirds of a processor spent so that 144 could be seen.</para>
+    /// faster than the screen refreshes cannot be seen by anybody: the compositor shows the newest frame at
+    /// the next refresh and throws the rest away. Measured with a 1000 Hz mouse on a 240 Hz screen, that was
+    /// 287 repaints a second - a fifth of them wasted outright, and, far more to the point, a thread so
+    /// busy drawing that it answered only 198 of the mouse's reports a second, which is why the thumb
+    /// trailed the hand.</para>
+    ///
+    /// <para>This is a floor on the gap between frames, NOT a schedule: nothing here is locked to the
+    /// screen's vertical blank, and it does not try to be. The calls that would do that
+    /// (<c>DwmFlush</c>, <c>D3DKMTWaitForVerticalBlankEvent</c>) block the thread until the next refresh,
+    /// which is the one thing a thread with a drag to answer cannot afford. So a frame may still land at
+    /// any moment within a refresh interval; what it may not do is land twice in one.</para>
+    ///
+    /// <para>The gap is measured from the END of the last frame, so the true period is a refresh interval
+    /// plus however long painting takes - about 5 frames in 6 on this machine. That is the conservative
+    /// direction on purpose: the slower a view is to paint, the further it backs off, and it can never
+    /// spend more than half its time painting.</para>
     ///
     /// <para>What is skipped is a <b>frame</b>, never a position: the view has already moved, and the next
     /// report - or the timer behind it, for the report that turns out to be the last - draws wherever the
@@ -562,8 +576,12 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>How many times a second the screen this window is on can show something new. Asked of the
-    /// monitor rather than assumed, because 60, 120 and 144 are all ordinary now - and asked again from time
-    /// to time, because a window can be dragged onto a different screen.</summary>
+    /// monitor rather than assumed, because 60, 120, 144 and 240 are all ordinary now - and asked again from
+    /// time to time, because a window can be dragged onto a different screen.
+    /// <para>An integer, and sometimes a rounded one: a 143.98 Hz screen says 144, and a variable-refresh
+    /// screen says whatever its ceiling is. Both make this a little too generous, which is the harmless
+    /// direction - a frame more than was needed, never one fewer. Zero or one means "whatever the hardware
+    /// defaults to", which is no answer, so the last real one stands.</para></summary>
     private int ScreenRate()
     {
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
