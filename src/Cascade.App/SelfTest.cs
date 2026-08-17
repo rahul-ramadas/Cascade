@@ -233,6 +233,25 @@ internal static class SelfTest
             grid.PressKeyForTesting(Keys.Home);
             ok &= Check("and Home brings it back", hbar.Value == 0, hbar.Value.ToString());
 
+            // A drag is paced to the screen, which has to be asked what it can show - and a remote desktop
+            // has no answer, because it has no refresh rate of its own. What is done with that matters most
+            // exactly where it cannot be tried: a session begun on a fast monitor and then picked up over a
+            // remote desktop must not go on drawing at the monitor's rate down the wire.
+            ok &= Check("a screen that answers is taken at its word",
+                        LineGridControl.RateFrom(240, remote: false) == 240 &&
+                        LineGridControl.RateFrom(60, remote: false) == 60,
+                        $"{LineGridControl.RateFrom(240, false)}, {LineGridControl.RateFrom(60, false)}");
+            ok &= Check("one that does not falls to a rate every screen can manage, not to the last one seen",
+                        LineGridControl.RateFrom(0, remote: false) == 60 &&
+                        LineGridControl.RateFrom(1, remote: false) == 60,
+                        $"{LineGridControl.RateFrom(0, false)}, {LineGridControl.RateFrom(1, false)}");
+            ok &= Check("and down a wire nothing draws faster than the wire shows it",
+                        LineGridControl.RateFrom(240, remote: true) == 30 &&
+                        LineGridControl.RateFrom(1, remote: true) == 30 &&
+                        LineGridControl.RateFrom(24, remote: true) == 24,
+                        $"{LineGridControl.RateFrom(240, true)}, {LineGridControl.RateFrom(1, true)}, " +
+                        $"{LineGridControl.RateFrom(24, true)}");
+
             var diff = FirstDifference(unscrolled, scrolled, margin);
             ok &= Check($"scrolling right leaves the line-number margin (0..{gutter}) untouched" +
                         (diff is null ? "" : $" [first differs at x={diff.Value.X},y={diff.Value.Y}: " +

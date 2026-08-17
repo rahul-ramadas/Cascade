@@ -504,7 +504,7 @@ public sealed class LineGridControl : Control
     private readonly System.Windows.Forms.Timer _catchUp = new() { Interval = 15 };
     private long _shownAt;
     private long _screenAskedAt;
-    private int _screenHz = 60;
+    private int _screenHz = DefaultRate;
     private bool _missedFrame;
     private static int _owing;
 
@@ -583,30 +583,52 @@ public sealed class LineGridControl : Control
 
     /// <summary>How many times a second the screen this window is on can show something new. Asked of the
     /// monitor rather than assumed, because 60, 120, 144 and 240 are all ordinary now - and asked again from
-    /// time to time, because a window can be dragged onto a different screen.
-    /// <para>An integer, and sometimes a rounded one: a 143.98 Hz screen says 144, and a variable-refresh
-    /// screen says whatever its ceiling is. Both make this a little too generous, which is the harmless
-    /// direction - a frame more than was needed, never one fewer. Zero or one means "whatever the hardware
-    /// defaults to", which is no answer, so the last real one stands.</para></summary>
+    /// time to time, because a window can be dragged onto a different screen, and because a session can be
+    /// picked up by a remote desktop while it is running.</summary>
     private int ScreenRate()
     {
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
         if (_screenAskedAt != 0 && now - _screenAskedAt < System.Diagnostics.Stopwatch.Frequency) return _screenHz;
         _screenAskedAt = now;
+
+        int asked = 0;
         try
         {
             IntPtr dc = CreateDC(Screen.FromControl(this).DeviceName, null, null, IntPtr.Zero);
             if (dc != IntPtr.Zero)
             {
-                int hz = GetDeviceCaps(dc, VerticalRefresh);
+                asked = GetDeviceCaps(dc, VerticalRefresh);
                 DeleteDC(dc);
-                if (hz > 1) _screenHz = hz;
             }
         }
-        catch (InvalidOperationException) { /* no screen to ask; whatever it said last stands */ }
-        return _screenHz;
+        catch (InvalidOperationException) { /* no screen to ask; the answer below stands */ }
+        return _screenHz = RateFrom(asked, SystemInformation.TerminalServerSession);
     }
 
+    /// <summary>
+    /// What to believe about the screen, given what it said and whether anyone is watching down a wire.
+    ///
+    /// <para>Nought and one both mean "whatever the hardware defaults to", which is no answer at all - it is
+    /// what a remote desktop's display driver says, having no refresh rate of its own to report. Anything
+    /// unanswered falls to a rate every screen can manage rather than to whatever was last seen: a session
+    /// begun on a 240 Hz monitor and then picked up over a remote desktop would otherwise keep drawing 240
+    /// frames a second down the wire, which is the worst place there is to be drawing them.</para>
+    ///
+    /// <para>And over that wire the picture is not pixels but drawing orders, shown at the far end on a
+    /// schedule of its own - commonly about thirty times a second. Frames drawn faster than that are
+    /// coalesced away at some cost to the machine sending them and none at all to the person reading. So a
+    /// remote session is held to that, which is also the kindest thing to do to the link.</para>
+    ///
+    /// <para>Separated from the asking so it can be checked without a monitor or a remote desktop to hand.</para>
+    /// </summary>
+    internal static int RateFrom(int asked, bool remote)
+    {
+        int hz = asked > 1 ? asked : DefaultRate;
+        return remote ? Math.Min(hz, RemoteRate) : hz;
+    }
+
+    private const int DefaultRate = 60;
+    private const int RemoteRate = 30;
     private const int VerticalRefresh = 116;
 
     [System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
