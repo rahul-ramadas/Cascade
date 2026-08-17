@@ -168,7 +168,7 @@ public sealed class LineGridControl : Control
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
         // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
         // file, because one of those would eventually be forgotten.
-        Invalidated += (_, _) => ViewMoved();
+        Invalidated += (_, _) => ViewMoved(onScreen: true);
         _tipTimer.Tick += (_, _) => ShowTipNow();
         _catchUp.Tick += (_, _) => { _catchUp.Stop(); Invalidate(); Update(); };
         TabStop = true;
@@ -519,7 +519,7 @@ public sealed class LineGridControl : Control
         // Too soon to be seen. The view has moved all the same, so something has to draw it in case this
         // report is the last one - restarted rather than left running, so a drag that keeps reporting keeps
         // pushing it out and it only ever fires once the hand has stopped.
-        ViewMoved();
+        ViewMoved(onScreen: false);
         _catchUp.Stop();
         _catchUp.Start();
     }
@@ -527,11 +527,14 @@ public sealed class LineGridControl : Control
     /// <summary>What the two strips beside the text are owed when the view moves. They are children, so a
     /// repaint of the text does not reach them, and they have to hear about a move even on the frames that
     /// are not drawn - the map remembers where the view was last put, and would otherwise decide the view
-    /// had wandered off on its own and re-centre itself under a hand that was dragging it.</summary>
-    private void ViewMoved()
+    /// had wandered off on its own and re-centre itself under a hand that was dragging it.
+    /// <para>The map is redrawn only on the frames that are: it is a picture of the same view, and one
+    /// nobody can see is worth no more than a page of text nobody can see. The scrollbar draws itself on
+    /// every report of a drag, and should - the thumb is the thing the hand is watching.</para></summary>
+    private void ViewMoved(bool onScreen)
     {
-        _map?.SyncToGrid();
-        _vbar?.Invalidate();
+        _map?.SyncToGrid(onScreen);
+        if (onScreen) _vbar?.Invalidate();
     }
 
     /// <summary>How many times a second the screen this window is on can show something new. Asked of the

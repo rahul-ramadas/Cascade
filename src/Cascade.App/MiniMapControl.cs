@@ -697,22 +697,25 @@ internal sealed class MiniMapControl : Control
 
     /// <summary>Repaints when anything the map draws has actually changed. The map is a child control, so the
     /// grid invalidating itself does not touch it - without this the picture would sit exactly as it was last
-    /// painted while the text scrolled under it.</summary>
-    internal void SyncToGrid()
+    /// painted while the text scrolled under it.
+    /// <para><paramref name="repaint"/> is false on the moves of a drag that the screen is too slow to show.
+    /// The window it is over still has to be tracked then - forgetting that is what makes a dragged map
+    /// spring back to the middle - but drawing it would be drawing a frame nobody can see.</para></summary>
+    internal void SyncToGrid(bool repaint = true)
     {
         if (!Visible || _grid.Document is not { } doc) return;
         if (_builtRows != doc.RowCount || _builtFilteredMode != doc.FilteredMode ||
             _builtGeneration != doc.FilterGeneration || _builtMarkers != doc.Markers.Version ||
             _builtFindHits != doc.FindHitCount || _drawnSelection != _grid.SelectionVersion)
         {
-            Invalidate();
+            if (repaint) Invalidate();
             return;
         }
         if (_slots <= 0) return;
         long rows = doc.RowCount;
         long before = _top;
         if (rows > 0) TrackView(rows, SlotCapacity);
-        if (_top != before || Geometry() != _drawnViewport) Invalidate();
+        if (repaint && (_top != before || Geometry() != _drawnViewport)) Invalidate();
     }
 
     // ---- interaction ----

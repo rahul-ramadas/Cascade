@@ -28,6 +28,7 @@ internal static class ScrollBench
     private const int WmLButtonDown = 0x0201;
     private const int WmLButtonUp = 0x0202;
     private const uint PmNoRemove = 0;
+    private const uint PmRemove = 1;
 
     public static int Run(string[] args)
     {
@@ -586,7 +587,8 @@ internal static class ScrollBench
                $"{(CpuMs - UiCpuMs) / Steps,5:F2} elsewhere (ms/move) | " +
                $"{Bytes / (double)Steps / 1024,7:F1} KB/move | " +
                $"{100 * CpuMs / WallMs,5:F0}% of a core | " +
-               $"{1000 * Steps / WallMs,5:F0} moves and {1000 * GridPaints / WallMs,5:F0} paints a second | " +
+               $"{1000 * Steps / WallMs,5:F0} moves, {1000 * GridPaints / WallMs,5:F0} text and " +
+               $"{1000 * MapPaints / WallMs,5:F0} map frames a second | " +
                $"{RowsColoured / (double)Steps,6:F0} rows coloured/move";
     }
 
@@ -608,8 +610,7 @@ internal static class ScrollBench
     {
         for (var clock = Stopwatch.StartNew(); clock.ElapsedMilliseconds < 2_000;)
         {
-            Application.DoEvents();
-            if (!PeekMessage(out _, IntPtr.Zero, 0, 0, PmNoRemove)) return;
+            if (!Dispatch()) return;
         }
     }
 
@@ -620,11 +621,27 @@ internal static class ScrollBench
     {
         while (true)
         {
-            Application.DoEvents();
+            Dispatch();
             double left = untilMs - clock.Elapsed.TotalMilliseconds;
             if (left <= 0) return;
             MsgWaitForMultipleObjectsEx(0, IntPtr.Zero, (uint)Math.Max(1, Math.Ceiling(left)), QsAllInput, 0);
         }
+    }
+
+    /// <summary>Takes everything waiting and delivers it, as a message loop does. Not
+    /// <see cref="Application.DoEvents"/>: that sets up a visual-styles context on every call, which is
+    /// eight percent of a core at a thousand mouse reports a second and belongs to the harness rather than
+    /// to the program being measured.</summary>
+    private static bool Dispatch()
+    {
+        bool any = false;
+        while (PeekMessage(out var message, IntPtr.Zero, 0, 0, PmRemove))
+        {
+            any = true;
+            TranslateMessage(ref message);
+            DispatchMessage(ref message);
+        }
+        return any;
     }
 
     // ---- the file to drag through ----
@@ -757,6 +774,12 @@ internal static class ScrollBench
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool PeekMessage(out Msg message, IntPtr hWnd, uint first, uint last, uint remove);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern void TranslateMessage(ref Msg message);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern void DispatchMessage(ref Msg message);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Msg
