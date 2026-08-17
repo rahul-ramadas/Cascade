@@ -8168,6 +8168,26 @@ internal static class SelfTest
             spare.Dispose();
             ok &= Check("and closing a log view lets go of its fonts", LetGo(spareFont));
 
+            // The text is drawn straight onto the device context now, through handles of its own: a face
+            // per style and a brush per colour. Those are GDI handles, not objects - nothing collects them,
+            // and a process that loses ten thousand of them is killed. Zooming rebuilds every face and every
+            // paint asks for brushes, so this does both, many times, and counts what the process holds.
+            int handlesBefore = GdiHandles();
+            for (int i = 0; i < 40; i++)
+            {
+                settings.ZoomPercent = 100 + i % 5 * 25;
+                grid.RebuildFonts();
+                grid.Invalidate();
+                grid.Update();
+            }
+            settings.ZoomPercent = 100;
+            grid.RebuildFonts();
+            Pump();
+            int handlesAfter = GdiHandles();
+            ok &= Check("and drawing through GDI's own handles hands every one of them back",
+                        handlesBefore == 0 || handlesAfter <= handlesBefore + 40,
+                        $"{handlesBefore} handles before 40 rebuilds and repaints, {handlesAfter} after");
+
             // The find bar used to cut a font of its own for the term box, at a different size from the rest
             // of the row. It draws everything in the ambient font now, so there is nothing for it to give
             // back - and nothing on the row may quietly go back to one of its own.
@@ -9600,6 +9620,14 @@ internal static class SelfTest
 
     private const uint PM_NOREMOVE = 0;
     private const uint WM_KEYDOWN = 0x0100;
+
+    /// <summary>How many GDI handles this process is holding. Drawing straight onto a device context means
+    /// owning faces and brushes, which nothing collects.</summary>
+    private static int GdiHandles()
+        => (int)GetGuiResources(System.Diagnostics.Process.GetCurrentProcess().Handle, 0);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetGuiResources(IntPtr process, uint flags);
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct MSG

@@ -189,6 +189,9 @@ internal sealed class GdiCanvas : IDeviceContext
     {
         int key = colour.ToArgb();
         if (_brushes.TryGetValue(key, out var brush)) return brush;
+        // A view has as many colours as it has filters; anything past that is settings being played with,
+        // and starting again costs less than remembering for ever.
+        if (_brushes.Count > 256) { foreach (var old in _brushes.Values) DeleteObject(old); _brushes.Clear(); }
         return _brushes[key] = CreateSolidBrush(ColorRef(colour));
     }
 
