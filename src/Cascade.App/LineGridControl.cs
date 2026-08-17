@@ -170,7 +170,15 @@ public sealed class LineGridControl : Control
         // file, because one of those would eventually be forgotten.
         Invalidated += (_, _) => ViewMoved(onScreen: true);
         _tipTimer.Tick += (_, _) => ShowTipNow();
-        _catchUp.Tick += (_, _) => { _catchUp.Stop(); Invalidate(); Update(); };
+        _catchUp.Tick += (_, _) =>
+        {
+            // Nothing has been missed since the last tick, so the hand has stopped and this can too. The
+            // timer is left running while a drag is in flight rather than being restarted per report:
+            // starting one destroys and recreates a window, which at a few hundred reports a second costs
+            // more than the frames it is there to catch.
+            if (!_missedFrame) { _catchUp.Stop(); return; }
+            ShowAtScreenRate();
+        };
         TabStop = true;
         AccessibleRole = AccessibleRole.List;
         AccessibleName = "Cascade log view";
@@ -491,6 +499,7 @@ public sealed class LineGridControl : Control
     private long _shownAt;
     private long _screenAskedAt;
     private int _screenHz = 60;
+    private bool _missedFrame;
 
     /// <summary>
     /// Puts the view on screen after a scroll, but never more often than the screen can show a new frame.
@@ -511,17 +520,15 @@ public sealed class LineGridControl : Control
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
         if (now - _shownAt >= System.Diagnostics.Stopwatch.Frequency / Math.Max(1, ScreenRate()))
         {
-            _catchUp.Stop();
             Invalidate();
             Update();
             return;
         }
         // Too soon to be seen. The view has moved all the same, so something has to draw it in case this
-        // report is the last one - restarted rather than left running, so a drag that keeps reporting keeps
-        // pushing it out and it only ever fires once the hand has stopped.
+        // report is the last one.
+        _missedFrame = true;
         ViewMoved(onScreen: false);
-        _catchUp.Stop();
-        _catchUp.Start();
+        if (!_catchUp.Enabled) _catchUp.Start();
     }
 
     /// <summary>What the two strips beside the text are owed when the view moves. They are children, so a
@@ -1059,6 +1066,10 @@ public sealed class LineGridControl : Control
 
     internal int RowsPaintedForTesting => _layout.Count;
 
+    /// <summary>The top row of the last frame actually drawn, which is not the same thing as the row the
+    /// view is on: a drag moves the view faster than the screen can show it.</summary>
+    internal long FirstPaintedRowForTesting => _layout.Count > 0 ? _layout[0].Row : -1;
+
     /// <summary>How many times the view has actually repainted. A picture of it cannot answer that - drawing
     /// a control to a bitmap paints it whether or not anything asked it to.</summary>
     internal int PaintsForTesting => _paints;
@@ -1337,7 +1348,7 @@ public sealed class LineGridControl : Control
         DrawFocusBar(g);
 
         _shownAt = System.Diagnostics.Stopwatch.GetTimestamp();
-        _catchUp.Stop();
+        _missedFrame = false;
 
         if (columns) runningMaxWidth = TotalColumnsWidth();
         if (runningMaxWidth != _maxContentWidth)

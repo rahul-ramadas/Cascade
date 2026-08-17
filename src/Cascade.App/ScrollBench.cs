@@ -502,12 +502,21 @@ internal static class ScrollBench
             at += direction * jump;
             if (at >= bottom) { at = bottom; direction = -1; }
             else if (at <= top) { at = top; direction = 1; }
-            Send(bar, WmMouseMove, x, at);
-            // A real mouse reports on its own clock and does not wait to be asked. Given a rate, this keeps
-            // to it whether or not the window has finished with the last report - which is the state a fast
-            // mouse leaves a program in, and the only one where anything is ever dropped.
-            if (rate > 0) PumpUntil(clock.Elapsed.TotalMilliseconds + 1000.0 / rate, clock);
-            else Pump();
+            // A real mouse posts its reports to the queue and Windows coalesces them: however fast it moves,
+            // a program only ever has one report waiting for it. Posting rather than sending also keeps the
+            // window's own message handling on the path it takes in life, rather than nested inside a
+            // send from this loop.
+            if (rate > 0)
+            {
+                if (!PeekMessage(out _, bar.Handle, WmMouseMove, WmMouseMove, PmNoRemove))
+                    Post(bar, WmMouseMove, x, at);
+                PumpUntil(clock.Elapsed.TotalMilliseconds + 1000.0 / rate, clock);
+            }
+            else
+            {
+                Send(bar, WmMouseMove, x, at);
+                Pump();
+            }
         }
 
         clock.Stop();
@@ -605,6 +614,9 @@ internal static class ScrollBench
     private static void Send(Control control, int message, int x, int y)
         => SendMessage(control.Handle, message, 1, (y << 16) | (x & 0xFFFF));
 
+    private static void Post(Control control, int message, int x, int y)
+        => PostMessage(control.Handle, message, (IntPtr)1, (IntPtr)((y << 16) | (x & 0xFFFF)));
+
     /// <summary>Runs the queue dry, which is what happens between two reports of a moving mouse.</summary>
     private static void Pump()
     {
@@ -690,6 +702,10 @@ internal static class ScrollBench
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
 
     private const uint QsAllInput = 0x04FF;
 

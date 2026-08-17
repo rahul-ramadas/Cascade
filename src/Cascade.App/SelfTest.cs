@@ -2251,6 +2251,31 @@ internal static class SelfTest
                 var middle = shot.GetPixel(thumb.Left + thumb.Width / 2, thumb.Top + thumb.Height / 2);
                 ok &= Check("and its thumb has square corners", corner.ToArgb() == middle.ToArgb(),
                             $"corner {corner}, middle {middle}");
+
+                // ---- a drag draws as often as the screen can show it, and no oftener ----
+                // A mouse reports up to a thousand times a second and each report moves the view a page or
+                // more. Drawing every one of them is work nobody can see: the screen shows the newest frame
+                // at its next refresh and throws the rest away. What must never happen is the other failure -
+                // the hand stopping on a position that is never drawn at all.
+                grid.ScrollToRow(0);
+                Pump();
+                var track = bar.TroughForTesting;
+                int painted = grid.PaintsForTesting;
+                bar.GrabForTesting();
+                const int Reports = 60;
+                for (int i = 0; i < Reports; i++)
+                    bar.DragToForTesting(track.Top + thumb.Height / 2 + i * (track.Height / (2 * Reports)));
+                int frames = grid.PaintsForTesting - painted;
+                long stoppedAt = grid.FirstRowForTesting;
+                bar.DropForTesting();
+                Line($"   (drag: {Reports} reports drew {frames} frames)");
+                ok &= Check("a drag reporting faster than the screen refreshes does not draw every report",
+                            frames < Reports, $"{frames} frames for {Reports} reports");
+                ok &= Check("but the view really did move all the way", stoppedAt > 0, stoppedAt.ToString());
+                Pump();
+                ok &= Check("and where the hand stopped is what ends up on the screen",
+                            grid.FirstPaintedRowForTesting == grid.FirstRowForTesting,
+                            $"drawn from row {grid.FirstPaintedRowForTesting}, view at {grid.FirstRowForTesting}");
             }
 
             // The sideways scrollbar is the same control, so the two edges of the window match.
