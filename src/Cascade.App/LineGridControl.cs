@@ -524,8 +524,8 @@ public sealed class LineGridControl : Control
     /// <para>A drag on the scrollbar or the map reports as fast as the mouse does - a thousand times a
     /// second on a modern one - and every report used to repaint the whole window there and then. Painting
     /// faster than the screen refreshes cannot be seen by anyone: the compositor shows the newest frame at
-    /// the next refresh and throws the rest away. Measured on a 1000 Hz mouse, that was 287 repaints a
-    /// second and two thirds of a processor spent so that sixty of them could be seen.</para>
+    /// the next refresh and throws the rest away. Measured on a 1000 Hz mouse against a 144 Hz screen, that
+    /// was 287 repaints a second and two thirds of a processor spent so that 144 could be seen.</para>
     ///
     /// <para>What is skipped is a <b>frame</b>, never a position: the view has already moved, and the next
     /// report - or the timer behind it, for the report that turns out to be the last - draws wherever the
