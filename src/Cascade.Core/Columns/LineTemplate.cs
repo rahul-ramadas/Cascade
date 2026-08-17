@@ -460,14 +460,20 @@ public sealed class LineTemplate
         return _parts.Length;
     }
 
-    /// <summary>Reads the <c>[...]</c> groups off the front of a line and writes a template for them,
-    /// keeping whatever separates them. This is what makes turning fields on a single click for the log
-    /// formats that have them.
+    /// <summary>Reads the header off the front of a line and writes a template for it: an opening field that
+    /// is not bracketed at all, then a run of bracketed groups, then the message. This is what makes turning
+    /// fields on a single click for the log formats that have a header worth reading.
+    ///
+    /// <para>Three bracket shapes count - <c>[ ]</c>, <c>( )</c> and <c>&lt; &gt;</c> - and a line may mix
+    /// them. Whatever separates two groups is kept.</para>
     ///
     /// <para>It stops at the message. What tells the two apart is what lies BETWEEN two groups: a short run
     /// of punctuation or spaces still counts as a separator, but the moment a letter or a digit turns up
     /// the header is over - otherwise a message carrying a bracket of its own, which any log full of JSON
-    /// does, drags half the line into the template.</para></summary>
+    /// does, drags half the line into the template.</para>
+    ///
+    /// <para>What it will NOT read is a header held together by nothing but spaces, where where one field
+    /// ends and the next begins is a guess rather than a reading. Those are written by hand.</para></summary>
     public static string Detect(string sample)
     {
         if (string.IsNullOrEmpty(sample)) return "";
@@ -476,19 +482,30 @@ public sealed class LineTemplate
         const int LongestSeparator = 4;
 
         var sb = new StringBuilder();
-        int i = 0, found = 0;
-        while (i < sample.Length && sample[i] == '[')
+        int i = LeadInLength(sample);
+        int found = 0;
+        if (i > 0)
         {
-            int close = sample.IndexOf(']', i + 1);
+            // The lead-in is a field, and the spaces after it are a separator between that field and the
+            // next - written outside the braces so they stay behind if the field is carried elsewhere.
+            int lead = i;
+            while (lead > 0 && sample[lead - 1] == ' ') lead--;
+            sb.Append("{*}").Append(Escape(sample[lead..i]));
+            found++;
+        }
+
+        while (i < sample.Length && Opener(sample[i]) is { } shut)
+        {
+            int close = sample.IndexOf(shut, i + 1);
             if (close < 0) break;
-            sb.Append("{[*]}");
+            sb.Append('{').Append(Escape(sample[i].ToString())).Append('*').Append(Escape(shut.ToString())).Append('}');
             found++;
             i = close + 1;
 
             int gap = i;
             while (gap < sample.Length && gap - i < LongestSeparator &&
-                   sample[gap] != '[' && !char.IsLetterOrDigit(sample[gap])) gap++;
-            if (gap >= sample.Length || sample[gap] != '[') break;   // the header is over
+                   Opener(sample[gap]) is null && !char.IsLetterOrDigit(sample[gap])) gap++;
+            if (gap >= sample.Length || Opener(sample[gap]) is null) break;   // the header is over
             if (gap > i) sb.Append(Escape(sample[i..gap]));
             i = gap;
         }
@@ -502,6 +519,34 @@ public sealed class LineTemplate
         while (i < sample.Length && sample[i] == ' ') i++;
         if (i < sample.Length || i > from) sb.Append(Escape(sample[from..i])).Append("{*}");
         return sb.ToString();
+    }
+
+    /// <summary>The bracket that closes the one a header group opens with, or null for anything else.</summary>
+    private static char? Opener(char c) => c switch { '[' => ']', '(' => ')', '<' => '>', _ => null };
+
+    /// <summary>How much of a line comes before its first bracketed group and can be read as a field in its
+    /// own right - the timestamp in <c>2026-08-05 12:00:00 [INFO] ...</c> and nothing more adventurous.
+    ///
+    /// <para>A header field is a VALUE, so it is allowed one space in it and no more: that is enough for a
+    /// date beside a time, and not enough for the opening words of a sentence that happens to have a bracket
+    /// somewhere further along. Zero if there is nothing to take, which is the usual answer.</para></summary>
+    private static int LeadInLength(string sample)
+    {
+        const int Longest = 64;
+        if (sample.Length == 0 || Opener(sample[0]) is not null) return 0;
+
+        int at = -1, spaces = 0;
+        for (int i = 0; i < sample.Length && i < Longest; i++)
+        {
+            if (Opener(sample[i]) is not null) { at = i; break; }
+            if (sample[i] == ' ' && ++spaces > 2) return 0;
+        }
+        // A group has to follow it, the lead-in itself has to be something, and the two have to be parted by
+        // a space - "foo[bar]" is one value with a bracket in it, not a field and a group.
+        if (at <= 0 || sample[at - 1] != ' ') return 0;
+        int text = at;
+        while (text > 0 && sample[text - 1] == ' ') text--;
+        return text == 0 ? 0 : at;
     }
 
     /// <summary>Makes literal text safe to drop into a template.</summary>

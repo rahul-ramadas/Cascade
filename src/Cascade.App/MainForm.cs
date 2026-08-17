@@ -501,7 +501,7 @@ public sealed class MainForm : Form
 
         _miFitColumns = Mi("&Fit Columns to Window", (_, _) => _grid.FitColumnsToWindow());
         _miColumns.DropDownItems.Add(_miFitColumns);
-        view.DropDownItems.Add(Mi("Field Settin&gs…", (_, _) => ShowColumns()));
+        view.DropDownItems.Add(Mi("Field Settin&gs…", (_, _) => ShowColumns(), Keys.Control | Keys.Shift | Keys.D));
         view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
         view.DropDownItems.Add(Mi("Zoom &Out", (_, _) => _grid.Zoom(-10), Keys.Control | Keys.OemMinus, "Ctrl+-"));
@@ -1222,9 +1222,13 @@ public sealed class MainForm : Form
     {
         if (!_doc.Columns.Active || line < 0 || seed.Length == 0) return "";
         if (_doc.GetLineText(line).Contains(seed, StringComparison.Ordinal)) return "";
-        return "This is the text as it is being shown, not as it stands in that line - so as plain text it "
-             + "will not match the line it came from. Search and filtering always run on the whole line.";
+        return RawLineCaution;
     }
+
+    /// <summary>Said wherever text taken off the screen is about to be matched against the file. Fields
+    /// change what a line LOOKS like and change nothing about what it IS, and that is the whole of it.</summary>
+    internal const string RawLineCaution =
+        "Searching and filtering always run on the original line, not the one shown.";
 
     /// <summary>Starts a filter from a seed taken off the screen, warning when the screen and the file no
     /// longer agree. Every path that seeds from a line comes through here.</summary>
@@ -1889,12 +1893,23 @@ public sealed class MainForm : Form
                 _findBar.Visible = true;
                 SnapSplitter();
             }));
+            CautionInFindBar();
         }
         // A part of a line picked out in the log is almost always what the search is about to be for.
         // Whole lines are not: selecting them is how you copy or mark them, and a line's worth of text is
         // no kind of search term - so only a selection WITHIN a line seeds the box.
         if (focus && _grid.SelectedText is { Length: > 0 } picked) _findBar.SetTerm(picked);
         if (focus) _findBar.FocusInput();
+    }
+
+    /// <summary>Said in the bar as it opens, while the log is being shown in fields: what is on screen is
+    /// not what will be searched, and the moment to say so is before anything has been typed. It gives way
+    /// to the tally the first search puts there and does not come back until the bar has been closed and
+    /// opened again - a warning that reappears between searches is one that gets read once and then
+    /// stopped being read.</summary>
+    private void CautionInFindBar()
+    {
+        if (_doc.Columns.Active) _findBar.SetMessage(RawLineCaution, caution: true);
     }
 
     /// <summary>Puts the bar away and the term with it. One gesture, because a search that is running with

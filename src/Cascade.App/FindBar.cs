@@ -351,13 +351,20 @@ public sealed class FindBar : UserControl
     }
 
     /// <summary>What the search found, or what went wrong. One label for both: a search that found nothing
-    /// has no tally to show, and a search that found something has nothing to complain about.</summary>
-    public void SetMessage(string text, string? detail = null)
+    /// has no tally to show, and a search that found something has nothing to complain about.
+    ///
+    /// <para><paramref name="caution"/> marks a note that is not a result at all - said as the bar opens,
+    /// in the amber the filter editor uses for the same warning, and replaced by the tally the moment there
+    /// is one.</para></summary>
+    public void SetMessage(string text, string? detail = null, bool caution = false)
     {
         _tally = text;
         _tallyDetail = detail ?? text;
+        _tallyIsCaution = caution;
         ShowMessage();
     }
+
+    private bool _tallyIsCaution;
 
     /// <summary>Complains about a pattern that will not compile. It goes where the count goes because the
     /// two can never both apply - a term that cannot be parsed has not matched anything to count.</summary>
@@ -377,7 +384,9 @@ public sealed class FindBar : UserControl
     private void ShowMessage()
     {
         bool bad = _regexError.Length > 0;
-        _message.ForeColor = bad ? Color.Firebrick : SystemColors.GrayText;
+        _message.ForeColor = bad ? Color.Firebrick
+                           : _tallyIsCaution ? Color.FromArgb(176, 110, 0)
+                           : SystemColors.GrayText;
         _message.Message = bad ? _regexError : _tally;
         string want = bad ? _regexError : _tallyDetail;
         if (_tip.GetToolTip(_message) != want) _tip.SetToolTip(_message, want);

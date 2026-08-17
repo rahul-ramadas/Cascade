@@ -38,7 +38,7 @@ internal sealed class CommandWithSubmenu : ToolStripMenuItem
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        if (e is null || !IsOnDropDown) return;
+        if (e is null || !IsOnDropDown || Owner is null) return;
 
         string? keys = ShortcutKeyDisplayString;
         if (string.IsNullOrEmpty(keys) && ShortcutKeys != Keys.None)
@@ -49,11 +49,14 @@ internal sealed class CommandWithSubmenu : ToolStripMenuItem
         box.Width -= ArrowRoom;
         if (box.Width <= 0) return;
 
-        Color colour = !Enabled ? SystemColors.GrayText
-                     : Selected ? SystemColors.HighlightText
-                     : SystemColors.MenuText;
-        TextRenderer.DrawText(e.Graphics, keys, Font, box, colour,
-            TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix |
-            TextFormatFlags.SingleLine);
+        // Handed to the renderer exactly as the framework hands it the item's own label, rather than drawn
+        // straight onto the Graphics: the colour worked out here is only a proposal, and a renderer is free
+        // to overrule it. The one in use does - it highlights a menu row in pale blue and leaves the text
+        // dark - so a shortcut painted directly in HighlightText came out white on pale blue.
+        Color ink = !Enabled ? SystemColors.GrayText
+                  : Selected || Pressed ? SystemColors.HighlightText
+                  : SystemColors.MenuText;
+        Owner.Renderer.DrawItemText(
+            new ToolStripItemTextRenderEventArgs(e.Graphics, this, keys, box, ink, Font, ContentAlignment.MiddleRight));
     }
 }

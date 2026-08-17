@@ -37,8 +37,6 @@ public sealed class ColumnsPreview : Control
     private ColumnSpec? _spec;
     private bool _fits;
     private bool _asked;
-    private int _selectFrom = -1, _selectTo = -1;
-    private bool _dragging;
 
     public ColumnsPreview()
     {
@@ -74,11 +72,6 @@ public sealed class ColumnsPreview : Control
     /// a value too long for one is cut, exactly as the table cuts it - while the rest grow to fit.</summary>
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Dictionary<int, int> FixedWidths { get; } = [];
-
-    /// <summary>What is picked out in the sample line, as indices into it, or (-1,-1) for nothing.</summary>
-    public (int From, int To) Selection => _selectFrom < 0 || _selectTo <= _selectFrom ? (-1, -1) : (_selectFrom, _selectTo);
-
-    public event Action? SelectionChanged;
 
     private void BuildFonts()
     {
@@ -156,7 +149,6 @@ public sealed class ColumnsPreview : Control
     public void ShowLine(string line, ColumnSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
-        if (!ReferenceEquals(_line, line)) ClearSelection();
         _line = line ?? "";
         _spec = spec;
         _sampleCells.Build(_line, CellsFor);
@@ -329,14 +321,6 @@ public sealed class ColumnsPreview : Control
     private readonly List<(int Start, int Width, int TextAt, int TextLength, int Part)> _tableSpans = [];
     private bool AsTable => _spec is not null && _spec.Layout == FieldLayout.Columns;
 
-    public void ClearSelection()
-    {
-        if (_selectFrom < 0) return;
-        _selectFrom = _selectTo = -1;
-        SelectionChanged?.Invoke();
-        Invalidate();
-    }
-
     private int VisibleChars => Math.Max(1, (ClientSize.Width - Gutter - Pad) / Math.Max(1, _charWidth));
 
     private void UpdateScroll()
@@ -369,15 +353,7 @@ public sealed class ColumnsPreview : Control
         => _scroll.SetBounds(1, Math.Max(0, ClientSize.Height - 1 - _scroll.Height),
                              Math.Max(0, ClientSize.Width - 2), _scroll.Height);
 
-    // ---- picking a stretch of the sample out, to make a column of it ----
-
-    /// <summary>Which character of the sample the pointer is over: the cell it is in, and then the character
-    /// that sits in that cell.</summary>
-    private int CharAt(int x)
-    {
-        int cell = (x - Gutter + _scroll.Value * _charWidth + _charWidth / 2) / Math.Max(1, _charWidth);
-        return _sampleCells.IndexAt(Math.Max(0, cell));
-    }
+    // ---- pointing at a field ----
 
     private int SampleTop => Pad + _nameHeight;
 
@@ -387,59 +363,32 @@ public sealed class ColumnsPreview : Control
     private int ResultNameTop => SampleTop + _lineHeight + Dpi(10);
     private int ResultTop => ResultNameTop + _nameHeight;
 
+    /// <summary>Pointing at a field, in either row. Neither row can be picked OUT of - there is nothing here
+    /// to select - so a press is remembered and answered on the way up, where a click properly is one, and
+    /// both rows say the same thing about themselves with the same cursor.</summary>
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
         if (e is null || e.Button != MouseButtons.Left) return;
-        if (InSample(e.Y))
-        {
-            _dragging = true;
-            _selectFrom = _selectTo = CharAt(e.X);
-            Capture = true;
-            Invalidate();
-            return;
-        }
-        // A press on the result is not a drag - the result cannot be picked out of, only pointed at - so it
-        // is remembered and answered on the way up, where a click properly is one.
-        if (InResult(e.Y)) _pressedResult = e.X;
+        if (PartAt(e.X, e.Y) >= 0) _pressedAt = e.X;
     }
 
-    private int _pressedResult = int.MinValue;
+    private int _pressedAt = int.MinValue;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
         if (e is null) return;
-        Cursor = InSample(e.Y) ? Cursors.IBeam
-               : InResult(e.Y) && PartAtResult(e.X) >= 0 ? Cursors.Hand
-               : Cursors.Default;
-        if (!_dragging) return;
-        _selectTo = CharAt(e.X);
-        Invalidate();
+        Cursor = PartAt(e.X, e.Y) >= 0 ? Cursors.Hand : Cursors.Default;
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        if (e is not null && _pressedResult != int.MinValue)
-        {
-            int was = _pressedResult;
-            _pressedResult = int.MinValue;
-            if (InResult(e.Y) && Math.Abs(e.X - was) <= SystemInformation.DragSize.Width)
-                Pick(PartAtResult(e.X));
-            return;
-        }
-        if (!_dragging || e is null) return;
-        _dragging = false;
-        Capture = false;
-        if (_selectTo < _selectFrom) (_selectFrom, _selectTo) = (_selectTo, _selectFrom);
-        // A press and release in the same place picked nothing out, so it was a click: it says which field
-        // was pointed at instead, which is how the sample and the list are tied together in both directions.
-        // Only over the text, though - the words naming the rows sit to the left of it, and pointing at
-        // those is pointing at nothing.
-        if (_selectTo == _selectFrom && e.X >= Gutter) Pick(PartAtSample(_selectFrom));
-        SelectionChanged?.Invoke();
-        Invalidate();
+        if (e is null || _pressedAt == int.MinValue) return;
+        int was = _pressedAt;
+        _pressedAt = int.MinValue;
+        if (Math.Abs(e.X - was) <= SystemInformation.DragSize.Width) Pick(PartAt(e.X, e.Y));
     }
 
     /// <summary>Raised with the part a click landed on, so the list can bring that field's row forward.</summary>
@@ -450,12 +399,26 @@ public sealed class ColumnsPreview : Control
         if (part >= 0) PartPicked?.Invoke(part);
     }
 
+    /// <summary>Which field is drawn at a point, in whichever of the two rows it falls in, or -1 for
+    /// anywhere else - the gap between the rows, the words that name them, the text between fields.</summary>
+    private int PartAt(int x, int y)
+        => InSample(y) ? PartAtSample(x)
+         : InResult(y) ? PartAtResult(x)
+         : -1;
+
     private bool InSample(int y) => y >= SampleTop && y <= SampleTop + _lineHeight;
     private bool InResult(int y) => _fits && y >= ResultTop && y <= ResultTop + _lineHeight;
 
-    /// <summary>Which part of the template covers a character of the sample, or -1 for the text between
-    /// parts and the tail beyond the last of them.</summary>
-    private int PartAtSample(int index)
+    /// <summary>Which part of the template covers the character of the sample under a point, or -1 for the
+    /// text between parts and the tail beyond the last of them.</summary>
+    private int PartAtSample(int x)
+    {
+        if (!_fits || x < Gutter) return -1;
+        int cell = (x - Gutter + _scroll.Value * _charWidth) / Math.Max(1, _charWidth);
+        return PartAtSampleIndex(_sampleCells.IndexAt(Math.Max(0, cell)));
+    }
+
+    private int PartAtSampleIndex(int index)
     {
         if (!_fits) return -1;
         for (int part = 0; part < _match.PartCount; part++)
@@ -583,14 +546,6 @@ public sealed class ColumnsPreview : Control
             }
         }
 
-        var (selectFrom, selectTo) = Selection;
-        if (selectFrom >= 0)
-        {
-            int from = _sampleCells.Of(selectFrom), to = _sampleCells.Of(selectTo);
-            var rect = new Rectangle(x0 + from * _charWidth, y, (to - from) * _charWidth, _lineHeight);
-            using var brush = new SolidBrush(Color.FromArgb(90, SystemColors.Highlight));
-            g.FillRectangle(brush, rect);
-        }
 
         // The text in stretches, so a hidden part can be drawn differently without being drawn over.
         int at = 0;
@@ -748,24 +703,27 @@ public sealed class ColumnsPreview : Control
             red, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.WordEllipsis);
     }
 
-    /// <summary>Picks a stretch of the sample out, as a drag across it does, so the dialog can be driven
-    /// without a mouse.</summary>
-    internal void SelectForTesting(int from, int to)
-    {
-        _selectFrom = Math.Clamp(from, 0, _line.Length);
-        _selectTo = Math.Clamp(to, 0, _line.Length);
-        SelectionChanged?.Invoke();
-        Invalidate();
-    }
-
     internal int ScrollValueForTesting() => _scroll.Value;
 
     internal void ScrollToForTesting(int value)
         => _scroll.Value = Math.Clamp(value, _scroll.Minimum, Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1));
 
     /// <summary>Points at a character of the sample, or a cell of the result, as a click on it does.</summary>
-    internal void ClickSampleForTesting(int index) => Pick(PartAtSample(index));
+    internal void ClickSampleForTesting(int index) => Pick(PartAtSampleIndex(index));
     internal void ClickResultForTesting(int cell) => Pick(PartAtResult(Gutter + (cell - _scroll.Value) * _charWidth));
+
+    /// <summary>What the pointer says a click would do, which has to be the same thing over both rows.</summary>
+    internal Cursor CursorOverSampleForTesting(int index)
+    {
+        int x = Gutter + (_sampleCells.Of(index) - _scroll.Value) * _charWidth;
+        return PartAt(x, SampleTop + _lineHeight / 2) >= 0 ? Cursors.Hand : Cursors.Default;
+    }
+
+    internal Cursor CursorOverResultForTesting(int cell)
+    {
+        int x = Gutter + (cell - _scroll.Value) * _charWidth;
+        return PartAt(x, ResultTop + _lineHeight / 2) >= 0 ? Cursors.Hand : Cursors.Default;
+    }
 
     internal bool CanScrollForTesting() => _scroll.Visible;
     internal int FurthestScrollForTesting() => Math.Max(_scroll.Minimum, _scroll.Maximum - _scroll.LargeChange + 1);

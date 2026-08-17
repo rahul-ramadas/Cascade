@@ -899,21 +899,18 @@ internal static class SelfTest
             dlg.StepSampleForTesting(-3);
             Pump();
 
-            // --- a field picked out of the sample keeps the space in front of it as a SEPARATOR ---
+            // --- Detect reads a bracketed header, and says so when there is not one ---
 
-            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]}");
+            dlg.SetTemplateForTesting("");
             Pump();
-            dlg.SelectSampleForTesting(42, 49);          // "payment", which follows a space
+            dlg.DetectForTesting();
             Pump();
-            ok &= Check("a stretch picked out past the last field can be made into one",
-                        dlg.AddFieldEnabledForTesting);
-            dlg.AddFieldForTesting();
-            Pump();
-            ok &= Check($"and the space in front of it is written outside the braces ({dlg.TemplateForTesting})",
-                        dlg.TemplateForTesting.EndsWith("} {*}", StringComparison.Ordinal),
-                        dlg.TemplateForTesting);
-            ok &= Check($"and the field just made is the one selected ({dlg.SelectedRowForTesting} of {dlg.RowCountForTesting})",
-                        dlg.SelectedRowForTesting == dlg.RowCountForTesting - 1);
+            ok &= Check($"Detect reads the header off the sample ({dlg.TemplateForTesting})",
+                        dlg.TemplateForTesting == "{[*]}{[*]}{[*]} {*}", dlg.TemplateForTesting);
+            // The space before the message is a SEPARATOR, so it sits outside the braces and stays behind
+            // when the message is carried elsewhere.
+            ok &= Check("with the space before the message left outside the braces",
+                        dlg.TemplateForTesting.EndsWith("} {*}", StringComparison.Ordinal));
 
             // --- the columns of the result line up, width and alignment included ---
 
@@ -1034,6 +1031,11 @@ internal static class SelfTest
                         dlg.SelectedRowForTesting == 1);
             ok &= Check($"and the band drawn round that field moves with it ({dlg.PreviewForTesting.Highlight})",
                         dlg.PreviewForTesting.Highlight == 1);
+            // Both rows do the same thing on a click, so both have to SAY the same thing. The sample used to
+            // offer an I-beam, left over from a drag-to-select that nothing reads any more.
+            ok &= Check($"the pointer says the same thing over both rows ({dlg.PreviewForTesting.CursorOverSampleForTesting(30)} / {dlg.PreviewForTesting.CursorOverResultForTesting(2)})",
+                        dlg.PreviewForTesting.CursorOverSampleForTesting(30) == Cursors.Hand &&
+                        dlg.PreviewForTesting.CursorOverResultForTesting(2) == Cursors.Hand);
             dlg.SetLayoutForTesting(FieldLayout.Inline);
             dlg.DropRowForTesting(3, 0);          // Message to the front, so the result is in another order
             dlg.SelectRowForTesting(3);
@@ -1113,12 +1115,13 @@ internal static class SelfTest
                 {
                     huge.SetTemplateForTesting("{[*]}{[*]}{[*]}");
                     Pump();
-                    huge.SelectSampleForTesting(42, 49);
-                    huge.AddFieldForTesting();
+                    huge.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
+                    huge.SelectRowForTesting(0);
+                    huge.PressListKeyForTesting(Keys.Alt | Keys.Down);
                     Pump();
                 }
                 catch (Exception ex) { blew = $"{ex.GetType().Name}: {ex.Message}"; }
-                ok &= Check($"and a field can still be added to a list with no room to show one ({huge.RowCountForTesting} fields)",
+                ok &= Check($"and its rows can still be worked with no room to show one ({huge.RowCountForTesting} fields)",
                             blew.Length == 0, blew);
 
                 var list = huge.ListForTesting;
@@ -1484,8 +1487,44 @@ internal static class SelfTest
                 ok &= Check("and is unticked while the columns are off", !item.Checked);
                 ok &= Check("and ticked once they are on",
                             form.ClickMenuForTesting("View", "Split Lines Into Fields") && item.Checked);
-                form.ClickMenuForTesting("View", "Split Lines Into Fields");
             }
+
+            // --- the find bar says which text it is going to search, while the shown text is not it ---
+
+            if (!doc.Columns.Enabled) form.ClickMenuForTesting("View", "Split Lines Into Fields");
+            Pump();
+            var bar = form.FindBarForTesting;
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            Pump();
+            ok &= Check($"opening find while the fields are on says what will be searched (\"{bar.MessageForTesting()}\")",
+                        bar.MessageForTesting() == MainForm.RawLineCaution, bar.MessageForTesting());
+            // It gives way to the tally and does not come back between searches - a warning that reappears
+            // every time is one that stops being read.
+            bar.SetMessage("3 of 200 lines");
+            Pump();
+            ok &= Check("a tally replaces it", bar.MessageForTesting() == "3 of 200 lines");
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            Pump();
+            ok &= Check("and Ctrl+F again, with the bar already up, does not put it back",
+                        bar.MessageForTesting() == "3 of 200 lines", bar.MessageForTesting());
+            // ...but closing and opening the bar is a fresh start, and says it again.
+            form.PressCmdKeyForTesting(Keys.Escape);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            Pump();
+            ok &= Check($"closing and opening it says it again (\"{bar.MessageForTesting()}\")",
+                        bar.MessageForTesting() == MainForm.RawLineCaution, bar.MessageForTesting());
+            form.PressCmdKeyForTesting(Keys.Escape);
+            Pump();
+            // With the fields off there is nothing to warn about: the line on screen IS the line.
+            form.ClickMenuForTesting("View", "Split Lines Into Fields");
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            Pump();
+            ok &= Check($"and with the fields off it says nothing (\"{bar.MessageForTesting()}\")",
+                        bar.MessageForTesting().Length == 0, bar.MessageForTesting());
+            form.PressCmdKeyForTesting(Keys.Escape);
+            Pump();
             return ok;
         }
         finally
@@ -9086,7 +9125,10 @@ internal static class SelfTest
 
         // A command with a key must say so where it is offered. These two run the same thing from different
         // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
-        string[] shortcuts = ["Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C"];
+        string[] shortcuts =
+        [
+            "Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C", "Field Settings\u2026\tCtrl+Shift+D"
+        ];
         var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
         var advertised = AllMenuItems(bar.Items)
             .Select(m => (m.Text ?? "").Replace("&", "") + "\t" +

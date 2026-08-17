@@ -408,13 +408,48 @@ public class TemplateTests
     public void Detect_handles_a_line_that_is_nothing_but_groups()
         => Assert.Equal("{[*]}{[*]}", LineTemplate.Detect("[a][b]"));
 
+    /// <summary>Round brackets and angle brackets hold a header together as well as square ones do, and a
+    /// line is free to mix them.</summary>
+    [Theory]
+    [InlineData("(09:31) (INFO) hello", "{(*)} {(*)} {*}")]
+    [InlineData("<09:31><INFO> hello", "{<*>}{<*>} {*}")]
+    [InlineData("[09:31](INFO)<api> hello", "{[*]}{(*)}{<*>} {*}")]
+    public void Detect_reads_the_other_bracket_shapes_too(string line, string want)
+        => Assert.Equal(want, LineTemplate.Detect(line));
+
+    /// <summary>The timestamp in front of the first bracket is a field like any other. It is taken only when
+    /// it reads as a VALUE - one space in it at most, so a date beside a time qualifies and the opening of a
+    /// sentence does not - and the spaces after it are a separator, written outside the braces.</summary>
+    [Theory]
+    [InlineData("2026-08-05 12:00:00.123 [INFO] hello there", "{*} {[*]} {*}")]
+    [InlineData("12:00:00 [INFO] hello", "{*} {[*]} {*}")]
+    [InlineData("2026-08-05 12:00:00 [a][b] hello", "{*} {[*]}{[*]} {*}")]
+    public void Detect_takes_what_stands_before_the_first_bracket_as_a_field(string line, string want)
+        => Assert.Equal(want, LineTemplate.Detect(line));
+
+    /// <summary>...and refuses when it would be a guess rather than a reading: prose with a bracket
+    /// somewhere in it, a value with a bracket stuck to it, or a header held together by spaces alone.</summary>
+    [Theory]
+    [InlineData("the quick brown fox [INFO] jumped")]
+    [InlineData("foo[bar] baz")]
+    [InlineData("2026-08-05 12:00:00 INFO api-gateway hello")]
+    [InlineData("plain line")]
+    public void Detect_says_nothing_rather_than_guessing(string line)
+        => Assert.Equal("", LineTemplate.Detect(line));
+
     [Fact]
     public void Detect_produces_a_template_that_matches_what_it_was_read_from()
     {
-        foreach (string line in new[] { Trace, TraceEmpty, "[09:31] [INFO] hello" })
+        string[] lines =
+        [
+            Trace, TraceEmpty, "[09:31] [INFO] hello",
+            "(09:31) (INFO) hello", "<09:31><INFO> hello", "[09:31](INFO)<api> hello",
+            "2026-08-05 12:00:00.123 [INFO] hello there", "12:00:00 [INFO] hello"
+        ];
+        foreach (string line in lines)
         {
             var t = new LineTemplate(LineTemplate.Detect(line));
-            Assert.True(t.IsValid);
+            Assert.True(t.IsValid, line);
             Assert.True(t.Match(line, new TemplateMatch()), line);
         }
     }
