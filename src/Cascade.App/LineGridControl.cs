@@ -80,6 +80,13 @@ public sealed class LineGridControl : Control
     /// It is what decides whether a column is sized in characters or in pixels.</summary>
     private bool _monospaced = true;
 
+    /// <summary>The same question asked of each of the eight faces separately, because a family is not
+    /// obliged to answer the same way for all of them - an italic or a bold cut proportionally spaced while
+    /// the regular one is not is unusual, but it exists. This is what decides whether a row's glyphs may be
+    /// PLACED by multiplication, so a wrong answer here is text drawn in the wrong place rather than a
+    /// scrollbar range a few pixels out.</summary>
+    private readonly bool[] _monoFace = new bool[8];
+
     private long _firstRow;
     private int _hScroll;
     private int _maxContentWidth;
@@ -358,9 +365,8 @@ public sealed class LineGridControl : Control
     /// binary search.</summary>
     private int CharWidthOf(Font font)
     {
-        if (!_monospaced) return 0;
         for (int i = 0; i < _fonts.Length; i++)
-            if (ReferenceEquals(_fonts[i], font)) return _charWidths[i];
+            if (ReferenceEquals(_fonts[i], font)) return CharWidthOf(i);
         return 0;
     }
 
@@ -846,9 +852,13 @@ public sealed class LineGridControl : Control
             _charWidths[i] = Math.Max(1, TextRenderer.MeasureText("0", _fonts[i], new Size(1000, 100),
                 TextFormatFlags.NoPadding).Width);
         // Asked of the shapes, not of the name: "Consolas" is fixed-pitch and "Segoe UI" is not, but a
-        // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
-        _monospaced = TextRenderer.MeasureText("iiiiiiiiii", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
-                   == TextRenderer.MeasureText("WWWWWWWWWW", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly - and,
+        // since a row's glyphs are placed by multiplication when the answer is yes, draws its text in the
+        // wrong place. Asked of every face, because a family may be cut fixed-pitch in one and not another.
+        for (int i = 0; i < _fonts.Length; i++)
+            _monoFace[i] = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width
+                        == TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        _monospaced = _monoFace[0];
         BuildChipFont();
         _naturalKey = null;   // the widths the content asks for are measured in this font
         Invalidate();
@@ -2728,8 +2738,8 @@ public sealed class LineGridControl : Control
             : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
                   TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
 
-    /// <summary>The width of one character when every character is the same width, else 0.</summary>
-    private int CharWidthOf(int fontIndex) => _monospaced ? _charWidths[fontIndex] : 0;
+    /// <summary>The width of one character in a face where every character is the same width, else 0.</summary>
+    private int CharWidthOf(int fontIndex) => _monoFace[fontIndex] ? _charWidths[fontIndex] : 0;
 
     /// <summary>A brush for a colour, kept rather than made. A frame fills a few hundred rectangles in a
     /// handful of colours, and every one of those used to be a fresh GDI+ object and a finaliser.</summary>

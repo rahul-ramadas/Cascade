@@ -260,6 +260,82 @@ internal static class SelfTest
                             partDiff is null);
             }
 
+            // The same, in every face a filter can ask for. A slanted or heavy cut hangs outside the cell
+            // its width says it occupies, so the stretch handed over is widened by a character at each end -
+            // and whether one character is enough is a question about typefaces, not about this machine.
+            var faces = new FilterCollection();
+            var styles = new (string Text, bool Bold, bool Italic, bool Underline)[]
+                { ("line 1", true, false, false), ("line 2", false, true, false),
+                  ("line 3", true, true, true),   ("line 4", false, false, true) };
+            foreach (var (text, bold, italic, underline) in styles)
+                faces.Roots.Add(new Filter
+                {
+                    Enabled = true,
+                    Match = new FilterMatch { Text = text },
+                    Style = { Bold = bold, Italic = italic, Underline = underline }
+                });
+            doc.SetFilters(faces);
+            WaitForFiltering(doc);
+            foreach (int scrolledTo in (int[])[0, 40, 260])
+            {
+                grid.ScrollHorizontallyTo(scrolledTo);
+                grid.RefreshView();
+                grid.DrawWholeLinesForTesting = true;
+                Pump();
+                using var whole = Capture(host);
+                grid.DrawWholeLinesForTesting = false;
+                Pump();
+                using var clipped = Capture(host);
+                var faceDiff = FirstDifference(whole, clipped, new Rectangle(0, 0, whole.Width, whole.Height));
+                ok &= Check($"and does so in bold, italic and underline, scrolled to {scrolledTo}" +
+                            (faceDiff is null ? "" : $" [first differs at x={faceDiff.Value.X},y={faceDiff.Value.Y}]"),
+                            faceDiff is null);
+            }
+            doc.SetFilters(new FilterCollection());
+            WaitForFiltering(doc);
+            grid.ScrollHorizontallyTo(260);
+            grid.RefreshView();
+            Pump();
+
+            // A face where the characters are not all one width cannot have its glyphs placed by
+            // multiplication, and must refuse the short road outright - asked of the SHAPES of every one of
+            // the eight faces, because a family may be cut fixed-pitch in one and proportionally in another,
+            // and it is now where each glyph is DRAWN that hangs on the answer.
+            string sample = "plain ascii 12345";
+            bool[] fixedPitch = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
+            ok &= Check($"a fixed-pitch face takes the short road in every style [{string.Join(",", fixedPitch.Select(b => b ? '1' : '0'))}]",
+                        fixedPitch.All(b => b), $"font {settings.FontFamily}");
+
+            var proportional = new AppSettings { MarkerVisibility = MarkerVisibilityMode.Always, FontFamily = "Segoe UI" };
+            grid.ApplySettings(proportional);
+            grid.RefreshView();
+            Pump();
+            bool[] variable = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
+            ok &= Check($"and a proportional one refuses it in every style [{string.Join(",", variable.Select(b => b ? '1' : '0'))}]",
+                        variable.All(b => !b), $"font {proportional.FontFamily}");
+            // ...and still draws, through the layout that has always drawn it.
+            grid.ScrollHorizontallyTo(0);
+            grid.RefreshView();
+            Pump();
+            using (var propUnscrolled = Capture(host))
+            {
+                grid.ScrollHorizontallyTo(120);
+                grid.RefreshView();
+                Pump();
+                using var propScrolled = Capture(host);
+                var propArea = new Rectangle(gutter, grid.GutterAreaForTesting.Top,
+                                             propUnscrolled.Width - gutter - 20, grid.GutterAreaForTesting.Height);
+                ok &= Check("a proportional face still draws, and still scrolls",
+                            !SameRegion(propUnscrolled, propScrolled, propArea));
+                var propMargin = FirstDifference(propUnscrolled, propScrolled, grid.GutterAreaForTesting);
+                ok &= Check("and still leaves the line-number margin alone", propMargin is null,
+                            propMargin?.ToString() ?? "");
+            }
+            grid.ApplySettings(settings);
+            grid.ScrollHorizontallyTo(260);
+            grid.RefreshView();
+            Pump();
+
             // Plain ASCII in a fixed-pitch face goes to GDI by the shortest road there is: the text draws
             // its own background in one call, and the line number is placed by arithmetic rather than by
             // asking for it to be right-aligned. Both are worth half the paint, and both are only allowed
