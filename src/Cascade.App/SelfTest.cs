@@ -4218,6 +4218,57 @@ internal static class SelfTest
             Pump();
             ok &= Check("turning the columns off drops the cell's selection", !grid.HasCharSelection,
                         grid.SelectedText ?? "(none)");
+
+            // ...and so does rearranging the fields from the chip strip. Inline, the indices are into the
+            // row AS PROJECTED, so putting a field away moves every character after it: a range kept across
+            // that would pick out text nobody chose, and that is what a filter made from it would be built
+            // out of. The chips do not go through RefreshView, so this is the path that has to drop it too.
+            doc.Columns.Enabled = true;
+            doc.Columns.Layout = FieldLayout.Inline;
+            grid.RefreshView();
+            Pump();
+
+            string inline = grid.DisplayTextForTesting(Row);
+            int reqInline = inline.IndexOf("req-abc", StringComparison.Ordinal);
+            ok &= Check($"the inline row still reads as the line ({inline})", reqInline > 0, inline);
+
+            grid.DragForTesting(Row, grid.XForCharForTesting(Row, reqInline),
+                                     grid.XForCharForTesting(Row, reqInline + 10));
+            ok &= Check("dragging inside an inline row picks out what it covered",
+                        grid.SelectedText == inline.Substring(reqInline, 10), grid.SelectedText ?? "(none)");
+
+            grid.SetColumnVisible(0, false);
+            Pump();
+            ok &= Check("putting a field away drops a selection made before the row moved",
+                        !grid.HasCharSelection, grid.SelectedText ?? "(none)");
+
+            // Carrying one along the row moves the text just as much, so that has to drop it as well. Both
+            // are driven through the chips themselves, which is the only way a reader can do either.
+            doc.Columns.Columns[0].Visible = true;
+            grid.RefreshView();
+            Pump();
+            inline = grid.DisplayTextForTesting(Row);
+            reqInline = inline.IndexOf("req-abc", StringComparison.Ordinal);
+            grid.DragForTesting(Row, grid.XForCharForTesting(Row, reqInline),
+                                     grid.XForCharForTesting(Row, reqInline + 10));
+            ok &= Check("a fresh selection to carry a field out from under",
+                        grid.SelectedText == inline.Substring(reqInline, 10), grid.SelectedText ?? "(none)");
+            grid.DragChipForTesting(2, 0);
+            Pump();
+            ok &= Check("carrying a field along the row drops it too",
+                        !grid.HasCharSelection, grid.SelectedText ?? "(none)");
+
+            // And a chip clicked, which is the same edit by the other gesture.
+            inline = grid.DisplayTextForTesting(Row);
+            reqInline = inline.IndexOf("req-abc", StringComparison.Ordinal);
+            grid.DragForTesting(Row, grid.XForCharForTesting(Row, reqInline),
+                                     grid.XForCharForTesting(Row, reqInline + 10));
+            ok &= Check("a fresh selection to click a chip out from under",
+                        grid.SelectedText == inline.Substring(reqInline, 10), grid.SelectedText ?? "(none)");
+            grid.ClickChipForTesting(0);
+            Pump();
+            ok &= Check("clicking a chip drops it as well",
+                        !grid.HasCharSelection, grid.SelectedText ?? "(none)");
             return ok;
         }
         finally

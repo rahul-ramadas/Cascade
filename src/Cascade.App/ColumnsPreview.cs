@@ -162,6 +162,14 @@ public sealed class ColumnsPreview : Control
             BuildTable();
             _resultCells.Build(_result, CellsFor);
         }
+        else if (!_asked)
+        {
+            // Nothing was asked of the line, so _match still holds whatever the LAST line and template made
+            // of it. Projecting with that would cut this line at offsets that mean nothing here - not drawn,
+            // because the result row is only drawn when it fits, but it would still size the scroll range.
+            _result = "";
+            _resultCells.Build(_result, CellsFor);
+        }
         else
         {
             _projection.Build(_line, spec, _match);

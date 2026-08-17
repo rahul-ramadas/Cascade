@@ -1722,7 +1722,7 @@ public sealed class MainForm : Form
         if (_doc.Columns.Columns.Count == 0)
         {
             var samples = SampleLines(out int caretAt);
-            string template = LineTemplate.Detect(samples[caretAt]);
+            string template = LineTemplate.Detect(samples[Math.Min(caretAt, samples.Count - 1)]);
             if (template.Length == 0) { ShowColumns(); return; }
             _doc.Columns.Template = template;
             _doc.Columns.Reset();
