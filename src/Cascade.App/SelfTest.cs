@@ -2276,6 +2276,20 @@ internal static class SelfTest
                 ok &= Check("and its thumb has square corners", corner.ToArgb() == middle.ToArgb(),
                             $"corner {corner}, middle {middle}");
 
+                // A bar is laid out before it has any height, and can be squeezed to nothing by a window
+                // being dragged shut. A thumb has a minimum length, and asking a bar shorter than that for
+                // one threw - which reached the outside world as a window that would not lay out.
+                bool squeezedAnswers;
+                try
+                {
+                    using var squeezed = new SlimScrollBar(grid) { Size = new Size(14, 2) };
+                    squeezed.Configure(1_000, 10);
+                    squeezedAnswers = squeezed.ThumbForTesting.Height >= 0;
+                }
+                catch (ArgumentException) { squeezedAnswers = false; }
+                ok &= Check("a scrollbar squeezed shorter than its own thumb still answers for one",
+                            squeezedAnswers);
+
                 // ---- a drag draws as often as the screen can show it, and no oftener ----
                 // A mouse reports up to a thousand times a second and each report moves the view a page or
                 // more. Drawing every one of them is work nobody can see: the screen shows the newest frame

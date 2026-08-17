@@ -55,13 +55,19 @@ internal sealed class SlimScrollBar : Control
     }
 
     /// <summary>How much there is to scroll through, and how much of it is on screen. Rows for the vertical
-    /// one, pixels for the horizontal - the bar does not care which.</summary>
+    /// one, pixels for the horizontal - the bar does not care which.
+    /// <para>Says nothing when nothing has changed. The sideways bar is told this on every frame of a
+    /// vertical drag, because the widest line on screen changes as the view moves, and repainting the whole
+    /// strip to draw the same picture was a twentieth of every frame.</para></summary>
     public void Configure(long total, long visible)
     {
-        _total = Math.Max(0, total);
-        _visible = Math.Max(1, visible);
+        long wanted = Math.Max(0, total), showing = Math.Max(1, visible);
+        if (wanted == _total && showing == _visible) return;
+        var was = Thumb;
+        _total = wanted;
+        _visible = showing;
         _value = Math.Clamp(_value, 0, MaxValue);
-        Invalidate();
+        InvalidateThumb(was);
     }
 
     public long MaxValue => Math.Max(0, _total - _visible);
@@ -114,9 +120,12 @@ internal sealed class SlimScrollBar : Control
     {
         get
         {
-            if (_total <= 0) return TrackLength;
+            int track = TrackLength;
+            if (_total <= 0) return track;
             double share = Math.Clamp((double)_visible / _total, 0, 1);
-            return (int)Math.Clamp(Math.Round(TrackLength * share), MinThumbLength, TrackLength);
+            // A thumb small enough to be unaimable is no use, but a bar shorter than that minimum is a bar
+            // being laid out, or squeezed to nothing, and asking for more than it has throws.
+            return (int)Math.Clamp(Math.Round(track * share), Math.Min(MinThumbLength, track), track);
         }
     }
 
