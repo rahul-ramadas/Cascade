@@ -3227,10 +3227,6 @@ public sealed class LineGridControl : Control
         return sb.ToString();
     }
 
-    /// <summary>Whether what is picked out of a line survives into the file in one piece. It does not when
-    /// the selection runs across something hidden, or across the join where a part has been carried
-    /// backwards - and then its text appears in no line of the file, so a filter or a search made from it
-    /// would match nothing at all.</summary>
     /// <summary>A row's text as the reader is seeing it, which is what the clipboard, a filter seeded from
     /// it and the search box all work from.</summary>
     public string DisplayedLineText(long line) => DisplayTextOf(line);
@@ -3270,72 +3266,6 @@ public sealed class LineGridControl : Control
             }
             from = at + length;
         }
-        return false;
-    }
-
-    /// <summary>Whether anything is being left out of the rows on screen at all.</summary>
-    public bool AnythingHidden
-        => _doc is not null && _doc.Columns.Active && _doc.Columns.Columns.Any(c => !c.Visible);
-
-    /// <summary>Whether a whole line is being shown as it stands in the file, or has had fields taken out
-    /// of it. What is seeded into a filter from a whole row depends on the answer.</summary>
-    public bool LineIsWholeInTheFile(long line)
-    {
-        if (_doc is null || !InlineOn || line < 0) return true;
-        return Project(_doc.GetLineText(line)).IsWholeLine;
-    }
-
-    public bool SelectionIsWholeInTheFile
-    {
-        get
-        {
-            if (_doc is null || !HasCharSelection || !InlineOn) return true;
-            string raw = _doc.GetLineText(_charLine);
-            var projection = Project(raw);
-            if (projection.IsWholeLine) return true;
-
-            // The selection counts in DISPLAYED characters, which is the projection with its tabs opened
-            // out into spaces. The map below works in the projection's own characters, so both ends have to
-            // be brought back through that expansion first, or every line with a tab in it answers wrong.
-            int from = Unexpand(projection.Text, Math.Min(_charAnchor, _charFocus));
-            int to = Unexpand(projection.Text, Math.Max(_charAnchor, _charFocus));
-
-            int first = projection.ToLine(from);
-            if (first < 0) return false;
-            for (int i = from + 1; i < to; i++)
-                if (projection.ToLine(i) != first + (i - from)) return false;
-            return true;
-        }
-    }
-
-    /// <summary>A displayed character index back to the index in the text it was drawn from, undoing the
-    /// tab expansion. The two only differ on a line that has a tab in it.</summary>
-    private int Unexpand(string text, int displayed)
-    {
-        int width = _settings.TabSize;
-        if (width <= 1 || !text.Contains('\t')) return Math.Clamp(displayed, 0, text.Length);
-
-        int shown = 0;
-        for (int i = 0; i < text.Length; i++)
-        {
-            if (shown >= displayed) return i;
-            shown += text[i] == '\t' ? width : 1;
-        }
-        return text.Length;
-    }
-
-    /// <summary>Whether a hit at <paramref name="offset"/> in <paramref name="line"/> would actually be
-    /// visible. A search runs on the raw line, so without this "find next" can land on a line whose only
-    /// hit sits inside a part that has been put away - and nothing lights up.</summary>
-    public bool HitIsVisible(long line, int offset, int length)
-    {
-        if (_doc is null || !InlineOn || line < 0) return true;
-        string raw = _doc.GetLineText(line);
-        if (offset < 0 || offset >= raw.Length) return true;
-        var projection = Project(raw);
-        if (projection.IsWholeLine) return true;
-        for (int i = offset; i < offset + length && i < raw.Length; i++)
-            if (projection.FromLine(i) >= 0) return true;
         return false;
     }
 
