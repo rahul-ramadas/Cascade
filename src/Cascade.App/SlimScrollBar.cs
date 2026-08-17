@@ -230,9 +230,10 @@ internal sealed class SlimScrollBar : Control
         Invalidate();
         Scrolled?.Invoke(v);
         // A held drag never lets the message queue empty, and WM_PAINT only arrives when it does - so
-        // without these nothing moves until the mouse stops.
+        // without this the thumb would not move until the mouse stopped. The view answers for itself: it
+        // redraws no faster than the screen can show it, which this must not do - the thumb has to stay
+        // under the pointer, and it costs a tenth of a millisecond to draw.
         Update();
-        _grid.Update();
     }
 
     /// <summary>Test seam: what a drag to this offset along the bar would scroll to.</summary>

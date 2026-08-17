@@ -163,13 +163,14 @@ public sealed class LineGridControl : Control
         Controls.Add(_map);
         _vbar = new SlimScrollBar(this);
         Controls.Add(_vbar);
-        _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; Invalidate(); };
-        _hbar.Scrolled += v => { _hScroll = (int)v; Invalidate(); };
+        _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; ShowAtScreenRate(); };
+        _hbar.Scrolled += v => { _hScroll = (int)v; ShowAtScreenRate(); };
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
         // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
         // file, because one of those would eventually be forgotten.
-        Invalidated += (_, _) => { _map?.SyncToGrid(); _vbar?.Invalidate(); };
+        Invalidated += (_, _) => ViewMoved();
         _tipTimer.Tick += (_, _) => ShowTipNow();
+        _catchUp.Tick += (_, _) => { _catchUp.Stop(); Invalidate(); Update(); };
         TabStop = true;
         AccessibleRole = AccessibleRole.List;
         AccessibleName = "Cascade log view";
@@ -481,8 +482,91 @@ public sealed class LineGridControl : Control
     {
         ClearViewAnchor();
         SetFirstRow(row);
-        Invalidate();
+        ShowAtScreenRate();
     }
+
+    // ---- how often a dragged view is actually put on the screen ----
+
+    private readonly System.Windows.Forms.Timer _catchUp = new() { Interval = 15 };
+    private long _shownAt;
+    private long _screenAskedAt;
+    private int _screenHz = 60;
+
+    /// <summary>
+    /// Puts the view on screen after a scroll, but never more often than the screen can show a new frame.
+    ///
+    /// <para>A drag on the scrollbar or the map reports as fast as the mouse does - a thousand times a
+    /// second on a modern one - and every report used to repaint the whole window there and then. Painting
+    /// faster than the screen refreshes cannot be seen by anyone: the compositor shows the newest frame at
+    /// the next refresh and throws the rest away. Measured on a 1000 Hz mouse, that was 287 repaints a
+    /// second and two thirds of a processor spent so that sixty of them could be seen.</para>
+    ///
+    /// <para>What is skipped is a <b>frame</b>, never a position: the view has already moved, and the next
+    /// report - or the timer behind it, for the report that turns out to be the last - draws wherever the
+    /// hand has got to by then. So a whole page still lands on screen each time, which is what a drag is
+    /// supposed to look like, and the one that lands is the one the pointer is actually pointing at.</para>
+    /// </summary>
+    private void ShowAtScreenRate()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now - _shownAt >= System.Diagnostics.Stopwatch.Frequency / Math.Max(1, ScreenRate()))
+        {
+            _catchUp.Stop();
+            Invalidate();
+            Update();
+            return;
+        }
+        // Too soon to be seen. The view has moved all the same, so something has to draw it in case this
+        // report is the last one - restarted rather than left running, so a drag that keeps reporting keeps
+        // pushing it out and it only ever fires once the hand has stopped.
+        ViewMoved();
+        _catchUp.Stop();
+        _catchUp.Start();
+    }
+
+    /// <summary>What the two strips beside the text are owed when the view moves. They are children, so a
+    /// repaint of the text does not reach them, and they have to hear about a move even on the frames that
+    /// are not drawn - the map remembers where the view was last put, and would otherwise decide the view
+    /// had wandered off on its own and re-centre itself under a hand that was dragging it.</summary>
+    private void ViewMoved()
+    {
+        _map?.SyncToGrid();
+        _vbar?.Invalidate();
+    }
+
+    /// <summary>How many times a second the screen this window is on can show something new. Asked of the
+    /// monitor rather than assumed, because 60, 120 and 144 are all ordinary now - and asked again from time
+    /// to time, because a window can be dragged onto a different screen.</summary>
+    private int ScreenRate()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_screenAskedAt != 0 && now - _screenAskedAt < System.Diagnostics.Stopwatch.Frequency) return _screenHz;
+        _screenAskedAt = now;
+        try
+        {
+            IntPtr dc = CreateDC(Screen.FromControl(this).DeviceName, null, null, IntPtr.Zero);
+            if (dc != IntPtr.Zero)
+            {
+                int hz = GetDeviceCaps(dc, VerticalRefresh);
+                DeleteDC(dc);
+                if (hz > 1) _screenHz = hz;
+            }
+        }
+        catch (InvalidOperationException) { /* no screen to ask; whatever it said last stands */ }
+        return _screenHz;
+    }
+
+    private const int VerticalRefresh = 116;
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr CreateDC(string driver, string? device, string? port, IntPtr mode);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern int GetDeviceCaps(IntPtr dc, int index);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeleteDC(IntPtr dc);
 
     /// <summary>A wheel turn over the map scrolls the text, as it does over the scrollbar.</summary>
     internal void ScrollByWheel(int delta) => ScrollBy(-Math.Sign(delta) * SystemInformation.MouseWheelScrollLines);
@@ -1248,6 +1332,9 @@ public sealed class LineGridControl : Control
                 g.DrawRectangle(pen, 0, caretTop, ClientSize.Width - RightGutterWidth - 1, caretHeight - 1);
 
         DrawFocusBar(g);
+
+        _shownAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        _catchUp.Stop();
 
         if (columns) runningMaxWidth = TotalColumnsWidth();
         if (runningMaxWidth != _maxContentWidth)
@@ -2803,6 +2890,7 @@ public sealed class LineGridControl : Control
         if (disposing)
         {
             _tipTimer.Dispose(); _tips.Dispose();
+            _catchUp.Dispose();
             foreach (var f in _fonts) f?.Dispose();
             ReleaseFaces();
             _canvas.Discard();

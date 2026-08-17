@@ -783,9 +783,9 @@ internal sealed class MiniMapControl : Control
         long lowest = _rowAt[0];
         long highest = Math.Max(lowest, _rowAt[_slots - 1] - _grid.VisibleRows + 1);
         _grid.ScrollToRow(Math.Clamp(_rowAt[slot], lowest, highest));
-        // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without these
-        // nothing moves until the mouse stops.
-        _grid.Update();
+        // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without this
+        // the window under the pointer would not move until the mouse stopped. The view answers for its own
+        // repaint, which it paces to the screen.
         Update();
     }
 

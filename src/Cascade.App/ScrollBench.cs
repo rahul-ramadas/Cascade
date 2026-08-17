@@ -39,6 +39,9 @@ internal static class ScrollBench
         int repeats = IntArg(args, "--repeat=", 3);
         int seconds = IntArg(args, "--seconds=", 0);
         int payload = IntArg(args, "--payload=", 0);
+        // Mouse reports a second. Zero means "one at a time, each waited for", which measures what a report
+        // costs; a real figure measures what a mouse of that speed does to the program.
+        int rate = IntArg(args, "--rate=", 0);
         string only = Arg(args, "--only=") ?? "";
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
@@ -49,6 +52,7 @@ internal static class ScrollBench
         // the noise. This asks for the scheduler's attention for the couple of minutes it runs.
         try { Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High; }
         catch (SystemException) { /* not allowed to; the numbers will simply be noisier */ }
+        BeginTimePeriod(1);
 
         // A window of this program writes preferences and recent-file lists as it goes. Pointed at the
         // developer's own directory a benchmark would quietly rewrite them.
@@ -119,14 +123,14 @@ internal static class ScrollBench
                 {
                     // A profiler needs something to sample, so drag for as long as it is being watched.
                     Console.WriteLine($"  {name,-22} dragging for {seconds}s");
-                    for (var clock = Stopwatch.StartNew(); clock.Elapsed.TotalSeconds < seconds;) Drag(form, steps, jump);
+                    for (var clock = Stopwatch.StartNew(); clock.Elapsed.TotalSeconds < seconds;) Drag(form, steps, jump, rate);
                     continue;
                 }
                 var best = Measurement.Worst;
                 for (int i = 0; i < repeats; i++)
                 {
                     if (cold) { form.GridForTesting.InvalidateMatchMap(); Pump(); }
-                    var run = Drag(form, steps, jump);
+                    var run = Drag(form, steps, jump, rate);
                     Console.WriteLine($"  {name,-22} {run}");
                     if (run.CpuPerFrameMs < best.CpuPerFrameMs) best = run;
                 }
@@ -138,6 +142,7 @@ internal static class ScrollBench
         finally
         {
             form.Dispose();
+            EndTimePeriod(1);
             try { Directory.Delete(configDir, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
         return 0;
@@ -457,7 +462,7 @@ internal static class ScrollBench
     }
 
     /// <summary>Drags the thumb up and down the bar, one mouse report at a time.</summary>
-    private static Measurement Drag(MainForm form, int steps, int jump)
+    private static Measurement Drag(MainForm form, int steps, int jump, int rate = 0)
     {
         var grid = form.GridForTesting;
         var bar = grid.ScrollBarForTesting;
@@ -497,7 +502,11 @@ internal static class ScrollBench
             if (at >= bottom) { at = bottom; direction = -1; }
             else if (at <= top) { at = top; direction = 1; }
             Send(bar, WmMouseMove, x, at);
-            Pump();
+            // A real mouse reports on its own clock and does not wait to be asked. Given a rate, this keeps
+            // to it whether or not the window has finished with the last report - which is the state a fast
+            // mouse leaves a program in, and the only one where anything is ever dropped.
+            if (rate > 0) PumpUntil(clock.Elapsed.TotalMilliseconds + 1000.0 / rate, clock);
+            else Pump();
         }
 
         clock.Stop();
@@ -527,12 +536,12 @@ internal static class ScrollBench
         long rows = Math.Max(1, form.DocForTesting.RowCount);
         long stride = Math.Max(1, rows / 40);   // a 24px move on a full-height bar is about a fortieth of the file
 
-        Report("text", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Update(); }));
+        Report("text", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Invalidate(); grid.Update(); }));
         Report("text, standing still", Measure(steps, rows, stride, _ => { grid.Invalidate(); grid.Update(); }));
         if (map is not null)
         {
             map.Visible = false;
-            Report("text, map hidden", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Update(); }));
+            Report("text, map hidden", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); grid.Invalidate(); grid.Update(); }));
             map.Visible = true;
             Report("minimap", Measure(steps, rows, stride, row => { grid.ScrollToRow(row); map.Invalidate(); map.Update(); }));
         }
@@ -576,8 +585,9 @@ internal static class ScrollBench
             => $"{WallMs / Steps,6:F2} wall | {CpuMs / Steps,6:F2} cpu | {UiCpuMs / Steps,6:F2} ui | " +
                $"{(CpuMs - UiCpuMs) / Steps,5:F2} elsewhere (ms/move) | " +
                $"{Bytes / (double)Steps / 1024,7:F1} KB/move | " +
-               $"{100 * CpuMs / Steps / 8,5:F1}% of a core at 125 Hz | " +
-               $"{GridPaints} grid, {MapPaints} map paints, {RowsColoured / (double)Steps,6:F0} rows coloured/move";
+               $"{100 * CpuMs / WallMs,5:F0}% of a core | " +
+               $"{1000 * Steps / WallMs,5:F0} moves and {1000 * GridPaints / WallMs,5:F0} paints a second | " +
+               $"{RowsColoured / (double)Steps,6:F0} rows coloured/move";
     }
 
     /// <summary>Processor time this thread alone has had, so the work the UI thread does can be told apart
@@ -600,6 +610,20 @@ internal static class ScrollBench
         {
             Application.DoEvents();
             if (!PeekMessage(out _, IntPtr.Zero, 0, 0, PmNoRemove)) return;
+        }
+    }
+
+    /// <summary>Runs the queue until a moment, whether or not it empties before then - which is how a
+    /// program that cannot keep up with a mouse actually behaves. Waits on the queue rather than spinning
+    /// on it, or the measurement would be of this loop.</summary>
+    private static void PumpUntil(double untilMs, Stopwatch clock)
+    {
+        while (true)
+        {
+            Application.DoEvents();
+            double left = untilMs - clock.Elapsed.TotalMilliseconds;
+            if (left <= 0) return;
+            MsgWaitForMultipleObjectsEx(0, IntPtr.Zero, (uint)Math.Max(1, Math.Ceiling(left)), QsAllInput, 0);
         }
     }
 
@@ -649,6 +673,20 @@ internal static class ScrollBench
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int message, IntPtr wParam, IntPtr lParam);
+
+    private const uint QsAllInput = 0x04FF;
+
+    [DllImport("user32.dll")]
+    private static extern void MsgWaitForMultipleObjectsEx(uint count, IntPtr handles, uint milliseconds,
+        uint wakeMask, uint flags);
+
+    /// <summary>Asks Windows for a millisecond timer while the bench runs. Without it a wait of one
+    /// millisecond can take fifteen, and a thousand-reports-a-second mouse cannot be imitated at all.</summary>
+    [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
+    private static extern void BeginTimePeriod(uint milliseconds);
+
+    [DllImport("winmm.dll", EntryPoint = "timeEndPeriod")]
+    private static extern void EndTimePeriod(uint milliseconds);
 
     // ---- what the micro-benchmark draws through ----
 
