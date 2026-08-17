@@ -199,23 +199,47 @@ public class ResourceLifetimeTests
         // Replacing the term throws the old search away, but its sweep is still reading the file. It is no
         // longer reachable through the document's fields, so a release that only waits for what is still
         // registered frees the mapping out from under it.
+        //
+        // The sweep is held at its first block rather than given a pattern that ought to be slow. It used to
+        // lean on "^(a+)+$" taking a long time to fail, which is true of a backtracking engine right up until
+        // the runtime learns to reject it outright - and then the sweep is over before the reopen, the
+        // mapping is free to go, and the test fails on a build where nothing is wrong. A gate is the same
+        // scenario with the timing taken out of it.
         string a = WriteSlowToScanLog(), b = WriteLog();
+        var gate = new SemaphoreSlim(0);
+        int reached = 0;
         var doc = new CascadeDocument();
         try
         {
             doc.Open(a);
             doc.WaitForIndex();
+            doc.FindCheckpointForTesting = _ =>
+            {
+                if (Interlocked.Exchange(ref reached, 1) == 0) gate.Wait(TimeSpan.FromSeconds(30));
+            };
 
             _ = doc.FindNextAsync(new FindQuery(SlowPattern, Regex: true, CaseSensitive: false), 0, true);
+            WaitFor(() => Volatile.Read(ref reached) == 1, "the sweep never reached its first block");
+
+            doc.FindCheckpointForTesting = null;    // the replacement must sweep freely
             _ = doc.FindNextAsync(new FindQuery("zzz", Regex: false, CaseSensitive: false), 0, true);
 
             doc.Open(b);
             Assert.False(await Finishes(doc.ReleasePending, 400),
                          "the mapping was released while a replaced search was still sweeping it");
 
+            gate.Release(1000);
             await doc.ReleasePending.WaitAsync(TimeSpan.FromSeconds(60));
         }
-        finally { doc.Dispose(); File.Delete(a); File.Delete(b); }
+        finally
+        {
+            gate.Release(1000);
+            doc.FindCheckpointForTesting = null;
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(a);
+            File.Delete(b);
+        }
     }
 
     [Fact]
