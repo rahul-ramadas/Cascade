@@ -6980,6 +6980,30 @@ internal static class SelfTest
         ok &= Check("an empty selection counts as none", MainForm.NewFilterSeed("", "a line") == "a line");
         ok &= Check("and nothing at all when the caret is on no line, so an empty filter is offered",
                     MainForm.NewFilterSeed(null, null) is null);
+
+        // --- when the dialog warns that the screen and the file no longer agree ---
+
+        // The rule is one thing: warn if what was taken off the screen is not IN the line it came from.
+        // Everything below is that rule met by the cases it exists for, and by the ones it must stay quiet
+        // for - a warning that fires whenever fields are on is one that gets ignored when it matters.
+        const string raw = "[09:31][api][INFO] payment declined";
+        bool Warns(string seed, bool fieldsOn = true) => MainForm.ShownTextNeedsCaution(fieldsOn, seed, raw);
+
+        ok &= Check("nothing is said while the fields are off", !Warns(raw, fieldsOn: false));
+        ok &= Check("nor when the seed is the line itself", !Warns(raw));
+        ok &= Check("nor for a value taken out of the middle of it", !Warns("api"));
+        // Hiding a field at the FRONT leaves the rest of the line in one piece, so a seed from what is left
+        // is still the file's own text and will match.
+        ok &= Check("nor for what is left after a field at the front is hidden",
+                    !Warns("[api][INFO] payment declined"));
+        // ...but a field hidden in the MIDDLE closes a gap that the file does not have.
+        ok &= Check("but a seed spanning a gap left by a hidden field is warned about",
+                    Warns("[09:31][INFO] payment declined"));
+        ok &= Check("and one spanning a join made by carrying a field elsewhere",
+                    Warns("payment declined[09:31]"));
+        ok &= Check("and one carrying a space the projection had to invent",
+                    Warns("[09:31] [api]"));
+        ok &= Check("an empty seed says nothing either way", !Warns(""));
         return ok;
     }
 
