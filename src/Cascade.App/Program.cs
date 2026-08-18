@@ -47,6 +47,14 @@ internal static class Program
             return SelfTest.Run(args.Skip(1).ToArray());
         }
 
+        if (args.Length > 0 && args[0].Equals("--rendershots", StringComparison.OrdinalIgnoreCase))
+        {
+            AttachConsole(-1);
+            InitialiseUi();
+            FailFastOnUiException();
+            return RenderShots.Run(args.Skip(1).ToArray());
+        }
+
         if (args.Length > 0 && args[0].Equals("--screens", StringComparison.OrdinalIgnoreCase))
         {
             AttachConsole(-1);
