@@ -61,6 +61,10 @@ public sealed class LineGridControl : Control
     // One font per combination of bold, italic and underline, indexed by those three bits. An array
     // rather than a field each: three flags is eight faces.
     private readonly Font[] _fonts = new Font[8];
+    // The same eight as GDI knows them. Drawing a row goes straight to GDI (see GdiCanvas), which wants a
+    // handle rather than a Font, and making one per call would be an object created and destroyed per row.
+    private readonly IntPtr[] _faces = new IntPtr[8];
+    private readonly GdiCanvas _canvas = new();
     private Font FontRegular => _fonts[0];
     private Font FontBold => _fonts[1];
     private Font FontItalic => _fonts[2];
@@ -75,6 +79,13 @@ public sealed class LineGridControl : Control
     /// <summary>Whether every character is the same width, measured rather than asked of the family name.
     /// It is what decides whether a column is sized in characters or in pixels.</summary>
     private bool _monospaced = true;
+
+    /// <summary>The same question asked of each of the eight faces separately, because a family is not
+    /// obliged to answer the same way for all of them - an italic or a bold cut proportionally spaced while
+    /// the regular one is not is unusual, but it exists. This is what decides whether a row's glyphs may be
+    /// PLACED by multiplication, so a wrong answer here is text drawn in the wrong place rather than a
+    /// scrollbar range a few pixels out.</summary>
+    private readonly bool[] _monoFace = new bool[8];
 
     private long _firstRow;
     private int _hScroll;
@@ -159,13 +170,22 @@ public sealed class LineGridControl : Control
         Controls.Add(_map);
         _vbar = new SlimScrollBar(this);
         Controls.Add(_vbar);
-        _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; Invalidate(); };
-        _hbar.Scrolled += v => { _hScroll = (int)v; Invalidate(); };
+        _vbar.Scrolled += v => { ClearViewAnchor(); _firstRow = v; ShowAtScreenRate(); };
+        _hbar.Scrolled += v => { _hScroll = (int)v; ShowAtScreenRate(); };
         // The map is a child, so it is not repainted by the grid repainting - and everything it draws is a
         // picture of the grid's own state. One hook here rather than a call beside every Invalidate() in the
         // file, because one of those would eventually be forgotten.
-        Invalidated += (_, _) => { _map?.SyncToGrid(); _vbar?.Invalidate(); };
+        Invalidated += (_, _) => ViewMoved(onScreen: true);
         _tipTimer.Tick += (_, _) => ShowTipNow();
+        _catchUp.Tick += (_, _) =>
+        {
+            // Nothing has been missed since the last tick, so the hand has stopped and this can too. The
+            // timer is left running while a drag is in flight rather than being restarted per report:
+            // starting one destroys and recreates a window, which at a few hundred reports a second costs
+            // more than the frames it is there to catch.
+            if (!MissedFrame) { _catchUp.Stop(); return; }
+            ShowAtScreenRate();
+        };
         TabStop = true;
         AccessibleRole = AccessibleRole.List;
         AccessibleName = "Cascade log view";
@@ -332,14 +352,23 @@ public sealed class LineGridControl : Control
         return SelectFont(eval.ColorFilter is not null ? StyleResolver.Resolve(eval.ColorFilter, defaults) : defaults);
     }
 
-    private int PrefixWidth(string text, int count, Font font)
-        => MeasureWidth(text.AsSpan(0, Math.Clamp(count, 0, text.Length)), font);
+    private int PrefixWidth(ReadOnlySpan<char> text, int count, Font font)
+        => MeasureWidth(text[..Math.Clamp(count, 0, text.Length)], font);
 
     /// <summary>Width of a stretch of text. Takes a span because wrapping binary-searches for the break,
     /// and a substring per probe would churn the heap on every frame.</summary>
     private int MeasureWidth(ReadOnlySpan<char> text, Font font)
-        => text.IsEmpty ? 0 : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
-               TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
+        => text.IsEmpty ? 0 : DrawnWidth(text, font, CharWidthOf(font));
+
+    /// <summary>The width of one character in a face, when every character in it is the same width. Found
+    /// by identity rather than measured: there are eight faces and this is asked once per probe of a
+    /// binary search.</summary>
+    private int CharWidthOf(Font font)
+    {
+        for (int i = 0; i < _fonts.Length; i++)
+            if (ReferenceEquals(_fonts[i], font)) return CharWidthOf(i);
+        return 0;
+    }
 
     /// <summary>Selecting part of a line works split into cells as well as whole; the cell simply takes the
     /// place of the line. What it never does is run from one cell into the next - the text between them is
@@ -394,29 +423,40 @@ public sealed class LineGridControl : Control
         }
     }
 
-    private void FillHighlights(Graphics g, string text, int from, int to, int gutter, int y, Font font)
+    /// <summary>Marks every occurrence on show and re-draws the text over it in the ordinary text colour.
+    /// Without the second part a hit on a selected row would be white on orange - and the row the search
+    /// just landed on is always selected.</summary>
+    private void DrawHighlightText(GdiCanvas ink, string text, int from, int to, Rectangle strip,
+                                   Font font, int fontIndex)
     {
         foreach (var (at, len, colour) in _highlights)
         {
             int a = Math.Max(at, from), b = Math.Min(at + len, to);
             if (b <= a) continue;
-            int x0 = SegmentX(text, from, a, gutter, font);
-            int x1 = SegmentX(text, from, b, gutter, font);
-            g.FillRectangle(Fill(colour), x0, y, Math.Max(1, x1 - x0), _rowHeight);
+            int x0 = SegmentX(text, from, a, strip.Left, font);
+            int x1 = SegmentX(text, from, b, strip.Left, font);
+            var box = Rectangle.Intersect(new Rectangle(x0, strip.Top, Math.Max(1, x1 - x0), _rowHeight), strip);
+            ink.Fill(box, colour);
+            var part = text.AsSpan(a, b - a);
+            ink.TextOver(part, x0, strip.Top, strip, _settings.Foreground, font, _faces[fontIndex],
+                         Plain(part, fontIndex));
         }
     }
 
-    /// <summary>Re-draws the marked text over its own fill in the ordinary text colour. Without this a hit on
-    /// a selected row would be white on orange - and the row the search just landed on is always selected.</summary>
-    private void DrawHighlightText(Graphics g, string text, int from, int to, int gutter, int y, Font font)
+    /// <summary>Whether a stretch of text is the plain printable ASCII that can go through the shortest
+    /// call GDI has, in a face where every character is the same width.</summary>
+    private bool Plain(ReadOnlySpan<char> text, int fontIndex)
+        => !_longWay && CharWidthOf(fontIndex) > 0 && text.IndexOfAnyExceptInRange(' ', '~') < 0;
+
+    private bool _longWay;
+
+    /// <summary>Test seam: put every piece of text back through the general text layout, as this did before
+    /// the direct path existed, so a check can prove the two draw the same picture.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool DrawTextTheLongWayForTesting
     {
-        foreach (var (at, len, _) in _highlights)
-        {
-            int a = Math.Max(at, from), b = Math.Min(at + len, to);
-            if (b <= a) continue;
-            int x0 = SegmentX(text, from, a, gutter, font);
-            TextRenderer.DrawText(g, text[a..b], font, new Point(x0, y), _settings.Foreground, TextFlags);
-        }
+        get => _longWay;
+        set { _longWay = value; Invalidate(); }
     }
 
     // ---- what the match map reads ----
@@ -456,8 +496,154 @@ public sealed class LineGridControl : Control
     {
         ClearViewAnchor();
         SetFirstRow(row);
-        Invalidate();
+        ShowAtScreenRate();
     }
+
+    // ---- how often a dragged view is actually put on the screen ----
+
+    private readonly System.Windows.Forms.Timer _catchUp = new() { Interval = 15 };
+    private long _shownAt;
+    private long _screenAskedAt;
+    private int _screenHz = DefaultRate;
+    private bool _missedFrame;
+    private static int _owing;
+
+    /// <summary>Whether any view is holding a frame it has not drawn yet. A drag's last frame is drawn by a
+    /// timer, and a timer arrives when Windows feels like it - so a harness that waits for the window to go
+    /// quiet has to know the difference between quiet and finished.</summary>
+    internal static bool AnyViewOwesAFrameForTesting => _owing > 0;
+
+    private bool MissedFrame
+    {
+        get => _missedFrame;
+        set
+        {
+            if (_missedFrame == value) return;
+            _missedFrame = value;
+            _owing += value ? 1 : -1;
+        }
+    }
+
+    /// <summary>
+    /// Puts the view on screen after a scroll, but leaves a refresh interval of the screen's own between
+    /// one frame and the next.
+    ///
+    /// <para>A drag on the scrollbar or the map reports as fast as the mouse does - a thousand times a
+    /// second on a modern one - and every report used to repaint the whole window there and then. Painting
+    /// faster than the screen refreshes cannot be seen by anybody: the compositor shows the newest frame at
+    /// the next refresh and throws the rest away. Measured with a 1000 Hz mouse on a 240 Hz screen, that was
+    /// 287 repaints a second - a fifth of them wasted outright, and, far more to the point, a thread so
+    /// busy drawing that it answered only 198 of the mouse's reports a second, which is why the thumb
+    /// trailed the hand.</para>
+    ///
+    /// <para>This is a floor on the gap between frames, NOT a schedule: nothing here is locked to the
+    /// screen's vertical blank, and it does not try to be. The calls that would do that
+    /// (<c>DwmFlush</c>, <c>D3DKMTWaitForVerticalBlankEvent</c>) block the thread until the next refresh,
+    /// which is the one thing a thread with a drag to answer cannot afford. So a frame may still land at
+    /// any moment within a refresh interval; what it may not do is land twice in one.</para>
+    ///
+    /// <para>The gap is measured from the END of the last frame, so the true period is a refresh interval
+    /// plus however long painting takes - about 5 frames in 6 on this machine. That is the conservative
+    /// direction on purpose: the slower a view is to paint, the further it backs off, and it can never
+    /// spend more than half its time painting.</para>
+    ///
+    /// <para>What is skipped is a <b>frame</b>, never a position: the view has already moved, and the next
+    /// report - or the timer behind it, for the report that turns out to be the last - draws wherever the
+    /// hand has got to by then. So a whole page still lands on screen each time, which is what a drag is
+    /// supposed to look like, and the one that lands is the one the pointer is actually pointing at.</para>
+    /// </summary>
+    private void ShowAtScreenRate()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now - _shownAt >= System.Diagnostics.Stopwatch.Frequency / Math.Max(1, ScreenRate()))
+        {
+            Invalidate();
+            Update();
+            return;
+        }
+        // Too soon to be seen. The view has moved all the same, so something has to draw it in case this
+        // report is the last one.
+        MissedFrame = true;
+        ViewMoved(onScreen: false);
+        if (!_catchUp.Enabled) _catchUp.Start();
+    }
+
+    /// <summary>What the two strips beside the text are owed when the view moves. They are children, so a
+    /// repaint of the text does not reach them, and they have to hear about a move even on the frames that
+    /// are not drawn - the map remembers where the view was last put, and would otherwise decide the view
+    /// had wandered off on its own and re-centre itself under a hand that was dragging it.
+    /// <para>The map is redrawn only on the frames that are: it is a picture of the same view, and one
+    /// nobody can see is worth no more than a page of text nobody can see. The scrollbar draws itself on
+    /// every report of a drag, and should - the thumb is the thing the hand is watching.</para></summary>
+    private void ViewMoved(bool onScreen)
+    {
+        _map?.SyncToGrid(onScreen);
+        if (onScreen) _vbar?.Invalidate();
+    }
+
+    /// <summary>How many times a second the screen this window is on can show something new. Asked of the
+    /// monitor rather than assumed, because 60, 120, 144 and 240 are all ordinary now - and asked again from
+    /// time to time, because a window can be dragged onto a different screen, and because a session can be
+    /// picked up by a remote desktop while it is running.</summary>
+    private int ScreenRate()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_screenAskedAt != 0 && now - _screenAskedAt < System.Diagnostics.Stopwatch.Frequency) return _screenHz;
+        _screenAskedAt = now;
+
+        int asked = 0;
+        try
+        {
+            IntPtr dc = CreateDC(Screen.FromControl(this).DeviceName, null, null, IntPtr.Zero);
+            if (dc != IntPtr.Zero)
+            {
+                asked = GetDeviceCaps(dc, VerticalRefresh);
+                DeleteDC(dc);
+            }
+        }
+        catch (InvalidOperationException) { /* no screen to ask; the answer below stands */ }
+        return _screenHz = RateFrom(asked, SystemInformation.TerminalServerSession);
+    }
+
+    /// <summary>
+    /// What to believe about the screen, given what it said and whether anyone is watching down a wire.
+    ///
+    /// <para>Nought and one both mean "whatever the hardware defaults to", which is no answer at all - it is
+    /// what a remote desktop's display driver says, having no refresh rate of its own to report. Anything
+    /// unanswered falls to a rate every screen can manage rather than to whatever was last seen: a session
+    /// begun on a 240 Hz monitor and then picked up over a remote desktop would otherwise keep drawing 240
+    /// frames a second down the wire, which is the worst place there is to be drawing them.</para>
+    ///
+    /// <para>And over that wire the picture is not pixels but drawing orders, shown at the far end on a
+    /// schedule of its own - commonly about thirty times a second. Frames drawn faster than that are
+    /// coalesced away at some cost to the machine sending them and none at all to the person reading. So a
+    /// remote session is held to that, which is also the kindest thing to do to the link.</para>
+    ///
+    /// <para>Separated from the asking so it can be checked without a monitor or a remote desktop to hand.</para>
+    /// </summary>
+    internal static int RateFrom(int asked, bool remote)
+    {
+        int hz = asked > 1 ? asked : DefaultRate;
+        return remote ? Math.Min(hz, RemoteRate) : hz;
+    }
+
+    private const int DefaultRate = 60;
+    private const int RemoteRate = 30;
+    private const int VerticalRefresh = 116;
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr CreateDC(string driver, string? device, string? port, IntPtr mode);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern int GetDeviceCaps(IntPtr dc, int index);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeleteDC(IntPtr dc);
+
+    /// <summary>The rate a drag is being paced to, so a check can hold the frames it drew against what the
+    /// screen it is on could actually have shown.</summary>
+    internal int ScreenRateForTesting => ScreenRate();
 
     /// <summary>A wheel turn over the map scrolls the text, as it does over the scrollbar.</summary>
     internal void ScrollByWheel(int delta) => ScrollBy(-Math.Sign(delta) * SystemInformation.MouseWheelScrollLines);
@@ -669,6 +855,7 @@ public sealed class LineGridControl : Control
     public void RebuildFonts()
     {
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
+        ReleaseFaces();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
         float size = _settings.EffectiveFontSize;
@@ -680,6 +867,7 @@ public sealed class LineGridControl : Control
             _fonts[i] = new Font(family, size,
                 ((i & 1) != 0 ? FontStyle.Bold : 0) | ((i & 2) != 0 ? FontStyle.Italic : 0) |
                 ((i & 4) != 0 ? FontStyle.Underline : 0));
+        for (int i = 0; i < _faces.Length; i++) _faces[i] = _fonts[i].ToHfont();
         // Font.Height is the typeface's own line spacing, which for a monospaced face already includes
         // whatever gap its designer wanted between lines - so anything added here is the reader's choice,
         // not a correction. Two pixels used to be added unasked, costing a line in every eleven on screen.
@@ -690,9 +878,13 @@ public sealed class LineGridControl : Control
             _charWidths[i] = Math.Max(1, TextRenderer.MeasureText("0", _fonts[i], new Size(1000, 100),
                 TextFormatFlags.NoPadding).Width);
         // Asked of the shapes, not of the name: "Consolas" is fixed-pitch and "Segoe UI" is not, but a
-        // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly.
-        _monospaced = TextRenderer.MeasureText("iiiiiiiiii", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width
-                   == TextRenderer.MeasureText("WWWWWWWWWW", FontRegular, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly - and,
+        // since a row's glyphs are placed by multiplication when the answer is yes, draws its text in the
+        // wrong place. Asked of every face, because a family may be cut fixed-pitch in one and not another.
+        for (int i = 0; i < _fonts.Length; i++)
+            _monoFace[i] = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width
+                        == TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        _monospaced = _monoFace[0];
         BuildChipFont();
         _naturalKey = null;   // the widths the content asks for are measured in this font
         Invalidate();
@@ -910,17 +1102,6 @@ public sealed class LineGridControl : Control
         return starts.Count;
     }
 
-    /// <summary>
-    /// Flags for every piece of scrolling line text.
-    ///
-    /// <see cref="TextFormatFlags.PreserveGraphicsClipping"/> is the load-bearing one: TextRenderer draws
-    /// through GDI, which ignores the GDI+ clip region set on the Graphics unless it is asked not to. Without
-    /// it, a line scrolled right starts at a negative x and is painted straight over the marker and
-    /// line-number margins - the SetClip around the call looks like it should prevent that, and does not.
-    /// </summary>
-    private const TextFormatFlags TextFlags =
-        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping;
-
     /// <summary>Width of the marker + line-number margin, for harnesses that check nothing paints over it.</summary>
     internal int GutterWidthForTesting => GutterWidth();
 
@@ -955,6 +1136,10 @@ public sealed class LineGridControl : Control
     }
 
     internal int RowsPaintedForTesting => _layout.Count;
+
+    /// <summary>The top row of the last frame actually drawn, which is not the same thing as the row the
+    /// view is on: a drag moves the view faster than the screen can show it.</summary>
+    internal long FirstPaintedRowForTesting => _layout.Count > 0 ? _layout[0].Row : -1;
 
     /// <summary>How many times the view has actually repainted. A picture of it cannot answer that - drawing
     /// a control to a bitmap paints it whether or not anything asked it to.</summary>
@@ -1146,83 +1331,95 @@ public sealed class LineGridControl : Control
         _layout.Clear();
         int atY = TextTop;
         int bottom = ClientSize.Height - BottomInset;
-        // Kept for the whole frame, not read back per row: every read of Graphics.Clip builds a GDI+ region
-        // with a finaliser behind it, and a screenful of rows is a few thousand of those a second.
-        var paintClip = g.Clip;
-        for (int i = 0; i < visible; i++)
+        int caretTop = -1, caretHeight = 0;
+        // The whole row loop draws on the device context itself, borrowed once. Nothing may touch the
+        // Graphics until it is given back - and nothing here wants to: filling a row as part of drawing its
+        // text is the cheapest way there is to put a line on screen (see GdiCanvas). What GDI+ is still
+        // needed for - the caret's translucent outline - is done afterwards, off the layout it left behind.
+        var ink = _canvas;
+        ink.Borrow(g);
+        try
         {
-            long row = _firstRow + i;
-            if (row >= rows || i >= windowCount) break;
-            if (atY >= bottom) break;
-            int y = atY;
-            long line = _window[i];
-            string text = _doc.GetLineText(line);
-            var eval = colouring.Evaluate(text, line);
-
-            ResolvedStyle style = eval.ColorFilter is not null
-                ? StyleResolver.Resolve(eval.ColorFilter, defaults)
-                : defaults;
-
-            // Both of these are asked of the LINE, not of the row it landed on this frame: the filters move
-            // every row about, and a highlight left on a row would end up over text nobody picked out.
-            bool charSel = HasCharSelection && line == _charLine;
-            bool selectedRow = !charSel && (_sel.Contains(line) || line == standIn);
-            bool dim = !_doc.FilteredMode && !eval.Shown;
-
-            Color back = selectedRow ? _settings.SelectionBack : ToColor(style.Background);
-            Color fore = selectedRow ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
-
-            Font font = SelectFont(style);
-            int charWidth = CharWidthOf(FontIndex(style));
-            string shown = columns ? text : Expand(inline ? Project(text).Text : text);
-            int segments = columns ? 1 : WrapInto(shown, contentW, font, _segments);
-            int rowHeight = segments * _rowHeight;
-            _layout.Add((row, y, rowHeight, segments));
-
-            var rowRect = new Rectangle(0, y, ClientSize.Width - RightGutterWidth, rowHeight);
-            g.FillRectangle(Fill(back), rowRect);
-
-            DrawMarkers(g, line, y, rowHeight);
-            DrawLineNumber(g, line, y, rowHeight, selectedRow);
-
-            var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
-            g.SetClip(contentRect);
-            if (columns)
-                DrawColumns(g, text, row, gutter, y, fore, font, charSel, selected);
-            else
+            for (int i = 0; i < visible; i++)
             {
-                CollectHighlights(shown, row == _caretRow, charSel, selected);
-                for (int s = 0; s < segments; s++)
+                long row = _firstRow + i;
+                if (row >= rows || i >= windowCount) break;
+                if (atY >= bottom) break;
+                int y = atY;
+                long line = _window[i];
+                string text = _doc.GetLineText(line);
+                var eval = colouring.Evaluate(text, line);
+
+                ResolvedStyle style = eval.ColorFilter is not null
+                    ? StyleResolver.Resolve(eval.ColorFilter, defaults)
+                    : defaults;
+
+                // Both of these are asked of the LINE, not of the row it landed on this frame: the filters move
+                // every row about, and a highlight left on a row would end up over text nobody picked out.
+                bool charSel = HasCharSelection && line == _charLine;
+                bool selectedRow = !charSel && (_sel.Contains(line) || line == standIn);
+                bool dim = !_doc.FilteredMode && !eval.Shown;
+
+                Color back = selectedRow ? _settings.SelectionBack : ToColor(style.Background);
+                Color fore = selectedRow ? _settings.SelectionFore : (dim ? _settings.DimForeground : ToColor(style.Foreground));
+
+                int fontIndex = FontIndex(style);
+                Font font = _fonts[fontIndex];
+                int charWidth = CharWidthOf(fontIndex);
+                string shown = columns ? text : Expand(inline ? Project(text).Text : text);
+                int segments = columns ? 1 : WrapInto(shown, contentW, font, _segments);
+                int rowHeight = segments * _rowHeight;
+                _layout.Add((row, y, rowHeight, segments));
+
+                DrawGutters(ink, line, y, rowHeight, selectedRow);
+
+                var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
+                if (columns)
                 {
-                    int from = _segments[s];
-                    int to = s + 1 < _segments.Count ? _segments[s + 1] : shown.Length;
-                    int sy = y + s * _rowHeight;
-                    FillHighlights(g, shown, from, to, gutter, sy, font);
-                    runningMaxWidth = Math.Max(runningMaxWidth, DrawSegment(g, shown, from, to, gutter, sy, fore, font, charWidth));
-                    DrawHighlightText(g, shown, from, to, gutter, sy, font);
-                    if (charSel) DrawCharSelection(g, shown, from, to, gutter, sy, font);
+                    ink.Fill(contentRect, back);
+                    using (ink.Clip(contentRect))
+                        DrawColumns(ink, text, row, gutter, y, fore, back, fontIndex, charSel, selected);
                 }
+                else
+                {
+                    CollectHighlights(shown, row == _caretRow, charSel, selected);
+                    for (int s = 0; s < segments; s++)
+                    {
+                        int from = _segments[s];
+                        int to = s + 1 < _segments.Count ? _segments[s + 1] : shown.Length;
+                        int sy = y + s * _rowHeight;
+                        var strip = new Rectangle(gutter, sy, contentW, _rowHeight);
+                        runningMaxWidth = Math.Max(runningMaxWidth,
+                            DrawSegment(ink, shown, from, to, strip, back, fore, font, fontIndex, charWidth));
+                        DrawHighlightText(ink, shown, from, to, strip, font, fontIndex);
+                        if (charSel) DrawCharSelection(ink, shown, from, to, strip, font, fontIndex);
+                    }
+                }
+
+                if (_doc.IsLineTruncated(line))
+                    ink.TextIn(" […]", new Rectangle(ClientSize.Width - RightGutterWidth - 40, y, 40, _rowHeight),
+                        Color.Gray, FontItalic, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+
+                if (row == _caretRow && Focused) { caretTop = y; caretHeight = rowHeight; }
+
+                atY += rowHeight;
             }
-            g.Clip = paintClip;
 
-            if (_doc.IsLineTruncated(line))
-                TextRenderer.DrawText(g, " […]", FontItalic,
-                    new Point(ClientSize.Width - RightGutterWidth - 40, y), Color.Gray);
-
-            if (row == _caretRow && Focused)
-                using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack))) g.DrawRectangle(pen, 0, y, rowRect.Width - 1, rowHeight - 1);
-
-            atY += rowHeight;
+            // Only the strip no row reached needs the background. Clearing the whole view first and then
+            // painting a row over every part of it wrote every pixel of the window twice.
+            if (atY < bottom)
+                ink.Fill(new Rectangle(0, atY, ClientSize.Width - RightGutterWidth, bottom - atY), _settings.Background);
         }
+        finally { ink.Release(); }
 
-        paintClip.Dispose();
-
-        // Only the strip no row reached needs the background. Clearing the whole view first and then
-        // painting a row over every part of it wrote every pixel of the window twice.
-        if (atY < bottom)
-            g.FillRectangle(Fill(_settings.Background), 0, atY, ClientSize.Width - RightGutterWidth, bottom - atY);
+        if (caretTop >= 0)
+            using (var pen = new Pen(Color.FromArgb(120, _settings.SelectionBack)))
+                g.DrawRectangle(pen, 0, caretTop, ClientSize.Width - RightGutterWidth - 1, caretHeight - 1);
 
         DrawFocusBar(g);
+
+        _shownAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        MissedFrame = false;
 
         if (columns) runningMaxWidth = TotalColumnsWidth();
         if (runningMaxWidth != _maxContentWidth)
@@ -1531,10 +1728,11 @@ public sealed class LineGridControl : Control
     /// most of them are off the side, and a cell costs a text draw whether or not anyone can see it.
     /// It does NOT report a content width - the row is as wide as the columns are, which the caller reads
     /// once from <see cref="TotalColumnsWidth"/> rather than once per row.</summary>
-    private void DrawColumns(Graphics g, string text, long row, int gutter, int y, Color fore, Font font,
-                             bool charSel, string? selected)
+    private void DrawColumns(GdiCanvas ink, string text, long row, int gutter, int y, Color fore, Color back,
+                             int fontIndex, bool charSel, string? selected)
     {
         var template = _doc!.Columns.Compiled;
+        var font = _fonts[fontIndex];
         CollectHighlights(text, row == _caretRow, charSel, selected);
 
         // A line the template does not fit is shown whole, across the row. Columns can shorten a line;
@@ -1542,11 +1740,11 @@ public sealed class LineGridControl : Control
         if (!template.Match(text, _match))
         {
             int from = 0, to = text.Length;
-            FillHighlights(g, text, from, to, gutter - _hScroll, y, font);
-            TextRenderer.DrawText(g, text, font, new Point(gutter - _hScroll, y), fore,
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.PreserveGraphicsClipping);
-            DrawHighlightText(g, text, from, to, gutter - _hScroll, y, font);
-            if (charSel) DrawCharSelection(g, text, from, to, gutter - _hScroll, y, font);
+            var strip = new Rectangle(gutter, y, ContentWidth, _rowHeight);
+            ink.TextOver(text, gutter - _hScroll, y, strip, fore, font, _faces[fontIndex],
+                         Plain(text, fontIndex));
+            DrawHighlightText(ink, text, from, to, strip, font, fontIndex);
+            if (charSel) DrawCharSelection(ink, text, from, to, strip, font, fontIndex);
             return;
         }
 
@@ -1565,19 +1763,43 @@ public sealed class LineGridControl : Control
             var span = CellText(text, def, _match);
             if (!marks)
             {
-                TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
+                DrawCell(ink, span, cell, fore, back, font, fontIndex, def.Align, CellFlags(def.Align, x, w, gutter, right));
             }
             else
             {
                 var (from, to) = CellRange(def, _match);
                 int originX = CellTextOrigin(cell.Left, cell.Width, span, font, def.Align);
-                FillCellHighlights(g, text, from, to, originX, cell, font);
-                TextRenderer.DrawText(g, span, font, cell, fore, CellFlags(def.Align, x, w, gutter, right));
-                DrawCellHighlightText(g, text, from, to, originX, cell, font);
-                if (charSel && i == _charColumn) DrawCellCharSelection(g, text, from, to, originX, cell, font);
+                FillCellHighlights(ink, text, from, to, originX, cell, font);
+                ink.TextIn(span, cell, fore, font, CellFlags(def.Align, x, w, gutter, right));
+                DrawCellHighlightText(ink, text, from, to, originX, cell, font);
+                if (charSel && i == _charColumn) DrawCellCharSelection(ink, text, from, to, originX, cell, font);
             }
             x += w;
         }
+    }
+
+    /// <summary>Draws one cell's text. Plain ASCII in a fixed-pitch face that fits its box goes by the same
+    /// short road a whole line does - one call that lays the background down with the text - and is placed
+    /// by arithmetic, which is exactly where the layout would have put it. Anything else (a proportional
+    /// face, a script that needs shaping, or text too long for its box and so wanting the ellipsis) goes
+    /// through the layout, over the fill the row has already had.</summary>
+    private void DrawCell(GdiCanvas ink, ReadOnlySpan<char> span, Rectangle cell, Color fore, Color back,
+                          Font font, int fontIndex, ColumnAlign align, TextFormatFlags flags)
+    {
+        int charWidth = CharWidthOf(fontIndex);
+        int width = span.Length * charWidth;
+        if (!Plain(span, fontIndex) || width > cell.Width)
+        {
+            ink.TextIn(span, cell, fore, font, flags);
+            return;
+        }
+        int x = align switch
+        {
+            ColumnAlign.Right => cell.Right - width,
+            ColumnAlign.Center => cell.Left + (cell.Width - width) / 2,
+            _ => cell.Left
+        };
+        ink.Text(span, x, cell.Top, cell, fore, back, font, _faces[fontIndex], plain: true);
     }
 
     /// <summary>Where a character of a cell's text sits on screen.</summary>
@@ -1586,7 +1808,7 @@ public sealed class LineGridControl : Control
 
     /// <summary>Fills whatever of the marked ranges falls inside this cell. Clamped to the cell's own box:
     /// a cell whose text is wider than it is would otherwise paint its marks over the column beside it.</summary>
-    private void FillCellHighlights(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    private void FillCellHighlights(GdiCanvas ink, string line, int from, int to, int originX, Rectangle cell, Font font)
     {
         foreach (var (at, len, colour) in _highlights)
         {
@@ -1594,8 +1816,7 @@ public sealed class LineGridControl : Control
             if (b <= a) continue;
             var rect = Rectangle.Intersect(cell, Span(a, b));
             if (rect.Width <= 0) continue;
-            using var brush = new SolidBrush(colour);
-            g.FillRectangle(brush, rect);
+            ink.Fill(rect, colour);
         }
 
         Rectangle Span(int a, int b)
@@ -1607,17 +1828,17 @@ public sealed class LineGridControl : Control
 
     /// <summary>Re-draws marked text over its own fill in the ordinary colour, as the whole-line path does -
     /// a hit on a selected row would otherwise be white on orange.</summary>
-    private void DrawCellHighlightText(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    private void DrawCellHighlightText(GdiCanvas ink, string line, int from, int to, int originX, Rectangle cell, Font font)
     {
         foreach (var (at, len, _) in _highlights)
         {
             int a = Math.Max(at, from), b = Math.Min(at + len, to);
             if (b <= a) continue;
-            DrawInCell(g, line.AsSpan(a, b - a), CellX(line, from, a, originX, font), cell, font, _settings.Foreground);
+            DrawInCell(ink, line.AsSpan(a, b - a), CellX(line, from, a, originX, font), cell, font, _settings.Foreground);
         }
     }
 
-    private void DrawCellCharSelection(Graphics g, string line, int from, int to, int originX, Rectangle cell, Font font)
+    private void DrawCellCharSelection(GdiCanvas ink, string line, int from, int to, int originX, Rectangle cell, Font font)
     {
         int a = Math.Clamp(Math.Min(_charAnchor, _charFocus), from, to);
         int b = Math.Clamp(Math.Max(_charAnchor, _charFocus), from, to);
@@ -1625,17 +1846,17 @@ public sealed class LineGridControl : Control
         int x0 = CellX(line, from, a, originX, font), x1 = CellX(line, from, b, originX, font);
         var rect = Rectangle.Intersect(cell, new Rectangle(x0, cell.Top, Math.Max(1, x1 - x0), cell.Height));
         if (rect.Width <= 0) return;
-        using (var brush = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(brush, rect);
-        DrawInCell(g, line.AsSpan(a, b - a), x0, cell, font, _settings.SelectionFore);
+        ink.Fill(rect, _settings.SelectionBack);
+        DrawInCell(ink, line.AsSpan(a, b - a), x0, cell, font, _settings.SelectionFore);
     }
 
     /// <summary>Draws a stretch of a cell's text at an exact x, bounded by the cell so it cannot run into
     /// the next column. Text that would start left of the cell is left alone - it is already drawn, and
     /// moving it to fit would put it somewhere it does not belong.</summary>
-    private static void DrawInCell(Graphics g, ReadOnlySpan<char> text, int x, Rectangle cell, Font font, Color colour)
+    private static void DrawInCell(GdiCanvas ink, ReadOnlySpan<char> text, int x, Rectangle cell, Font font, Color colour)
     {
         if (x < cell.Left || x >= cell.Right) return;
-        TextRenderer.DrawText(g, text, font, new Rectangle(x, cell.Top, cell.Right - x, cell.Height), colour,
+        ink.TextIn(text, new Rectangle(x, cell.Top, cell.Right - x, cell.Height), colour, font,
             TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.Left);
     }
 
@@ -2480,24 +2701,50 @@ public sealed class LineGridControl : Control
     /// <summary>Gives a column a width outright, so a check can set one up without a gesture.</summary>
     internal void SetColumnWidthForTesting(int index, int pixels) { SetColumnWidth(index, pixels); ColumnsEdited(); }
 
-    private int DrawFullLine(Graphics g, string text, int gutter, int y, Color fore, Font font)
+    /// <summary>Draws one segment of a line - the whole of it when nothing is wrapped - and the row's own
+    /// background behind it, in one call. Returns how wide the content is, which is what the horizontal
+    /// scrollbar's range is built from.</summary>
+    private int DrawSegment(GdiCanvas ink, string text, int from, int to, Rectangle strip,
+                            Color back, Color fore, Font font, int fontIndex, int charWidth)
     {
-        text = Expand(text);
-        var pt = new Point(gutter - _hScroll, y);
-        TextRenderer.DrawText(g, text, font, pt, fore, TextFlags);
-        int w = TextRenderer.MeasureText(g, text, font, new Size(int.MaxValue, _rowHeight), TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
-        return w + 8;
+        var part = text.AsSpan(from, to - from);
+        int x = strip.Left - (Wrapping ? 0 : _hScroll);
+        bool plain = charWidth > 0 && part.IndexOfAnyExceptInRange(' ', '~') < 0;
+        var (shownFrom, shownTo) = plain ? OnScreenPart(part.Length, x, charWidth) : (0, part.Length);
+        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back,
+                 font, _faces[fontIndex], plain);
+        if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
+        return (plain ? part.Length * charWidth : DrawnWidth(part, font, charWidth)) + 8;
     }
 
-    /// <summary>Draws one segment of a line - the whole of it when nothing is wrapped. Returns how wide the
-    /// content is, which is what the horizontal scrollbar's range is built from.</summary>
-    private int DrawSegment(Graphics g, string text, int from, int to, int gutter, int y, Color fore, Font font, int charWidth)
+    /// <summary>
+    /// Which characters of a fixed-pitch stretch of text starting at <paramref name="x"/> can land in the
+    /// window, with one character of slack at each end for a slanted face's overhang.
+    ///
+    /// <para>GDI lays out and rasterises every character it is handed, whether or not the result falls
+    /// inside the clip - so drawing a whole line costs what the whole line costs, and a log line is
+    /// routinely three or four times the width of the window it is being read in. Handing over only the
+    /// part that can be seen measured a 400-character log at less than half its cost, and cannot change a
+    /// pixel of what appears: what is left out is outside the clip either way.</para>
+    /// </summary>
+    private (int From, int To) OnScreenPart(int length, int x, int charWidth)
     {
-        string part = text[from..to];
-        int x = gutter - (Wrapping ? 0 : _hScroll);
-        TextRenderer.DrawText(g, part, font, new Point(x, y), fore, TextFlags);
-        if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
-        return DrawnWidth(part, font, charWidth) + 8;
+        if (_wholeLines) return (0, length);
+        int left = GutterWidth(), right = left + ContentWidth;
+        int first = Math.Clamp((left - x) / charWidth - 1, 0, length);
+        int last = Math.Clamp((right - x) / charWidth + 2, first, length);
+        return (first, last);
+    }
+
+    private bool _wholeLines;
+
+    /// <summary>Test seam: hand GDI the whole of every line, as this used to, so a check can prove that
+    /// drawing only the part that shows draws the same picture.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool DrawWholeLinesForTesting
+    {
+        get => _wholeLines;
+        set { _wholeLines = value; Invalidate(); }
     }
 
     /// <summary>
@@ -2517,8 +2764,8 @@ public sealed class LineGridControl : Control
             : TextRenderer.MeasureText(text, font, new Size(int.MaxValue, _rowHeight),
                   TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix).Width;
 
-    /// <summary>The width of one character when every character is the same width, else 0.</summary>
-    private int CharWidthOf(int fontIndex) => _monospaced ? _charWidths[fontIndex] : 0;
+    /// <summary>The width of one character in a face where every character is the same width, else 0.</summary>
+    private int CharWidthOf(int fontIndex) => _monoFace[fontIndex] ? _charWidths[fontIndex] : 0;
 
     /// <summary>A brush for a colour, kept rather than made. A frame fills a few hundred rectangles in a
     /// handful of colours, and every one of those used to be a fresh GDI+ object and a finaliser.</summary>
@@ -2547,50 +2794,79 @@ public sealed class LineGridControl : Control
     /// <summary>Paints the selected part of a line over the text already drawn, clipped to one segment. The
     /// row keeps its own colours - only the range is in the selection colours - which is how a text box
     /// reads.</summary>
-    private void DrawCharSelection(Graphics g, string text, int from, int to, int gutter, int y, Font font)
+    private void DrawCharSelection(GdiCanvas ink, string text, int from, int to, Rectangle strip,
+                                   Font font, int fontIndex)
     {
         int a = Math.Clamp(Math.Min(_charAnchor, _charFocus), 0, text.Length);
         int b = Math.Clamp(Math.Max(_charAnchor, _charFocus), 0, text.Length);
         a = Math.Max(a, from);
         b = Math.Min(b, to);
         if (b <= a) return;
-        int x0 = SegmentX(text, from, a, gutter, font);
-        int x1 = SegmentX(text, from, b, gutter, font);
-        using (var brush = new SolidBrush(_settings.SelectionBack)) g.FillRectangle(brush, x0, y, Math.Max(1, x1 - x0), _rowHeight);
-        TextRenderer.DrawText(g, text[a..b], font, new Point(x0, y), _settings.SelectionFore, TextFlags);
+        int x0 = SegmentX(text, from, a, strip.Left, font);
+        int x1 = SegmentX(text, from, b, strip.Left, font);
+        var box = Rectangle.Intersect(new Rectangle(x0, strip.Top, Math.Max(1, x1 - x0), _rowHeight), strip);
+        ink.Fill(box, _settings.SelectionBack);
+        var part = text.AsSpan(a, b - a);
+        ink.TextOver(part, x0, strip.Top, strip, _settings.SelectionFore, font, _faces[fontIndex],
+                     Plain(part, fontIndex));
     }
 
     /// <summary>Where a character sits on screen, measured from the start of the segment it is drawn in.</summary>
-    private int SegmentX(string text, int segmentStart, int index, int gutter, Font font)
-        => gutter - (Wrapping ? 0 : _hScroll) + PrefixWidth(text[segmentStart..], index - segmentStart, font);
+    private int SegmentX(string text, int segmentStart, int index, int left, Font font)
+        => left - (Wrapping ? 0 : _hScroll) + PrefixWidth(text.AsSpan(segmentStart), index - segmentStart, font);
 
-    private void DrawMarkers(Graphics g, long line, int y, int height)
+    /// <summary>The margins beside a row: the marker bars and the line number, on the neutral margin colour
+    /// rather than the row's own - a marker has to stay findable whatever colour a filter gave the line.
+    /// <para>The number is drawn over a background it is told about, and placed by arithmetic in a
+    /// fixed-pitch face rather than by asking the text layout to right-align it. Between them those took a
+    /// fifth of the whole paint off it.</para></summary>
+    private void DrawGutters(GdiCanvas ink, long line, int y, int height, bool selected)
     {
-        if (!MarkersVisible || _doc is null) return;
-        // Keep the marker gutter the neutral margin color (not the line's fill color) so the marker
-        // bars stay clearly visible regardless of the line's filter highlight or selection.
-        g.FillRectangle(Fill(_settings.GutterBack), 0, y, MarkerGutterWidth, height);
-        byte mask = _doc.Markers.MaskOf(line);
-        if (mask == 0) return;
-        for (int m = 0; m < 8; m++)
+        int markers = MarkerGutterWidth;
+        if (markers > 0)
         {
-            if ((mask & (1 << m)) == 0) continue;
-            g.FillRectangle(Fill(AppSettings.MarkerColors[m]), 3 + m * 5, y + 2, 4, _rowHeight - 4);
+            ink.Fill(new Rectangle(0, y, markers, height), _settings.GutterBack);
+            if (_doc?.Markers.MaskOf(line) is var mask && mask is not (null or 0))
+                for (int m = 0; m < 8; m++)
+                {
+                    if ((mask.Value & (1 << m)) == 0) continue;
+                    ink.Fill(new Rectangle(3 + m * 5, y + 2, 4, _rowHeight - 4), AppSettings.MarkerColors[m]);
+                }
         }
-    }
 
-    private void DrawLineNumber(Graphics g, long line, int y, int height, bool selected)
-    {
         int lnw = LineNumberGutterWidth;
         if (lnw == 0) return;
-        int x = MarkerGutterWidth;
-        // The whole height of the row, not one line of it: a wrapped row is several lines tall, and the
-        // segments below the first would otherwise keep the row's own fill - or its selection colour.
-        g.FillRectangle(Fill(_settings.GutterBack), x, y, lnw, height);
-        var color = selected ? _settings.SelectionBack : _settings.LineNumberColor;
-        TextRenderer.DrawText(g, (line + 1).ToString(), FontRegular, new Rectangle(x, y, lnw - 6, _rowHeight),
-            color, TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+        var colour = selected ? _settings.SelectionBack : _settings.LineNumberColor;
+        var box = new Rectangle(markers, y, lnw, _rowHeight);
+        var digits = Digits(line + 1);
+        int digitWidth = _longWay ? 0 : CharWidthOf(0);
+        if (digitWidth > 0)
+            ink.Text(digits, box.Right - 6 - digits.Length * digitWidth, y, box, colour, _settings.GutterBack,
+                     FontRegular, _faces[0], plain: true);
+        else
+        {
+            // Text laid out over a background colour fills the character cells, not the box around them,
+            // so the margin has to be laid down first.
+            ink.Fill(box, _settings.GutterBack);
+            ink.TextIn(digits, new Rectangle(markers, y, lnw - 6, _rowHeight), colour, FontRegular,
+                       TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
+        }
+
+        // A wrapped row is several lines tall and the number belongs beside the first of them; the rest of
+        // the margin still has to be the margin's colour rather than the row's.
+        if (height > _rowHeight)
+            ink.Fill(new Rectangle(markers, y + _rowHeight, lnw, height - _rowHeight), _settings.GutterBack);
     }
+
+    /// <summary>A line number as characters, without the string a row's worth of them would allocate on
+    /// every frame.</summary>
+    private ReadOnlySpan<char> Digits(long value)
+    {
+        value.TryFormat(_digits, out int written, provider: System.Globalization.CultureInfo.CurrentCulture);
+        return _digits.AsSpan(0, written);
+    }
+
+    private readonly char[] _digits = new char[24];
 
     // ---- input ----
 
@@ -2723,13 +2999,32 @@ public sealed class LineGridControl : Control
         if (disposing)
         {
             _tipTimer.Dispose(); _tips.Dispose();
+            MissedFrame = false;
+            _catchUp.Dispose();
             foreach (var f in _fonts) f?.Dispose();
+            ReleaseFaces();
+            _canvas.Discard();
             foreach (var b in _brushes.Values) b.Dispose();
             _brushes.Clear();
             _fontFamily?.Dispose();
         }
         base.Dispose(disposing);
     }
+
+    /// <summary>Gives back the eight faces GDI was asked for. They are handles, not objects: nothing else
+    /// would ever let go of them.</summary>
+    private void ReleaseFaces()
+    {
+        for (int i = 0; i < _faces.Length; i++)
+        {
+            if (_faces[i] != IntPtr.Zero) DeleteObject(_faces[i]);
+            _faces[i] = IntPtr.Zero;
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DeleteObject(IntPtr handle);
 
     protected override void OnMouseLeave(EventArgs e)
     {

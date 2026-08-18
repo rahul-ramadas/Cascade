@@ -116,13 +116,13 @@ internal sealed class MiniMapControl : Control
     }
 
     /// <summary>Throws away the summary so the next paint rebuilds it.</summary>
-    public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; _cacheRows = -1; Invalidate(); }
+    public void InvalidateSummary() { _builtGeneration = -1; _trackedView = -1; _cacheRows = -1; _blockRows = -1; Invalidate(); }
 
     /// <summary>The filters look different but match the same rows: work the colours out again without
     /// forgetting where the view was tracked, which would re-centre a window the user had dragged. Also how
     /// the two things the summary key does not cover - the settings, and which file is open - are
     /// reported.</summary>
-    internal void InvalidateColors() { _builtGeneration = -1; _cacheRows = -1; Invalidate(); }
+    internal void InvalidateColors() { _builtGeneration = -1; _cacheRows = -1; _blockRows = -1; Invalidate(); }
 
     protected override void OnResize(EventArgs e)
     {
@@ -302,6 +302,7 @@ internal sealed class MiniMapControl : Control
         long firstWord = _top >> 6;
         var matched = anyColour ? ReadMatchedRows(doc, firstWord, lastRow) : ReadOnlySpan<ulong>.Empty;
 
+        PrepareBlocks(doc, rows);
         if (anyColour) ResolveColours(doc, rows, lastRow, matched, firstWord, defaults, settings);
 
         int at = 0;
@@ -313,6 +314,11 @@ internal sealed class MiniMapControl : Control
             _rowAt[at] = from;
             _colour[at] = 0;
             if (!anyColour) continue;
+
+            // A pixel this map has already worked out, in a stretch of the file it has been over before.
+            // Reading a log is dragging up and down it, so this is most of them.
+            int settled = KnownBlock(from);
+            if (settled != Unknown) { _colour[at] = settled == Blank ? 0 : settled; continue; }
 
             int kinds = 0;
             for (long row = from; row < to; row++)
@@ -332,8 +338,66 @@ internal sealed class MiniMapControl : Control
             // one would paint a whole map in it and hide that the other was ever there.
             if (kinds == 1) _colour[at] = colours[0];
             else if (kinds > 1) _colour[at] = PickColour(colours, counts, kinds, from);
+            RememberBlock(from, _colour[at]);
         }
         return at;
+    }
+
+    // ---- the colours this map has already worked out, for the whole file ----
+    //
+    // A pixel stands for a fixed block of rows: the window is pinned to a grid of the file, so the colour a
+    // block comes out is the same wherever the window happens to sit. Keeping those makes going back over a
+    // stretch free, and going back over a stretch is what reading a log is - the window slides by thousands
+    // of rows on every mouse report of a drag, and each of those rows used to be read out of the file and
+    // run past the filters again on the way back up.
+    private int[] _blocks = [];
+    private int _blockStep;
+    private int _blockGeneration = -1;
+    private bool _blockFilteredMode;
+    private long _blockRows = -1;
+    private long _blockBaseLine = -1;
+
+    /// <summary>How many blocks are worth keeping. Four million of them is sixteen megabytes and covers a
+    /// file of a hundred and twenty million lines; past that the map keeps only the window it is over, as it
+    /// always did - a file that big is one the reader can never drag their way across anyway.</summary>
+    private const int MaxBlocks = 4 << 20;
+
+    private void PrepareBlocks(CascadeDocument doc, long rows)
+    {
+        long wanted = rows <= 0 ? 0 : (rows + _step - 1) / _step;
+        long baseLine = rows > 0 ? doc.RowToLine(0) : -1;
+        if (wanted is 0 or > MaxBlocks)
+        {
+            if (_blocks.Length > 0) _blocks = [];
+            _blockRows = -1;
+            return;
+        }
+        // Anything that can change what colour a row comes out, or which row a line is on, starts them again.
+        if (_blockGeneration == doc.FilterGeneration && _blockFilteredMode == doc.FilteredMode &&
+            _blockStep == _step && _blockRows == rows && _blockBaseLine == baseLine)
+            return;
+
+        if (_blocks.Length < wanted) _blocks = new int[wanted];
+        else Array.Clear(_blocks, 0, (int)wanted);
+        _blockGeneration = doc.FilterGeneration;
+        _blockFilteredMode = doc.FilteredMode;
+        _blockStep = _step;
+        _blockRows = rows;
+        _blockBaseLine = baseLine;
+    }
+
+    /// <summary>The colour settled for the block a row falls in, or <see cref="Unknown"/>.</summary>
+    private int KnownBlock(long from)
+    {
+        long block = from / _step;
+        return _blockRows < 0 || block >= _blocks.Length ? Unknown : _blocks[(int)block];
+    }
+
+    private void RememberBlock(long from, int colour)
+    {
+        long block = from / _step;
+        if (_blockRows < 0 || block >= _blocks.Length) return;
+        _blocks[(int)block] = colour == 0 ? Blank : colour;
     }
 
     /// <summary>
@@ -349,6 +413,14 @@ internal sealed class MiniMapControl : Control
     {
         int want = (int)Math.Min(int.MaxValue, Math.Max(0, lastRow - _top));
         if (want <= 0) return;
+        // Nothing to read when every pixel the window covers has been worked out before. Worth its own pass:
+        // turning rows into lines is itself a walk of the visible set, and this is the common case on the way
+        // back up a file.
+        bool anythingUnknown = false;
+        for (long from = _top; from < lastRow && !anythingUnknown; from += _step)
+            anythingUnknown = KnownBlock(from) == Unknown;
+        if (!anythingUnknown) return;
+
         if (_wantLines.Length < want) { _wantLines = new long[want]; _wantFilters = new Filter?[want]; }
 
         // Rows to lines against ONE snapshot of the visible set, rather than a lookup apiece - the same
@@ -358,7 +430,7 @@ internal sealed class MiniMapControl : Control
         for (int i = 0; i < found; i++)
         {
             long row = _top + i;
-            bool skip = _cache[i] != Unknown ||
+            bool skip = _cache[i] != Unknown || KnownBlock(row) != Unknown ||
                         (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0);
             if (skip) _wantLines[i] = -1; else asked++;
         }
@@ -625,23 +697,32 @@ internal sealed class MiniMapControl : Control
 
     /// <summary>Repaints when anything the map draws has actually changed. The map is a child control, so the
     /// grid invalidating itself does not touch it - without this the picture would sit exactly as it was last
-    /// painted while the text scrolled under it.</summary>
-    internal void SyncToGrid()
+    /// painted while the text scrolled under it.
+    /// <para><paramref name="repaint"/> is false on the moves of a drag that the screen is too slow to show.
+    /// The window it is over still has to be tracked then - forgetting that is what makes a dragged map
+    /// spring back to the middle - but drawing it would be drawing a frame nobody can see.</para></summary>
+    internal void SyncToGrid(bool repaint = true)
     {
         if (!Visible || _grid.Document is not { } doc) return;
         if (_builtRows != doc.RowCount || _builtFilteredMode != doc.FilteredMode ||
             _builtGeneration != doc.FilterGeneration || _builtMarkers != doc.Markers.Version ||
             _builtFindHits != doc.FindHitCount || _drawnSelection != _grid.SelectionVersion)
         {
-            Invalidate();
+            if (repaint) { _owed = false; Invalidate(); } else _owed = true;
             return;
         }
         if (_slots <= 0) return;
         long rows = doc.RowCount;
         long before = _top;
         if (rows > 0) TrackView(rows, SlotCapacity);
-        if (_top != before || Geometry() != _drawnViewport) Invalidate();
+        // Whether it is out of date, counting the times it was told so on a frame that was not drawn: the
+        // window it is over is moved by the telling, so by the next one it looks as though nothing happened.
+        bool stale = _owed || _top != before || Geometry() != _drawnViewport;
+        if (!repaint) { _owed = stale; return; }
+        if (stale) { _owed = false; Invalidate(); }
     }
+
+    private bool _owed;
 
     // ---- interaction ----
 
@@ -711,9 +792,9 @@ internal sealed class MiniMapControl : Control
         long lowest = _rowAt[0];
         long highest = Math.Max(lowest, _rowAt[_slots - 1] - _grid.VisibleRows + 1);
         _grid.ScrollToRow(Math.Clamp(_rowAt[slot], lowest, highest));
-        // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without these
-        // nothing moves until the mouse stops.
-        _grid.Update();
+        // A held drag never lets the queue empty, and WM_PAINT only arrives when it does - so without this
+        // the window under the pointer would not move until the mouse stopped. The view answers for its own
+        // repaint, which it paces to the screen.
         Update();
     }
 

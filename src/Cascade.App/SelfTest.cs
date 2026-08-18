@@ -233,6 +233,25 @@ internal static class SelfTest
             grid.PressKeyForTesting(Keys.Home);
             ok &= Check("and Home brings it back", hbar.Value == 0, hbar.Value.ToString());
 
+            // A drag is paced to the screen, which has to be asked what it can show - and a remote desktop
+            // has no answer, because it has no refresh rate of its own. What is done with that matters most
+            // exactly where it cannot be tried: a session begun on a fast monitor and then picked up over a
+            // remote desktop must not go on drawing at the monitor's rate down the wire.
+            ok &= Check("a screen that answers is taken at its word",
+                        LineGridControl.RateFrom(240, remote: false) == 240 &&
+                        LineGridControl.RateFrom(60, remote: false) == 60,
+                        $"{LineGridControl.RateFrom(240, false)}, {LineGridControl.RateFrom(60, false)}");
+            ok &= Check("one that does not falls to a rate every screen can manage, not to the last one seen",
+                        LineGridControl.RateFrom(0, remote: false) == 60 &&
+                        LineGridControl.RateFrom(1, remote: false) == 60,
+                        $"{LineGridControl.RateFrom(0, false)}, {LineGridControl.RateFrom(1, false)}");
+            ok &= Check("and down a wire nothing draws faster than the wire shows it",
+                        LineGridControl.RateFrom(240, remote: true) == 30 &&
+                        LineGridControl.RateFrom(1, remote: true) == 30 &&
+                        LineGridControl.RateFrom(24, remote: true) == 24,
+                        $"{LineGridControl.RateFrom(240, true)}, {LineGridControl.RateFrom(1, true)}, " +
+                        $"{LineGridControl.RateFrom(24, true)}");
+
             var diff = FirstDifference(unscrolled, scrolled, margin);
             ok &= Check($"scrolling right leaves the line-number margin (0..{gutter}) untouched" +
                         (diff is null ? "" : $" [first differs at x={diff.Value.X},y={diff.Value.Y}: " +
@@ -242,6 +261,119 @@ internal static class SelfTest
             if (diff is not null)
                 WriteRenderDiagnostics("scrolling right leaves the line-number margin untouched",
                     host, grid, margin, diff.Value, unscrolled, scrolled);
+
+            // Only the stretch of a line that can land in the window is handed to GDI, which lays out
+            // everything it is given whether or not it shows. What is left out is outside the clip either
+            // way, so the two must draw the same picture - here, with a line running off BOTH edges, which
+            // is where a character of overhang at either end would show up.
+            grid.DrawWholeLinesForTesting = true;
+            Pump();
+            using (var whole = Capture(host))
+            {
+                grid.DrawWholeLinesForTesting = false;
+                Pump();
+                using var clipped = Capture(host);
+                var partDiff = FirstDifference(whole, clipped, new Rectangle(0, 0, whole.Width, whole.Height));
+                ok &= Check("drawing only the part of a line that shows draws what drawing all of it does" +
+                            (partDiff is null ? "" : $" [first differs at x={partDiff.Value.X},y={partDiff.Value.Y}]"),
+                            partDiff is null);
+            }
+
+            // The same, in every face a filter can ask for. A slanted or heavy cut hangs outside the cell
+            // its width says it occupies, so the stretch handed over is widened by a character at each end -
+            // and whether one character is enough is a question about typefaces, not about this machine.
+            var faces = new FilterCollection();
+            var styles = new (string Text, bool Bold, bool Italic, bool Underline)[]
+                { ("line 1", true, false, false), ("line 2", false, true, false),
+                  ("line 3", true, true, true),   ("line 4", false, false, true) };
+            foreach (var (text, bold, italic, underline) in styles)
+                faces.Roots.Add(new Filter
+                {
+                    Enabled = true,
+                    Match = new FilterMatch { Text = text },
+                    Style = { Bold = bold, Italic = italic, Underline = underline }
+                });
+            doc.SetFilters(faces);
+            WaitForFiltering(doc);
+            foreach (int scrolledTo in (int[])[0, 40, 260])
+            {
+                grid.ScrollHorizontallyTo(scrolledTo);
+                grid.RefreshView();
+                grid.DrawWholeLinesForTesting = true;
+                Pump();
+                using var whole = Capture(host);
+                grid.DrawWholeLinesForTesting = false;
+                Pump();
+                using var clipped = Capture(host);
+                var faceDiff = FirstDifference(whole, clipped, new Rectangle(0, 0, whole.Width, whole.Height));
+                ok &= Check($"and does so in bold, italic and underline, scrolled to {scrolledTo}" +
+                            (faceDiff is null ? "" : $" [first differs at x={faceDiff.Value.X},y={faceDiff.Value.Y}]"),
+                            faceDiff is null);
+            }
+            doc.SetFilters(new FilterCollection());
+            WaitForFiltering(doc);
+            grid.ScrollHorizontallyTo(260);
+            grid.RefreshView();
+            Pump();
+
+            // A face where the characters are not all one width cannot have its glyphs placed by
+            // multiplication, and must refuse the short road outright - asked of the SHAPES of every one of
+            // the eight faces, because a family may be cut fixed-pitch in one and proportionally in another,
+            // and it is now where each glyph is DRAWN that hangs on the answer.
+            string sample = "plain ascii 12345";
+            bool[] fixedPitch = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
+            ok &= Check($"a fixed-pitch face takes the short road in every style [{string.Join(",", fixedPitch.Select(b => b ? '1' : '0'))}]",
+                        fixedPitch.All(b => b), $"font {settings.FontFamily}");
+
+            var proportional = new AppSettings { MarkerVisibility = MarkerVisibilityMode.Always, FontFamily = "Segoe UI" };
+            grid.ApplySettings(proportional);
+            grid.RefreshView();
+            Pump();
+            bool[] variable = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
+            ok &= Check($"and a proportional one refuses it in every style [{string.Join(",", variable.Select(b => b ? '1' : '0'))}]",
+                        variable.All(b => !b), $"font {proportional.FontFamily}");
+            // ...and still draws, through the layout that has always drawn it.
+            grid.ScrollHorizontallyTo(0);
+            grid.RefreshView();
+            Pump();
+            using (var propUnscrolled = Capture(host))
+            {
+                grid.ScrollHorizontallyTo(120);
+                grid.RefreshView();
+                Pump();
+                using var propScrolled = Capture(host);
+                var propArea = new Rectangle(gutter, grid.GutterAreaForTesting.Top,
+                                             propUnscrolled.Width - gutter - 20, grid.GutterAreaForTesting.Height);
+                ok &= Check("a proportional face still draws, and still scrolls",
+                            !SameRegion(propUnscrolled, propScrolled, propArea));
+                var propMargin = FirstDifference(propUnscrolled, propScrolled, grid.GutterAreaForTesting);
+                ok &= Check("and still leaves the line-number margin alone", propMargin is null,
+                            propMargin?.ToString() ?? "");
+            }
+            grid.ApplySettings(settings);
+            grid.ScrollHorizontallyTo(260);
+            grid.RefreshView();
+            Pump();
+
+            // Plain ASCII in a fixed-pitch face goes to GDI by the shortest road there is: the text draws
+            // its own background in one call, and the line number is placed by arithmetic rather than by
+            // asking for it to be right-aligned. Both are worth half the paint, and both are only allowed
+            // because they put exactly the same pixels on the screen as the general path does.
+            grid.ScrollHorizontallyTo(0);
+            grid.DrawTextTheLongWayForTesting = true;
+            Pump();
+            using (var longWay = Capture(host))
+            {
+                grid.DrawTextTheLongWayForTesting = false;
+                Pump();
+                using var direct = Capture(host);
+                var inkDiff = FirstDifference(longWay, direct, new Rectangle(0, 0, longWay.Width, longWay.Height));
+                ok &= Check("text drawn straight onto the device context is the same picture as text laid out" +
+                            (inkDiff is null ? "" : $" [first differs at x={inkDiff.Value.X},y={inkDiff.Value.Y}: " +
+                                                    $"{longWay.GetPixel(inkDiff.Value.X, inkDiff.Value.Y)} -> " +
+                                                    $"{direct.GetPixel(inkDiff.Value.X, inkDiff.Value.Y)}]"),
+                            inkDiff is null);
+            }
 
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
@@ -265,6 +397,46 @@ internal static class SelfTest
             ok &= Check("scrolling right actually moved the columns",
                         !SameRegion(colUnscrolled, colScrolled,
                             new Rectangle(gutter, colMargin.Top, colUnscrolled.Width - gutter - 20, colMargin.Height)));
+
+            // A cell takes the same short road a whole line does when its text is plain ASCII in a
+            // fixed-pitch face and fits its box - placed by arithmetic where the layout would have put it,
+            // aligned as its column asks. Against the layout, pixel for pixel, in all three alignments.
+            //
+            // With and without the line-number margin, because the two are not the same drawing at all.
+            // Narrowing the clip to the text area saves the whole device context and puts it back, which
+            // puts the selected face back with it - and a margin drawn before that happens hides the fault,
+            // because drawing the number selects the face again on every row.
+            grid.ScrollHorizontallyTo(0);
+            for (int i = 0; i < doc.Columns.Columns.Count; i++)
+            {
+                doc.Columns.Columns[i].Align = (ColumnAlign)(i % 3);
+                // Wide enough for what is in them at any font size, or every cell asks for the ellipsis
+                // instead and none of them takes the short road this is here to check.
+                doc.Columns.Columns[i].Width = 400;
+            }
+            foreach (bool numbers in (bool[])[true, false])
+            {
+                settings.ShowLineNumbers = numbers;
+                grid.ApplySettings(settings);
+                grid.RefreshView();
+                grid.DrawTextTheLongWayForTesting = true;
+                Pump();
+                using var cellsLaidOut = Capture(host);
+                grid.DrawTextTheLongWayForTesting = false;
+                Pump();
+                using var cellsDirect = Capture(host);
+                var cellDiff = FirstDifference(cellsLaidOut, cellsDirect,
+                    new Rectangle(0, 0, cellsLaidOut.Width, cellsLaidOut.Height));
+                ok &= Check($"a cell drawn straight onto the device context is the same picture too " +
+                            $"({(numbers ? "with" : "without")} line numbers)" +
+                            (cellDiff is null ? "" : $" [first differs at x={cellDiff.Value.X},y={cellDiff.Value.Y}]"),
+                            cellDiff is null);
+            }
+            settings.ShowLineNumbers = true;
+            grid.ApplySettings(settings);
+            foreach (var column in doc.Columns.Columns) column.Align = ColumnAlign.Left;
+            grid.RefreshView();
+            Pump();
             var colDiff = FirstDifference(colUnscrolled, colScrolled, colMargin);
             ok &= Check("scrolling right with columns leaves the margin untouched" +
                         (colDiff is null ? "" : $" [first differs at x={colDiff.Value.X},y={colDiff.Value.Y}]"),
@@ -2214,6 +2386,59 @@ internal static class SelfTest
                 var middle = shot.GetPixel(thumb.Left + thumb.Width / 2, thumb.Top + thumb.Height / 2);
                 ok &= Check("and its thumb has square corners", corner.ToArgb() == middle.ToArgb(),
                             $"corner {corner}, middle {middle}");
+
+                // A bar is laid out before it has any height, and can be squeezed to nothing by a window
+                // being dragged shut. A thumb has a minimum length, and asking a bar shorter than that for
+                // one threw - which reached the outside world as a window that would not lay out.
+                bool squeezedAnswers;
+                try
+                {
+                    using var squeezed = new SlimScrollBar(grid) { Size = new Size(14, 2) };
+                    squeezed.Configure(1_000, 10);
+                    squeezedAnswers = squeezed.ThumbForTesting.Height >= 0;
+                }
+                catch (ArgumentException) { squeezedAnswers = false; }
+                ok &= Check("a scrollbar squeezed shorter than its own thumb still answers for one",
+                            squeezedAnswers);
+
+                // ---- a drag draws as often as the screen can show it, and no oftener ----
+                // A mouse reports up to a thousand times a second and each report moves the view a page or
+                // more. Drawing every one of them is work nobody can see: the screen shows the newest frame
+                // at its next refresh and throws the rest away. What must never happen is the other failure -
+                // the hand stopping on a position that is never drawn at all.
+                //
+                // Held to what the refresh rate allows in the time the reports actually took, rather than to
+                // a flat "fewer frames than reports": on a machine where a paint takes longer than a refresh
+                // interval, drawing every report IS the right answer, and a check that called that a failure
+                // would be reporting the hardware rather than the code.
+                grid.ScrollToRow(0);
+                Pump();
+                var track = bar.TroughForTesting;
+                int painted = grid.PaintsForTesting;
+                bar.GrabForTesting();
+                const int Reports = 60;
+                var dragClock = Stopwatch.StartNew();
+                for (int i = 0; i < Reports; i++)
+                    bar.DragToForTesting(track.Top + thumb.Height / 2 + i * (track.Height / (2 * Reports)));
+                dragClock.Stop();
+                int frames = grid.PaintsForTesting - painted;
+                long stoppedAt = grid.FirstRowForTesting;
+                bar.DropForTesting();
+                int hz = grid.ScreenRateForTesting;
+                // One for the frame that may already have been owed when the drag began, one for rounding.
+                int allowed = (int)Math.Ceiling(dragClock.Elapsed.TotalSeconds * hz) + 2;
+                Line($"   (drag: {Reports} reports in {dragClock.Elapsed.TotalMilliseconds:F0} ms drew {frames} " +
+                     $"frames; {hz} Hz allows {allowed})");
+                ok &= Check("a drag never draws more frames than the screen can show in the time it took",
+                            frames <= allowed, $"{frames} frames, {allowed} allowed at {hz} Hz");
+                ok &= Check("and reporting faster than that really does cost frames",
+                            frames < Reports || allowed >= Reports,
+                            $"{frames} frames for {Reports} reports, {allowed} allowed");
+                ok &= Check("but the view really did move all the way", stoppedAt > 0, stoppedAt.ToString());
+                Pump();
+                ok &= Check("and where the hand stopped is what ends up on the screen",
+                            grid.FirstPaintedRowForTesting == grid.FirstRowForTesting,
+                            $"drawn from row {grid.FirstPaintedRowForTesting}, view at {grid.FirstRowForTesting}");
             }
 
             // The sideways scrollbar is the same control, so the two edges of the window match.
@@ -2371,6 +2596,30 @@ internal static class SelfTest
             ok &= Check("and sliding it read far fewer rows than starting over",
                         resolvedSliding * 4 < resolvedCold,
                         $"{resolvedSliding} rows read after a 400-row scroll, {resolvedCold} from cold");
+
+            // ---- and remembered for the whole file, not just the window ----
+            // Reading a log is dragging up and down it, and a drag moves the window by more than its own
+            // height on every mouse report - so what makes a drag affordable is that the way back costs
+            // nothing. The colours must be the same ones, too: a block of the file is a block of the file
+            // wherever the window happens to be sitting when it is asked about.
+            grid.ScrollToRow(HalfMap() + 4_000);
+            map.RebuildForTesting();
+            var wasHere = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            grid.ScrollToRow(lines - HalfMap() - 1);   // the far end, well past anything this window covers
+            map.RebuildForTesting();
+            int beforeReturn = map.ColoursResolvedForTesting;
+            grid.ScrollToRow(HalfMap() + 4_000);
+            map.RebuildForTesting();
+            var backHere = Enumerable.Range(0, map.SlotCountForTesting).Select(map.ColourAtForTesting).ToArray();
+            int changed = Enumerable.Range(0, Math.Min(wasHere.Length, backHere.Length))
+                                    .FirstOrDefault(i => wasHere[i] != backHere[i], -1);
+            ok &= Check("coming back to a stretch it has been over reads nothing at all",
+                        map.ColoursResolvedForTesting == beforeReturn,
+                        $"{map.ColoursResolvedForTesting - beforeReturn} rows read on the way back");
+            ok &= Check("and shows exactly the colours it showed the first time",
+                        wasHere.Length == backHere.Length && changed < 0,
+                        changed < 0 ? $"{wasHere.Length} pixels agree"
+                                    : $"pixel {changed}: {Color.FromArgb(wasHere[changed])} vs {Color.FromArgb(backHere[changed])}");
 
             // A change of settings has to reach the map: what counts as "no colour at all" is one of them,
             // so the colours it remembered were worked out against the settings that were in force.
@@ -8058,6 +8307,26 @@ internal static class SelfTest
             spare.Dispose();
             ok &= Check("and closing a log view lets go of its fonts", LetGo(spareFont));
 
+            // The text is drawn straight onto the device context now, through handles of its own: a face
+            // per style and a brush per colour. Those are GDI handles, not objects - nothing collects them,
+            // and a process that loses ten thousand of them is killed. Zooming rebuilds every face and every
+            // paint asks for brushes, so this does both, many times, and counts what the process holds.
+            int handlesBefore = GdiHandles();
+            for (int i = 0; i < 40; i++)
+            {
+                settings.ZoomPercent = 100 + i % 5 * 25;
+                grid.RebuildFonts();
+                grid.Invalidate();
+                grid.Update();
+            }
+            settings.ZoomPercent = 100;
+            grid.RebuildFonts();
+            Pump();
+            int handlesAfter = GdiHandles();
+            ok &= Check("and drawing through GDI's own handles hands every one of them back",
+                        handlesBefore == 0 || handlesAfter <= handlesBefore + 40,
+                        $"{handlesBefore} handles before 40 rebuilds and repaints, {handlesAfter} after");
+
             // The find bar used to cut a font of its own for the term box, at a different size from the rest
             // of the row. It draws everything in the ambient font now, so there is nothing for it to give
             // back - and nothing on the row may quietly go back to one of its own.
@@ -9474,13 +9743,18 @@ internal static class SelfTest
 
     /// <summary>Lets the UI finish whatever it has queued, and comes back as soon as it goes quiet. It used
     /// to wait a flat 250ms every time; the drag checks alone call it about 190 times, so nearly the whole
-    /// self-test was spent sitting idle. The old wait is kept as the cap.</summary>
+    /// self-test was spent sitting idle. The old wait is kept as the cap.
+    /// <para>Quiet is not the same as finished: the last frame of a drag is drawn by a timer, and a timer
+    /// arrives when Windows feels like it - up to two of its ticks later. So the view is asked whether it
+    /// still owes a frame, rather than the wait being lengthened to cover the worst case, which would be
+    /// paid by every one of the thousand calls this makes.</para></summary>
     private static void Pump()
     {
         for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;)
         {
             Application.DoEvents();
             if (PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) { Thread.Sleep(1); continue; }
+            if (LineGridControl.AnyViewOwesAFrameForTesting) { Thread.Sleep(1); continue; }
             // Quiet once is not the same as settled - a timer may be about to post. Ask again after a pause.
             Thread.Sleep(15);
             Application.DoEvents();
@@ -9490,6 +9764,14 @@ internal static class SelfTest
 
     private const uint PM_NOREMOVE = 0;
     private const uint WM_KEYDOWN = 0x0100;
+
+    /// <summary>How many GDI handles this process is holding. Drawing straight onto a device context means
+    /// owning faces and brushes, which nothing collects.</summary>
+    private static int GdiHandles()
+        => (int)GetGuiResources(System.Diagnostics.Process.GetCurrentProcess().Handle, 0);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetGuiResources(IntPtr process, uint flags);
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct MSG

@@ -445,6 +445,7 @@ public sealed class CascadeDocument : IDisposable
 
         // Below this the fork and join cost more than the work does.
         const int WorthSharingOut = 512;
+        const int MostColouringWorkers = 8;
         if (count < WorthSharingOut)
         {
             var reader = new LineReader(src, encoding);
@@ -455,7 +456,18 @@ public sealed class CascadeDocument : IDisposable
 
         // One reader and one match context per partition, never one per line: both carry scratch buffers
         // that would otherwise be reallocated - or, worse, shared between threads.
-        Parallel.For(0, count, () => new LineReader(src, encoding), (i, _, reader) =>
+        //
+        // As many threads as there is work for, and no more. Running the filters over a line is about a
+        // third of a microsecond, so handing a mapful to all 32 cores of a big machine gives each of them a
+        // few dozen microseconds of work in return for waking up, spinning and handing back - measured, on
+        // the five and a half thousand rows a mouse report of a drag uncovers, at 8.1 ms of processor time
+        // against 2.1 ms of actual work. A thread per thousand lines, up to eight, costs 3.5 ms for the same
+        // rows and finishes within a fifth of a millisecond of the greedy version.
+        var share = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Clamp(count / 1024, 1, Math.Min(MostColouringWorkers, Environment.ProcessorCount))
+        };
+        Parallel.For(0, count, share, () => new LineReader(src, encoding), (i, _, reader) =>
         {
             One(i, reader, snapshot.GetThreadContext());
             return reader;
