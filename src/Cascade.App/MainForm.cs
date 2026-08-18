@@ -188,8 +188,7 @@ public sealed class MainForm : Form
         _state = state;
         _updater = updater;
         Text = "Cascade";
-        WindowState = FormWindowState.Maximized;
-        MinimumSize = new Size(700, 400);
+        OpenMaximised();
         Icon = LoadAppIcon();
         PlaceOffScreenIfAsked();
 
@@ -274,6 +273,28 @@ public sealed class MainForm : Form
         FormClosing += OnClosing;
         SyncUndoMenu();
         UpdateStatus();
+    }
+
+    /// <summary>Comes up maximised, but sized first, and in that order.
+    ///
+    /// <para>WinForms keeps back any bounds set while the state is Maximized and forces them onto the window
+    /// the moment it stops being maximised - <c>Form.SetBoundsCore</c> stashes them, <c>Form.WndProc</c>
+    /// hands them back through <c>RestoreWindowBoundsIfNecessary</c> on the next WM_WINDOWPOSCHANGED. Aero
+    /// Snap leaves the maximised state as the first half of what it does, so Win+Left would take Windows'
+    /// half-screen rectangle and then be shrunk, on the spot, to whatever was last set here: MinimumSize,
+    /// left sitting in the corner the snap had just moved it to. Setting the size while the state is still
+    /// Normal leaves nothing pending, and the snapped rectangle stands - as it does for every other app.</para>
+    ///
+    /// <para>The size is also what Win+Down and a double-clicked title bar restore to, so it is worth a
+    /// window that can be worked in rather than the smallest one allowed. Measured off the primary screen,
+    /// which is where a window that asks for no position of its own is put, and floored by the MinimumSize
+    /// set right after it - that setter grows the size to meet it.</para></summary>
+    private void OpenMaximised()
+    {
+        var work = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 800);
+        Size = new Size(work.Width * 3 / 4, work.Height * 3 / 4);
+        MinimumSize = new Size(700, 400);
+        WindowState = FormWindowState.Maximized;
     }
 
     /// <summary>An automated UI run drives the app through UI Automation and needs no one to see it, but a

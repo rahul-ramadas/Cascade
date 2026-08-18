@@ -112,6 +112,7 @@ internal static class SelfTest
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
+            ok &= Timed("window snapping", RunWindowSnapChecks);
             ok &= Timed("closing", RunClosingChecks);
             ok &= Timed("file drop", RunFileDropChecks);
             ok &= Timed("the menus", RunMenuActionChecks);
@@ -8618,6 +8619,96 @@ internal static class SelfTest
         form.Close();
         return ok;
     }
+
+    /// <summary>Win+Left has to leave the window filling half the screen, the way it does for every other
+    /// app - it used to leave it at MinimumSize in the corner instead.
+    ///
+    /// <para>Snapping un-maximises the window as the first half of what it does, and WinForms hands back any
+    /// bounds that were set while the window WAS maximised at exactly that moment, over the top of the
+    /// rectangle the snap just gave it. So the check is about what the constructor leaves behind, and the
+    /// window is therefore built exactly as a user gets it and not adjusted afterwards. What the snap does
+    /// to it is done here in one operation, which is the single WM_WINDOWPOSCHANGED the bug rode in on;
+    /// driving the real hotkey would need the foreground and would snap whatever the reader was in.</para></summary>
+    private static bool RunWindowSnapChecks()
+    {
+        Line("-- Win+Left snaps the window to half the screen --");
+
+        using var form = ShippedWindow();
+        form.Show();
+        Pump();
+
+        bool ok = Check($"the window opens maximised ({form.WindowState})",
+                        form.WindowState == FormWindowState.Maximized);
+
+        var work = Screen.FromControl(form).WorkingArea;
+        // Windows will not hand back less than the window says it can be worked in.
+        var want = new Rectangle(work.Location,
+                                 new Size(Math.Max(work.Width / 2, form.MinimumSize.Width),
+                                          Math.Max(work.Height, form.MinimumSize.Height)));
+
+        var placement = new WINDOWPLACEMENT { Length = System.Runtime.InteropServices.Marshal.SizeOf<WINDOWPLACEMENT>() };
+        GetWindowPlacement(form.Handle, ref placement);
+        placement.ShowCmd = SW_SHOWNOACTIVATE;
+        placement.NormalPosition = RECT.From(want);
+        SetWindowPlacement(form.Handle, ref placement);
+        Pump();
+
+        ok &= Check($"and keeps the half of it that the snap gave it ({form.Bounds})",
+                    form.Bounds == want, $"asked for {want}, work area {work}");
+        form.Close();
+
+        // The other half of having a size before being maximised: this is what Win+Down and a double-clicked
+        // title bar restore to, and a window that opens at MinimumSize has nothing better to offer them.
+        // A second window, because the snap above has already rewritten the first one's normal position.
+        using var restored = ShippedWindow();
+        restored.Show();
+        Pump();
+        restored.WindowState = FormWindowState.Normal;
+        Pump();
+        var room = Screen.FromControl(restored).WorkingArea;
+        ok &= Check($"and un-maximises to a window worth having ({restored.Size} of {room.Size})",
+                    restored.Width > room.Width / 2 && restored.Height > room.Height / 2,
+                    $"minimum is {restored.MinimumSize}");
+        restored.Close();
+
+        return ok;
+    }
+
+    /// <summary>A main window exactly as a user gets one. The off-screen parking the UI suite asks for is
+    /// stood down for it: parked beyond the last monitor there is nothing to snap to, and it is the
+    /// untouched constructor that is on trial here. Nothing appears - the window is transparent.</summary>
+    private static MainForm ShippedWindow()
+    {
+        string? offScreen = Environment.GetEnvironmentVariable("CASCADE_TEST_OFFSCREEN");
+        Environment.SetEnvironmentVariable("CASCADE_TEST_OFFSCREEN", null);
+        try { return new MainForm(new AppSettings(), new MachineState(), Array.Empty<string>()) { Opacity = 0, NoSavePrompt = true }; }
+        finally { Environment.SetEnvironmentVariable("CASCADE_TEST_OFFSCREEN", offScreen); }
+    }
+
+    private const int SW_SHOWNOACTIVATE = 4;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+        public static RECT From(Rectangle r) => new() { Left = r.Left, Top = r.Top, Right = r.Right, Bottom = r.Bottom };
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct WINDOWPLACEMENT
+    {
+        public int Length, Flags, ShowCmd;
+        public Point MinPosition, MaxPosition;
+        public RECT NormalPosition;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool GetWindowPlacement(IntPtr window, ref WINDOWPLACEMENT placement);
+
+    /// <summary>Leaves the maximised state and takes the new rectangle in one go, which is what snapping
+    /// does to a maximised window and what an un-maximise followed by a move would not be.</summary>
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool SetWindowPlacement(IntPtr window, ref WINDOWPLACEMENT placement);
 
     /// <summary>Letting go of a very large log costs the kernel two thirds of a second - it has to hand back
     /// every resident page of the mapping - and it happens on the thread that draws. So the window has to be
