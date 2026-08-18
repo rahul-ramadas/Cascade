@@ -446,15 +446,13 @@ public sealed class LineGridControl : Control
 
     private bool _longWay;
 
-    /// <summary>Test seam: put every piece of text back through the general text layout, as this did before
-    /// the direct path existed, so a check can prove the two draw the same picture. It has to reach the
-    /// canvas as well as this: which of the two calls draws a line is the canvas's decision, and a check
-    /// that only moved the line number would be proving the smaller half of it.</summary>
+    /// <summary>Test seam: place text by laying it out inside its box rather than by arithmetic, as this
+    /// did before the arithmetic existed, so a check can prove the two put it in the same place.</summary>
     [System.ComponentModel.DefaultValue(false)]
     internal bool DrawTextTheLongWayForTesting
     {
         get => _longWay;
-        set { _longWay = value; _canvas.LayOutEverythingForTesting = value; Invalidate(); }
+        set { _longWay = value; Invalidate(); }
     }
 
     // ---- what the match map reads ----
@@ -852,10 +850,6 @@ public sealed class LineGridControl : Control
 
     public void RebuildFonts()
     {
-        // Before the fonts go: the canvas keeps a GDI handle for each of them, filed under the font it was
-        // made from. Left alone, every settings change would leak those handles and leave the canvas
-        // holding fonts that have been disposed.
-        _canvas.Discard();
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
@@ -882,20 +876,12 @@ public sealed class LineGridControl : Control
         // since a row's glyphs are placed by multiplication when the answer is yes, draws its text in the
         // wrong place. Asked of every face, because a family may be cut fixed-pitch in one and not another.
         //
-        // Asked of GDI as well as of the measurement, and both have to agree. The measurement says what a
-        // string is laid out as; GDI's advance says where the ink of each character actually lands. A face
-        // can measure eight pixels a character and advance eleven - there are such faces installed on this
-        // machine - and where they disagree, text placed by multiplying the measured width drifts further
-        // along the line with every character. Neither answer alone would have caught that; the two
-        // together settle it on whatever machine the app is run on.
+        // Asked of the same measurement that lays the text out, because that is what places it. Whether the
+        // canvas may then draw it by the quick road is a separate question, and one the canvas settles for
+        // itself by checking that the quick road draws what the layout draws.
         for (int i = 0; i < _fonts.Length; i++)
-        {
-            int laidOut = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
-            int widest = TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
-            _monoFace[i] = laidOut == widest
-                        && _canvas.AdvanceOf(_fonts[i]) == _charWidths[i]
-                        && laidOut == 10 * _charWidths[i];
-        }
+            _monoFace[i] = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width
+                        == TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
         _monospaced = _monoFace[0];
         BuildChipFont();
         _naturalKey = null;   // the widths the content asks for are measured in this font
@@ -2795,12 +2781,6 @@ public sealed class LineGridControl : Control
     /// <summary>The same width, always measured - what the shortcut has to agree with.</summary>
     internal int MeasuredWidthForTesting(string text, int fontIndex)
         => DrawnWidth(text, _fonts[fontIndex], 0);
-
-    /// <summary>The width a character is measured at, and the width GDI advances by, so a check can say
-    /// which of the two refused the shortcut.</summary>
-    internal int FaceWidthForTesting(int fontIndex) => _charWidths[fontIndex];
-
-    internal int AdvanceForTesting(int fontIndex) => _canvas.AdvanceOf(_fonts[fontIndex]);
 
     /// <summary>Whether the shortcut was taken, so a check can prove it is doing something.</summary>
     internal bool WidthWasArithmeticForTesting(string text, int fontIndex)

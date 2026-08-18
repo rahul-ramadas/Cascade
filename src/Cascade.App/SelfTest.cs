@@ -317,14 +317,11 @@ internal static class SelfTest
             Pump();
 
             // A face where the characters are not all one width cannot have its glyphs placed by
-            // multiplication, and must refuse the short road outright - asked of the SHAPES of every one of
-            // the eight faces, because a family may be cut fixed-pitch in one and proportionally in another,
-            // and it is now where each glyph is DRAWN that hangs on the answer.
+            // multiplication - asked of the SHAPES of every one of the eight faces, because a family may be
+            // cut fixed-pitch in one and proportionally in another. Asked of the same measurement that lays
+            // the text out, which is also what draws it, so the two cannot disagree about where a character
+            // goes.
             string sample = "plain ascii 12345";
-            Line($"   (font smoothing enabled {SystemInformation.IsFontSmoothingEnabled}, " +
-                 $"type {SystemInformation.FontSmoothingType}, drawing at quality {GdiCanvas.SmoothingForTesting}; " +
-                 $"{grid.FontForTesting.Name} measures {grid.FaceWidthForTesting(0)} " +
-                 $"and advances {grid.AdvanceForTesting(0)})");
             bool[] fixedPitch = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
             ok &= Check($"a fixed-pitch face takes the short road in every style [{string.Join(",", fixedPitch.Select(b => b ? '1' : '0'))}]",
                         fixedPitch.All(b => b), $"font {settings.FontFamily}");
@@ -336,40 +333,6 @@ internal static class SelfTest
             bool[] variable = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
             ok &= Check($"and a proportional one refuses it in every style [{string.Join(",", variable.Select(b => b ? '1' : '0'))}]",
                         variable.All(b => !b), $"font {proportional.FontFamily}");
-
-            // The trap in between: a face that MEASURES as fixed-pitch and does not ADVANCE as one. Its
-            // strings lay out ten characters to ten times one character, so the measurement calls it
-            // fixed-pitch, while GDI moves along by a different amount for each glyph it draws - so text
-            // placed by multiplication drifts further from its ink the further along the line it goes.
-            // Whichever face this finds differs from machine to machine, so it is looked for rather than
-            // named, and a machine with none of them says so instead of quietly checking nothing.
-            var trap = TrapFace();
-            if (trap is null) Line("   (no face installed that measures fixed-pitch and advances otherwise)");
-            else
-            {
-                var trapped = new AppSettings { MarkerVisibility = MarkerVisibilityMode.Always, FontFamily = trap };
-                grid.ApplySettings(trapped);
-                grid.ScrollHorizontallyTo(260);
-                grid.RefreshView();
-                Pump();
-                ok &= Check($"a face that measures fixed-pitch but does not advance like one refuses the short road " +
-                            $"({trap}: measured {grid.FaceWidthForTesting(0)}, advances {grid.AdvanceForTesting(0)}, " +
-                            $"asked for {grid.FontForTesting.Name})",
-                            !grid.WidthWasArithmeticForTesting(sample, 0));
-                grid.DrawWholeLinesForTesting = true;
-                Pump();
-                using var trapWhole = Capture(host);
-                grid.DrawWholeLinesForTesting = false;
-                Pump();
-                using var trapClipped = Capture(host);
-                var trapDiff = FirstDifference(trapWhole, trapClipped, new Rectangle(0, 0, trapWhole.Width, trapWhole.Height));
-                ok &= Check("and draws the same picture whether it is handed the whole line or the part that shows" +
-                            (trapDiff is null ? "" : $" [first differs at x={trapDiff.Value.X},y={trapDiff.Value.Y}]"),
-                            trapDiff is null);
-            }
-            grid.ApplySettings(proportional);
-            grid.RefreshView();
-            Pump();
             // ...and still draws, through the layout that has always drawn it.
             grid.ScrollHorizontallyTo(0);
             grid.RefreshView();
@@ -9813,36 +9776,6 @@ internal static class SelfTest
     private static int GdiHandles()
         => (int)GetGuiResources(System.Diagnostics.Process.GetCurrentProcess().Handle, 0);
 
-    /// <summary>The name of an installed face whose characters measure all one width but are not all drawn
-    /// one width apart, or null if this machine has none. Such a face is the one case where measuring the
-    /// text and drawing it disagree about where a character goes, which is the whole reason the short road
-    /// asks GDI as well as the measurement.</summary>
-    private static string? TrapFace()
-    {
-        var canvas = new GdiCanvas();
-        try
-        {
-            foreach (var family in FontFamily.Families)
-            {
-                Font? font = null;
-                try
-                {
-                    font = new Font(family, 9f);
-                    int one = TextRenderer.MeasureText("0", font, new Size(1000, 100), TextFormatFlags.NoPadding).Width;
-                    bool narrowAsWide =
-                        TextRenderer.MeasureText("iiiiiiiiii", font, new Size(4000, 100), TextFormatFlags.NoPadding).Width
-                     == TextRenderer.MeasureText("WWWWWWWWWW", font, new Size(4000, 100), TextFormatFlags.NoPadding).Width;
-                    if (narrowAsWide && canvas.AdvanceOf(font) != one) return family.Name;
-                }
-                catch (ArgumentException) { }   // a family with no regular face
-                finally { font?.Dispose(); }
-            }
-            return null;
-        }
-        // A face apiece for every family on the machine, and they are GDI handles: nothing else would
-        // collect them.
-        finally { canvas.Discard(); }
-    }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern uint GetGuiResources(IntPtr process, uint flags);
