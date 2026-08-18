@@ -8311,10 +8311,15 @@ internal static class SelfTest
             // per style and a brush per colour. Those are GDI handles, not objects - nothing collects them,
             // and a process that loses ten thousand of them is killed. Zooming rebuilds every face and every
             // paint asks for brushes, so this does both, many times, and counts what the process holds.
+            //
+            // Every step a different size, not five sizes over and over: the faces are filed under the font
+            // they were cut from, and a font that comes round again finds the one it had. Repeating five
+            // sizes therefore leaks five handles however long the loop runs - the shape of a real leak but
+            // not the size of one. Dragging the zoom the way a reader drags it is what tells them apart.
             int handlesBefore = GdiHandles();
             for (int i = 0; i < 40; i++)
             {
-                settings.ZoomPercent = 100 + i % 5 * 25;
+                settings.ZoomPercent = 60 + i * 5;
                 grid.RebuildFonts();
                 grid.Invalidate();
                 grid.Update();
@@ -8323,9 +8328,9 @@ internal static class SelfTest
             grid.RebuildFonts();
             Pump();
             int handlesAfter = GdiHandles();
-            ok &= Check("and drawing through GDI's own handles hands every one of them back",
-                        handlesBefore == 0 || handlesAfter <= handlesBefore + 40,
-                        $"{handlesBefore} handles before 40 rebuilds and repaints, {handlesAfter} after");
+            ok &= Check($"and drawing through GDI's own handles hands every one of them back " +
+                        $"({handlesBefore} held before 40 rebuilds and repaints, {handlesAfter} after)",
+                        handlesBefore == 0 || handlesAfter <= handlesBefore + 12);
 
             // The find bar used to cut a font of its own for the term box, at a different size from the rest
             // of the row. It draws everything in the ambient font now, so there is nothing for it to give

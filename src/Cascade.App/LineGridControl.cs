@@ -852,6 +852,10 @@ public sealed class LineGridControl : Control
 
     public void RebuildFonts()
     {
+        // Before the fonts go: the canvas keeps a GDI handle for each of them, filed under the font it was
+        // made from. Left alone, every settings change would leak those handles and leave the canvas
+        // holding fonts that have been disposed.
+        _canvas.Discard();
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
@@ -3003,7 +3007,7 @@ public sealed class LineGridControl : Control
             MissedFrame = false;
             _catchUp.Dispose();
             foreach (var f in _fonts) f?.Dispose();
-                _canvas.Discard();
+            _canvas.Discard();
             foreach (var b in _brushes.Values) b.Dispose();
             _brushes.Clear();
             _fontFamily?.Dispose();
