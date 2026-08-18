@@ -321,6 +321,10 @@ internal static class SelfTest
             // the eight faces, because a family may be cut fixed-pitch in one and proportionally in another,
             // and it is now where each glyph is DRAWN that hangs on the answer.
             string sample = "plain ascii 12345";
+            Line($"   (font smoothing enabled {SystemInformation.IsFontSmoothingEnabled}, " +
+                 $"type {SystemInformation.FontSmoothingType}, drawing at quality {GdiCanvas.SmoothingForTesting}; " +
+                 $"{grid.FontForTesting.Name} measures {grid.FaceWidthForTesting(0)} " +
+                 $"and advances {grid.AdvanceForTesting(0)})");
             bool[] fixedPitch = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
             ok &= Check($"a fixed-pitch face takes the short road in every style [{string.Join(",", fixedPitch.Select(b => b ? '1' : '0'))}]",
                         fixedPitch.All(b => b), $"font {settings.FontFamily}");
