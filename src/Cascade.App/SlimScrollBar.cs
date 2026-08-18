@@ -55,19 +55,13 @@ internal sealed class SlimScrollBar : Control
     }
 
     /// <summary>How much there is to scroll through, and how much of it is on screen. Rows for the vertical
-    /// one, pixels for the horizontal - the bar does not care which.
-    /// <para>Says nothing when nothing has changed. The sideways bar is told this on every frame of a
-    /// vertical drag, because the widest line on screen changes as the view moves, and repainting the whole
-    /// strip to draw the same picture was a twentieth of every frame.</para></summary>
+    /// one, pixels for the horizontal - the bar does not care which.</summary>
     public void Configure(long total, long visible)
     {
-        long wanted = Math.Max(0, total), showing = Math.Max(1, visible);
-        if (wanted == _total && showing == _visible) return;
-        var was = Thumb;
-        _total = wanted;
-        _visible = showing;
+        _total = Math.Max(0, total);
+        _visible = Math.Max(1, visible);
         _value = Math.Clamp(_value, 0, MaxValue);
-        InvalidateThumb(was);
+        Invalidate();
     }
 
     public long MaxValue => Math.Max(0, _total - _visible);
@@ -80,25 +74,12 @@ internal sealed class SlimScrollBar : Control
         {
             long v = Math.Clamp(value, 0, MaxValue);
             if (v == _value) return;
-            var was = Thumb;
             _value = v;
-            InvalidateThumb(was);
+            Invalidate();
         }
     }
 
     internal bool CanScroll => _total > _visible;
-
-    /// <summary>Repaints the stretch the thumb has moved across, rather than the whole strip. A drag reports
-    /// as fast as the mouse does and the thumb has to follow every one of those - a few hundred a second -
-    /// so what it costs to move it one notch is worth this much care. Everything else the bar draws is in
-    /// the same place as it was.</summary>
-    private void InvalidateThumb(Rectangle was)
-    {
-        var now = Thumb;
-        var moved = Rectangle.Union(was, now);
-        moved.Inflate(2, 2);
-        Invalidate(Rectangle.Intersect(moved, ClientRectangle));
-    }
 
     // ---- geometry ----
 
@@ -120,12 +101,9 @@ internal sealed class SlimScrollBar : Control
     {
         get
         {
-            int track = TrackLength;
-            if (_total <= 0) return track;
+            if (_total <= 0) return TrackLength;
             double share = Math.Clamp((double)_visible / _total, 0, 1);
-            // A thumb small enough to be unaimable is no use, but a bar shorter than that minimum is a bar
-            // being laid out, or squeezed to nothing, and asking for more than it has throws.
-            return (int)Math.Clamp(Math.Round(track * share), Math.Min(MinThumbLength, track), track);
+            return (int)Math.Clamp(Math.Round(TrackLength * share), MinThumbLength, TrackLength);
         }
     }
 
@@ -162,30 +140,16 @@ internal sealed class SlimScrollBar : Control
 
         // A rule all the way round, not just down the side facing the text: an open-ended strip runs into
         // whatever it meets at the top and bottom, which is exactly where it meets the other scrollbar.
-        g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.30)), ClientRectangle);
-        g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07)), Track);
+        using (var rule = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.30)))
+            g.FillRectangle(rule, ClientRectangle);
+        using (var trough = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07)))
+            g.FillRectangle(trough, Track);
 
         if (_vertical) DrawMarks(g);
 
         double strength = !CanScroll ? 0.20 : _dragging ? 0.62 : _hot ? 0.50 : 0.38;
-        g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength)), Thumb);
-    }
-
-    /// <summary>A brush for a colour, kept rather than made. A drag repaints this a few hundred times a
-    /// second and there are five colours in the whole strip.</summary>
-    private SolidBrush Ink(Color colour)
-    {
-        if (_inks.TryGetValue(colour.ToArgb(), out var brush)) return brush;
-        if (_inks.Count > 32) { foreach (var b in _inks.Values) b.Dispose(); _inks.Clear(); }
-        return _inks[colour.ToArgb()] = new SolidBrush(colour);
-    }
-
-    private readonly Dictionary<int, SolidBrush> _inks = new();
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing) { foreach (var brush in _inks.Values) brush.Dispose(); _inks.Clear(); }
-        base.Dispose(disposing);
+        using var fill = new SolidBrush(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength));
+        g.FillRectangle(fill, Thumb);
     }
 
     /// <summary>Every marked line in the file, at its place on the scrollbar's own scale.</summary>
@@ -262,15 +226,13 @@ internal sealed class SlimScrollBar : Control
     {
         long v = Math.Clamp(to, 0, MaxValue);
         if (v == _value) return;
-        var was = Thumb;
         _value = v;
-        InvalidateThumb(was);
+        Invalidate();
         Scrolled?.Invoke(v);
         // A held drag never lets the message queue empty, and WM_PAINT only arrives when it does - so
-        // without this the thumb would not move until the mouse stopped. The view answers for itself: it
-        // redraws no faster than the screen can show it, which this must not do - the thumb has to stay
-        // under the pointer, and it costs a tenth of a millisecond to draw.
+        // without these nothing moves until the mouse stops.
         Update();
+        _grid.Update();
     }
 
     /// <summary>Test seam: what a drag to this offset along the bar would scroll to.</summary>
@@ -280,23 +242,6 @@ internal sealed class SlimScrollBar : Control
         int origin = _vertical ? Track.Top : Track.Left;
         return Math.Clamp((long)Math.Round((along - origin) * (double)MaxValue / span), 0, MaxValue);
     }
-
-    /// <summary>Test seams for a drag: takes hold of the thumb, moves it, lets go. The same three steps the
-    /// mouse takes, so a check drives the wiring rather than the arithmetic behind it.</summary>
-    internal void GrabForTesting()
-    {
-        var thumb = Thumb;
-        int at = (_vertical ? thumb.Top : thumb.Left) + (_vertical ? thumb.Height : thumb.Width) / 2;
-        OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, _vertical ? Width / 2 : at,
-                                       _vertical ? at : Height / 2, 0));
-    }
-
-    internal void DragToForTesting(int along)
-        => OnMouseMove(new MouseEventArgs(MouseButtons.Left, 0, _vertical ? Width / 2 : along,
-                                          _vertical ? along : Height / 2, 0));
-
-    internal void DropForTesting()
-        => OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, Width / 2, Height / 2, 0));
 
     internal Rectangle ThumbForTesting => Thumb;
     internal Rectangle TroughForTesting => Track;

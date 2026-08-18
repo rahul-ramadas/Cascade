@@ -47,14 +47,6 @@ internal static class Program
             return SelfTest.Run(args.Skip(1).ToArray());
         }
 
-        if (args.Length > 0 && args[0].Equals("--scrollbench", StringComparison.OrdinalIgnoreCase))
-        {
-            AttachConsole(-1);
-            InitialiseUi();
-            FailFastOnUiException();
-            return ScrollBench.Run(args.Skip(1).ToArray());
-        }
-
         if (args.Length > 0 && args[0].Equals("--screens", StringComparison.OrdinalIgnoreCase))
         {
             AttachConsole(-1);
@@ -149,16 +141,6 @@ internal static class Program
           --screens [outDir] [file] [file.tat]
                             Render every dialog and the main window to PNGs.
                             Create outDir first; otherwise %TEMP%\cascade_shots is used.
-          --scrollbench [--lines=N] [--payload=N] [--width=N] [--height=N] [--steps=N]
-                        [--jump=N] [--rate=N] [--repeat=N] [--only=<text>] [--parts]
-                        [--micro] [--cold] [--longway] [--seconds=N]
-                            Drag the scrollbar of a generated log and report what one mouse
-                            report costs in wall time, processor time and bytes. --rate gives
-                            the mouse a speed in reports a second (0, the default, waits for
-                            each one); --parts breaks a frame into text, minimap and scrollbar;
-                            --micro times the ways a screenful can be drawn; --cold forgets the
-                            minimap's colours first; --longway puts the text back through the
-                            general layout; --seconds drags on for a profiler to watch.
           --cleanup <pid> <path>
                             Internal. Started by the previous version as it exits, to delete
                             the executable it was running from.
