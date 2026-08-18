@@ -22,12 +22,13 @@ namespace Cascade.App;
 internal sealed class GdiCanvas : IDeviceContext
 {
     private readonly Dictionary<int, IntPtr> _brushes = new();
+    private readonly Dictionary<Font, IntPtr> _faces = new();
+    private readonly HashSet<IntPtr> _variablePitch = new();
     private Graphics? _over;
     private IntPtr _hdc;
-    private IntPtr _font;
-    private int _fore = Unset, _back = Unset, _mode;
-
-    private const int Unset = -1;   // a COLORREF made here is three bytes, so none of them is ever negative
+    private IntPtr _face, _wasFace;
+    private int _fore = -1, _back = -1;
+    private bool _opaque, _variable;
 
     /// <summary>Takes the context out of the Graphics. Nothing may touch that Graphics again until
     /// <see cref="Release"/> - GDI+ holds it locked meanwhile, and drawing on it throws.</summary>
@@ -35,19 +36,33 @@ internal sealed class GdiCanvas : IDeviceContext
     {
         _over = over;
         _hdc = over.GetHdc();
-        // Whatever else has drawn through this context, this is what the arithmetic below assumes.
-        SetTextAlign(_hdc, TaLeft | TaTop | TaNoUpdateCp);
-        _font = IntPtr.Zero;
-        _fore = _back = Unset;
-        _mode = 0;
+        _wasFace = IntPtr.Zero;
+        Unknown();
     }
 
     public void Release()
     {
         if (_over is null) return;
+        // Whatever was in the context when it was borrowed goes back into it: a font that is still selected
+        // cannot be deleted, and the context is not ours to leave changed.
+        if (_wasFace != IntPtr.Zero) SelectObject(_hdc, _wasFace);
         _over.ReleaseHdc(_hdc);
         _over = null;
         _hdc = IntPtr.Zero;
+        _wasFace = IntPtr.Zero;
+        Unknown();
+    }
+
+    /// <summary>Drops what this remembers of the context's state, so the next draw sets everything it needs
+    /// rather than trusting a note about a context that has been put back to how it was. Anything that
+    /// saves and restores the context wholesale has to say so here: a restore puts back the font, the
+    /// colours and the background mode along with the clip, and a note that survived it would have the next
+    /// piece of text drawn in the last one's colours.</summary>
+    private void Unknown()
+    {
+        _face = IntPtr.Zero;
+        _fore = _back = -1;
+        _opaque = false;
     }
 
     public bool Holding => _over is not null;
@@ -60,13 +75,16 @@ internal sealed class GdiCanvas : IDeviceContext
     /// did not create. The brushes are let go of in <see cref="Discard"/>.</summary>
     void IDisposable.Dispose() { }
 
-    /// <summary>Gives back the brushes kept for the colours drawn so far. The colours of a view change when
-    /// its settings or its filters do, which is rare, and there are a handful of them at a time.</summary>
+    /// <summary>Gives back the brushes and fonts kept for what has been drawn so far. The colours and faces
+    /// of a view change when its settings or its filters do, which is rare, and there are a handful of them
+    /// at a time.</summary>
     public void Discard()
     {
         Release();
         foreach (var brush in _brushes.Values) DeleteObject(brush);
         _brushes.Clear();
+        foreach (var face in _faces.Values) DeleteObject(face);
+        _faces.Clear();
     }
 
     public void Fill(Rectangle box, Color colour)
@@ -80,95 +98,94 @@ internal sealed class GdiCanvas : IDeviceContext
     /// Draws text and the background behind it in one go: <paramref name="box"/> is filled with
     /// <paramref name="back"/> and the text is drawn at <paramref name="x"/>, clipped to that box - so the
     /// text may start left of it, as a line scrolled sideways does.
-    /// <para><paramref name="plain"/> says the text is printable ASCII, which is the only case that can go
-    /// through the shortest call GDI has. Anything else - a script that needs shaping or reordering, a
-    /// character that has to come from a linked font - is left to the layout that has always drawn it.</para>
+    ///
+    /// <para>Plain ASCII in a fixed-pitch face is handed straight to GDI, which is about twice as quick as
+    /// going through <see cref="TextRenderer"/> for it. Everything else is laid out: a character the face
+    /// has no glyph for has to be fetched from a linked font, and in a face whose characters differ in
+    /// width the layout call spaces a run fractionally differently from the plain one - not enough to see,
+    /// but enough that the same text would not be drawn the same way twice. Both draw with the SAME font
+    /// handle, which is what lets them be mixed at all: the handle decides the antialiasing, and when each
+    /// call was left to choose a handle for itself they chose differently on machines whose font smoothing
+    /// was not this one's - ClearType on one line, grey on the next.</para>
     /// </summary>
-    public void Text(ReadOnlySpan<char> text, int x, int y, Rectangle box, Color fore, Color back,
-                     Font font, IntPtr hfont, bool plain)
+    public void Text(ReadOnlySpan<char> text, int x, int y, Rectangle box, Color fore, Color back, Font font)
     {
         if (box.Width <= 0 || box.Height <= 0) return;
         if (text.IsEmpty) { Fill(box, back); return; }
-        if (plain && hfont != IntPtr.Zero)
+        Ready(font, fore, back, opaque: true);
+        if (_variable || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
         {
-            Use(hfont, fore, back, opaque: true);
-            var rect = new Rect(box);
-            unsafe
+            Fill(box, back);
+            // Saved and restored by hand rather than through a scope object: the text is a span, and a span
+            // cannot be captured by anything that outlives the call.
+            int saved = SaveDC(_hdc);
+            try
             {
-                fixed (char* chars = text)
-                    ExtTextOut(_hdc, x, y, EtoOpaque | EtoClipped, &rect, chars, (uint)text.Length, null);
+                IntersectClipRect(_hdc, box.Left, box.Top, box.Right, box.Bottom);
+                LaidOut(text, font, new Point(x, y), fore, back, Plain);
             }
+            finally { RestoreDC(_hdc, saved); Unknown(); }
             return;
         }
-        Fill(box, back);
-        Layout(text, x, y, box, fore, font);
+
+        var rect = new Rect(box);
+        ExtTextOut(_hdc, x, y, EtoOpaque | EtoClipped, ref rect, in System.Runtime.InteropServices.MemoryMarshal.GetReference(text), (uint)text.Length, IntPtr.Zero);
     }
 
-    /// <summary>Text over whatever is already there, for the few things drawn on top of a row rather than
-    /// as part of it.</summary>
-    public void TextOver(ReadOnlySpan<char> text, int x, int y, Rectangle box, Color fore,
-                         Font font, IntPtr hfont, bool plain)
+    /// <summary>Text over whatever is already there: a found word over its highlight, the selected part of
+    /// a line over the selection. Transparent, unlike <see cref="Text"/> - these are drawn on top of pixels
+    /// that are already right, and telling GDI to lay a background down with them would square off the
+    /// antialiasing where a selected glyph meets the unselected one beside it. They are also rare, so what
+    /// that costs is nothing against how a whole row is drawn.</summary>
+    public void TextOver(ReadOnlySpan<char> text, int x, int y, Rectangle box, Color fore, Font font)
     {
         if (text.IsEmpty || box.Width <= 0 || box.Height <= 0) return;
-        if (plain && hfont != IntPtr.Zero)
-        {
-            Use(hfont, fore, fore, opaque: false);
-            var rect = new Rect(box);
-            unsafe
-            {
-                fixed (char* chars = text)
-                    ExtTextOut(_hdc, x, y, EtoClipped, &rect, chars, (uint)text.Length, null);
-            }
-            return;
-        }
-        Layout(text, x, y, box, fore, font);
-    }
-
-    /// <summary>Text through the layout GDI+ has always used, clipped to its box because it may be asked to
-    /// start left of one. The box is not filled here; whoever called has done that.</summary>
-    private void Layout(ReadOnlySpan<char> text, int x, int y, Rectangle box, Color fore, Font font)
-    {
         int saved = SaveDC(_hdc);
         try
         {
             IntersectClipRect(_hdc, box.Left, box.Top, box.Right, box.Bottom);
-            TextRenderer.DrawText(this, text, font, new Point(x, y), fore,
-                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            LaidOut(text, font, new Point(x, y), fore, Color.Empty, Plain);
         }
-        finally { RestoreDC(_hdc, saved); Forget(); }
+        finally { RestoreDC(_hdc, saved); Unknown(); }
     }
 
-    /// <summary>Text laid out inside a box - right-aligned line numbers, aligned column cells - over a
-    /// background it is told about, which is what makes it cheap.</summary>
-    public void TextIn(ReadOnlySpan<char> text, Rectangle box, Color fore, Color back, Font font,
-                       TextFormatFlags flags)
+    /// <summary>Puts the context into the state a draw wants, saying only what has changed since the last
+    /// one. A screenful is hundreds of draws in a handful of colours and one font.</summary>
+    private void Ready(Font font, Color fore, Color back, bool opaque)
     {
-        if (box.Width <= 0 || box.Height <= 0) return;
-        TextRenderer.DrawText(this, text, font, box, fore, back, flags);
+        IntPtr face = Face(font);
+        if (face != _face)
+        {
+            IntPtr was = SelectObject(_hdc, face);
+            if (_wasFace == IntPtr.Zero) _wasFace = was;
+            _face = face;
+        }
+        int ink = ColorRef(fore);
+        if (ink != _fore) { SetTextColor(_hdc, ink); _fore = ink; }
+        int behind = ColorRef(back);
+        if (behind != _back) { SetBkColor(_hdc, behind); _back = behind; }
+        if (opaque != _opaque) { SetBkMode(_hdc, opaque ? OpaqueBackground : TransparentBackground); _opaque = opaque; }
     }
 
-    /// <summary>The same, over what is already there.</summary>
-    public void TextIn(ReadOnlySpan<char> text, Rectangle box, Color fore, Font font, TextFormatFlags flags)
+    /// <summary>Text through the layout call, which is the only one that will go and find a glyph the face
+    /// itself does not have. It selects a font of its own for the length of the call and leaves the colours
+    /// as it pleases, so what this remembers of them is thrown away afterwards.</summary>
+    private void LaidOut(ReadOnlySpan<char> text, Font font, Point at, Color fore, Color back,
+                         TextFormatFlags flags)
     {
-        if (box.Width <= 0 || box.Height <= 0) return;
-        TextRenderer.DrawText(this, text, font, box, fore, flags);
+        Ready(font, fore, back.IsEmpty ? Color.Black : back, opaque: !back.IsEmpty);
+        if (back.IsEmpty) TextRenderer.DrawText(this, text, font, at, fore, flags);
+        else TextRenderer.DrawText(this, text, font, at, fore, back, flags);
+        _fore = _back = -1;
+        _opaque = false;
     }
+
+    private const TextFormatFlags Plain = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
 
     /// <summary>Narrows the clip to a box for as long as the returned scope lives. Used where drawing is
     /// laid out per cell but must not reach past the text area as a whole.</summary>
     public ClipScope Clip(Rectangle box) => new(this, box);
 
-    /// <summary>
-    /// A narrowed clip, put back when it goes out of scope.
-    ///
-    /// <para>It is narrowed by saving the whole device context and restoring it, which is the cheap way to
-    /// do it - and which also puts back the face and the colours that were selected when it was saved. So
-    /// the canvas has to forget what it believes is selected on the way out, or the next piece of text
-    /// would be told it need not select the face it is already using, and would come out in whatever the
-    /// context reverted to. That is a row of cells in the system font, and it happened for real: a log
-    /// split into fields, with the line-number margin turned off, drew every row but the first that
-    /// way.</para>
-    /// </summary>
     internal readonly struct ClipScope : IDisposable
     {
         private readonly GdiCanvas _canvas;
@@ -184,30 +201,78 @@ internal sealed class GdiCanvas : IDeviceContext
         public void Dispose()
         {
             RestoreDC(_canvas._hdc, _saved);
-            _canvas.Forget();
+            _canvas.Unknown();
         }
     }
 
-    /// <summary>Lets go of what the canvas believes the context has selected, because something has put the
-    /// context back to how it was.</summary>
-    private void Forget()
+    /// <summary>Text laid out inside a box - right-aligned line numbers, aligned column cells - over a
+    /// background it is told about, which is what makes it cheap.</summary>
+    public void TextIn(ReadOnlySpan<char> text, Rectangle box, Color fore, Color back, Font font,
+                       TextFormatFlags flags)
     {
-        _font = IntPtr.Zero;
-        _fore = _back = Unset;
-        _mode = 0;
+        if (box.Width <= 0 || box.Height <= 0) return;
+        Ready(font, fore, back, opaque: true);
+        TextRenderer.DrawText(this, text, font, box, fore, back, flags);
+        _fore = _back = -1;
+        _opaque = false;
     }
 
-    private void Use(IntPtr font, Color fore, Color back, bool opaque)
+    /// <summary>The same, over what is already there.</summary>
+    public void TextIn(ReadOnlySpan<char> text, Rectangle box, Color fore, Font font, TextFormatFlags flags)
     {
-        if (font != _font) { SelectObject(_hdc, font); _font = font; }
-        int foreRef = ColorRef(fore);
-        if (foreRef != _fore) { SetTextColor(_hdc, foreRef); _fore = foreRef; }
-        int mode = opaque ? Opaque : Transparent;
-        if (mode != _mode) { SetBkMode(_hdc, mode); _mode = mode; }
-        if (!opaque) return;
-        int backRef = ColorRef(back);
-        if (backRef != _back) { SetBkColor(_hdc, backRef); _back = backRef; }
+        if (box.Width <= 0 || box.Height <= 0) return;
+        Ready(font, fore, Color.Black, opaque: false);
+        TextRenderer.DrawText(this, text, font, box, fore, flags);
+        _fore = _back = -1;
+        _opaque = false;
     }
+
+    /// <summary>
+    /// The GDI font handle for a font, kept rather than made.
+    ///
+    /// <para>Made the way <see cref="TextRenderer"/> makes its own, which matters for one field:
+    /// <c>lfQuality</c>. <see cref="Font.ToHfont"/> leaves it at DEFAULT_QUALITY - "system, you decide" -
+    /// and the system's answer is not always the one WinForms asks for, which is worked out from the
+    /// machine's own font-smoothing settings. Where the two answers differ, text drawn straight comes out
+    /// with ClearType's colour fringes and text that was laid out comes out grey, in the same view. Asking
+    /// the settings the same question WinForms asks makes the two agree on any machine, rather than only on
+    /// one whose smoothing happens to match.</para>
+    /// </summary>
+    private IntPtr Face(Font font)
+    {
+        if (_faces.TryGetValue(font, out var face))
+        {
+            _variable = _variablePitch.Contains(face);
+            return face;
+        }
+        var logFont = new LogFont();
+        font.ToLogFont(logFont);
+        logFont.lfQuality = Smoothing;
+        face = CreateFontIndirect(logFont);
+        if (face == IntPtr.Zero) face = font.ToHfont();
+        // Whether every character in the face is the same width is GDI's to say, not a caller's: it decides
+        // which of the two draws below may be used, and a caller that got it wrong would be drawing text
+        // that is subtly misplaced.
+        IntPtr was = SelectObject(_hdc, face);
+        GetTextMetrics(_hdc, out var metrics);
+        SelectObject(_hdc, was);
+        _variable = (metrics.tmPitchAndFamily & VariablePitch) != 0;
+        if (_variable) _variablePitch.Add(face);
+        return _faces[font] = face;
+    }
+
+    /// <summary>What WinForms asks GDI for when it lays text out on a context of ours, read from the
+    /// machine's font-smoothing settings exactly as it reads them.</summary>
+    private static readonly byte Smoothing =
+        !SystemInformation.IsFontSmoothingEnabled ? ProofQuality
+        : SystemInformation.FontSmoothingType == ClearTypeSmoothing ? ClearTypeQuality
+        : AntialiasedQuality;
+
+    private const byte ProofQuality = 2, AntialiasedQuality = 4, ClearTypeQuality = 5;
+    private const int ClearTypeSmoothing = 2;
+
+    /// <summary>Which quality the text is drawn at, so a check can say what it is looking at.</summary>
+    internal static byte SmoothingForTesting => Smoothing;
 
     private IntPtr Brush(Color colour)
     {
@@ -223,9 +288,19 @@ internal sealed class GdiCanvas : IDeviceContext
 
     // ---- GDI ----
 
-    private const int Transparent = 1, Opaque = 2;
+    private const int OpaqueBackground = 2, TransparentBackground = 1;
+    private const byte VariablePitch = 0x01;
     private const uint EtoOpaque = 0x0002, EtoClipped = 0x0004;
-    private const uint TaLeft = 0, TaTop = 0, TaNoUpdateCp = 0;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private sealed class LogFont
+    {
+        public int lfHeight, lfWidth, lfEscapement, lfOrientation, lfWeight;
+        public byte lfItalic, lfUnderline, lfStrikeOut, lfCharSet, lfOutPrecision, lfClipPrecision,
+                    lfQuality, lfPitchAndFamily;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string lfFaceName = "";
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Rect
@@ -239,30 +314,44 @@ internal sealed class GdiCanvas : IDeviceContext
     }
 
     [DllImport("gdi32.dll")]
-    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
-
-    [DllImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeleteObject(IntPtr obj);
 
     [DllImport("gdi32.dll")]
-    private static extern void SetBkMode(IntPtr hdc, int mode);
+    private static extern IntPtr CreateSolidBrush(int colour);
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "CreateFontIndirectW")]
+    private static extern IntPtr CreateFontIndirect(LogFont font);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct TextMetric
+    {
+        public int tmHeight, tmAscent, tmDescent, tmInternalLeading, tmExternalLeading, tmAveCharWidth,
+                   tmMaxCharWidth, tmWeight, tmOverhang, tmDigitizedAspectX, tmDigitizedAspectY;
+        public char tmFirstChar, tmLastChar, tmDefaultChar, tmBreakChar;
+        public byte tmItalic, tmUnderlined, tmStruckOut, tmPitchAndFamily, tmCharSet;
+    }
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetTextMetricsW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetTextMetrics(IntPtr hdc, out TextMetric metrics);
 
     [DllImport("gdi32.dll")]
-    private static extern void SetBkColor(IntPtr hdc, int colour);
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
 
     [DllImport("gdi32.dll")]
     private static extern void SetTextColor(IntPtr hdc, int colour);
 
     [DllImport("gdi32.dll")]
-    private static extern void SetTextAlign(IntPtr hdc, uint mode);
+    private static extern void SetBkColor(IntPtr hdc, int colour);
 
     [DllImport("gdi32.dll")]
-    private static extern IntPtr CreateSolidBrush(int colour);
+    private static extern void SetBkMode(IntPtr hdc, int mode);
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "ExtTextOutW")]
-    private static extern unsafe void ExtTextOut(IntPtr hdc, int x, int y, uint options, Rect* rect,
-        char* text, uint count, int* spacing);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ExtTextOut(IntPtr hdc, int x, int y, uint options, ref Rect rect,
+                                          in char text, uint length, IntPtr spacing);
 
     [DllImport("gdi32.dll")]
     private static extern int SaveDC(IntPtr hdc);

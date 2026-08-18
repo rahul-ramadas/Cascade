@@ -61,9 +61,6 @@ public sealed class LineGridControl : Control
     // One font per combination of bold, italic and underline, indexed by those three bits. An array
     // rather than a field each: three flags is eight faces.
     private readonly Font[] _fonts = new Font[8];
-    // The same eight as GDI knows them. Drawing a row goes straight to GDI (see GdiCanvas), which wants a
-    // handle rather than a Font, and making one per call would be an object created and destroyed per row.
-    private readonly IntPtr[] _faces = new IntPtr[8];
     private readonly GdiCanvas _canvas = new();
     private Font FontRegular => _fonts[0];
     private Font FontBold => _fonts[1];
@@ -438,8 +435,7 @@ public sealed class LineGridControl : Control
             var box = Rectangle.Intersect(new Rectangle(x0, strip.Top, Math.Max(1, x1 - x0), _rowHeight), strip);
             ink.Fill(box, colour);
             var part = text.AsSpan(a, b - a);
-            ink.TextOver(part, x0, strip.Top, strip, _settings.Foreground, font, _faces[fontIndex],
-                         Plain(part, fontIndex));
+            ink.TextOver(part, x0, strip.Top, strip, _settings.Foreground, font);
         }
     }
 
@@ -855,7 +851,6 @@ public sealed class LineGridControl : Control
     public void RebuildFonts()
     {
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
-        ReleaseFaces();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
         float size = _settings.EffectiveFontSize;
@@ -867,7 +862,6 @@ public sealed class LineGridControl : Control
             _fonts[i] = new Font(family, size,
                 ((i & 1) != 0 ? FontStyle.Bold : 0) | ((i & 2) != 0 ? FontStyle.Italic : 0) |
                 ((i & 4) != 0 ? FontStyle.Underline : 0));
-        for (int i = 0; i < _faces.Length; i++) _faces[i] = _fonts[i].ToHfont();
         // Font.Height is the typeface's own line spacing, which for a monospaced face already includes
         // whatever gap its designer wanted between lines - so anything added here is the reader's choice,
         // not a correction. Two pixels used to be added unasked, costing a line in every eleven on screen.
@@ -1741,8 +1735,7 @@ public sealed class LineGridControl : Control
         {
             int from = 0, to = text.Length;
             var strip = new Rectangle(gutter, y, ContentWidth, _rowHeight);
-            ink.TextOver(text, gutter - _hScroll, y, strip, fore, font, _faces[fontIndex],
-                         Plain(text, fontIndex));
+            ink.TextOver(text, gutter - _hScroll, y, strip, fore, font);
             DrawHighlightText(ink, text, from, to, strip, font, fontIndex);
             if (charSel) DrawCharSelection(ink, text, from, to, strip, font, fontIndex);
             return;
@@ -1799,7 +1792,7 @@ public sealed class LineGridControl : Control
             ColumnAlign.Center => cell.Left + (cell.Width - width) / 2,
             _ => cell.Left
         };
-        ink.Text(span, x, cell.Top, cell, fore, back, font, _faces[fontIndex], plain: true);
+        ink.Text(span, x, cell.Top, cell, fore, back, font);
     }
 
     /// <summary>Where a character of a cell's text sits on screen.</summary>
@@ -2711,8 +2704,7 @@ public sealed class LineGridControl : Control
         int x = strip.Left - (Wrapping ? 0 : _hScroll);
         bool plain = charWidth > 0 && part.IndexOfAnyExceptInRange(' ', '~') < 0;
         var (shownFrom, shownTo) = plain ? OnScreenPart(part.Length, x, charWidth) : (0, part.Length);
-        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back,
-                 font, _faces[fontIndex], plain);
+        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back, font);
         if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
         return (plain ? part.Length * charWidth : DrawnWidth(part, font, charWidth)) + 8;
     }
@@ -2807,8 +2799,7 @@ public sealed class LineGridControl : Control
         var box = Rectangle.Intersect(new Rectangle(x0, strip.Top, Math.Max(1, x1 - x0), _rowHeight), strip);
         ink.Fill(box, _settings.SelectionBack);
         var part = text.AsSpan(a, b - a);
-        ink.TextOver(part, x0, strip.Top, strip, _settings.SelectionFore, font, _faces[fontIndex],
-                     Plain(part, fontIndex));
+        ink.TextOver(part, x0, strip.Top, strip, _settings.SelectionFore, font);
     }
 
     /// <summary>Where a character sits on screen, measured from the start of the segment it is drawn in.</summary>
@@ -2841,8 +2832,16 @@ public sealed class LineGridControl : Control
         var digits = Digits(line + 1);
         int digitWidth = _longWay ? 0 : CharWidthOf(0);
         if (digitWidth > 0)
-            ink.Text(digits, box.Right - 6 - digits.Length * digitWidth, y, box, colour, _settings.GutterBack,
-                     FontRegular, _faces[0], plain: true);
+        {
+            // The margin is filled whole, then the number drawn into the part of it the number is allowed:
+            // the six pixels of air before the text begins are not the number's to spill its antialiasing
+            // into, and laying the text out inside that narrower box is exactly what the arithmetic here
+            // stands in for.
+            ink.Fill(box, _settings.GutterBack);
+            var room = new Rectangle(markers, y, lnw - 6, _rowHeight);
+            ink.Text(digits, room.Right - digits.Length * digitWidth, y, room, colour, _settings.GutterBack,
+                     FontRegular);
+        }
         else
         {
             // Text laid out over a background colour fills the character cells, not the box around them,
@@ -3002,8 +3001,7 @@ public sealed class LineGridControl : Control
             MissedFrame = false;
             _catchUp.Dispose();
             foreach (var f in _fonts) f?.Dispose();
-            ReleaseFaces();
-            _canvas.Discard();
+                _canvas.Discard();
             foreach (var b in _brushes.Values) b.Dispose();
             _brushes.Clear();
             _fontFamily?.Dispose();
@@ -3011,20 +3009,6 @@ public sealed class LineGridControl : Control
         base.Dispose(disposing);
     }
 
-    /// <summary>Gives back the eight faces GDI was asked for. They are handles, not objects: nothing else
-    /// would ever let go of them.</summary>
-    private void ReleaseFaces()
-    {
-        for (int i = 0; i < _faces.Length; i++)
-        {
-            if (_faces[i] != IntPtr.Zero) DeleteObject(_faces[i]);
-            _faces[i] = IntPtr.Zero;
-        }
-    }
-
-    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
-    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
-    private static extern bool DeleteObject(IntPtr handle);
 
     protected override void OnMouseLeave(EventArgs e)
     {
