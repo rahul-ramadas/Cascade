@@ -13,11 +13,11 @@ namespace Cascade.App;
 /// screenful. The second, and the larger by far: text drawn over a background GDI has not been told about
 /// must read every destination pixel back to blend ClearType against it, where text drawn over a
 /// background it knows simply writes them. Filling each row as part of drawing its text, on a device
-/// context held for the whole frame, took a screenful of an ordinary log from 6.0 ms to 2.1.</para>
+/// context held for the whole frame, took a screenful of an ordinary log from 5.7 ms to 2.1.</para>
 ///
 /// <para>It is <see cref="IDeviceContext"/> as well, so <see cref="TextRenderer"/> calls can be pointed at
 /// the same borrowed context instead of fetching one of their own - which is what the parts that need
-/// GDI+'s text layout (alignment, ellipsis, anything not plain ASCII) do.</para>
+/// GDI+'s text layout do: alignment, ellipsis, a proportional face, and anything not plain ASCII.</para>
 /// </summary>
 internal sealed class GdiCanvas : IDeviceContext
 {
