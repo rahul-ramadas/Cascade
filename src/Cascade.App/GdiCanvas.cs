@@ -111,7 +111,7 @@ internal sealed class GdiCanvas : IDeviceContext
     {
         if (box.Width <= 0 || box.Height <= 0) return;
         if (text.IsEmpty) { Fill(box, back); return; }
-        if (Variable(font) || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
+        if (LayOutEverythingForTesting || Variable(font) || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
         {
             Fill(box, back);
             // Saved and restored by hand rather than through a scope object: the text is a span, and a span
@@ -169,6 +169,12 @@ internal sealed class GdiCanvas : IDeviceContext
     }
 
     private const TextFormatFlags Plain = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+
+    /// <summary>Test seam: send every piece of text through the layout call, whatever it is made of, so a
+    /// check can draw a view both ways and prove the two put the same pixels on the screen. That they do is
+    /// the whole licence for having two, and it is not something one machine's font settings can settle.
+    /// </summary>
+    internal bool LayOutEverythingForTesting { get; set; }
 
     /// <summary>Narrows the clip to a box for as long as the returned scope lives. Used where drawing is
     /// laid out per cell but must not reach past the text area as a whole.</summary>

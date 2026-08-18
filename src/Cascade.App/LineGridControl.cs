@@ -447,12 +447,14 @@ public sealed class LineGridControl : Control
     private bool _longWay;
 
     /// <summary>Test seam: put every piece of text back through the general text layout, as this did before
-    /// the direct path existed, so a check can prove the two draw the same picture.</summary>
+    /// the direct path existed, so a check can prove the two draw the same picture. It has to reach the
+    /// canvas as well as this: which of the two calls draws a line is the canvas's decision, and a check
+    /// that only moved the line number would be proving the smaller half of it.</summary>
     [System.ComponentModel.DefaultValue(false)]
     internal bool DrawTextTheLongWayForTesting
     {
         get => _longWay;
-        set { _longWay = value; Invalidate(); }
+        set { _longWay = value; _canvas.LayOutEverythingForTesting = value; Invalidate(); }
     }
 
     // ---- what the match map reads ----
