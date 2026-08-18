@@ -111,7 +111,7 @@ internal sealed class GdiCanvas : IDeviceContext
     {
         if (box.Width <= 0 || box.Height <= 0) return;
         if (text.IsEmpty) { Fill(box, back); return; }
-        if (LayOutEverythingForTesting || Variable(font) || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
+        if (LayOutEverythingForTesting || Face(font).Advance == 0 || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
         {
             Fill(box, back);
             // Saved and restored by hand rather than through a scope object: the text is a span, and a span
@@ -218,7 +218,8 @@ internal sealed class GdiCanvas : IDeviceContext
     }
 
     /// <summary>
-    /// The GDI font handle for a font, and whether its characters differ in width, worked out once and kept.
+    /// The GDI font handle for a font, how wide it advances every printable ASCII character if it advances
+    /// them all alike, and whether its characters differ in width, worked out once and kept.
     ///
     /// <para>The handle is made the way <see cref="TextRenderer"/> makes its own, which matters for one
     /// field: <c>lfQuality</c>. <see cref="Font.ToHfont"/> leaves that at DEFAULT_QUALITY - "system, you
@@ -229,8 +230,11 @@ internal sealed class GdiCanvas : IDeviceContext
     /// It is asked once here and once there, so even a machine whose smoothing is changed while the app is
     /// running has the two still agreeing with each other.</para>
     ///
-    /// <para>Whether the face is fixed-pitch is GDI's to say rather than a caller's to pass in and get
-    /// wrong: it decides which of the two draws may be used, and the wrong answer means misplaced text.</para>
+    /// <para>The advance is asked of GDI character by character rather than taken from a measurement of a
+    /// string, because it is what decides where the ink actually lands. A face can measure as fixed-pitch
+    /// and still not advance by that width - there are fonts installed on this machine that measure eight
+    /// pixels a character and advance eleven - and text placed by multiplying the measured width would then
+    /// be drawn a little further along with every character.</para>
     /// </summary>
     private Realised Face(Font font)
     {
@@ -242,14 +246,30 @@ internal sealed class GdiCanvas : IDeviceContext
         if (face == IntPtr.Zero) face = font.ToHfont();
         IntPtr was = SelectObject(_hdc, face);
         GetTextMetrics(_hdc, out var metrics);
+        var widths = new int[Last - First + 1];
+        int advance = GetCharWidth32(_hdc, First, Last, widths) ? widths[0] : 0;
+        foreach (int w in widths) if (w != advance) { advance = 0; break; }
         SelectObject(_hdc, was);
-        return _faces[font] = new Realised(face, (metrics.tmPitchAndFamily & VariablePitch) != 0);
+        return _faces[font] = new Realised(face, Math.Max(0, advance),
+                                           (metrics.tmPitchAndFamily & VariablePitch) != 0);
     }
 
-    private readonly record struct Realised(IntPtr Handle, bool Variable);
+    private const char First = ' ', Last = '~';
 
-    /// <summary>Whether the face spaces its characters unevenly, which decides how its text is drawn.</summary>
-    private bool Variable(Font font) => Face(font).Variable;
+    private readonly record struct Realised(IntPtr Handle, int Advance, bool Variable);
+
+    /// <summary>How far the face moves along for each printable ASCII character, if it moves the same
+    /// distance for all of them - and 0 if it does not, which is what says that text in it may not be
+    /// placed by multiplication.</summary>
+    internal int AdvanceOf(Font font)
+    {
+        if (Holding) return Face(font).Advance;
+        // Asked between paints, when there is no context to borrow: a screen one will do, and the answer
+        // does not depend on which context the face is measured in.
+        IntPtr screen = GetDC(IntPtr.Zero);
+        try { _hdc = screen; return Face(font).Advance; }
+        finally { ReleaseDC(IntPtr.Zero, screen); _hdc = IntPtr.Zero; }
+    }
 
     /// <summary>What WinForms asks GDI for when it lays text out on a context of ours, read from the
     /// machine's font-smoothing settings exactly as it reads them.</summary>
@@ -321,6 +341,16 @@ internal sealed class GdiCanvas : IDeviceContext
         public char tmFirstChar, tmLastChar, tmDefaultChar, tmBreakChar;
         public byte tmItalic, tmUnderlined, tmStruckOut, tmPitchAndFamily, tmCharSet;
     }
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetCharWidth32W")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCharWidth32(IntPtr hdc, uint first, uint last, [Out] int[] widths);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern void ReleaseDC(IntPtr window, IntPtr hdc);
 
     [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetTextMetricsW")]
     [return: MarshalAs(UnmanagedType.Bool)]

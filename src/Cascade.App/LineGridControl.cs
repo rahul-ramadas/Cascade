@@ -881,9 +881,21 @@ public sealed class LineGridControl : Control
         // family cannot be relied on to say so, and a wrong answer here sizes every column wrongly - and,
         // since a row's glyphs are placed by multiplication when the answer is yes, draws its text in the
         // wrong place. Asked of every face, because a family may be cut fixed-pitch in one and not another.
+        //
+        // Asked of GDI as well as of the measurement, and both have to agree. The measurement says what a
+        // string is laid out as; GDI's advance says where the ink of each character actually lands. A face
+        // can measure eight pixels a character and advance eleven - there are such faces installed on this
+        // machine - and where they disagree, text placed by multiplying the measured width drifts further
+        // along the line with every character. Neither answer alone would have caught that; the two
+        // together settle it on whatever machine the app is run on.
         for (int i = 0; i < _fonts.Length; i++)
-            _monoFace[i] = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width
-                        == TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+        {
+            int laidOut = TextRenderer.MeasureText("iiiiiiiiii", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+            int widest = TextRenderer.MeasureText("WWWWWWWWWW", _fonts[i], new Size(4000, 100), TextFormatFlags.NoPadding).Width;
+            _monoFace[i] = laidOut == widest
+                        && _canvas.AdvanceOf(_fonts[i]) == _charWidths[i]
+                        && laidOut == 10 * _charWidths[i];
+        }
         _monospaced = _monoFace[0];
         BuildChipFont();
         _naturalKey = null;   // the widths the content asks for are measured in this font
@@ -2783,6 +2795,12 @@ public sealed class LineGridControl : Control
     /// <summary>The same width, always measured - what the shortcut has to agree with.</summary>
     internal int MeasuredWidthForTesting(string text, int fontIndex)
         => DrawnWidth(text, _fonts[fontIndex], 0);
+
+    /// <summary>The width a character is measured at, and the width GDI advances by, so a check can say
+    /// which of the two refused the shortcut.</summary>
+    internal int FaceWidthForTesting(int fontIndex) => _charWidths[fontIndex];
+
+    internal int AdvanceForTesting(int fontIndex) => _canvas.AdvanceOf(_fonts[fontIndex]);
 
     /// <summary>Whether the shortcut was taken, so a check can prove it is doing something.</summary>
     internal bool WidthWasArithmeticForTesting(string text, int fontIndex)
