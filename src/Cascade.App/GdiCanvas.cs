@@ -22,13 +22,12 @@ namespace Cascade.App;
 internal sealed class GdiCanvas : IDeviceContext
 {
     private readonly Dictionary<int, IntPtr> _brushes = new();
-    private readonly Dictionary<Font, IntPtr> _faces = new();
-    private readonly HashSet<IntPtr> _variablePitch = new();
+    private readonly Dictionary<Font, Realised> _faces = new();
     private Graphics? _over;
     private IntPtr _hdc;
     private IntPtr _face, _wasFace;
     private int _fore = -1, _back = -1;
-    private bool _opaque, _variable;
+    private bool _opaque;
 
     /// <summary>Takes the context out of the Graphics. Nothing may touch that Graphics again until
     /// <see cref="Release"/> - GDI+ holds it locked meanwhile, and drawing on it throws.</summary>
@@ -83,7 +82,7 @@ internal sealed class GdiCanvas : IDeviceContext
         Release();
         foreach (var brush in _brushes.Values) DeleteObject(brush);
         _brushes.Clear();
-        foreach (var face in _faces.Values) DeleteObject(face);
+        foreach (var face in _faces.Values) DeleteObject(face.Handle);
         _faces.Clear();
     }
 
@@ -112,8 +111,7 @@ internal sealed class GdiCanvas : IDeviceContext
     {
         if (box.Width <= 0 || box.Height <= 0) return;
         if (text.IsEmpty) { Fill(box, back); return; }
-        Ready(font, fore, back, opaque: true);
-        if (_variable || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
+        if (Variable(font) || text.IndexOfAnyExceptInRange(' ', '~') >= 0)
         {
             Fill(box, back);
             // Saved and restored by hand rather than through a scope object: the text is a span, and a span
@@ -122,14 +120,17 @@ internal sealed class GdiCanvas : IDeviceContext
             try
             {
                 IntersectClipRect(_hdc, box.Left, box.Top, box.Right, box.Bottom);
-                LaidOut(text, font, new Point(x, y), fore, back, Plain);
+                TextRenderer.DrawText(this, text, font, new Point(x, y), fore, back, Plain);
             }
             finally { RestoreDC(_hdc, saved); Unknown(); }
             return;
         }
 
+        Ready(font, fore, back);
         var rect = new Rect(box);
-        ExtTextOut(_hdc, x, y, EtoOpaque | EtoClipped, ref rect, in System.Runtime.InteropServices.MemoryMarshal.GetReference(text), (uint)text.Length, IntPtr.Zero);
+        ExtTextOut(_hdc, x, y, EtoOpaque | EtoClipped, ref rect,
+                   in System.Runtime.InteropServices.MemoryMarshal.GetReference(text), (uint)text.Length,
+                   IntPtr.Zero);
     }
 
     /// <summary>Text over whatever is already there: a found word over its highlight, the selected part of
@@ -144,16 +145,16 @@ internal sealed class GdiCanvas : IDeviceContext
         try
         {
             IntersectClipRect(_hdc, box.Left, box.Top, box.Right, box.Bottom);
-            LaidOut(text, font, new Point(x, y), fore, Color.Empty, Plain);
+            TextRenderer.DrawText(this, text, font, new Point(x, y), fore, Plain);
         }
         finally { RestoreDC(_hdc, saved); Unknown(); }
     }
 
     /// <summary>Puts the context into the state a draw wants, saying only what has changed since the last
     /// one. A screenful is hundreds of draws in a handful of colours and one font.</summary>
-    private void Ready(Font font, Color fore, Color back, bool opaque)
+    private void Ready(Font font, Color fore, Color back)
     {
-        IntPtr face = Face(font);
+        IntPtr face = Face(font).Handle;
         if (face != _face)
         {
             IntPtr was = SelectObject(_hdc, face);
@@ -164,20 +165,7 @@ internal sealed class GdiCanvas : IDeviceContext
         if (ink != _fore) { SetTextColor(_hdc, ink); _fore = ink; }
         int behind = ColorRef(back);
         if (behind != _back) { SetBkColor(_hdc, behind); _back = behind; }
-        if (opaque != _opaque) { SetBkMode(_hdc, opaque ? OpaqueBackground : TransparentBackground); _opaque = opaque; }
-    }
-
-    /// <summary>Text through the layout call, which is the only one that will go and find a glyph the face
-    /// itself does not have. It selects a font of its own for the length of the call and leaves the colours
-    /// as it pleases, so what this remembers of them is thrown away afterwards.</summary>
-    private void LaidOut(ReadOnlySpan<char> text, Font font, Point at, Color fore, Color back,
-                         TextFormatFlags flags)
-    {
-        Ready(font, fore, back.IsEmpty ? Color.Black : back, opaque: !back.IsEmpty);
-        if (back.IsEmpty) TextRenderer.DrawText(this, text, font, at, fore, flags);
-        else TextRenderer.DrawText(this, text, font, at, fore, back, flags);
-        _fore = _back = -1;
-        _opaque = false;
+        if (!_opaque) { SetBkMode(_hdc, OpaqueBackground); _opaque = true; }
     }
 
     private const TextFormatFlags Plain = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
@@ -211,55 +199,51 @@ internal sealed class GdiCanvas : IDeviceContext
                        TextFormatFlags flags)
     {
         if (box.Width <= 0 || box.Height <= 0) return;
-        Ready(font, fore, back, opaque: true);
         TextRenderer.DrawText(this, text, font, box, fore, back, flags);
-        _fore = _back = -1;
-        _opaque = false;
+        Unknown();
     }
 
     /// <summary>The same, over what is already there.</summary>
     public void TextIn(ReadOnlySpan<char> text, Rectangle box, Color fore, Font font, TextFormatFlags flags)
     {
         if (box.Width <= 0 || box.Height <= 0) return;
-        Ready(font, fore, Color.Black, opaque: false);
         TextRenderer.DrawText(this, text, font, box, fore, flags);
-        _fore = _back = -1;
-        _opaque = false;
+        Unknown();
     }
 
     /// <summary>
-    /// The GDI font handle for a font, kept rather than made.
+    /// The GDI font handle for a font, and whether its characters differ in width, worked out once and kept.
     ///
-    /// <para>Made the way <see cref="TextRenderer"/> makes its own, which matters for one field:
-    /// <c>lfQuality</c>. <see cref="Font.ToHfont"/> leaves it at DEFAULT_QUALITY - "system, you decide" -
-    /// and the system's answer is not always the one WinForms asks for, which is worked out from the
-    /// machine's own font-smoothing settings. Where the two answers differ, text drawn straight comes out
-    /// with ClearType's colour fringes and text that was laid out comes out grey, in the same view. Asking
-    /// the settings the same question WinForms asks makes the two agree on any machine, rather than only on
-    /// one whose smoothing happens to match.</para>
+    /// <para>The handle is made the way <see cref="TextRenderer"/> makes its own, which matters for one
+    /// field: <c>lfQuality</c>. <see cref="Font.ToHfont"/> leaves that at DEFAULT_QUALITY - "system, you
+    /// decide" - while WinForms works out what to ask for from the machine's own font-smoothing settings.
+    /// Where the two answers differ, text drawn straight comes out with ClearType's colour fringes and text
+    /// that was laid out comes out grey, in the same view. Asking those settings the same question WinForms
+    /// asks makes the two agree on any machine, rather than only on one whose smoothing happens to match.
+    /// It is asked once here and once there, so even a machine whose smoothing is changed while the app is
+    /// running has the two still agreeing with each other.</para>
+    ///
+    /// <para>Whether the face is fixed-pitch is GDI's to say rather than a caller's to pass in and get
+    /// wrong: it decides which of the two draws may be used, and the wrong answer means misplaced text.</para>
     /// </summary>
-    private IntPtr Face(Font font)
+    private Realised Face(Font font)
     {
-        if (_faces.TryGetValue(font, out var face))
-        {
-            _variable = _variablePitch.Contains(face);
-            return face;
-        }
+        if (_faces.TryGetValue(font, out var known)) return known;
         var logFont = new LogFont();
         font.ToLogFont(logFont);
         logFont.lfQuality = Smoothing;
-        face = CreateFontIndirect(logFont);
+        IntPtr face = CreateFontIndirect(logFont);
         if (face == IntPtr.Zero) face = font.ToHfont();
-        // Whether every character in the face is the same width is GDI's to say, not a caller's: it decides
-        // which of the two draws below may be used, and a caller that got it wrong would be drawing text
-        // that is subtly misplaced.
         IntPtr was = SelectObject(_hdc, face);
         GetTextMetrics(_hdc, out var metrics);
         SelectObject(_hdc, was);
-        _variable = (metrics.tmPitchAndFamily & VariablePitch) != 0;
-        if (_variable) _variablePitch.Add(face);
-        return _faces[font] = face;
+        return _faces[font] = new Realised(face, (metrics.tmPitchAndFamily & VariablePitch) != 0);
     }
+
+    private readonly record struct Realised(IntPtr Handle, bool Variable);
+
+    /// <summary>Whether the face spaces its characters unevenly, which decides how its text is drawn.</summary>
+    private bool Variable(Font font) => Face(font).Variable;
 
     /// <summary>What WinForms asks GDI for when it lays text out on a context of ours, read from the
     /// machine's font-smoothing settings exactly as it reads them.</summary>
