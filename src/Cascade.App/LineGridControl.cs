@@ -641,6 +641,10 @@ public sealed class LineGridControl : Control
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool DeleteDC(IntPtr dc);
 
+    /// <summary>The rate a drag is being paced to, so a check can hold the frames it drew against what the
+    /// screen it is on could actually have shown.</summary>
+    internal int ScreenRateForTesting => ScreenRate();
+
     /// <summary>A wheel turn over the map scrolls the text, as it does over the scrollbar.</summary>
     internal void ScrollByWheel(int delta) => ScrollBy(-Math.Sign(delta) * SystemInformation.MouseWheelScrollLines);
 

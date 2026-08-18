@@ -2406,20 +2406,34 @@ internal static class SelfTest
                 // more. Drawing every one of them is work nobody can see: the screen shows the newest frame
                 // at its next refresh and throws the rest away. What must never happen is the other failure -
                 // the hand stopping on a position that is never drawn at all.
+                //
+                // Held to what the refresh rate allows in the time the reports actually took, rather than to
+                // a flat "fewer frames than reports": on a machine where a paint takes longer than a refresh
+                // interval, drawing every report IS the right answer, and a check that called that a failure
+                // would be reporting the hardware rather than the code.
                 grid.ScrollToRow(0);
                 Pump();
                 var track = bar.TroughForTesting;
                 int painted = grid.PaintsForTesting;
                 bar.GrabForTesting();
                 const int Reports = 60;
+                var dragClock = Stopwatch.StartNew();
                 for (int i = 0; i < Reports; i++)
                     bar.DragToForTesting(track.Top + thumb.Height / 2 + i * (track.Height / (2 * Reports)));
+                dragClock.Stop();
                 int frames = grid.PaintsForTesting - painted;
                 long stoppedAt = grid.FirstRowForTesting;
                 bar.DropForTesting();
-                Line($"   (drag: {Reports} reports drew {frames} frames)");
-                ok &= Check("a drag reporting faster than the screen refreshes does not draw every report",
-                            frames < Reports, $"{frames} frames for {Reports} reports");
+                int hz = grid.ScreenRateForTesting;
+                // One for the frame that may already have been owed when the drag began, one for rounding.
+                int allowed = (int)Math.Ceiling(dragClock.Elapsed.TotalSeconds * hz) + 2;
+                Line($"   (drag: {Reports} reports in {dragClock.Elapsed.TotalMilliseconds:F0} ms drew {frames} " +
+                     $"frames; {hz} Hz allows {allowed})");
+                ok &= Check("a drag never draws more frames than the screen can show in the time it took",
+                            frames <= allowed, $"{frames} frames, {allowed} allowed at {hz} Hz");
+                ok &= Check("and reporting faster than that really does cost frames",
+                            frames < Reports || allowed >= Reports,
+                            $"{frames} frames for {Reports} reports, {allowed} allowed");
                 ok &= Check("but the view really did move all the way", stoppedAt > 0, stoppedAt.ToString());
                 Pump();
                 ok &= Check("and where the hand stopped is what ends up on the screen",
