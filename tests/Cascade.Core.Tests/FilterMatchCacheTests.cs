@@ -438,6 +438,90 @@ public class FilterMatchCacheTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Holds a filtering pass still after each block, so a test can look at the list while one
+    /// filter is genuinely mid-scan. Releasing lets it run to the end as usual.</summary>
+    private sealed class HeldPass : IDisposable
+    {
+        private readonly SemaphoreSlim _gate = new(0);
+        private readonly CascadeDocument _doc;
+        private int _blocks;
+        private int _released;
+
+        public HeldPass(CascadeDocument doc)
+        {
+            _doc = doc;
+            doc.FilterCheckpointForTesting = _ =>
+            {
+                Interlocked.Increment(ref _blocks);
+                _gate.Wait(TimeSpan.FromSeconds(20));
+            };
+        }
+
+        /// <summary>Waits until the pass is stopped inside a block, with the file only part swept.</summary>
+        public void WaitUntilHeld()
+        {
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 20_000)
+            {
+                if (Volatile.Read(ref _blocks) >= 1) return;
+                Thread.Sleep(2);
+            }
+            throw new TimeoutException("the pass never reached its first checkpoint");
+        }
+
+        public void Dispose()
+        {
+            Release();
+            _gate.Dispose();
+        }
+
+        /// <summary>Lets the pass run on to the end. Safe to call more than once, so a test can release the
+        /// hold in the middle and still let <c>using</c> clean up.</summary>
+        public void Release()
+        {
+            _doc.FilterCheckpointForTesting = null;
+            if (Interlocked.Exchange(ref _released, 1) == 0) _gate.Release(1000);
+        }
+    }
+
+    [Fact]
+    public void A_settled_count_stays_settled_while_a_newly_added_filter_is_scanned()
+    {
+        // Reported: add a second filter and EVERY count in the list turns to "still counting", including ones
+        // the previous pass had already worked out in full. The numbers shown were right - they come from the
+        // cache - but whether a number was finished was asked of the pass rather than of the filter, so a
+        // filter nobody had touched read as unfinished for as long as the new one took to scan.
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out var filters, out var flat);
+            using var held = new HeldPass(doc);
+
+            var added = new Filter { Enabled = true, Match = { Text = "INFO" } };   // uncached: forces a scan
+            filters.Add(added);
+            doc.ApplyFilters();
+            held.WaitUntilHeld();
+
+            Assert.False(doc.IsFilterIdle);                     // a pass really is in flight, which is the point
+
+            long known = doc.MatchCountFor(flat[3], out bool settled);
+            Assert.Equal(17_143, known);                        // "net": every 7th line, as before the change
+            Assert.True(settled, "a whole-file result cannot be unsettled by a pass that cannot move it");
+
+            doc.MatchCountFor(added, out bool addedSettled);
+            Assert.False(addedSettled, "the filter being scanned right now is the one still counting");
+
+            held.Release();                                     // let it finish
+            WaitIdle(doc);
+
+            Assert.Equal(40_000, doc.MatchCountFor(added, out addedSettled));   // "INFO": every third line
+            Assert.True(addedSettled);
+            doc.MatchCountFor(flat[3], out settled);
+            Assert.True(settled);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void Switching_a_filter_between_include_and_exclude_reuses_the_cache()
     {

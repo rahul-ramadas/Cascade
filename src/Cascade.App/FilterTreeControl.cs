@@ -761,13 +761,15 @@ public sealed class FilterTreeControl : UserControl
     /// <summary>Test seam: the tree's own bounds inside this control, for pixel comparisons.</summary>
     internal Rectangle TreeAreaForTesting => _tree.Bounds;
 
-    /// <summary>What the count column shows for a filter, or "" when it shows nothing.</summary>
+    /// <summary>What the count column shows for a filter, or "" when it shows nothing.
+    /// <para>The trailing ellipsis means "this number is still climbing", which is asked of the filter
+    /// rather than of the pass: a filter whose count is already known for the whole file keeps its plain
+    /// number while a newly added one is counted beside it.</para></summary>
     private string CountTextFor(Filter f)
     {
         if (!f.Enabled || _doc is null) return "";
-        long count = _doc.MatchCountFor(f);
-        bool busy = !_doc.IsFilterIdle;
-        return count >= 0 ? (busy ? $"{count:N0}\u2026" : $"{count:N0}") : (busy ? "\u2026" : "");
+        long count = _doc.MatchCountFor(f, out bool final);
+        return count >= 0 ? (final ? $"{count:N0}" : $"{count:N0}\u2026") : (final ? "" : "\u2026");
     }
 
     private void MeasureDescriptions()

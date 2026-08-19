@@ -513,14 +513,38 @@ public sealed class CascadeDocument : IDisposable
     /// used as it stands. Without that, every filter's count would restart from zero on every filter change,
     /// because a fresh pass owns fresh accumulators: the whole list would read 0 for as long as the change
     /// took to apply, even though nothing about those filters had changed.</para></summary>
-    public long MatchCountFor(Filter filter)
+    public long MatchCountFor(Filter filter) => MatchCountFor(filter, out _);
+
+    /// <summary>As <see cref="MatchCountFor(Filter)"/>, and tells whether the number is settled.
+    /// <para>Finality is per filter, not per pass. A pass being in flight says nothing about a filter whose
+    /// whole-file result is already known: that answer came from the cache and the running pass cannot move
+    /// it. Only a filter this pass is actually working out - one added or edited, or one whose chain is not
+    /// cacheable - has a count still climbing. Without the distinction a new filter would put every
+    /// already-settled count in the list back to "still counting" for as long as it took to apply.</para>
+    /// <para>Unsettled is the safe answer, so where nothing is known (-1) this follows the pass.</para></summary>
+    public long MatchCountFor(Filter filter, out bool final)
     {
         var gen = _generation;
-        if (gen is null || !gen.Snapshot.TryGetIndex(filter, out int idx) || idx >= gen.Counts.Length) return -1;
+        if (gen is null || !gen.Snapshot.TryGetIndex(filter, out int idx) || idx >= gen.Counts.Length)
+        {
+            final = IsFilterIdle;
+            return -1;
+        }
         if (filter.Enabled && _filterService is not null
             && _filterService.TryGetMatchSet(gen.Snapshot, filter, out var known))
+        {
+            final = true;
             return known.Matches;
-        lock (gen.CountsSync) return gen.Counts[idx];
+        }
+
+        // Read before the count, never after: an idle seen first can only mean the count read next is at
+        // least as settled, whereas the other order could pair "idle now" with a count taken mid-climb.
+        bool idle = IsFilterIdle;
+        lock (gen.CountsSync)
+        {
+            final = idle;
+            return gen.Counts[idx];
+        }
     }
 
     public long FindLine(FindQuery query, long startLine, bool forward, CancellationToken ct, Action<double>? onProgress = null)
