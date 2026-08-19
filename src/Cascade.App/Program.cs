@@ -71,6 +71,14 @@ internal static class Program
             return UiShots.Run(args.Skip(1).ToArray());
         }
 
+        if (args.Length > 0 && args[0].Equals("--docshots", StringComparison.OrdinalIgnoreCase))
+        {
+            AttachConsole(-1);
+            InitialiseUi();
+            FailFastOnUiException();
+            return DocShots.Run(args.Skip(1).ToArray());
+        }
+
         InitialiseUi();
 
         string crashLog = Path.Combine(Path.GetTempPath(), "cascade_crash.log");
@@ -157,6 +165,10 @@ internal static class Program
           --screens [outDir] [file] [file.tat]
                             Render every dialog and the main window to PNGs.
                             Create outDir first; otherwise %TEMP%\cascade_shots is used.
+          --docshots [outDir]
+                            Render the README's pictures, and the frames its animations
+                            are built from, off a log generated for the purpose.
+                            scripts/Build-DocImages.ps1 drives this and calls ffmpeg.
           --rendershots [outDir]
                             Render the log view in a fixed set of states to PNGs, with a
                             fingerprint for each, so two builds can be compared pixel for pixel.

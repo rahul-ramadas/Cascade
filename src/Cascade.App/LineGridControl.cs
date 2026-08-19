@@ -2611,6 +2611,20 @@ public sealed class LineGridControl : Control
     internal static int OverflowChipForTesting => OverflowChip;
     internal int ChipsOverflowingForTesting { get { ChipRects(); return _chipsOverflowing; } }
 
+    /// <summary>Harness only: lets the tip appear over a window that is not the active one. A screenshot run
+    /// has no active window at all, and a reader never wants a tip from an application they are not in.</summary>
+    internal void ShowTipsWhenInactiveForTesting(bool on) => _tips.ShowAlways = on;
+
+    /// <summary>The pointer resting on a line, which is what starts the countdown to the tip that names the
+    /// filters matching it.</summary>
+    internal void HoverRowForTesting(long row, int x = 40)
+    {
+        var at = new Point(x, YForRowForTesting(row));
+        TrackHover(at);
+    }
+
+    internal void HideTipForTesting() => HideTip();
+
     /// <summary>Skips the hover countdown and puts the tip up now, and reads back what it is saying - so a
     /// check can watch the words themselves change rather than trusting that they would.</summary>
     internal void ShowTipNowForTesting() => ShowTipNow();

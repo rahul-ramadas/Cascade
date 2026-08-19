@@ -122,6 +122,7 @@ public sealed class MainForm : Form
     internal bool FindBarIsOpenForTesting => _findBar.Visible;
     internal bool FindBarRedrawsInOneGoForTesting => _findBar.MessageRedrawsInOneGoForTesting;
     internal FindBar FindBarForTesting => _findBar;
+    internal FilterPresetsControl PresetsForTesting => _presets;
     /// <summary>Drives the form's own shortcut handling, which is where Tab and Escape are decided - and,
     /// through the form, the menu's. The message has to carry a window for that second part: the shortcut
     /// manager starts from the control the key arrived at, and a message from nowhere is not offered to any

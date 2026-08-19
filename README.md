@@ -8,91 +8,147 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 [![CI](https://github.com/rahul-ramadas/Cascade/actions/workflows/ci.yml/badge.svg)](https://github.com/rahul-ramadas/Cascade/actions/workflows/ci.yml)
 
-![Cascade](docs/images/hero.png)
+[Download](../../releases/latest/download/Cascade.exe) ·
+[Filters](#filters) ·
+[Reading the log](#reading-the-log) ·
+[Fields](#fields) ·
+[Files](#files) ·
+[Settings](#settings) ·
+[Keyboard](#keyboard-reference)
+
+![The main window: a two-million-line log coloured by a nested filter set, with the match map beside it and the presets pane on the right](docs/images/hero.png)
 
 </div>
-
-Point Cascade at a log, describe what you care about as **filters**, and it colours the lines that
-match and dims — or hides — everything else.
-
-|  |  |
-|---|---|
-| **Opens anything** | Memory-mapped and indexed as it streams, 4 bytes a line. A 1 GB / 10 M-line log is on screen in milliseconds and fully indexed in under half a second. |
-| **Filters nest** | A filter refines its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*. |
-| **Nothing blocks** | Matches appear while the file is still being scanned, and the line you were reading holds its place on screen while they do. |
-| **Instant on repeat** | Results are cached per filter, so switching one on and off again is a few milliseconds however big the file. |
-| **Remote-desktop friendly** | WinForms and GDI, no GPU — text travels as drawing orders, not bitmaps. |
-| **One file** | A single `.exe`, no installer, and it updates itself. |
 
 ---
 
 ## Filters
 
-![The filter list](docs/images/filter-list.png)
+### What a filter is
 
-A filter is a substring, a .NET regular expression, or *marked by marker N*, dressed with colours, bold,
-italic and underline, a description and an optional case-sensitivity flag. Filters are **includes** (show
-these lines) or **excludes** (but not these), and every row carries a **live count** that climbs while
-the file is still being scanned.
+![The filter editor: match type, pattern, options, colours and the three style flags](docs/images/filter-edit.png)
 
-Nesting is the point: a filter matches a line only if its own pattern **and every ancestor's** match,
-whether or not those ancestors are switched on — so *parent off, children on* scopes a whole branch
-without flooding the view with it. A line is shown when an enabled include matches it and no enabled
-exclude does; its colour comes from the deepest match, and anything left unset is inherited.
+- Matches a **substring**, a **.NET regular expression**, or **marked by marker 1–8**.
+- A line is shown when an enabled **include** matches it and no enabled **exclude** does.
+- Colour, background, bold, italic and underline are each **on, off, or inherited**.
 
-![The filter editor](docs/images/filter-edit.png)
+### Nesting
 
-Work on one filter or on a whole selection: enable, disable, delete, duplicate, recolour, reorder, nest
-and drag a group as one, with undo and redo a hundred steps deep. `Ctrl+E` searches a list of hundreds
-without hiding or reordering it, and `F4` walks the matches of one filter without changing what's on
-screen.
+![Alt+Right nests inventory-svc under warnings, and its count falls from 330,152 to 20,666](docs/images/nesting.gif)
+
+- A child narrows its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*.
+- A child matches a line only if **every one of its ancestors matches it too** — whether or not those ancestors are switched on.
+- So switching a parent off does not stop it narrowing its children: you can scope a branch without showing everything the parent matches.
+- A line takes its colour from the deepest filter that matched it, and whatever that filter leaves unset it inherits from the filters above it.
+- Nest with `Alt+→`, or by dragging.
+
+### The filter list
+
+![The filter list: nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
+
+- **Count** is how many lines in the whole file match, not how many are on screen.
+- `Shift+Space` switches a filter's whole subtree on or off.
+- The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`).
+
+### From the log to a filter
+
+![Dragging over an order number inside a line, then Ctrl+N: the Add Filter dialog opens seeded with it, and the new filter arrives already coloured](docs/images/new-filter.gif)
+
+- `Ctrl+N` turns the text you have selected inside a line — or the whole line under the caret — into a filter.
+
+### Colour
+
+![The paint chips palette: every unused colour pair, each cell drawn as a matching line would look](docs/images/paint-chips.png)
+
+- **I'm feeling lucky** picks a legible colour pair that no other filter is using; **Paint chips…** shows the rest of the palette.
+- A filter with no colour of its own leaves no mark on the match map.
+
+### Working on many at once
+
+![Five filters selected across two branches, the header saying so](docs/images/filter-multi.png)
+
+- Select several filters and enable, disable, delete, duplicate, reorder, nest or recolour them in one go.
+- Dragging carries the whole selection, nesting and all.
+- `Ctrl+Z` undoes filter edits, drags included.
+
+![Restyling three filters at once: the colour they agree on offered back, 'varies' where they don't](docs/images/appearance.png)
+
+### Finding a filter among hundreds
+
+![Searching the filter list for 'payment': matches keep their colour, everything else is dimmed but stays where it was](docs/images/filter-search.png)
+
+- `Ctrl+E` searches the list **without hiding or reordering it** — non-matching filters dim rather than disappear.
+- `F4` / `Shift+F4` walk the log through the selected filter's matches, without changing which filters are on.
 
 ### Presets
 
-![Presets](docs/images/presets.png)
+![The presets pane: one preset ticked and a different one highlighted](docs/images/presets.png)
 
-A preset names a combination of filters — *the payment incident*, *the slow queries*. The tick says
-which are in effect, the highlight says which one the commands act on, and ticking two gives you both.
-Ticking and unticking move only that preset's own filters; anything you switched on by hand stays as
-you left it.
+- A preset names a combination of filters — *the payment incident*, *the slow queries*.
+- The **tick** applies a preset; the **highlight** only says which one the commands act on.
+- Ticking two gives you both, and ticking one moves only its own filters — anything you switched on by hand stays as you left it.
 
 ### Dim or hide
 
-![Dimming and hiding the lines that didn't match](docs/images/dim-or-hide.gif)
+![Ctrl+H switching between dimming the lines that didn't match and hiding them](docs/images/dim-or-hide.gif)
 
-`Ctrl+H` switches between dimming the lines that didn't match and hiding them altogether. Line numbers
-are always the file's own, and the line you were on keeps its place through the switch.
+- `Ctrl+H` switches between dimming the lines that didn't match and hiding them altogether.
+- Line numbers are always the file's own, either way.
 
 ---
 
-## Reading the file
+## Reading the log
 
-![The find bar, with every occurrence marked, beside the minimap](docs/images/find.png)
+### Find
 
-**Find** is a bar above the log rather than a dialog over it, so the search and its results are on screen
-at once. Literal or regex, every occurrence in view marked as you type, and a count that fills in as it
-sweeps — `Match 12 of 348` — keeping what you can see apart from what the filters are hiding.
+![The find bar above the log, every occurrence marked and the tally reading 'Match 1 of 8,688'](docs/images/find.png)
 
-**The minimap** stands in for the scrollbar: the log zoomed out to a pixel a line, in the colours the
-filters gave it, with empty stretches compressed so that a rare match is still worth a pixel. Drag it to
-scroll, click to jump; your markers and search hits ride alongside. `Ctrl+M` brings back a plain
-scrollbar.
+- `Ctrl+F` searches the text, literal or regex, marking every occurrence on screen as you type.
+- Find works on every line, not just the shown ones: hits on hidden lines are counted separately, and it says so when a match lands on one.
 
-**Markers** are eight colours you apply by hand — `Ctrl+1`…`Ctrl+8` to set, `1`…`8` to walk them. They
-are a filter type too, so lines you picked out yourself can be treated as a category.
+### The match map
 
-**Hover a line** and Cascade names the filters that matched it, including the ones you had switched off
-— usually the one you were about to go looking for. Drag inside a line to select part of it; `Ctrl+N`
-turns that into a filter, which is the quickest way to chase a request id you just spotted. `Alt+Z`
-wraps long lines.
+![The match map beside the log: the whole file at a pixel a line, markers down the left edge, find hits down the right](docs/images/match-map.png)
 
-### Fields
+- The scrollbar is replaced by the whole file at a pixel a line, in the colours the filters gave it.
+- Unmatched stretches are compressed, so one error among ten thousand ordinary lines still gets a pixel of its own.
 
-![Fields](docs/images/columns.png)
+### Markers
 
-`Ctrl+Shift+C` splits each line into **fields** for display — and **View > Split Lines Into Fields** reads
-them off the line under the caret for you. A template is a picture of your line: write one out, then
-replace the text that changes with `*` and wrap each field in `{ }`.
+![Ctrl+1, Ctrl+2 and Ctrl+3 marking three lines, then 1, 2 and 3 walking back to them](docs/images/markers.gif)
+
+- Eight colours for marking lines by hand: `Ctrl+1`…`Ctrl+8` on the selection.
+- The bare number keys `1`…`8` then walk between the lines you marked, `Shift` to go backwards.
+- **Marked by marker N** is a filter type, so lines you picked out by hand can be treated as a category.
+
+### What matched this line
+
+![The tooltip over a line, naming three filters that matched it, one of them switched off](docs/images/hover-tip.png)
+
+- Hovering a line names every filter that matched it — **including the ones that are switched off**.
+
+### Getting lines out
+
+- **File ▸ Save Current Lines…** writes out exactly what the filters are showing.
+- **Edit ▸ Copy with Line Numbers** copies the file's own line numbers along with the text.
+
+---
+
+## Fields
+
+Long lines are either wrapped (`Alt+Z`) or split into fields you can hide and reorder.
+
+### Splitting a line
+
+![The log laid out as columns under a draggable header](docs/images/fields-columns.png)
+
+- `Ctrl+Shift+C` splits every line into fields for display, guessing a template from the line under the caret.
+- Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
+- A line the template does not match is left whole and untouched.
+
+### The template
+
+A template is a picture of your line: write one out, replace what changes with `*`, and wrap each field in `{ }`.
 
 ```
 your line:  [2026-08-05T05:00:02][BthPort][INFO] WDF PnP state: started
@@ -102,61 +158,93 @@ template:   {[*]}{[*]}{[*]} {*}
 | | |
 |---|---|
 | `*` | the text that changes — matches as little as it can, up to whatever you wrote next |
-| `{ }` | one **field**: the thing that is hidden or moved, punctuation and all |
+| `{ }` | one **field**: the unit that gets hidden or moved, punctuation and all |
 | anything else | has to be there, except a run of spaces, which matches any run of spaces |
 | `\` | makes `{ } * \` ordinary |
 
-Then pick a **layout**, from the two items under **View > Split Lines Into Fields** or with `Ctrl+Shift+X`,
-which switches between them. **Columns** lines the fields up under a header: drag an edge to resize
-(snapping to whole characters in a fixed-pitch font), double-click an edge to fit a column to its content,
-carry a header sideways to reorder, double-click a name to rename it, right-click for the tick list.
-**Inline** keeps every row a line and simply leaves out what you have hidden — better when one field is far
-longer than the rest — with a strip of chips above the log instead of a header: click one to put that field
-away or bring it back, drag it to move the field along the row, double-click it to rename it.
+- Punctuation goes with the field, so hiding the middle of `[a][b][c]` leaves `[a][c]` rather than `[a][][c]`.
 
-Hiding a field takes its punctuation with it, so `[a][b][c]` closes up to `[a][c]` rather than leaving
-empty brackets behind, and a field carried elsewhere leaves the space that separated it behind as well.
-**View > Field Settings…** (`Ctrl+Shift+D`) shows the template against real lines from the file: a coloured
-band per field, and beneath it the row as it will actually be drawn — cell by cell in the Columns layout,
-widths and alignment included. Both rows are named, so a row whose fields have been moved about still says
-which value is which. Click a field in either row to pick its entry out of the list; move a field along the
-row by dragging its entry, by the buttons, or with `Alt+↑` / `Alt+↓`, and rename one with `F2`. The dialog
-also says how many of the sampled lines match, and, for one that does not, the character where it stopped
-matching. **Detect** writes the template for you when the line has a header of bracketed groups — `[ ]`,
-`( )` or `< >`, with anything before the first bracket taken as a field of its own; a header held together
-by nothing but spaces has to be written by hand.
+### Columns and Inline
 
-Filtering and searching always run on the whole raw line, so this can shorten a line but never hide one.
-A line the template does not match is shown whole and untouched, and Cascade says so when a search lands
-on a match you cannot see.
+![Hiding a field, then Ctrl+Shift+X switching between the two layouts](docs/images/fields.gif)
+
+- **Columns** lays the fields out as a table: drag a header to reorder, double-click it to rename, right-click for the list of which fields are shown.
+
+![The same log laid out inline, with a chip strip above it and two fields put away](docs/images/fields-inline.png)
+
+- **Inline** keeps every row a line and leaves out what you hid — better when one field dwarfs the rest.
+- A strip of chips stands in for the header: click one to put a field away or bring it back, drag it to move the field along the row.
+
+### Field settings
+
+![The field settings dialog: the template, a coloured band per field over a real line, and the row as it will be drawn beneath](docs/images/field-settings.png)
+
+- `Ctrl+Shift+D` tries the template against real lines from the file: how many of them match, and where a line that doesn't stopped matching.
+- **Detect** writes the template for you when the line begins with bracketed groups: `[ ]`, `( )` or `< >`.
+
+---
+
+## Files
+
+### Opening
+
+- Drop a log on the window, hand it to `Cascade.exe` on the command line, or use **Open from Clipboard** for one you have pasted from somewhere else.
+- `F5` re-reads the file, for when you have just re-run whatever produced it.
+- Dropping a `.cascade` or `.tat` file loads its filters instead of opening it as a log.
+- The file is memory-mapped and indexed as it streams, four bytes a line: a 1 GB, 10-million-line log is on screen in milliseconds and fully indexed in under half a second.
+
+### Encodings
+
+![The Encoding menu, with Auto-detect naming what it found and a tick on the encoding in effect](docs/images/encoding.png)
+
+- A byte-order mark is honoured; without one, UTF-8 is assumed.
+- **View ▸ Encoding** reads the file again as UTF-16 or UTF-32 (either endianness), Windows-1252 or the system code page.
+
+### Filter files
+
+- `.cascade` is JSON — the filter tree with its styles, the presets, and the field template — so a filter set diffs well in source control.
+- `Ctrl+S` saves the set you have; **File ▸ Append Filters…** merges another set into it.
+- TextAnalysisTool.NET `.tat` files are imported, flattened to top-level filters. Saving is always `.cascade`.
+
+---
+
+## Settings
+
+### Preferences
+
+![The Preferences dialog](docs/images/preferences.png)
+
+- **File ▸ Settings ▸ Export / Import** moves your preferences to another machine.
+
+### Where things live
+
+- Preferences in `%APPDATA%\Cascade\settings.json`, machine-local state in `state.json`, and nothing at all in the registry. `CASCADE_SETTINGS_DIR` moves the folder.
+
+### Command line
+
+```
+Cascade.exe [file] [/Filters:<path>]
+```
+
+- `/Filters:` also stops the last-used filter file being loaded automatically.
+- `CASCADE_UPDATE=off` turns off the update check.
 
 ---
 
 ## Install
 
-Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run it — a single file, no
-installer. That link always points at the newest build, so it works from a terminal too:
+Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run it — a single file, no installer.
 
 ```powershell
 curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
 ```
 
-It needs Windows and the .NET 10 Desktop Runtime, writes nothing but `%APPDATA%\Cascade`, touches no
-registry keys, and updates itself.
-
-## And the rest
-
-- **Opening** — `Ctrl+O`, `F5` to reload, *Open from Clipboard*, recent files, a path on the command line, or drag a file onto the window. Dropping a `.cascade` or `.tat` loads its filters instead.
-- **Encodings** — a byte-order mark is honoured, otherwise UTF-8 is assumed. When a file has neither — a code page, or UTF-16 written without a mark — *View ▸ Encoding* reads it again as UTF-8, UTF-16 LE/BE, UTF-32 LE/BE, Windows-1252 or your system code page. A tick shows which is in effect, *Auto-detect* names what it found, and the choice survives a reload.
-- **Copying** — selected lines with or without line numbers, or *Save Current Lines* to write out exactly what the filters are showing.
-- **Preferences** — font, size, line spacing, colours, tab size, markers, line numbers, which end of the list new filters join; exportable to carry between machines.
-- **Keyboard-complete and accessible** — every feature has a shortcut or a menu item, and the log view exposes each row to UI Automation.
-- **Survives being killed** — settings, state and filter files are written as you change them, not on the way out.
+- Needs Windows and the .NET 10 Desktop Runtime. It updates itself.
+- Draws with GDI rather than a GPU, so it stays quick over a remote desktop.
 
 ---
 
-<details>
-<summary><b>Keyboard reference</b></summary>
+## Keyboard reference
 
 **Log view**
 
@@ -194,9 +282,8 @@ registry keys, and updates itself.
 | `Ctrl+G` / `Ctrl+H` | Go to line / show only filtered lines |
 | `Ctrl+N` | New filter from the selection or the current line |
 | `Ctrl+E` | Search the filter list |
-| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Minimap or plain scrollbar / word wrap / split lines into fields |
-| `Ctrl+Shift+X` | Switch between the Columns and Inline field layouts |
-| `Ctrl+Shift+D` | Field settings |
+| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Match map or plain scrollbar / word wrap / split lines into fields |
+| `Ctrl+Shift+X` / `Ctrl+Shift+D` | Switch field layout / field settings |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |
@@ -204,31 +291,7 @@ registry keys, and updates itself.
 | `Tab` | Move between the log and the filter list |
 | `Esc` | Stop a search, then close the bar and clear its marks |
 
-</details>
-
-## Files and command line
-
-`.cascade` is the native filter set — JSON holding the filter tree with its per-property styles, any
-presets, the field template with its layout, and the view mode, so it diffs well in source control. TextAnalysisTool.NET
-`.tat` files are **imported** (flattened to top-level filters, keeping patterns, colours and flags);
-saving is always `.cascade`. Preferences live in `%APPDATA%\Cascade\settings.json` and machine-local
-state in `state.json`; `CASCADE_SETTINGS_DIR` overrides the folder.
-
-```
-Cascade.exe [file] [/Filters:<path>]
-```
-
-Or, as the first argument: `--help`, `--version`, `--selftest`, `--screens <dir>`.
-
-## Coming from TextAnalysisTool.NET
-
-Everything you rely on is here — the filter list with its checkboxes and counts, includes and excludes,
-substring and regex matching, colours per filter, the eight markers, `Ctrl+H`, find, encodings, zoom, a
-dockable filter list, recent files and `.tat` import. Deliberately different: **filters nest**, so saving
-is `.cascade` (the old format cannot express a hierarchy or per-property style inheritance, but flat
-`.tat` sets import unchanged); copy is plain text, optionally with line numbers; and there are no
-plug-ins, no live tail, no `A`–`Z` filter cycling and no `/Config:`, `/Line:` or `/Clipboard` — `F4` and
-the filter-list search do the cycling job.
+---
 
 ## Building
 
@@ -236,11 +299,10 @@ the filter-list search do the cycling job.
 dotnet build Cascade.slnx -c Release
 dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj   # engine tests
 ./scripts/Run-UiTests.ps1 -Publish                               # UI automation, off-screen
+./scripts/Build-DocImages.ps1                                    # every picture above, from the app
 ```
 
-.NET 10 SDK. `src/Cascade.Core` is a UI-agnostic engine (mapping, indexing, filtering, find, markers,
-columns, persistence, updating) with no reference to WinForms; `src/Cascade.App` is the GUI. Filter files
-written by older builds are read and their column settings migrated (`schemaVersion` 1 → 2).
+- .NET 10 SDK. `src/Cascade.Core` is the UI-agnostic engine — indexing, filtering, find, markers, columns, persistence — and `src/Cascade.App` is the WinForms GUI.
 
 ## License
 
