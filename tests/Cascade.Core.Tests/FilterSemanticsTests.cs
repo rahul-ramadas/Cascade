@@ -3,9 +3,9 @@ using Cascade.Core.Model;
 
 namespace Cascade.Core.Tests;
 
-/// <summary>Golden tests for the hierarchical filter semantics (design §8.3): deep-match, deepest
-/// enabled coloring with topmost tie-break, ancestor constraints even when parents are disabled,
-/// and leaf excludes scoped to their parent.</summary>
+/// <summary>Golden tests for the hierarchical filter semantics: deep-match, the first matching filter in
+/// list order claiming a line and only its own descendants refining it, ancestor constraints even when
+/// parents are disabled, and leaf excludes scoped to their parent.</summary>
 public class FilterSemanticsTests
 {
     private static Filter Make(string text, bool enabled, FilterKind kind = FilterKind.Include)
@@ -44,7 +44,7 @@ public class FilterSemanticsTests
     }
 
     [Fact]
-    public void Example1_refinement_and_deepest_coloring()
+    public void Example1_refinement_and_coloring()
     {
         var c = new FilterCollection();
         var error = Make("Error", true);
@@ -60,7 +60,7 @@ public class FilterSemanticsTests
         Assert.True(r1.Shown);
         Assert.Same(disk, r1.ColorFilter);
 
-        // Matches Timeout too, but Timeout is disabled → deepest *enabled* match is Disk.
+        // Matches Timeout too, but Timeout is disabled → the claim stops at Disk.
         var r2 = Eval(c, "Error: disk timeout");
         Assert.True(r2.Shown);
         Assert.Same(disk, r2.ColorFilter);
@@ -118,7 +118,7 @@ public class FilterSemanticsTests
 
         var r = Eval(c, "the cat sat");
         Assert.True(r.Shown);
-        Assert.Same(first, r.ColorFilter); // topmost among equal depth
+        Assert.Same(first, r.ColorFilter); // first in the list claims it
     }
 
     [Fact]

@@ -214,9 +214,11 @@ public class MatchingEngineTests
         }
 
         var error = Add("ERROR");
-        Add("disk", parent: error);                       // nested: parent must match too
+        Add("disk", parent: error);                       // nested under the first root
         Add("WARN");
-        Add("Abc", caseSensitive: true);                  // case-sensitive literal
+        var abc = Add("Abc", caseSensitive: true);        // case-sensitive literal
+        Add("12", parent: abc);                           // nested under a *later* root, so a line that an
+        Add("xy", parent: abc);                           //   earlier root claims must not fall to these
         Add(@"\[x\].+\[y\]", regex: true);                // rewritten to a literal sequence
         Add(@"q(1|2)z", regex: true);                     // stays a real regex
         Add("noise", kind: FilterKind.Exclude);           // exclude
@@ -227,14 +229,19 @@ public class MatchingEngineTests
         var all = filters.EnumerateDepthFirst().ToList();
 
         var rnd = new Random(4242);
-        const string alphabet = "ERORWANdiskAbcqz12[]xy noise";
+        // Whole tokens rather than random characters. The lines that tell the two rules apart are the ones
+        // where filters in *different* branches match at once, and those essentially never turn up when a
+        // line is built a character at a time - "ERROR" alone is one chance in twenty million.
+        string[] tokens =
+        {
+            "ERROR", "WARN", "disk", "Abc", "abc", "12", "xy", "[x]mid[y]", "q1z", "q3z",
+            "noise", "ignored", "svc", "line", "-"
+        };
         for (int i = 0; i < 3_000; i++)
         {
             var sb = new StringBuilder();
-            int len = rnd.Next(40);
-            for (int k = 0; k < len; k++) sb.Append(alphabet[rnd.Next(alphabet.Length)]);
-            if (i % 7 == 0) sb.Append("[x]mid[y]");
-            if (i % 11 == 0) sb.Append("ERROR disk");
+            int words = rnd.Next(1, 8);
+            for (int k = 0; k < words; k++) sb.Append(tokens[rnd.Next(tokens.Length)]).Append(' ');
             string text = sb.ToString();
 
             var counts = new long[snapshot.FilterCount];
@@ -243,7 +250,6 @@ public class MatchingEngineTests
             // Reference: deep-match every filter with plain Contains / Regex, then apply the display rules.
             bool anyInclude = false, excluded = false;
             Filter? best = null;
-            int bestDepth = -1;
             foreach (var f in all)
             {
                 if (!DeepMatch(f, text)) continue;
@@ -254,7 +260,9 @@ public class MatchingEngineTests
                 else
                 {
                     anyInclude = true;
-                    if (f.Depth > bestDepth) { bestDepth = f.Depth; best = f; }
+                    // The first match in list order claims the line, and after that only a filter nested
+                    // under the claimant may take it - never a deeper one in some other branch.
+                    if (best is null || best.IsAncestorOf(f)) best = f;
                 }
             }
             bool shown = anyInclude && !excluded;

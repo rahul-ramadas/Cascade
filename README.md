@@ -39,7 +39,8 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - A child narrows its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*.
 - A child matches a line only if **every one of its ancestors matches it too** — whether or not those ancestors are switched on.
 - So switching a parent off does not stop it narrowing its children: you can scope a branch without showing everything the parent matches.
-- A line takes its colour from the deepest filter that matched it, and whatever that filter leaves unset it inherits from the filters above it.
+- A line takes its colour from the **first filter in the list** that matched it, refined by whichever of that filter's own descendants matched too — never by a filter in a branch further down, however deeply nested.
+- Whatever the winning filter leaves unset it inherits from the filters above it, so a filter with no colour of its own draws the line in the view's default colours.
 - Nest with `Alt+→`, or by dragging.
 
 ### The filter list

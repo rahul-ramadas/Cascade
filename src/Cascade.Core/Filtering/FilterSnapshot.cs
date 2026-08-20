@@ -5,14 +5,19 @@ using Cascade.Core.Model;
 namespace Cascade.Core.Filtering;
 
 /// <summary>Result of evaluating one line: whether it is shown and, if so, the filter whose style
-/// colors it (the deepest enabled include that matched; ties broken by document order).</summary>
+/// colors it (the first enabled include in list order that matched, refined by its own descendants).</summary>
 public readonly record struct LineEval(bool Shown, Filter? ColorFilter);
 
 /// <summary>
 /// An immutable, compiled snapshot of the filter tree used to evaluate lines on background threads
 /// without racing UI edits. Regexes are compiled once. Implements the exact hierarchical semantics:
 /// a line is shown iff some enabled include filter <i>deep-matches</i> (it and all ancestors' predicates
-/// match) and no enabled exclude deep-matches; the color is the deepest enabled matching include.
+/// match) and no enabled exclude deep-matches.
+/// <para>The color comes from the <b>first</b> enabled include that deep-matches, reading the list top to
+/// bottom as it is drawn - even when that filter sets no style, in which case the line takes the view's
+/// defaults. Only a filter <b>nested under</b> that one may take it from there, and among those, again the
+/// first. Depth is not a criterion: a deeper filter in a later branch loses to an earlier, shallower one.
+/// </para>
 /// </summary>
 public sealed class FilterSnapshot
 {
@@ -26,8 +31,11 @@ public sealed class FilterSnapshot
         public int MarkerIndex;
         public bool Enabled;
         public FilterKind Kind;
-        public int Depth;
         public int Index;
+        /// <summary>One past the last index in this node's subtree. Indices are handed out in the order the
+        /// tree is drawn, so a subtree is a contiguous range and "is <c>x</c> below me?" is
+        /// <c>x.Index &lt; SubtreeEnd</c> - no walk up the parents, no depth arithmetic.</summary>
+        public int SubtreeEnd;
         public bool SubtreeHasEnabled;
         public Node[] Children = Array.Empty<Node>();
         public Filter Source = null!;
@@ -269,7 +277,7 @@ public sealed class FilterSnapshot
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
 
-        Node Convert(Filter f, int depth, string parentKey, bool parentCacheable)
+        Node Convert(Filter f, string parentKey, bool parentCacheable)
         {
             bool enabled = f.Enabled || ReferenceEquals(f, forceEnabled);
             var node = new Node
@@ -280,7 +288,6 @@ public sealed class FilterSnapshot
                 MarkerIndex = f.Match.MarkerIndex,
                 Enabled = enabled,
                 Kind = f.Kind,
-                Depth = depth,
                 Index = counter++,
                 Source = f
             };
@@ -320,8 +327,11 @@ public sealed class FilterSnapshot
 
             var kept = new List<Node>(f.Children.Count);
             foreach (var child in f.Children)
-                if (chain is null || chain.Contains(child)) kept.Add(Convert(child, depth + 1, node.CacheKey, node.Cacheable));
+                if (chain is null || chain.Contains(child)) kept.Add(Convert(child, node.CacheKey, node.Cacheable));
             node.Children = kept.ToArray();
+
+            // Every descendant has now taken its index, so the counter is one past the last of them.
+            node.SubtreeEnd = counter;
 
             node.SubtreeHasEnabled = enabled;
             foreach (var c in node.Children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
@@ -333,7 +343,7 @@ public sealed class FilterSnapshot
         foreach (var root in filters.Roots)
             if (chain is null || chain.Contains(root)) rootFilters.Add(root);
         var roots = new Node[rootFilters.Count];
-        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], 0, "", true);
+        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], "", true);
 
         // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
         // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character
@@ -414,7 +424,13 @@ public sealed class FilterSnapshot
             _csAutomaton?.Match(line, hits[_ciWords..]);
         }
 
-        int bestDepth = -1;
+        // The winner is the first enabled include that deep-matches, and after that only something nested
+        // under it can take over. bestEnd is one past the last index in the winner's subtree, so "is this
+        // below the winner?" is one comparison - indices are handed out in the order the tree is drawn and
+        // visited in that order, so an index below bestEnd is inside the winner's nest and one at or above
+        // it is a later branch that has already lost. Starting at int.MaxValue makes "nobody has claimed it
+        // yet" the same comparison rather than a null check of its own.
+        int bestEnd = int.MaxValue;
         Filter? best = null;
         bool excluded = false;
         bool anyIncludeMatched = false;
@@ -424,7 +440,7 @@ public sealed class FilterSnapshot
             // A literal root that the automaton did not hit cannot match, and neither can its subtree.
             int bit = _rootBits[i];
             if (bit >= 0 && (hits[bit >> 6] & (1UL << (bit & 63))) == 0) continue;
-            Dfs(_roots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(_roots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
         }
         bool included = HasEnabledInclude ? anyIncludeMatched : true;
         bool shown = included && !excluded;
@@ -432,7 +448,7 @@ public sealed class FilterSnapshot
     }
 
     private static void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
-        MatchContext context, Span<ulong> deepMatches, ref int bestDepth, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
+        MatchContext context, Span<ulong> deepMatches, ref int bestEnd, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
     {
         if (!node.SubtreeHasEnabled) return;          // prune: nothing enabled at/below
         if (!Matches(node, line, lineNumber, markers, context)) return; // prune: descendants require this match
@@ -446,7 +462,8 @@ public sealed class FilterSnapshot
             if (node.Kind == FilterKind.Include)
             {
                 anyIncludeMatched = true;
-                if (node.Depth > bestDepth) { bestDepth = node.Depth; best = node.Source; }
+                // Nothing has claimed the line yet, or this is nested under whatever has.
+                if (node.Index < bestEnd) { best = node.Source; bestEnd = node.SubtreeEnd; }
             }
             else
             {
@@ -455,7 +472,7 @@ public sealed class FilterSnapshot
         }
 
         foreach (var child in node.Children)
-            Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestDepth, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
     }
 
     private static bool Matches(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,

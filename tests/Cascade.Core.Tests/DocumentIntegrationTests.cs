@@ -1446,8 +1446,10 @@ public class DocumentIntegrationTests
         using var doc = new CascadeDocument();
         try
         {
-            // Nested, so which filter gives a line its colour is the deepest enabled one that matches - the
-            // part a per-line walk could get right and a bulk one wrong.
+            // Nested both above and below the catch-all, so the rows exercise both halves of the colour
+            // rule: a claim refined by a child (ERROR > disk), and a claim that a deeper filter further
+            // down the list must not steal (line, against INFO > net). That is the part a per-line walk
+            // could get right and a bulk one wrong.
             var error = new Filter { Enabled = true, Match = { Text = "ERROR" } };
             var disk = new Filter { Enabled = true, Match = { Text = "disk" } };
             doc.Filters.Add(error);
@@ -1455,6 +1457,9 @@ public class DocumentIntegrationTests
             doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "WARN" } });
             doc.Filters.Add(new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "line 7" } });
             doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "line" } });   // so most rows have a colour
+            var info = new Filter { Enabled = true, Match = { Text = "INFO" } };
+            doc.Filters.Add(info);
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "net" } }, info);
             doc.Open(path);
             doc.WaitForIndex();
             doc.ApplyFilters();
@@ -1482,6 +1487,74 @@ public class DocumentIntegrationTests
             }
             // The fixture has to be able to tell a right answer from a blank one.
             Assert.True(coloured > count / 2, $"only {coloured} of {count} lines were coloured at all");
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Dragging_a_filter_into_another_branch_re_colours_the_file()
+    {
+        // The colour rule reads the filter list as it is drawn, so moving a filter changes which lines it
+        // answers for. Everything downstream is keyed off a snapshot taken when the pass starts - the match
+        // cache by the chain of predicates above each filter, the counts by position - so this is the case
+        // where a stale snapshot or a stale cache entry would show up as the wrong colour on screen.
+        var sb = new StringBuilder();
+        for (int i = 0; i < 4_000; i++)
+            sb.Append(i % 3 == 0 ? "ERROR" : "INFO").Append(" payment-svc line ").Append(i).Append('\n');
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(sb.ToString()));
+
+        using var doc = new CascadeDocument();
+        try
+        {
+            // "line" matches everything and sits at the top, so it claims every row. payment-svc is nested
+            // under ERROR further down: deeper, but in a branch of its own, so it must not take anything.
+            var everything = new Filter { Enabled = true, Match = { Text = "line" } };
+            var error = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            var service = new Filter { Enabled = true, Match = { Text = "payment-svc" } };
+            doc.Filters.Add(everything);
+            doc.Filters.Add(error);
+            doc.Filters.Add(service, error);
+
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            const long errorLine = 9;    // 9 % 3 == 0, so this one says ERROR
+            const long infoLine = 10;
+            Assert.Same(everything, doc.ColouringSnapshot().Evaluate(doc.GetLineText(errorLine), errorLine).ColorFilter);
+            Assert.Same(everything, doc.ColouringSnapshot().Evaluate(doc.GetLineText(infoLine), infoLine).ColorFilter);
+
+            // Drag the whole ERROR branch to the top. Now it claims first, and its child refines it.
+            Assert.True(doc.Filters.Move(error, null, 0));
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            Assert.Same(service, doc.ColouringSnapshot().Evaluate(doc.GetLineText(errorLine), errorLine).ColorFilter);
+            Assert.Same(everything, doc.ColouringSnapshot().Evaluate(doc.GetLineText(infoLine), infoLine).ColorFilter);
+
+            // Nest the catch-all under the service filter: three levels, and the deepest now answers.
+            Assert.True(doc.Filters.Move(everything, service, 0));
+            doc.ApplyFilters();
+            WaitFilter(doc);
+
+            Assert.Same(everything, doc.ColouringSnapshot().Evaluate(doc.GetLineText(errorLine), errorLine).ColorFilter);
+            var info = doc.ColouringSnapshot().Evaluate(doc.GetLineText(infoLine), infoLine);
+            Assert.False(info.Shown);       // an INFO line no longer satisfies the chain above the catch-all
+            Assert.Null(info.ColorFilter);
+
+            // ...and the bulk path the minimap uses has to agree with all of it, row for row.
+            var lines = new long[512];
+            var got = new Filter?[512];
+            for (int i = 0; i < lines.Length; i++) lines[i] = i;
+            doc.ColouringFilters(lines, lines.Length, got);
+            var colouring = doc.ColouringSnapshot();
+            for (int i = 0; i < lines.Length; i++)
+                Assert.Same(colouring.Evaluate(doc.GetLineText(lines[i]), lines[i]).ColorFilter, got[i]);
         }
         finally
         {
