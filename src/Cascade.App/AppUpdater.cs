@@ -95,9 +95,19 @@ internal static class AppUpdater
             : Task.FromResult(Environment.GetEnvironmentVariable(GitCredentialToken.EnvironmentVariable));
 
     /// <summary>
-    /// Proves a downloaded file is a working build before it is allowed to replace the running one. First
-    /// the cheap structural check - an HTML error page or a truncated download is not a PE image at all -
-    /// and only then is it actually run.
+    /// Proves a downloaded file is a working build, and one from the same signer, before it is allowed to
+    /// replace the running one.
+    ///
+    /// The order is the point. First the cheap structural check - an HTML error page or a truncated download
+    /// is not a PE image at all - then the signature, and only then is the file run. Running it used to come
+    /// second, which made the verification itself the exposure: a substituted binary had already executed by
+    /// the time anything judged it, and whether it was then installed hardly mattered.
+    ///
+    /// The signer is compared against the running executable rather than a constant compiled in here. That
+    /// keeps working when the certificate rotates, needs nothing kept in sync with Azure, and states the
+    /// rule the update path actually wants - a replacement comes from whoever produced what is running. An
+    /// unsigned build enforces nothing, having nothing to enforce: that is a local developer build, which
+    /// does not reach this code anyway unless it is forced.
     ///
     /// The process is killed if it does not answer promptly. A build that hangs or opens a window instead
     /// of printing its version must not be left running in the background, and must not be installed.
@@ -105,6 +115,7 @@ internal static class AppUpdater
     private static async Task<bool> VerifyAsync(string path, CancellationToken ct)
     {
         if (!IsWindowsExecutable(path)) return false;
+        if (!SignedByWhoeverSignedUs(path)) return false;
 
         Process? proc = null;
         try
@@ -137,6 +148,23 @@ internal static class AppUpdater
             try { if (proc is { HasExited: false }) proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
             proc?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Whether a downloaded file carries a valid signature from the same signer as the running executable.
+    ///
+    /// True when the running executable is not signed: there is then no identity to demand, and demanding
+    /// one would break the end-to-end update test, which serves a copy of whatever build is under test -
+    /// signed in CI, not signed on a developer's machine. Nothing is lost by it, because a released build is
+    /// always signed and an unsigned one is a local build the updater already refuses to touch.
+    /// </summary>
+    private static bool SignedByWhoeverSignedUs(string candidatePath)
+    {
+        string? ours = Authenticode.IdentityOf(AppInfo.ExePath);
+        if (ours is null) return true;
+
+        string? theirs = Authenticode.IdentityOf(candidatePath);
+        return theirs is not null && string.Equals(ours, theirs, StringComparison.Ordinal);
     }
 
     /// <summary>True if the file really is a Windows executable (MZ header pointing at a PE signature).</summary>

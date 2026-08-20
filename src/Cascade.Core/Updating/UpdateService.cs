@@ -36,8 +36,9 @@ public sealed class UpdateService
     private volatile string? _lastNote;
     private volatile bool _finished;
 
-    /// <param name="verify">Proves a downloaded file is a working build before it is allowed to replace the
-    /// running one. The application runs it with <c>--version</c>; tests substitute their own.</param>
+    /// <param name="verify">Proves a downloaded file is a working build, and one to be trusted, before it is
+    /// allowed to replace the running one. The application checks its signature and then runs it with
+    /// <c>--version</c>; tests substitute their own.</param>
     public UpdateService(IReleaseSource source, UpdateOptions options,
                          Func<string, CancellationToken, Task<bool>> verify)
     {
@@ -143,7 +144,7 @@ public sealed class UpdateService
 
             if (!await _verify(part, ct).ConfigureAwait(false))
             {
-                _lastError = "The downloaded update did not run correctly and was discarded.";
+                _lastError = "The downloaded update was not a signed, working build and was discarded.";
                 TryDelete(part);
                 return;
             }
