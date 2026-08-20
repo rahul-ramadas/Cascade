@@ -41,10 +41,23 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
+  # Signing switches itself off wherever it cannot work, so no fork has to care that it exists: a fork has
+  # no signing variables, and the federated credential in Entra trusts only this repository on master, so a
+  # token minted anywhere else buys nothing. A fork therefore gets an unsigned exe and a green build.
+  # Restricting it to master also means "Run workflow" on master signs without releasing - the release job
+  # wants a push - which is the way to rehearse a change to any of this before it is load-bearing.
+  SIGN_RELEASE: ${{ vars.SIGNING_ACCOUNT_NAME != '' && github.ref == 'refs/heads/master' }}
+
 jobs:
   build:
     name: Build and test
     runs-on: windows-latest
+    # id-token is what Azure login exchanges for signing credentials. A permission cannot be granted per
+    # step, so pull request runs are handed the same token; it is inert, because the federated credential
+    # accepts only master and a pull request's token says otherwise.
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -151,6 +164,70 @@ jobs:
           if ($actualBytes -gt $thresholdBytes) {
             throw "Published Cascade.exe is $actualBytes bytes, over the 5 MB guardrail. The likely cause is the publish becoming self-contained: framework-dependent single-file output is around 1 MB and grows slowly with the code, while self-contained output is about 116 MB."
           }
+
+      # Authenticode signing. SmartScreen accrues reputation to the signing certificate, not to each new
+      # file hash, so a signed release inherits the standing of every release before it - where an unsigned
+      # build, being a brand new hash on every push to master, always starts again from nothing.
+      # Signed here rather than just before packaging so the tests below drive the bytes that ship: a
+      # signature changes the file, and an exe tested before signing is not the exe anybody downloads.
+      - name: Azure login
+        if: env.SIGN_RELEASE == 'true'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign
+        if: env.SIGN_RELEASE == 'true'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.SIGNING_CERTIFICATE_PROFILE }}
+          files: ${{ github.workspace }}\artifacts\publish\Cascade.exe
+          file-digest: SHA256
+          # Certificates now expire within 460 days, and a signature without a countersigned timestamp dies
+          # with the certificate that made it - retroactively, taking every release already downloaded with
+          # it. The timestamp is what proves the signing happened while the certificate was still valid.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Cascade
+          description-url: https://github.com/rahul-ramadas/Cascade
+
+      # The signing step reports its own failures, but not a signature that applied and then does not hold
+      # up - an untrusted chain, or the silent timestamp omission above. Windows is the authority on that,
+      # so ask it here rather than discover it from a user's SmartScreen prompt.
+      - name: Verify the signature
+        if: env.SIGN_RELEASE == 'true'
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'artifacts\publish\Cascade.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $exe
+
+          if ($signature.Status -ne 'Valid') {
+            throw "Cascade.exe did not come out validly signed. Status: $($signature.Status). $($signature.StatusMessage)"
+          }
+
+          if (-not $signature.TimeStamperCertificate) {
+            throw "Cascade.exe is signed but not timestamped, so every signature made with this certificate stops verifying the day it expires. Check the timestamp-rfc3161 input on the signing step."
+          }
+
+          $signer = $signature.SignerCertificate
+          Write-Host "Signer: $($signer.Subject)"
+          Write-Host "Issuer: $($signer.Issuer)"
+          Write-Host "Certificate valid until: $($signer.NotAfter.ToString('u'))"
+          Write-Host "Timestamped by: $($signature.TimeStamperCertificate.Subject)"
+
+          @(
+            '### Authenticode signature'
+            ''
+            '| Item | Value |'
+            '| --- | --- |'
+            "| Status | ``$($signature.Status)`` |"
+            "| Signer | ``$($signer.Subject)`` |"
+            "| Certificate expires | ``$($signer.NotAfter.ToString('u'))`` |"
+            "| Timestamped | ``yes`` |"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Core tests
         run: >
