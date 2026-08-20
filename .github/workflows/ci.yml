@@ -226,3 +226,34 @@ jobs:
             --target "$SHA" \
             --title "Cascade v$VERSION" \
             --generate-notes
+
+      # Every green push to master ships a release, so the release list and the tag namespace grow without
+      # bound - 33 had piled up before the first sweep. Keeping the newest few leaves room to roll back to a
+      # recent known-good exe without hoarding builds nobody would install any more.
+      # Ordering is by publish time, not created_at: GitHub reports the target commit's own timestamp as a
+      # release's created_at, so a rewritten history or an out-of-order commit date would scramble that sort
+      # and prune the wrong builds.
+      # A release and its tag are separate objects, and deleting the release alone would strand the tag,
+      # so --cleanup-tag takes both. Drafts are skipped because a draft has no tag to clean up.
+      # Failure here is deliberately fatal: the release itself is already published by this point, and a red
+      # run is the only thing that would surface pruning silently breaking and letting releases pile up.
+      - name: Prune old releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KEEP: 5
+        run: |
+          stale=$(gh release list --repo "$REPO" --limit 200 \
+            --json tagName,publishedAt,isDraft \
+            --jq "[.[] | select(.isDraft | not)] | sort_by(.publishedAt) | reverse | .[$KEEP:] | .[].tagName")
+
+          if [ -z "$stale" ]; then
+            echo "Nothing to prune: $KEEP or fewer releases exist."
+            exit 0
+          fi
+
+          while read -r tag; do
+            echo "Deleting release $tag and its tag."
+            gh release delete "$tag" --repo "$REPO" --cleanup-tag --yes
+          done <<< "$stale"
