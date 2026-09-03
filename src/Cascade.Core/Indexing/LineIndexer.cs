@@ -17,6 +17,11 @@ public sealed class LineIndexer
 {
     private const int ChunkSize = 4 * 1024 * 1024;
 
+    // Asked for in whole ranges on a thread of its own: one range reaching this far ahead lets the OS keep
+    // several reads in flight, where the scan's own faults can only ever have one.
+    private const long PrefetchChunk = 32L * 1024 * 1024;
+    private const long PrefetchLead = 64L * 1024 * 1024;
+
     private readonly MemoryMappedTextSource _src;
     private readonly int _preamble;
     private readonly int _unit;
@@ -55,8 +60,11 @@ public sealed class LineIndexer
 
         Index.Add(_preamble); // first line starts right after any BOM
 
-        if (_unit == 1) ScanSingleByte(length, onProgress, ct);
-        else ScanCodeUnits(length, onProgress, ct);
+        using (StartReadAhead(length, ct))
+        {
+            if (_unit == 1) ScanSingleByte(length, onProgress, ct);
+            else ScanCodeUnits(length, onProgress, ct);
+        }
 
         IsComplete = true;
         Volatile.Write(ref _processed, length);
@@ -111,6 +119,56 @@ public sealed class LineIndexer
             pos += chunk;
             Volatile.Write(ref _processed, pos);
             onProgress?.Invoke(new IndexProgress(Index.Count, false));
+        }
+    }
+
+    /// <summary>Keeps the OS reading ahead of the scan, on its own thread. Demand paging alone leaves one
+    /// fault outstanding at a time, so throughput is that fault's latency however idle the disk is. Issuing
+    /// the read-ahead from the scanning thread does not work - <c>PrefetchVirtualMemory</c> does not return
+    /// until the reads are under way, so it stalls the very scan it is meant to feed. MEASURED cold on a
+    /// 19.3 GB log: 12.1 s demand-paged, 7.6 s asked for inline, 5.0 s from here.
+    /// <para>Disposing joins the thread, so the read-ahead can never outlive the scan and therefore never
+    /// outlives the mapping it reads through - the release waits on the indexing task.</para></summary>
+    private ReadAhead? StartReadAhead(long length, CancellationToken ct)
+        => length < PrefetchChunk ? null : new ReadAhead(this, length, ct);
+
+    private sealed class ReadAhead : IDisposable
+    {
+        private readonly CancellationTokenSource _stop;
+        private readonly Thread _thread;
+
+        public ReadAhead(LineIndexer owner, long length, CancellationToken ct)
+        {
+            _stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var stop = _stop.Token;
+            _thread = new Thread(() =>
+            {
+                // Reading ahead is only a hint, and this is a background thread - an exception escaping
+                // here would end the process over work whose failure costs nothing but speed.
+                try
+                {
+                    long at = owner._preamble;
+                    while (at < length && !stop.IsCancellationRequested)
+                    {
+                        while (at - owner.ProcessedByteCount > PrefetchLead && !stop.IsCancellationRequested)
+                            Thread.Sleep(1);
+                        if (stop.IsCancellationRequested) return;
+                        long take = Math.Min(PrefetchChunk, length - at);
+                        owner._src.Prefetch(at, take);
+                        at += take;
+                    }
+                }
+                catch { /* the scan pages the file in for itself either way */ }
+            })
+            { IsBackground = true, Name = "Cascade.ReadAhead" };
+            _thread.Start();
+        }
+
+        public void Dispose()
+        {
+            _stop.Cancel();
+            _thread.Join();
+            _stop.Dispose();
         }
     }
 

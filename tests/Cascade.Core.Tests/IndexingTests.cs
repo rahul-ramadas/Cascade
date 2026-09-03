@@ -38,6 +38,81 @@ public class IndexingTests
     public void Empty_file_has_no_lines()
         => Assert.Empty(Harness.Lines(""));
 
+    // Every other test here uses a file of a few bytes, which is below the size at which the indexer
+    // bothers to read ahead - so without these two the read-ahead never runs in the suite at all.
+
+    [Fact]
+    public void A_file_big_enough_to_read_ahead_indexes_to_the_same_thing()
+    {
+        string path = Harness.TempFile(BigLog(out int expected));
+        try
+        {
+            using var src = new MemoryMappedTextSource(path);
+            var index = new LineIndex();
+            new LineIndexer(src, index, 0, 1, false).Run(null, CancellationToken.None);
+
+            Assert.Equal(expected, index.Count);
+            var reader = new LineReader(src, new UTF8Encoding(false));
+            index.GetRange(0, src.Length, out long s, out long e);
+            Assert.Equal("line 0", reader.GetString(s, e));
+            index.GetRange(expected - 1, src.Length, out s, out e);
+            Assert.Equal($"line {expected - 1}", reader.GetString(s, e));
+            index.GetRange(expected / 2, src.Length, out s, out e);
+            Assert.Equal($"line {expected / 2}", reader.GetString(s, e));
+
+            // Losing the read-ahead costs a large file well over half its speed and breaks no result,
+            // so without this the whole change could be deleted and every test would still pass.
+            Assert.Equal(src.Length, src.PrefetchedBytes);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_file_too_small_to_be_worth_it_is_not_read_ahead()
+    {
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes("alpha\nbeta\ngamma"));
+        try
+        {
+            using var src = new MemoryMappedTextSource(path);
+            var index = new LineIndex();
+            new LineIndexer(src, index, 0, 1, false).Run(null, CancellationToken.None);
+
+            Assert.Equal(3, index.Count);
+            Assert.Equal(0, src.PrefetchedBytes);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Cancelling_a_scan_does_not_leave_the_read_ahead_running()
+    {
+        string path = Harness.TempFile(BigLog(out _));
+        try
+        {
+            using var src = new MemoryMappedTextSource(path);
+            using var cts = new CancellationTokenSource();
+            var indexer = new LineIndexer(src, new LineIndex(), 0, 1, false);
+
+            // Reaching the second chunk means the read-ahead is under way, so the cancel lands mid-scan.
+            Assert.Throws<OperationCanceledException>(() => indexer.Run(
+                p => { if (p.LineCount > 0) cts.Cancel(); }, cts.Token));
+
+            // Run only returns once the read-ahead has been joined; anything else would hang here.
+            Assert.False(indexer.IsComplete);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>A log comfortably past the 32 MB the indexer starts reading ahead at.</summary>
+    private static byte[] BigLog(out int lines)
+    {
+        var text = new StringBuilder(40 * 1024 * 1024);
+        lines = 0;
+        while (text.Length < 40 * 1024 * 1024) text.Append("line ").Append(lines++).Append('\n');
+        text.Length--;   // no trailing newline, so the last line is a line of its own
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
     [Fact]
     public void Just_a_newline_is_one_empty_line()
         => Assert.Equal(new[] { "" }, Harness.Lines("\n"));

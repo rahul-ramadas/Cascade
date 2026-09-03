@@ -262,11 +262,25 @@ public sealed class CascadeDocument : IDisposable
         _indexCts = new CancellationTokenSource();
         var ct = _indexCts.Token;
         var service = _filterService;
-        _indexTask = Task.Run(() => indexer.Run(_ =>
+        // A thread of its own rather than the pool: the scan blocks on the file for as long as the file
+        // takes, and the pool is where the filter pass runs its per-block Parallel.For at full width.
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _indexTask = done.Task;
+        new Thread(() =>
         {
-            service.Notify();
-            Updated?.Invoke();
-        }, ct), ct);
+            try
+            {
+                indexer.Run(_ =>
+                {
+                    service.Notify();
+                    Updated?.Invoke();
+                }, ct);
+                done.SetResult();
+            }
+            catch (OperationCanceledException) { done.SetCanceled(ct); }
+            catch (Exception ex) { done.SetException(ex); }
+        })
+        { IsBackground = true, Name = "Cascade.Index" }.Start();
     }
 
     /// <summary>Rebuilds the filter snapshot and (re)starts streaming evaluation. Call after any edit
