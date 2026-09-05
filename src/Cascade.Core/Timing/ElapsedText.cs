@@ -103,9 +103,6 @@ public static class ElapsedText
     /// box, so the reader can see the feature is there and waiting for a selection.</summary>
     public const string None = "\u2014";
 
-    /// <summary>Nothing at all, for a row whose line carries no time.</summary>
-    public static string Blank => Nothing;
-
     private static long Pow10(int n)
     {
         long v = 1;

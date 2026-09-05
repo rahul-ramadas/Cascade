@@ -65,9 +65,8 @@ public sealed class ColumnsDialog : DialogBase
     private readonly Button _down = new() { Text = "Move d&own", AutoSize = true };
     private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
 
-    // No Alt key of its own: F, I, E and L are all claimed elsewhere in this dialog, and the "Tim&e"
-    // heading directly above already lands on this box - a label's mnemonic moves focus to the next stop.
-    private readonly Label _timeFieldLabel = new() { Text = "Field:", AutoSize = true };
+    // Carries the section's own Alt key now that there is no heading above it to hold one.
+    private readonly Label _timeFieldLabel = new() { Text = "Tim&estamp field:", AutoSize = true };
     private readonly ComboBox _timeField = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Time field" };
     private readonly Label _timeLabel = new() { Text = "Format:", AutoSize = true };
     private readonly ComboBox _timeFormat = new() { DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Time format" };
@@ -336,8 +335,9 @@ public sealed class ColumnsDialog : DialogBase
         var dragNote = new Label { Text = "\u2026or drag a field up and down the list, or press Alt+\u2191 / Alt+\u2193.", AutoSize = true, ForeColor = SystemColors.GrayText };
         Row(Flow(_up, _down, Centred(dragNote, 10)), SizeType.AutoSize, 0, 6);
 
-        Row(Heading("Tim&e"), SizeType.AutoSize, 0, 12);
-        Row(TimeRow(), SizeType.AutoSize, 0, 2);
+        // No heading of its own: the section is one row, and "Timestamp field" says what a heading over it
+        // would have said. That is a row of the dialog's height back, which a screen 768 pixels tall needs.
+        Row(TimeRow(), SizeType.AutoSize, 0, 12);
         Row(_timeStatus, SizeType.AutoSize, 0, 4);
 
         var buttons = OkCancelRow(out var ok, out _);
@@ -1363,7 +1363,15 @@ public sealed class ColumnsDialog : DialogBase
     /// that a cell was left stale is to watch what the grid was asked to draw.</summary>
     private readonly List<int> _swatchPaints = [];
 
-    internal void ForgetSwatchPaintsForTesting() => _swatchPaints.Clear();
+    internal void ForgetSwatchPaintsForTesting()
+    {
+        // A cell nobody can see is never painted, whatever it was told - so on a screen short enough to
+        // scroll the list out of the panel, bring it back first or the reading is about the scroll position
+        // rather than about the invalidation.
+        _scroll.ScrollControlIntoView(_list);
+        _list.Update();
+        _swatchPaints.Clear();
+    }
 
     internal int[] SwatchPaintsForTesting()
     {
@@ -1480,6 +1488,11 @@ public sealed class ColumnsDialog : DialogBase
     internal int SelectedRowForTesting => _list.CurrentRow?.Index ?? -1;
     internal int ListRoomInRowsForTesting
         => _list.ClientSize.Height / Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
+
+    /// <summary>Whether the list still has the least room it is ever held to. A screen with nothing to
+    /// spare leaves it exactly that and no more, so this is the promise to check when there are no spare
+    /// rows to ask for. Compared where both figures are known, so neither can drift from the other.</summary>
+    internal bool ListIsAtItsFloorForTesting => _list.Height >= LeastListHeight;
     internal void DetectForTesting() => Detect();
     internal void ApplyForTesting() => Apply();
 

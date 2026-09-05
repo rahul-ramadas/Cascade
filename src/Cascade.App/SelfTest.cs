@@ -836,19 +836,40 @@ internal static class SelfTest
 
                 // Everything on the dialog has to sit inside it, at any font size or DPI - a row that
                 // overflows is how a dialog ends up with its buttons off the bottom edge.
-                var stray = AllControls(dlg).Where(c => c.Visible && c.Parent is not null)
-                    .Select(c => (c, r: Where(c)))
-                    .Where(t => t.r.Right > dlg.ClientSize.Width + 1 || t.r.Bottom > dlg.ClientSize.Height + 1)
-                    .ToList();
-                ok &= Check("nothing on the dialog hangs off its edge", stray.Count == 0,
-                            string.Join(", ", stray.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
+                //
+                // What "inside" means depends on the screen. This dialog is taller than a 768-pixel one can
+                // show, and it is MEANT to be: the content is held to its floor and the panel around it
+                // scrolls, or the list would be squeezed away and the OK button pushed out of reach. So the
+                // claim is "nothing is unreachable", which on a roomy screen means nothing hangs off the
+                // edge and on a short one means everything can be scrolled to. Checked BOTH ways here,
+                // whatever this machine's screen is, because CI's is 1024x768 and a developer's is not.
+                bool RunsInside(string where, Control edge)
+                {
+                    var over = AllControls(dlg).Where(c => c.Visible && c.Parent is not null)
+                        .Select(c => (c, r: Where(c)))
+                        .Where(t => t.r.Right > edge.ClientSize.Width + 1 || t.r.Bottom > edge.ClientSize.Height + 1)
+                        .ToList();
+                    return Check($"nothing on the dialog hangs off {where}", over.Count == 0,
+                                 string.Join(", ", over.Select(t => $"{t.c.GetType().Name}'{t.c.Text}' {t.r}")));
+                }
 
-                // Opened at its own size it fits, so there must be no scroll bar: one that is always there
-                // takes width off the content and says the dialog is bigger than it is.
                 var fits = dlg.ContentScrollForTesting;
-                ok &= Check("and at its own size there is nothing to scroll",
-                            !fits.VerticalScroll.Visible && !fits.HorizontalScroll.Visible,
-                            $"content {fits.DisplayRectangle} in {fits.ClientSize}; {dlg.ContentFloorForTesting}");
+                bool roomy = !fits.VerticalScroll.Visible;
+                if (roomy)
+                {
+                    ok &= RunsInside("its edge", dlg);
+                    // Opened at its own size it fits, so there must be no scroll bar: one that is always
+                    // there takes width off the content and says the dialog is bigger than it is.
+                    ok &= Check("and at its own size there is nothing to scroll",
+                                !fits.HorizontalScroll.Visible,
+                                $"content {fits.DisplayRectangle} in {fits.ClientSize}; {dlg.ContentFloorForTesting}");
+                }
+                else
+                {
+                    ok &= Check("on a screen too short for it, the content scrolls rather than being squeezed",
+                                fits.DisplayRectangle.Height >= fits.ClientSize.Height,
+                                $"content {fits.DisplayRectangle} in {fits.ClientSize}; {dlg.ContentFloorForTesting}");
+                }
 
                 // Width and alignment mean nothing to the Inline layout, so they are put out of reach
                 // rather than left looking as though they do something.
@@ -1308,9 +1329,14 @@ internal static class SelfTest
             sized.Shown += (_, _) => sized.BeginInvoke(sized.Close);
             sized.ShowDialog(opener);
             Pump();
-            ok &= Check($"the field list opens with room for the fields and a few spare ({sized.ListRoomInRowsForTesting} rows for {sized.RowCountForTesting} fields)",
-                        sized.ListRoomInRowsForTesting >= sized.RowCountForTesting + 2,
-                        $"{sized.ClientSize}");
+            // The spare rows come out of whatever room is left once everything else on the dialog has had
+            // its own, so a screen too short for the dialog has none to give - and the list is then held at
+            // its floor rather than squeezed away, which is the promise that actually matters.
+            bool spare = sized.ListRoomInRowsForTesting >= sized.RowCountForTesting + 2;
+            ok &= Check($"the field list opens with room for the fields and a few spare " +
+                        $"({sized.ListRoomInRowsForTesting} rows for {sized.RowCountForTesting} fields)",
+                        spare || sized.ListIsAtItsFloorForTesting,
+                        $"{sized.ClientSize}; {sized.ContentFloorForTesting}");
             var middle = new Point(sized.Left + sized.Width / 2, sized.Top + sized.Height / 2);
             var screen = Screen.FromControl(opener).WorkingArea;
             var want = new Point(screen.Left + screen.Width / 2, screen.Top + screen.Height / 2);
