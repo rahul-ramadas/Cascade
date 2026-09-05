@@ -55,7 +55,8 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
     private ToolStripMenuItem _miElapsed = null!, _miElapsedGutter = null!, _miElapsedStatus = null!, _miNoClock = null!;
-    private ToolStripMenuItem _miMeasuredFrom = null!, _miNextOrigin = null!, _miSetReference = null!, _miClearReference = null!;
+    private ToolStripMenuItem _miMeasuredFrom = null!, _miNextOrigin = null!, _miSetReference = null!;
+    private ToolStripMenuItem _miGoToReference = null!, _miClearReference = null!;
     private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
@@ -247,7 +248,7 @@ public sealed class MainForm : Form
     /// menu item paints EITHER a shortcut or a submenu arrow, so an item with children can advertise
     /// nothing at all.</summary>
     internal string ElapsedMenuKeysForTesting()
-        => string.Join("|", new[] { _miElapsedGutter, _miElapsedStatus, _miNextOrigin, _miSetReference }
+        => string.Join("|", new[] { _miElapsedGutter, _miElapsedStatus, _miNextOrigin, _miSetReference, _miGoToReference }
             .Select(i => $"{i.Text}={i.ShortcutKeyDisplayString}"
                        + (i.HasDropDownItems ? " (ARROW HIDES IT)" : "")));
 
@@ -493,6 +494,7 @@ public sealed class MainForm : Form
         if (keyData == ElapsedStatusKey) return ToggleElapsed(margin: false);
         if (keyData == SetReferenceKey) return SetReferenceHere();
         if (keyData == CycleOriginKey) return CycleOrigin();
+        if (keyData == GoToReferenceKey) return GoToReference();
         // Before anything the menu claims: a shortcut registered on a menu item is dispatched by the base
         // call below, over the head of whatever has the focus.
         if (EditFocusedText(keyData)) return true;
@@ -783,6 +785,8 @@ public sealed class MainForm : Form
         { ShortcutKeyDisplayString = "Ctrl+Shift+R" };
         _miSetReference = new ToolStripMenuItem("Set the Reference &Here", null, (_, _) => SetReferenceHere())
         { ShortcutKeyDisplayString = "Ctrl+R" };
+        _miGoToReference = new ToolStripMenuItem("&Go to the Reference", null, (_, _) => GoToReference())
+        { ShortcutKeyDisplayString = "Ctrl+Shift+G" };
         _miClearReference = new ToolStripMenuItem("&Clear the Reference", null, (_, _) => ClearReference());
 
         _miElapsed.DropDownItems.Add(_miElapsedGutter);
@@ -791,6 +795,7 @@ public sealed class MainForm : Form
         _miElapsed.DropDownItems.Add(_miMeasuredFrom);
         _miElapsed.DropDownItems.Add(_miNextOrigin);
         _miElapsed.DropDownItems.Add(_miSetReference);
+        _miElapsed.DropDownItems.Add(_miGoToReference);
         _miElapsed.DropDownItems.Add(_miClearReference);
         _miElapsed.DropDownItems.Add(_miNoClock);
         _miElapsed.DropDownOpening += (_, _) => SyncElapsedMenu();
@@ -812,10 +817,13 @@ public sealed class MainForm : Form
     // matched "Status" better still, but Ctrl+S here saves filters and every app in the world reads
     // Ctrl+Shift+S as Save As. Ctrl+R sets the reference and Ctrl+Shift+R steps through what is measured
     // from - one letter for one idea, the pairing Ctrl+Shift+X already uses for switching the field layout.
+    // Going to the reference is the same pairing on the key that already means going somewhere: Ctrl+G goes
+    // to a line you name, Ctrl+Shift+G to the one already named.
     private const Keys ElapsedGutterKey = Keys.Control | Keys.Shift | Keys.M;
     private const Keys ElapsedStatusKey = Keys.Control | Keys.Shift | Keys.B;
     private const Keys SetReferenceKey = Keys.Control | Keys.R;
     private const Keys CycleOriginKey = Keys.Control | Keys.Shift | Keys.R;
+    private const Keys GoToReferenceKey = Keys.Control | Keys.Shift | Keys.G;
 
     /// <summary>Names the caret's line as the one everything is measured from, and starts measuring from
     /// it: setting an origin and leaving the column showing something else would look like the key had done
@@ -839,6 +847,33 @@ public sealed class MainForm : Form
         _doc.ClearReference();
         if (_settings.ElapsedMeasuredFrom == ElapsedOrigin.Reference) MeasureFrom(ElapsedOrigin.PreviousShown);
         else RefreshElapsed();
+    }
+
+    /// <summary>Takes the view back to the line everything is being measured from.
+    ///
+    /// <para>A reference is set on a line worth coming back to and then scrolled away from - that is what it
+    /// is FOR - and in a file of seventy million lines there was no way back to it but to have remembered
+    /// the number. The one record of where it was sat in a tooltip on the entry that throws it away.</para>
+    ///
+    /// <para>Filtered out, it lands on the nearest line still shown, the way Go To Line does - and says so,
+    /// because a jump that quietly arrives somewhere else is worse than one that explains itself.</para>
+    /// </summary>
+    private bool GoToReference()
+    {
+        if (_doc.Clock is null) return false;
+        long line = _doc.ReferenceLine;
+        if (line < 0)
+        {
+            NoMoreMatches("No reference line yet",
+                          "Select a line and press Ctrl+R to measure everything from it.");
+            return true;
+        }
+        bool shown = _doc.RowForLine(line) >= 0;
+        GoToLine(line + 1);
+        if (!shown)
+            ShowFindMessage($"Line {line + 1:N0} is not being shown",
+                            $"The reference is filtered out, so this is the nearest line to it that is shown.");
+        return true;
     }
 
     /// <summary>Steps to the next origin there is anything to measure from. With no reference named there
@@ -905,11 +940,14 @@ public sealed class MainForm : Form
 
         bool named = _doc.ReferenceLine >= 0;
         _miSetReference.Enabled = have;
+        _miGoToReference.Enabled = named;
         _miClearReference.Enabled = named;
         // Wording that does not move: an item renaming itself to carry the line number cannot be found by
         // name afterwards, by a check or by anything else. Where the reference IS belongs on the status
-        // bar, which says so beside the figure it is producing.
-        _miClearReference.ToolTipText = named ? $"Line {_doc.ReferenceLine + 1:N0}" : "";
+        // bar, which says so beside the figure it is producing - and on the tip of the two entries that act
+        // on it, which is where the question is asked.
+        _miGoToReference.ToolTipText = _miClearReference.ToolTipText =
+            named ? $"Line {_doc.ReferenceLine + 1:N0}" : "";
         foreach (ToolStripMenuItem item in _miMeasuredFrom.DropDownItems)
         {
             var origin = (ElapsedOrigin)item.Tag!;

@@ -8473,7 +8473,7 @@ internal static class SelfTest
             // parked on one is a key nobody can find.
             string advertised = form.ElapsedMenuKeysForTesting();
             Line("   (" + advertised + ")");
-            bool matched = advertised.Split('|').Length == 4 && advertised.Split('|').All(entry =>
+            bool matched = advertised.Split('|').Length == 5 && advertised.Split('|').All(entry =>
             {
                 string[] parts = entry.Split('=');
                 int amp = parts[0].IndexOf('&', StringComparison.Ordinal);
@@ -8548,6 +8548,20 @@ internal static class SelfTest
                             form.ElapsedOriginForTesting.StartsWith("PreviousShown", StringComparison.Ordinal),
                             form.ElapsedOriginForTesting);
 
+            // Nothing to go back to yet, so the key says so rather than moving the caret somewhere arbitrary
+            // - and the menu offers the way back only once there is one.
+            grid.GoToLine(10);
+            Pump();
+            bool refused = form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.G);
+            Pump();
+            ok &= Check("with no reference named, going to it is refused out loud",
+                        refused && grid.CaretLine == 10
+                        && form.FindMessageForTesting.Contains("No reference", StringComparison.Ordinal),
+                        $"caret {grid.CaretLine} / {form.FindMessageForTesting}");
+            ok &= Check("and the menu says the way back is not available",
+                        form.ElapsedMenuForTesting().Contains("Go to the Reference (unavailable)", StringComparison.Ordinal),
+                        form.ElapsedMenuForTesting().Replace("\n", " / ", StringComparison.Ordinal));
+
             // With no reference named there is nothing to see in that mode, so the key steps over it rather
             // than stopping on an empty column.
             form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
@@ -8591,6 +8605,26 @@ internal static class SelfTest
                         grid.ElapsedForTesting(140) == "2400.000", grid.ElapsedForTesting(140));
             ok &= Check("and a line BEFORE it reads as a negative, which is what it is",
                         grid.ElapsedForTesting(40) == "-3600.000", grid.ElapsedForTesting(40));
+
+            // ...and there is a way back to it. A reference is set on a line worth returning to and then
+            // scrolled away from - that is what it is for - and the only record of where it was used to sit
+            // in a tooltip on the entry that throws it away.
+            grid.GoToLine(280);
+            Pump();
+            ok &= Check("the view can be taken a long way from the reference", grid.CaretLine == 280,
+                        grid.CaretLine.ToString());
+            bool went = form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.G);
+            Pump();
+            ok &= Check("and one key brings it back to the line everything is measured from",
+                        went && grid.CaretLine == 100, grid.CaretLine.ToString());
+            ok &= Check("which is on screen, not merely selected out of sight",
+                        grid.FirstRowForTesting <= 100 &&
+                        100 < grid.FirstRowForTesting + grid.RowsPaintedForTesting,
+                        $"row 100, showing {grid.FirstRowForTesting}.." +
+                        $"{grid.FirstRowForTesting + grid.RowsPaintedForTesting - 1}");
+            ok &= Check("and the menu offers the same, now that there is somewhere to go",
+                        !form.ElapsedMenuForTesting().Contains("Go to the Reference (unavailable)", StringComparison.Ordinal),
+                        form.ElapsedMenuForTesting().Replace("\n", " / ", StringComparison.Ordinal));
 
             string offered = form.MeasuredFromMenuForTesting();
             Line("   (" + offered.Replace("\n", " / ", StringComparison.Ordinal) + ")");

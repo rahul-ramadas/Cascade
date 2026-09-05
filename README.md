@@ -118,6 +118,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 ![The same errors measured from one of them: the lines above the reference read as negative, the reference itself sits at zero and is picked out in the margin, and the ones below climb away from it](docs/images/elapsed-reference.png)
 
 - `Ctrl+Shift+R` steps between the three: the previous line, the start of the file, and your reference. The status bar says which — `Δ Prev`, `Δ Start`, `Δ Ref` — and the column stays the same width whichever it is.
+- `Ctrl+Shift+G` goes back to the reference, wherever you have scrolled to since.
 - Select a line and the status bar says the same thing in words; select several and it says how long they cover.
 - If your timestamp is somewhere the guess cannot reach, name the field it is in under **Field Settings**; **Ctrl+Shift+M** and **Ctrl+Shift+B** turn the two displays off.
 
@@ -296,7 +297,8 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+O` / `F5` / `Ctrl+S` | Open / reload / save filters |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo a filter edit |
 | `Ctrl+F` / `F3` / `Shift+F3` | Find / next / previous |
-| `Ctrl+G` / `Ctrl+H` | Go to line / show only filtered lines |
+| `Ctrl+G` / `Ctrl+Shift+G` | Go to a line you name / to the line you are measuring from |
+| `Ctrl+H` | Show only filtered lines |
 | `Ctrl+N` | New filter from the selection or the current line |
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Match map or plain scrollbar / word wrap / split lines into fields |
