@@ -648,6 +648,9 @@ public sealed class ColumnsDialog : DialogBase
             if (_filling || e.RowIndex < 0) return;
             PullFromList();
             KeepOneShown(e.RowIndex);
+            // The drop-down offers the fields BY NAME, and the list is only rebuilt when the NUMBER of them
+            // changes - which renaming one does not.
+            if (e.ColumnIndex == _list.Columns["name"]!.Index) RefillTimeField();
             // The first cell draws the field's colour, greyed when the field is not being shown - and the
             // grid has no reason to know that ticking one cell changed what another one draws.
             _list.InvalidateCell(_list.Columns["swatch"]!.Index, e.RowIndex);
@@ -967,6 +970,16 @@ public sealed class ColumnsDialog : DialogBase
     }
 
     private const string NoTimeField = "(none)";
+
+    /// <summary>Refilling a ComboBox resets its selection, and the handler would read that as a choice - so
+    /// the refill is done under <see cref="_filling"/> and the selection put back from what is stored.
+    /// </summary>
+    private void RefillTimeField()
+    {
+        _filling = true;
+        FillTimeField();
+        _filling = false;
+    }
 
     /// <summary>Width and alignment only mean anything to the Columns layout, so they are greyed rather
     /// than left looking as though they do nothing. The format goes the same way when no field is the time.

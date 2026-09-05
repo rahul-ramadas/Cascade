@@ -8453,6 +8453,19 @@ internal static class SelfTest
                     dlg.TimeFormatForTesting == "HH:mm:ss.fff", dlg.TimeFormatForTesting);
         ok &= Check("and the field it is reading is named where it was chosen",
                     dlg.TimeFieldForTesting == "Col 2", dlg.TimeFieldForTesting);
+
+        // The drop-down offers the fields BY NAME, and the list behind it is only rebuilt when the NUMBER
+        // of fields changes - so a rename left it offering a name nothing was called any more, until the
+        // dialog was closed and opened again.
+        dlg.SetCellForTesting(1, "name", "Timestamp");
+        Pump();
+        ok &= Check("renaming a field renames it on the drop-down too, there and then",
+                    dlg.TimeFieldForTesting == "Timestamp", dlg.TimeFieldForTesting);
+        ok &= Check("and the field it is reading is still the one that was chosen",
+                    dlg.Result.TimePart == 1, $"part {dlg.Result.TimePart}");
+        dlg.SetCellForTesting(1, "name", "Col 2");
+        Pump();
+
         ok &= Check("and shows it reading the reader's own log back to them",
                     dlg.TimeStatusForTesting.Contains("40 of 40", StringComparison.Ordinal)
                     && dlg.TimeStatusForTesting.Contains("09:00:00.000", StringComparison.Ordinal),

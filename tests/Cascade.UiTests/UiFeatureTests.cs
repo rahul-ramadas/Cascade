@@ -940,7 +940,9 @@ public class UiFeatureTests
             Check("the search found something", app.WaitFindBarMessage("Match "));
             app.FindWith("line 137", forward: true);   // ...and there is only the one
             Check("text find reports the end", app.WaitForFindMessage("No more matches"));
-            Check("and the counts are still on show in the bar", app.FindBarMessage().Contains("Match "));
+            // Waited for, not read on the spot: the bar repaints its count no faster than the eye, so it
+            // can still be catching up when the status bar has already said its piece.
+            Check("and the counts are still on show in the bar", app.WaitFindBarMessage("Match "));
             app.CloseFind();
 
             // 4. Filter search for a filter that is not in the list. Deliberately after the find bar, which
