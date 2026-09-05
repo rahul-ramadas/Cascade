@@ -63,14 +63,20 @@ public sealed class ColumnsDialog : DialogBase
 
     private readonly Button _up = new() { Text = "Move &up", AutoSize = true };
     private readonly Button _down = new() { Text = "Move d&own", AutoSize = true };
-    private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
 
-    // Carries the section's own Alt key now that there is no heading above it to hold one.
-    private readonly Label _timeFieldLabel = new() { Text = "Tim&estamp field:", AutoSize = true };
+    // Carries the section's own Alt key now that there is no heading above it to hold one. The stamp's
+    // letter rather than the time's, because Alt+E belongs to the Detect beside it - see _detectFormat.
+    private readonly Label _timeFieldLabel = new() { Text = "Time&stamp field:", AutoSize = true };
     private readonly ComboBox _timeField = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Time field" };
     private readonly Label _timeLabel = new() { Text = "Format:", AutoSize = true };
     private readonly ComboBox _timeFormat = new() { DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Time format" };
-    private readonly Button _guess = new() { Text = "&Guess", AutoSize = true };
+
+    /// <summary>The same word as the button over the template, because it is the same offer: read this out
+    /// of the log rather than write it by hand. Two buttons cannot share an Alt key, so this one takes the
+    /// E its own row's label gave up - and the underline is hidden until Alt is held, which is exactly when
+    /// telling them apart is what the reader wants.
+    /// <para>The name says which one it is, since "Detect" alone no longer does.</para></summary>
+    private readonly Button _detectFormat = new() { Text = "D&etect", AutoSize = true, AccessibleName = "Detect format" };
     private readonly Label _timeStatus = new() { AutoSize = true };
 
     /// <summary>Everything on the dialog, in one column, inside the panel that scrolls it. Kept because how
@@ -370,8 +376,8 @@ public sealed class ColumnsDialog : DialogBase
         _timeField.Anchor = AnchorStyles.Left;
         _timeField.Width = Dpi(260);
         _timeFormat.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        _guess.Anchor = AnchorStyles.Left;
-        _guess.Margin = new Padding(0);
+        _detectFormat.Anchor = AnchorStyles.Left;
+        _detectFormat.Margin = new Padding(0);
 
         var row = new TableLayoutPanel { ColumnCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -385,7 +391,7 @@ public sealed class ColumnsDialog : DialogBase
         row.Controls.Add(_timeField, 1, 0);
         row.Controls.Add(_timeLabel, 2, 0);
         row.Controls.Add(_timeFormat, 3, 0);
-        row.Controls.Add(_guess, 4, 0);
+        row.Controls.Add(_detectFormat, 4, 0);
         return row;
     }
 
@@ -674,13 +680,7 @@ public sealed class ColumnsDialog : DialogBase
 
         _timeField.SelectedIndexChanged += (_, _) => { if (!_filling) PickTimeField(_timeField.SelectedIndex - 1); };
         _timeFormat.TextChanged += (_, _) => { if (_filling) return; _working.TimeFormat = _timeFormat.Text.Trim(); ShowTimeStatus(); };
-        _guess.Click += (_, _) => GuessTimeFormat(announce: true);
-
-        // One tip, and it says something no label does: "Detect" alone gives no clue what it will read or
-        // what it will do with it. Everything else here explains itself where it stands - the marks under
-        // the template box, the description beside each layout, the words on the buttons - and a tip that
-        // repeats the thing it is pointing at only gets in the way of it.
-        _tips.SetToolTip(_detect, DetectSays);
+        _detectFormat.Click += (_, _) => DetectTimeFormat(announce: true);
     }
 
     // ---- the template ----
@@ -782,13 +782,6 @@ public sealed class ColumnsDialog : DialogBase
 
     private static string Count(int n, string what) => n == 1 ? $"1 {what}" : $"{n} {what}s";
 
-    /// <summary>What Detect will and will not read, said on the button rather than found out by pressing
-    /// it: a header held together by brackets is a reading, and one held together by spaces is a guess.</summary>
-    private const string DetectSays =
-        "Reads a header of bracketed groups - [ ], ( ) or < > - off the start of the line below, "
-        + "with anything before the first bracket as a field of its own. A header separated by nothing but "
-        + "spaces has to be written by hand.";
-
     private void Detect()
     {
         string found = LineTemplate.Detect(Current);
@@ -817,7 +810,7 @@ public sealed class ColumnsDialog : DialogBase
     /// <summary>Proposes what reads the ticked field, judged across every sample line rather than the one
     /// on show. Silent when it is filling the box on the reader's behalf, and outspoken when they asked.
     /// </summary>
-    private void GuessTimeFormat(bool announce)
+    private void DetectTimeFormat(bool announce)
     {
         string? found = _working.TimePart < 0
             ? null
@@ -860,7 +853,7 @@ public sealed class ColumnsDialog : DialogBase
         if (_working.TimeFormat.Length == 0)
         {
             _timeStatus.ForeColor = SystemColors.GrayText;
-            _timeStatus.Text = "Press Guess, or choose a format above.";
+            _timeStatus.Text = "Press Detect, or choose a format above.";
             return;
         }
 
@@ -998,7 +991,7 @@ public sealed class ColumnsDialog : DialogBase
         _list.Invalidate();
 
         bool timed = _working.TimePart >= 0;
-        _timeLabel.Enabled = _timeFormat.Enabled = _guess.Enabled = timed;
+        _timeLabel.Enabled = _timeFormat.Enabled = _detectFormat.Enabled = timed;
     }
 
     private void PullFromList()
@@ -1031,7 +1024,7 @@ public sealed class ColumnsDialog : DialogBase
 
         _working.TimePart = now;
         if (now < 0) _working.TimeFormat = "";
-        else GuessTimeFormat(announce: false);
+        else DetectTimeFormat(announce: false);
         FillList();
     }
 
@@ -1362,7 +1355,7 @@ public sealed class ColumnsDialog : DialogBase
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) { _tips.Dispose(); _legendMono?.Dispose(); _templateFont?.Dispose(); _bold?.Dispose(); }
+        if (disposing) { _legendMono?.Dispose(); _templateFont?.Dispose(); _bold?.Dispose(); }
         base.Dispose(disposing);
     }
 
@@ -1513,7 +1506,7 @@ public sealed class ColumnsDialog : DialogBase
     /// <summary>The two rows that mix a button with a box beside it, which is where they can end up on
     /// different lines: a button is several pixels taller, and a cell anchored Top puts them both at the
     /// top of it rather than through the middle.</summary>
-    internal Control[] MixedRowsForTesting => [_detect.Parent!, _guess.Parent!];
+    internal Control[] MixedRowsForTesting => [_detect.Parent!, _detectFormat.Parent!];
     internal void SetLayoutForTesting(FieldLayout layout) { _asInline.Checked = layout == FieldLayout.Inline; _asColumns.Checked = !_asInline.Checked; }
     internal int RowCountForTesting => _list.Rows.Count;
     internal bool WidthIsEditableForTesting => !_list.Columns["width"]!.ReadOnly;
