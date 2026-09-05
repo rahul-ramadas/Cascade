@@ -1004,7 +1004,7 @@ public class UiFeatureTests
         app.ClickMenu("View", "Focus Text Area");
         app.SelectLine(5);
         Check("one line says how long after the line above it was written",
-              app.WaitStatus("Gap:", "Gap: 1 s"), app.StatusText("Gap:"));
+              app.WaitStatus("\u0394 Prev:", "\u0394 Prev: 1 s"), app.StatusText("\u0394 Prev:"));
 
         var grid = app.Grid();
         for (int i = 0; i < 9; i++) app.ShiftKey(grid, VirtualKeyShort.DOWN);
@@ -1015,7 +1015,7 @@ public class UiFeatureTests
         // using belongs to the two paths beside it.
         app.ClickMenu("View", "Elapsed Time", "In the Status Bar");
         bool gone = Retry.WhileFalse(() => !app.AllStatusText().Contains("Span:", StringComparison.Ordinal)
-                                        && !app.AllStatusText().Contains("Gap:", StringComparison.Ordinal),
+                                        && !app.AllStatusText().Contains('\u0394'),
                                      TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
         Check("turning it off takes it off the bar", gone, app.AllStatusText());
 

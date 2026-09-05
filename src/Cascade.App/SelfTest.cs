@@ -7998,6 +7998,27 @@ internal static class SelfTest
                         RuleIsDrawnAt(grid, grid.ElapsedGutterLeftForTesting),
                         $"nothing darker at x={grid.ElapsedGutterLeftForTesting}");
 
+            // The air either side of a line number has to MATCH, and has to scale. It did neither: the box
+            // was padded by a raw 12 device pixels while the text was inset by a scaled 6, so at 150% the
+            // numbers had 3 pixels to their left and 9 to their right and sat against the window edge.
+            // Two things the reading depends on: the END of the file, where the numbers are as wide as the
+            // box was sized for and so fill it (a short number is right-aligned and leaves more on the left,
+            // which would let the fault through); and the focus elsewhere, because the accent bar runs down
+            // the very edge the air is measured from and a focus indicator is not the margin.
+            form.ClickMenuForTesting("View", "Focus Filter List");
+            grid.GoToLine(299);
+            Pump();
+            string margins = grid.MarginLayoutForTesting;
+            Line("   (" + margins + ")");
+            int pad = Figure(margins, "pad="), numbers = Figure(margins, "numbers=");
+            var (leftAir, rightAir) = MarginAir(grid, Figure(margins, "markers="), numbers);
+            ok &= Check("and a line number has the same air either side of it, whatever the display's scale",
+                        pad >= form.LogicalToDeviceUnits(6) && leftAir >= pad - 1 && rightAir >= pad - 1
+                        && Math.Abs(leftAir - rightAir) <= pad,
+                        $"{margins}; ink sits {leftAir} from the left and {rightAir} from the right");
+            form.ClickMenuForTesting("View", "Focus Text Area");
+            Pump();
+
             // The width is what the text to its right is placed by, so it has to come from the widest value
             // the format can EVER draw rather than from the ones on screen.
             int room = grid.ElapsedGutterWidthForTesting;
@@ -8008,12 +8029,12 @@ internal static class SelfTest
             grid.GoToLine(41);
             Pump();
             ok &= Check("the status bar measures the same line the margin does",
-                        form.ElapsedSlotForTesting == "Gap: 1 s", form.ElapsedSlotForTesting);
+                        form.ElapsedSlotForTesting == "\u0394 Prev: 1 s", form.ElapsedSlotForTesting);
 
             grid.SelectRowForAccessibility(40);
             for (int i = 0; i < 9; i++) grid.PressKeyForTesting(Keys.Down | Keys.Shift);
             Pump();
-            ok &= Check("and calls a stretch of lines a span, not a gap",
+            ok &= Check("and calls a stretch of lines a span, not a difference from the line above",
                         form.ElapsedSlotForTesting == "Span: 9 s", form.ElapsedSlotForTesting);
 
             // The whole point of the column: with the noise filtered away it measures between one
@@ -8042,7 +8063,7 @@ internal static class SelfTest
             for (int i = 0; i < 100 && !doc.IsFilterIdle; i++) { Thread.Sleep(20); Pump(); }
             Pump();
             ok &= Check("a selection the filters have hidden is measured where the view puts it instead",
-                        form.ElapsedSlotForTesting.StartsWith("Gap: ", StringComparison.Ordinal)
+                        form.ElapsedSlotForTesting.StartsWith("\u0394 Prev: ", StringComparison.Ordinal)
                         && !form.ElapsedSlotForTesting.Contains('\u2014', StringComparison.Ordinal),
                         form.ElapsedSlotForTesting);
             filters.ShowOnlyFilteredLines = false;
@@ -8111,11 +8132,11 @@ internal static class SelfTest
             // the menu items, because whether they may run depends on the log having a clock - and the items
             // only learn that when the View menu is opened.
             int margin = grid.ElapsedGutterWidthForTesting;
-            ok &= Check("Ctrl+Shift+E takes the margin away",
-                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+            ok &= Check("Ctrl+Shift+M takes the margin away",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.M)
                         && grid.ElapsedGutterWidthForTesting == 0, $"{grid.ElapsedGutterWidthForTesting}px");
             ok &= Check("and brings it back exactly as it was",
-                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.M)
                         && grid.ElapsedGutterWidthForTesting == margin,
                         $"{margin} -> {grid.ElapsedGutterWidthForTesting}");
             form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B);
@@ -8126,9 +8147,19 @@ internal static class SelfTest
             Pump();
             ok &= Check("and puts it back", form.ElapsedSlotForTesting.Length > 0);
 
-            ok &= Check("and the menu says which keys they are",
-                        form.ElapsedMenuKeysForTesting() == "Ctrl+Shift+E|Ctrl+Shift+B",
-                        form.ElapsedMenuKeysForTesting());
+            // The rule the pair was chosen by, stated rather than written down twice: each key is the letter
+            // its own entry underlines, so there is one letter to learn per entry.
+            string advertised = form.ElapsedMenuKeysForTesting();
+            Line("   (" + advertised + ")");
+            bool matched = advertised.Split('|').Length == 2 && advertised.Split('|').All(entry =>
+            {
+                string[] parts = entry.Split('=');
+                int amp = parts[0].IndexOf('&', StringComparison.Ordinal);
+                return parts.Length == 2 && amp >= 0 && amp + 1 < parts[0].Length
+                    && parts[1].StartsWith("Ctrl+Shift+", StringComparison.Ordinal)
+                    && parts[1][^1] == char.ToUpperInvariant(parts[0][amp + 1]);
+            });
+            ok &= Check("and each key is the letter its own entry underlines", matched, advertised);
 
             // On a log with no clock the key must fall through rather than silently flip a setting nobody
             // can see the effect of.
@@ -8136,7 +8167,7 @@ internal static class SelfTest
             for (int i = 0; i < 100 && doc.Clock is not null; i++) { Thread.Sleep(20); Pump(); }
             bool wasOn = form.ShowElapsedGutterForTesting;
             ok &= Check("and neither key claims itself on a log with no clock",
-                        !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+                        !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.M)
                         && !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B)
                         && form.ShowElapsedGutterForTesting == wasOn);
 
@@ -8153,6 +8184,34 @@ internal static class SelfTest
 
     private static int PathRoomOf(string layout) => Figure(layout, "pathroom=");
     private static int SlotOf(string layout) => Figure(layout, "elapsed=");
+
+    /// <summary>How far the widest line number's ink sits from each end of the box it is drawn in, read off
+    /// a render of the grid. The arithmetic says how wide the box is; only the pixels say where in it the
+    /// digits ended up. Rows carrying something other than a line number - the caret's row, and the focus
+    /// accent down the left edge - are passed over: neither is the margin.</summary>
+    private static (int Left, int Right) MarginAir(LineGridControl grid, int from, int width)
+    {
+        var area = grid.GutterAreaForTesting;
+        if (width <= 0 || area.Height <= 0) return (-1, -1);
+        using var bmp = new Bitmap(grid.Width, grid.Height);
+        grid.DrawToBitmap(bmp, new Rectangle(0, 0, grid.Width, grid.Height));
+
+        static bool Ink(Color c) => (c.R + c.G + c.B) / 3 < 200;
+        int first = int.MaxValue, last = -1;
+        for (int y = area.Top; y < area.Bottom && y < grid.Height; y++)
+        {
+            // A run reaching the very left edge is the focus accent, not a digit; a row inked end to end is
+            // a fill rather than glyphs. Either way there is no number in it to measure.
+            if (Ink(bmp.GetPixel(from, y))) continue;
+            for (int x = from; x < from + width && x < grid.Width; x++)
+            {
+                if (!Ink(bmp.GetPixel(x, y))) continue;
+                if (x < first) first = x;
+                if (x > last) last = x;
+            }
+        }
+        return last < 0 ? (-1, -1) : (first - from, from + width - 1 - last);
+    }
 
     private static int Figure(string layout, string key)
     {

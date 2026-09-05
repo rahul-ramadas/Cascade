@@ -1034,6 +1034,11 @@ public sealed class LineGridControl : Control
 
     private int MarkerGutterWidth => MarkersVisible ? 8 * 5 + 6 : 0;
 
+    /// <summary>The air either side of a figure in the margin, and the SAME air on both sides - the line
+    /// numbers used to have six device pixels of it whatever the display, which at 150% left them all but
+    /// touching the window edge.</summary>
+    private int MarginPad => LogicalToDeviceUnits(6);
+
     private int LineNumberGutterWidth
     {
         get
@@ -1041,7 +1046,7 @@ public sealed class LineGridControl : Control
             if (!_settings.ShowLineNumbers || _doc is null) return 0;
             long max = Math.Max(1, _doc.CompletedLineCount);
             int digits = max.ToString().Length;
-            return digits * _charWidth + 12;
+            return digits * _charWidth + 2 * MarginPad;
         }
     }
 
@@ -1061,7 +1066,7 @@ public sealed class LineGridControl : Control
                 _elapsedWidthAt = _charWidth;
                 _elapsedWidthDigits = digits;
                 _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits), FontRegular).Width
-                              + LogicalToDeviceUnits(10);
+                              + 2 * MarginPad;
             }
             return _elapsedWidth;
         }
@@ -1133,6 +1138,12 @@ public sealed class LineGridControl : Control
     /// <summary>Where the elapsed column starts, which is where the hairline between it and the line
     /// numbers is drawn - so a check can go and look at the pixels rather than trust the arithmetic.</summary>
     internal int ElapsedGutterLeftForTesting => MarkerGutterWidth + LineNumberGutterWidth;
+
+    /// <summary>How the margin has divided itself up. The air either side of a figure is the point of it:
+    /// the two must match, and both must scale, or the numbers end up against the window edge.</summary>
+    internal string MarginLayoutForTesting
+        => $"markers={MarkerGutterWidth} numbers={LineNumberGutterWidth} "
+         + $"elapsed={ElapsedGutterWidth} pad={MarginPad} char={_charWidth}";
 
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
@@ -2900,7 +2911,7 @@ public sealed class LineGridControl : Control
     private void DrawMarginText(GdiCanvas ink, ReadOnlySpan<char> text, int x, int y, int width, int height,
                                 Color colour)
     {
-        int gap = LogicalToDeviceUnits(6);
+        int gap = MarginPad;
         ink.Fill(new Rectangle(x, y, width, _rowHeight), _settings.GutterBack);
         var room = new Rectangle(x, y, Math.Max(0, width - gap), _rowHeight);
 

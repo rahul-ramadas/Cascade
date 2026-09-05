@@ -233,11 +233,12 @@ public sealed class MainForm : Form
                                               + $"={Words(i)}{(i.Available ? "" : "(off)")}"));
     }
 
-    /// <summary>The keys the two elapsed entries advertise. They are not registered as ShortcutKeys, so
-    /// nothing but the displayed string tells a reader they exist - which makes it the thing to check.
-    /// </summary>
+    /// <summary>The two elapsed entries, each with the key it advertises. They are not registered as
+    /// ShortcutKeys, so nothing but the displayed string tells a reader they exist - and the wording is
+    /// here too because the key is meant to BE the letter the entry underlines.</summary>
     internal string ElapsedMenuKeysForTesting()
-        => $"{_miElapsedGutter.ShortcutKeyDisplayString}|{_miElapsedStatus.ShortcutKeyDisplayString}";
+        => string.Join("|", new[] { _miElapsedGutter, _miElapsedStatus }
+            .Select(i => $"{i.Text}={i.ShortcutKeyDisplayString}"));
 
     internal bool ShowElapsedGutterForTesting => _settings.ShowElapsedGutter;
 
@@ -727,8 +728,8 @@ public sealed class MainForm : Form
         _miElapsed = new ToolStripMenuItem("Elap&sed Time");
 
         _miElapsedGutter = new ToolStripMenuItem("In the &Margin", null, (_, _) => ToggleElapsed(margin: true))
-        { ShortcutKeyDisplayString = "Ctrl+Shift+E" };
-        _miElapsedStatus = new ToolStripMenuItem("In the &Status Bar", null, (_, _) => ToggleElapsed(margin: false))
+        { ShortcutKeyDisplayString = "Ctrl+Shift+M" };
+        _miElapsedStatus = new ToolStripMenuItem("In the Status &Bar", null, (_, _) => ToggleElapsed(margin: false))
         { ShortcutKeyDisplayString = "Ctrl+Shift+B" };
         _miNoClock = new ToolStripMenuItem("No timestamp field \u2014 set one in Field Settings") { Enabled = false };
 
@@ -740,7 +741,11 @@ public sealed class MainForm : Form
         return _miElapsed;
     }
 
-    private const Keys ElapsedGutterKey = Keys.Control | Keys.Shift | Keys.E;
+    // Each key is the letter its own item underlines - "In the &Margin", "In the Status &Bar" - so there is
+    // one letter to learn per entry rather than a shortcut vocabulary of its own. Ctrl+Shift+S would have
+    // matched "Status" better still, but Ctrl+S here saves filters and every app in the world reads
+    // Ctrl+Shift+S as Save As.
+    private const Keys ElapsedGutterKey = Keys.Control | Keys.Shift | Keys.M;
     private const Keys ElapsedStatusKey = Keys.Control | Keys.Shift | Keys.B;
 
     /// <summary>Turns one of the two displays on or off, and answers whether it did - so the key can fall
@@ -1038,8 +1043,11 @@ public sealed class MainForm : Form
     /// <summary>The two measurements are named apart on purpose. One line selected gives the time since the
     /// line above it on screen; several give the stretch from the first to the last. They are different
     /// questions with answers orders of magnitude apart, and one word over both would be read as the number
-    /// changing meaning under the reader.</summary>
-    private const string GapPrefix = "Gap: ", SpanPrefix = "Span: ";
+    /// changing meaning under the reader.
+    ///
+    /// <para>"Prev" rather than a bare delta because a difference between two lines has a DIRECTION, and
+    /// nothing in a signed number says which of the two neighbours it was measured against.</para></summary>
+    private const string GapPrefix = "\u0394 Prev: ", SpanPrefix = "Span: ";
 
     private void UpdateElapsed()
     {
