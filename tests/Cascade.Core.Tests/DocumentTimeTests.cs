@@ -231,6 +231,78 @@ public class DocumentTimeTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>The span is read through the CLOCK, so pointing the reader at another field has to measure
+    /// it again. Everything worked out by reading times - the span the column is sized from, the moment a
+    /// fixed origin stands at - was remembered against the LINE COUNT alone, which a change of field does
+    /// not move.</summary>
+    [Fact]
+    public void Naming_a_different_field_measures_the_span_again()
+    {
+        // Two stamps a line: the guess takes the one at the front, a second a line. The other runs a minute
+        // a line and starts an hour later, so the two readers disagree about the span AND about the moment
+        // the log's first line stands at, while agreeing that it IS the first line.
+        string path = WriteLog(600, line: i =>
+            $"[{Start.AddSeconds(i).ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)}]"
+            + $"[{Start.AddSeconds(i * 60 + 3600).ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture)}] request {i}");
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            // Asked BEFORE the field changes, or nothing is remembered and there is nothing to go stale.
+            Assert.Equal(999, doc.WidestElapsedSeconds());
+            Assert.True(doc.TryElapsedFrom(599, ElapsedOrigin.FileStart, out long guessed));
+            Assert.Equal("599.000", ElapsedText.Gutter(guessed, 3, doc.WidestElapsedSeconds()));
+
+            doc.Columns.Enabled = false;
+            doc.Columns.Template = "{[*]}{[*]}{*}";
+            doc.Columns.Reset();
+            doc.Columns.TimePart = 1;
+            doc.Columns.TimeFormat = "HH:mm:ss.fff";
+
+            Assert.Equal(99_999, doc.WidestElapsedSeconds());
+            Assert.True(doc.TryElapsedFrom(599, ElapsedOrigin.FileStart, out long named));
+            Assert.Equal("35940.000", ElapsedText.Gutter(named, 3, doc.WidestElapsedSeconds()));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>And it has to find the log's beginning again too: which line counts as the first is a
+    /// property of the READER, not of the file, so a field the opening lines do not carry starts the
+    /// measuring somewhere else entirely.</summary>
+    [Fact]
+    public void Naming_a_different_field_finds_where_the_log_starts_again()
+    {
+        string path = WriteLog(600, line: i =>
+        {
+            string front = Start.AddSeconds(i).ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            string other = i < 3 ? "--:--:--.---"
+                                 : Start.AddSeconds(i * 60 + 3600).ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            return $"[{front}][{other}] request {i}";
+        });
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            Assert.True(doc.TryElapsedFrom(599, ElapsedOrigin.FileStart, out long guessed));
+            Assert.Equal("599.000", ElapsedText.Gutter(guessed, 3, doc.WidestElapsedSeconds()));
+
+            doc.Columns.Enabled = false;
+            doc.Columns.Template = "{[*]}{[*]}{*}";
+            doc.Columns.Reset();
+            doc.Columns.TimePart = 1;
+            doc.Columns.TimeFormat = "HH:mm:ss.fff";
+
+            // Line 4 is the first the named field can be read on, so that is what "from the start" means.
+            Assert.True(doc.TryElapsedFrom(599, ElapsedOrigin.FileStart, out long named));
+            Assert.Equal("35760.000", ElapsedText.Gutter(named, 3, doc.WidestElapsedSeconds()));
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>A clock belongs to the file it was read from. Opening another must start over, or the
     /// second log is measured with the first one's reader.</summary>
     [Fact]

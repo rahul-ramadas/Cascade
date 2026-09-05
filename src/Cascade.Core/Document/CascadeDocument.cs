@@ -385,6 +385,7 @@ public sealed class CascadeDocument : IDisposable
                     _clock = LogClock.From(Columns);
                     _clockSettled = true;
                     _detectedWith = 0;
+                    ForgetTimesRead();
                 }
                 return _clock;
             }
@@ -397,6 +398,7 @@ public sealed class CascadeDocument : IDisposable
                 _clock = null;
                 _clockSettled = false;
                 _detectedWith = 0;
+                ForgetTimesRead();
             }
             if (!_clockSettled) Detect();
             return _clock;
@@ -420,6 +422,18 @@ public sealed class CascadeDocument : IDisposable
         _clock = ClockDetector.Detect(sample);
         _detectedWith = take;
         _clockSettled = take >= DetectFrom || complete;
+        ForgetTimesRead();
+    }
+
+    /// <summary>Everything the log was READ for rather than counted from, which a new clock invalidates:
+    /// naming another field in the field settings turns the same lines into different moments, and these
+    /// were all remembered against the line count, which a change of field does not move.</summary>
+    private void ForgetTimesRead()
+    {
+        _widestFor = -1;
+        _widestSeconds = ElapsedText.DefaultWidestSeconds;
+        _originTicksFor = long.MinValue;
+        _firstTimed = long.MinValue;
     }
 
     /// <summary>Whether the reader named the time field rather than it being guessed at.</summary>
@@ -500,6 +514,10 @@ public sealed class CascadeDocument : IDisposable
     /// every line of every frame, and the answer only moves when the reference or the clock does.</summary>
     private bool TryOriginTicks(ElapsedOrigin origin, out long ticks)
     {
+        // Asked BEFORE the cache is consulted: reading it is what notices the reader naming another field,
+        // and on the reference path nothing else here would touch it.
+        if (Clock is null) { ticks = 0; return false; }
+
         long want = origin == ElapsedOrigin.Reference ? ReferenceLine : FirstTimedLine();
         ticks = _originTicks;
         if (want < 0) return false;
