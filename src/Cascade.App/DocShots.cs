@@ -29,7 +29,14 @@ internal static class DocShots
     /// worth reading. Small enough to generate and index in a few seconds.</summary>
     private const int LineCount = 2_000_000;
 
-    private const int WindowWidth = 1480, WindowHeight = 900;
+    /// <summary>The window every picture is taken through, in DEVICE pixels - so on a scaled display this
+    /// is a smaller window than the number suggests, and the status bar is the first thing to feel it. The
+    /// bar carries two paths, a slot for whatever the app is busy with, five counts and the elapsed
+    /// measurement; the paths are the only part of it that gives way, so a window that cannot afford the
+    /// rest wears them down to a character or two. MEASURED at 1480: 182px left for both paths, which is
+    /// how they came out as a single letter after an ellipsis. Wide enough here that a file name fits.
+    /// </summary>
+    private const int WindowWidth = 1900, WindowHeight = 900;
 
     /// <summary>Frames a second the animations are written at; <c>Build-DocImages.ps1</c> must use the
     /// same number or every GIF plays at the wrong speed.</summary>
@@ -79,6 +86,18 @@ internal static class DocShots
         form.Show();
         form.Activate();
         Ready(form);
+        // Setting Size in the initializer is not enough: the window has no handle yet, and how much of it
+        // survives handle creation depends on the display the run lands on - MEASURED 1600x1000 back from
+        // a 1900x900 ask. Every crop here is cut at a fixed offset from an edge, so a window that is not
+        // the size asked for silently moves what is in the pictures. Set it again once it is really there.
+        if (form.Size != new Size(WindowWidth, WindowHeight))
+        {
+            Console.WriteLine($"  window came up {form.Size.Width}x{form.Size.Height}; sizing it again");
+            form.Size = new Size(WindowWidth, WindowHeight);
+            Ready(form);
+        }
+        if (form.Size != new Size(WindowWidth, WindowHeight))
+            throw new InvalidOperationException($"window will not size to {WindowWidth}x{WindowHeight}");
         // The filter pane defaults to a third of the window; the list is the star of half these pictures, so
         // it gets enough room for every filter in the sample set and the presets beside them.
         form.SplitForTesting.SplitterDistance = form.SplitForTesting.Height - 350;
@@ -90,6 +109,7 @@ internal static class DocShots
         MatchMapShot(form);
         HoverTipShot(form);
         FieldShots(form);
+        ElapsedShot(form);
         EncodingShot(form);
 
         NestingAnimation(form);
@@ -360,11 +380,27 @@ internal static class DocShots
         grid.ScrollToRow(Incident + 4);
         Ready(form);
 
+        // The strip is cut from the right-hand edge, so the log has to still be there when it gets to the
+        // map - the point of the picture is that the two sit side by side. The window every other shot is
+        // taken through is wider than this log's longest line, which would leave a band of empty rows
+        // between them, so this one is taken through a window narrowed by exactly that slack.
+        var full = form.Size;
+        var pane = Placed(form, grid);
+        int slack = pane.Right - pane.X - grid.ContentWidthForTesting;
+        if (slack > 0)
+        {
+            form.Size = new Size(full.Width - slack, full.Height);
+            Ready(form);
+        }
+
         // Below the find bar: the bar has a picture of its own, and its close button at the top of this one
         // reads as a stray mark.
         var area = Placed(form, grid);
         int top = area.Y + form.FindBarHeightForTesting;
         Save(Crop(form, new Rectangle(area.Right - 330, top, 330, area.Bottom - top)), "match-map");
+
+        form.Size = full;
+        Ready(form);
 
         form.CloseFindForTesting();
         form.SplitForTesting.SplitterDistance = was;
@@ -442,6 +478,42 @@ internal static class DocShots
         foreach (var c in doc.Columns.Columns) c.Visible = true;
         form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.C);
         Ready(form);
+    }
+
+    /// <summary>The elapsed margin, photographed where it says something a reader could not get any other
+    /// way: with the log filtered down to the errors, so the figures are the time between one error and the
+    /// next rather than between one line and the next. The line numbers beside them skip, which is what
+    /// makes that legible without a word of explanation.</summary>
+    private static void ElapsedShot(MainForm form)
+    {
+        var doc = form.DocForTesting;
+        var grid = form.GridForTesting;
+        if (doc.Clock is null) { Console.WriteLine("elapsed: SKIPPED (no clock in the sample log)"); return; }
+
+        var wasOn = doc.Filters.EnumerateDepthFirst().Where(f => f.Enabled).ToList();
+        foreach (var f in wasOn) f.Enabled = false;
+        var errors = doc.Filters.Roots.First(f => f.Description == "errors");
+        errors.Enabled = true;
+        form.FilterTreeForTesting.RefreshCheckStates();
+        doc.ApplyFilters();
+        Ready(form, 30_000);
+
+        bool wasFiltered = doc.FilteredMode;
+        if (!wasFiltered) form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+        Ready(form, 30_000);
+
+        // Just before the incident: the errors are minutes apart, then seconds, then a flood of them.
+        long row = Math.Max(0, doc.RowAtOrAfterLine(Incident) - 4);
+        grid.ScrollToRow(row);
+        Ready(form);
+        Save(Crop(form, LogArea(form, rows: 16)), "elapsed");
+
+        if (!wasFiltered) form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+        errors.Enabled = false;
+        foreach (var f in wasOn) f.Enabled = true;
+        form.FilterTreeForTesting.RefreshCheckStates();
+        doc.ApplyFilters();
+        Ready(form, 30_000);
     }
 
     /// <summary>The Encoding drop-down as Windows draws it, which is the only place the app says what it

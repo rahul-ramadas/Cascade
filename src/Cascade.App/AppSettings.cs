@@ -52,6 +52,14 @@ public sealed class AppSettings
     public bool ShowLineNumbers { get; set; } = true;
     public MarkerVisibilityMode MarkerVisibility { get; set; } = MarkerVisibilityMode.WhenInUse;
 
+    /// <summary>Whether the margin carries how long it was since the line above. On by default: a log whose
+    /// clock could be read is one where the answer is worth having, and a column nobody was told about is a
+    /// column nobody uses. Off costs nothing and stays off, since this is a preference like any other.</summary>
+    public bool ShowElapsedGutter { get; set; } = true;
+
+    /// <summary>Whether the status bar measures whatever is selected.</summary>
+    public bool ShowElapsedInStatusBar { get; set; } = true;
+
     /// <summary>When true, <see cref="MachineState.LastFilterFile"/> is reloaded automatically at startup.</summary>
     public bool AutoLoadLastFilterFile { get; set; } = true;
 

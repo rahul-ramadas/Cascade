@@ -984,9 +984,50 @@ public class UiFeatureTests
         Assert.True(fails.Count == 0, "Scroll failures:\n  " + string.Join("\n  ", fails));
     }
 
+    /// <summary>
+    /// How long a stretch of the log took, read the way a reader reads it: click a line and the status bar
+    /// says how long after the one above it was written; drag over several and it says what they cover.
+    ///
+    /// <para>The fixture writes a second a line, so every expected answer is arithmetic on the line number
+    /// and owes nothing to the implementation. Nothing here is told where the timestamp is - finding it is
+    /// half of what is under test.</para>
+    /// </summary>
     [Fact]
-    public void Ctrl_shift_c_splits_the_log_into_columns_and_back()
+    public void The_status_bar_measures_the_time_a_selection_covers()
     {
+        string log = TestData.WriteBracketedLogFile();
+        using var app = CascadeApp.LaunchExisting(log, null, CascadeApp.NewSettingsDir(),
+                                                  ownsFiles: true, ownsSettingsDir: true);
+        var fails = new List<string>();
+        void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+        app.ClickMenu("View", "Focus Text Area");
+        app.SelectLine(5);
+        Check("one line says how long after the line above it was written",
+              app.WaitStatus("Gap:", "Gap: 1 s"), app.StatusText("Gap:"));
+
+        var grid = app.Grid();
+        for (int i = 0; i < 9; i++) app.ShiftKey(grid, VirtualKeyShort.DOWN);
+        Check("and a stretch of them says what the stretch covers",
+              app.WaitStatus("Span:", "Span: 9 s"), app.StatusText("Span:"));
+
+        // Turning it off has to take the slot off the bar, not leave an empty box behind - the room it was
+        // using belongs to the two paths beside it.
+        app.ClickMenu("View", "Elapsed Time", "In the Status Bar");
+        bool gone = Retry.WhileFalse(() => !app.AllStatusText().Contains("Span:", StringComparison.Ordinal)
+                                        && !app.AllStatusText().Contains("Gap:", StringComparison.Ordinal),
+                                     TimeSpan.FromSeconds(4), TimeSpan.FromMilliseconds(50)).Result;
+        Check("turning it off takes it off the bar", gone, app.AllStatusText());
+
+        app.ClickMenu("View", "Elapsed Time", "In the Status Bar");
+        Check("and turning it back on brings the measurement back",
+              app.WaitStatus("Span:", "Span: 9 s"), app.AllStatusText());
+
+        Assert.True(fails.Count == 0, "Elapsed failures:\n  " + string.Join("\n  ", fails));
+    }
+
+    [Fact]
+    public void Ctrl_shift_c_splits_the_log_into_columns_and_back()    {
         // A bracketed log, so turning columns on finds fields to split by and never has to ask.
         string log = TestData.WriteBracketedLogFile();
         string tat = TestData.WriteFilterFile();

@@ -6,6 +6,7 @@ using Cascade.Core.Columns;
 using Cascade.Core.Document;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
+using Cascade.Core.Timing;
 
 namespace Cascade.App;
 
@@ -1044,7 +1045,29 @@ public sealed class LineGridControl : Control
         }
     }
 
-    private int GutterWidth() => MarkerGutterWidth + LineNumberGutterWidth;
+    private int _elapsedWidth, _elapsedWidthAt = -1, _elapsedWidthDigits = -1;
+
+    /// <summary>Room for the elapsed column, and nothing when there is no clock or the reader has put it
+    /// away. Sized from the WIDEST value the format can ever produce rather than from the values on screen,
+    /// because a margin that resized as it scrolled would slide the whole log sideways.</summary>
+    private int ElapsedGutterWidth
+    {
+        get
+        {
+            if (!_settings.ShowElapsedGutter || _doc?.Clock is not { } clock) return 0;
+            int digits = clock.FractionDigits;
+            if (_elapsedWidthAt != _charWidth || _elapsedWidthDigits != digits)
+            {
+                _elapsedWidthAt = _charWidth;
+                _elapsedWidthDigits = digits;
+                _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits), FontRegular).Width
+                              + LogicalToDeviceUnits(10);
+            }
+            return _elapsedWidth;
+        }
+    }
+
+    private int GutterWidth() => MarkerGutterWidth + LineNumberGutterWidth + ElapsedGutterWidth;
 
     /// <summary>Whether lines are broken to fit the width. Not offered while they are laid out in COLUMNS:
     /// wrapping inside a cell is a different feature, and the menu says so by greying out. Inline is only a
@@ -1102,6 +1125,10 @@ public sealed class LineGridControl : Control
 
     /// <summary>Width of the marker + line-number margin, for harnesses that check nothing paints over it.</summary>
     internal int GutterWidthForTesting => GutterWidth();
+
+    /// <summary>What the elapsed margin draws beside one line, and how much room it takes.</summary>
+    internal string ElapsedForTesting(long line) => Elapsed(line, _doc?.GetLineText(line) ?? "");
+    internal int ElapsedGutterWidthForTesting => ElapsedGutterWidth;
 
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
@@ -1322,6 +1349,7 @@ public sealed class LineGridControl : Control
         bool columns = ColumnsOn;
         bool inline = InlineOn;
         int runningMaxWidth = 0;
+        int elapsedRoom = ElapsedGutterWidth;
 
         if (columns) { EnsureColumnLayout(); DrawColumnHeader(g, gutter, contentW); }
         else if (inline) DrawFieldChips(g);
@@ -1369,7 +1397,7 @@ public sealed class LineGridControl : Control
                 int rowHeight = segments * _rowHeight;
                 _layout.Add((row, y, rowHeight, segments));
 
-                DrawGutters(ink, line, y, rowHeight, selectedRow);
+                DrawGutters(ink, line, y, rowHeight, selectedRow, elapsedRoom > 0 ? Elapsed(line, text) : null);
 
                 var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
                 if (columns)
@@ -2824,12 +2852,13 @@ public sealed class LineGridControl : Control
     private int SegmentX(string text, int segmentStart, int index, int left, Font font)
         => left - (Wrapping ? 0 : _hScroll) + PrefixWidth(text.AsSpan(segmentStart), index - segmentStart, font);
 
-    /// <summary>The margins beside a row: the marker bars and the line number, on the neutral margin colour
-    /// rather than the row's own - a marker has to stay findable whatever colour a filter gave the line.
+    /// <summary>The margins beside a row: the marker bars, the line number and however long it was since
+    /// the line above it, on the neutral margin colour rather than the row's own - a marker has to stay
+    /// findable whatever colour a filter gave the line.
     /// <para>The number is drawn over a background it is told about, and placed by arithmetic in a
     /// fixed-pitch face rather than by asking the text layout to right-align it. Between them those took a
     /// fifth of the whole paint off it.</para></summary>
-    private void DrawGutters(GdiCanvas ink, long line, int y, int height, bool selected)
+    private void DrawGutters(GdiCanvas ink, long line, int y, int height, bool selected, string? elapsed)
     {
         int markers = MarkerGutterWidth;
         if (markers > 0)
@@ -2844,35 +2873,34 @@ public sealed class LineGridControl : Control
         }
 
         int lnw = LineNumberGutterWidth;
-        if (lnw == 0) return;
         var colour = selected ? _settings.SelectionBack : _settings.LineNumberColor;
-        var box = new Rectangle(markers, y, lnw, _rowHeight);
-        var digits = Digits(line + 1);
+        if (lnw > 0) DrawMarginText(ink, Digits(line + 1), markers, y, lnw, height, colour);
+
+        int elw = ElapsedGutterWidth;
+        if (elw > 0) DrawMarginText(ink, elapsed ?? "", markers + lnw, y, elw, height, colour);
+    }
+
+    /// <summary>One right-aligned figure in the margin: filled to the margin's own colour, then the text
+    /// laid into the part of the box it is allowed - the few pixels of air before the next thing along are
+    /// not the figure's to spill its antialiasing into.</summary>
+    private void DrawMarginText(GdiCanvas ink, ReadOnlySpan<char> text, int x, int y, int width, int height,
+                                Color colour)
+    {
+        int gap = LogicalToDeviceUnits(6);
+        ink.Fill(new Rectangle(x, y, width, _rowHeight), _settings.GutterBack);
+        var room = new Rectangle(x, y, Math.Max(0, width - gap), _rowHeight);
+
         int digitWidth = _longWay ? 0 : CharWidthOf(0);
         if (digitWidth > 0)
-        {
-            // The margin is filled whole, then the number drawn into the part of it the number is allowed:
-            // the six pixels of air before the text begins are not the number's to spill its antialiasing
-            // into, and laying the text out inside that narrower box is exactly what the arithmetic here
-            // stands in for.
-            ink.Fill(box, _settings.GutterBack);
-            var room = new Rectangle(markers, y, lnw - 6, _rowHeight);
-            ink.Text(digits, room.Right - digits.Length * digitWidth, y, room, colour, _settings.GutterBack,
-                     FontRegular);
-        }
+            ink.Text(text, room.Right - text.Length * digitWidth, y, room, colour, _settings.GutterBack, FontRegular);
         else
-        {
-            // Text laid out over a background colour fills the character cells, not the box around them,
-            // so the margin has to be laid down first.
-            ink.Fill(box, _settings.GutterBack);
-            ink.TextIn(digits, new Rectangle(markers, y, lnw - 6, _rowHeight), colour, FontRegular,
+            ink.TextIn(text, room, colour, FontRegular,
                        TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
-        }
 
-        // A wrapped row is several lines tall and the number belongs beside the first of them; the rest of
+        // A wrapped row is several lines tall and the figure belongs beside the first of them; the rest of
         // the margin still has to be the margin's colour rather than the row's.
         if (height > _rowHeight)
-            ink.Fill(new Rectangle(markers, y + _rowHeight, lnw, height - _rowHeight), _settings.GutterBack);
+            ink.Fill(new Rectangle(x, y + _rowHeight, width, height - _rowHeight), _settings.GutterBack);
     }
 
     /// <summary>A line number as characters, without the string a row's worth of them would allocate on
@@ -2881,6 +2909,17 @@ public sealed class LineGridControl : Control
     {
         value.TryFormat(_digits, out int written, provider: System.Globalization.CultureInfo.CurrentCulture);
         return _digits.AsSpan(0, written);
+    }
+
+    /// <summary>How long after the line above it on screen this one was written, as the margin shows it.
+    /// Empty for a line carrying no time, and for the first line there is - neither has anything to be
+    /// measured from.</summary>
+    private string Elapsed(long line, string text)
+    {
+        if (_doc?.Clock is not { } clock) return "";
+        return _doc.TryElapsedBefore(line, text, out long ticks)
+            ? ElapsedText.Gutter(ticks, clock.FractionDigits)
+            : "";
     }
 
     private readonly char[] _digits = new char[24];
@@ -3435,6 +3474,25 @@ public sealed class LineGridControl : Control
                 n += Math.Max(0, _doc.RowAtOrAfterLine(b + 1) - _doc.RowAtOrAfterLine(a));
             return n > 0 ? n : (StandInLine >= 0 ? 1 : 0);
         }
+    }
+
+    /// <summary>The stretch of the log the selection covers: the first line of the first range and the last
+    /// of the last. Lines, not rows - which is what makes it mean the same thing in either mode, and what
+    /// lets a stretch be measured whether or not the filters are hiding some of the middle of it.
+    /// <para>When the filters have hidden the whole selection the view falls back to showing the caret's
+    /// line instead, and this measures THAT: what is measured has to be what is highlighted, or the status
+    /// bar and the margin would disagree about the row under the reader's eye.</para></summary>
+    public bool SelectionBounds(out long first, out long last)
+    {
+        var ranges = _sel.Ranges;
+        if (ranges.Count == 0 || StandInLine >= 0)
+        {
+            first = last = StandInLine;
+            return first >= 0;
+        }
+        first = ranges[0].A;
+        last = ranges[^1].B;
+        return true;
     }
 
     /// <summary>The selected lines the view is showing, in order. Walked through the rows rather than

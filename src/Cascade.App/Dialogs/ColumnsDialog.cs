@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
+using Cascade.Core.Timing;
 
 namespace Cascade.App;
 
@@ -64,6 +65,11 @@ public sealed class ColumnsDialog : DialogBase
     private readonly Button _down = new() { Text = "Move d&own", AutoSize = true };
     private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
 
+    private readonly Label _timeLabel = new() { Text = "Format:", AutoSize = true };
+    private readonly ComboBox _timeFormat = new() { DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Time format" };
+    private readonly Button _guess = new() { Text = "&Guess", AutoSize = true };
+    private readonly Label _timeStatus = new() { AutoSize = true };
+
     /// <summary>Everything on the dialog, in one column, inside the panel that scrolls it. Kept because how
     /// short the content may be drawn is what decides whether the dialog scrolls at all; see
     /// <see cref="GiveTheContentAFloor"/>.</summary>
@@ -83,10 +89,22 @@ public sealed class ColumnsDialog : DialogBase
 
     public ColumnSpec Result => _working;
 
-    public ColumnsDialog(ColumnSpec spec, IReadOnlyList<string> samples, int startSample = 0)
+    /// <summary>What the log's own clock was found to be, when nobody has named a field. Shown so that the
+    /// figures already on screen can be accounted for from here rather than taken on trust.</summary>
+    private readonly LogClock? _found;
+
+    /// <summary>The template and the switch as they were when the dialog opened, so that OK can tell a
+    /// reader who wrote a template from one who came for something else - see <see cref="Apply"/>.</summary>
+    private readonly string _templateAsOpened;
+    private readonly bool _openedEnabled;
+
+    public ColumnsDialog(ColumnSpec spec, IReadOnlyList<string> samples, int startSample = 0, LogClock? found = null)
     {
         ArgumentNullException.ThrowIfNull(spec);
         _working = spec.Clone();
+        _found = found;
+        _templateAsOpened = spec.Template;
+        _openedEnabled = spec.Enabled;
         _samples = samples is { Count: > 0 } ? samples : [""];
         _sample = Math.Clamp(startSample, 0, _samples.Count - 1);
 
@@ -309,6 +327,10 @@ public sealed class ColumnsDialog : DialogBase
         var dragNote = new Label { Text = "\u2026or drag a field up and down the list, or press Alt+\u2191 / Alt+\u2193.", AutoSize = true, ForeColor = SystemColors.GrayText };
         Row(Flow(_up, _down, Centred(dragNote, 10)), SizeType.AutoSize, 0, 6);
 
+        Row(Heading("Tim&e"), SizeType.AutoSize, 0, 12);
+        Row(TimeRow(), SizeType.AutoSize, 0, 2);
+        Row(_timeStatus, SizeType.AutoSize, 0, 4);
+
         var buttons = OkCancelRow(out var ok, out _);
         _ok = ok;
         ok.Click += (_, _) => Apply();
@@ -318,6 +340,39 @@ public sealed class ColumnsDialog : DialogBase
     }
 
     private Button? _ok;
+
+    /// <summary>How the field ticked as the time is read. The controls are always here and greyed when no
+    /// field is ticked, rather than appearing with the tick: a row that came and went would shift the OK
+    /// button under the pointer that had just ticked the box.</summary>
+    private TableLayoutPanel TimeRow()
+    {
+        _timeFormat.Items.AddRange(CommonFormats);
+        _timeFormat.Margin = new Padding(0, 0, Dpi(6), 0);
+        _timeLabel.Anchor = AnchorStyles.Left;
+        _timeLabel.Margin = new Padding(0, 0, Dpi(6), 0);
+        _guess.Margin = new Padding(0);
+
+        var row = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _timeFormat.Dock = DockStyle.Fill;
+        row.Controls.Add(_timeLabel, 0, 0);
+        row.Controls.Add(_timeFormat, 1, 0);
+        row.Controls.Add(_guess, 2, 0);
+        return row;
+    }
+
+    /// <summary>The shapes worth offering ready-made. Everything else is written in the same language, which
+    /// is .NET's own - the one <c>DateTime.ToString</c> takes - so there is nothing new to learn.</summary>
+    private static readonly string[] CommonFormats =
+    [
+        "yyyy-MM-dd HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:ss.fffffff", "yyyy-MM-dd HH:mm:ss",
+        "HH:mm:ss.fff", "HH:mm:ss", "yyyy/MM/dd HH:mm:ss", "MM/dd/yyyy HH:mm:ss.fff",
+        "dd/MM/yyyy HH:mm:ss.fff", "MMM d HH:mm:ss",
+        "epoch:s", "epoch:ms", "epoch:us", "epoch:ns", "elapsed:s", "elapsed:ms"
+    ];
 
     /// <summary>The two layouts, each with what it does written beside it. Both are on show at once rather
     /// than one line that describes whichever is ticked: the reason to read either of them is to decide
@@ -522,6 +577,11 @@ public sealed class ColumnsDialog : DialogBase
         {
             Name = "show", HeaderText = "Show", SortMode = DataGridViewColumnSortMode.NotSortable
         });
+        _list.Columns.Add(new DataGridViewCheckBoxColumn
+        {
+            Name = "time", HeaderText = "Time", SortMode = DataGridViewColumnSortMode.NotSortable,
+            ToolTipText = "Which field holds the timestamp. Only one can."
+        });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "width", HeaderText = "Width (px)", SortMode = DataGridViewColumnSortMode.NotSortable
@@ -543,6 +603,7 @@ public sealed class ColumnsDialog : DialogBase
     {
         _list.Columns["swatch"]!.Width = GripWidth + Dpi(30);
         _list.Columns["show"]!.Width = HeaderRoom("Show", 34);
+        _list.Columns["time"]!.Width = HeaderRoom("Time", 34);
         _list.Columns["width"]!.Width = HeaderRoom("Width (px)", 34);
         _list.Columns["align"]!.Width = HeaderRoom("Center", 40);
     }
@@ -564,8 +625,7 @@ public sealed class ColumnsDialog : DialogBase
 
         _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); Refresh0(); };
 
-        _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); KeepOneShown(e.RowIndex); Refresh0(); } };
-        _list.CurrentCellDirtyStateChanged += (_, _) =>
+        _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); KeepOneShown(e.RowIndex); Refresh0(); } };        _list.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_list.IsCurrentCellDirty && _list.CurrentCell is DataGridViewCheckBoxCell or DataGridViewComboBoxCell)
                 _list.CommitEdit(DataGridViewDataErrorContexts.Commit);
@@ -579,6 +639,9 @@ public sealed class ColumnsDialog : DialogBase
         _up.Click += (_, _) => Reorder(-1);
         _down.Click += (_, _) => Reorder(+1);
         _preview.PartPicked += SelectField;
+
+        _timeFormat.TextChanged += (_, _) => { if (_filling) return; _working.TimeFormat = _timeFormat.Text.Trim(); ShowTimeStatus(); };
+        _guess.Click += (_, _) => GuessTimeFormat(announce: true);
 
         // One tip, and it says something no label does: "Detect" alone gives no clue what it will read or
         // what it will do with it. Everything else here explains itself where it stands - the marks under
@@ -643,6 +706,10 @@ public sealed class ColumnsDialog : DialogBase
         _working.Template = _template.Text;
         _working.Sync(_working.Compiled.PartIndexAtOffset(caret));
         UpdateStatus();
+        // What the time field holds changes with the template even when the number of fields does not -
+        // "{[*]}{[*]}{*}" edited to "{(*)}{[*]}{*}" reads a different stretch of the line out of the same
+        // part - so what the format makes of it has to be worked out again rather than left as it was.
+        ShowTimeStatus();
     }
 
     private int _caretAfterEdit = -1;
@@ -700,8 +767,116 @@ public sealed class ColumnsDialog : DialogBase
             return;
         }
         WriteTemplate(found, found.Length);
+        // A header nearly always begins with the time, and a reader who pressed Detect wants the whole
+        // reading rather than the fields alone. Proposed, not imposed: it lands in the tick and the format
+        // box where it can be seen and changed.
+        if (ClockDetector.GuessField(_samples, _working.Compiled) is { } time)
+        {
+            _working.TimePart = time.Part;
+            _working.TimeFormat = time.Format;
+        }
         FillList();
         Refresh0();
+    }
+
+    // ---- the time field ----
+
+    /// <summary>Proposes what reads the ticked field, judged across every sample line rather than the one
+    /// on show. Silent when it is filling the box on the reader's behalf, and outspoken when they asked.
+    /// </summary>
+    private void GuessTimeFormat(bool announce)
+    {
+        string? found = _working.TimePart < 0
+            ? null
+            : ClockDetector.GuessFormat(_samples, _working.Compiled, _working.TimePart);
+
+        if (found is not null)
+        {
+            _working.TimeFormat = found;
+            _filling = true;
+            try { _timeFormat.Text = found; } finally { _filling = false; }
+        }
+        else if (announce)
+        {
+            _timeStatus.ForeColor = Color.FromArgb(180, 120, 0);
+            _timeStatus.Text = "That field is not written in a shape this recognises. Write the format above "
+                             + "- it is the same language as DateTime.ToString, e.g. yyyy-MM-dd HH:mm:ss.fff.";
+            return;
+        }
+        ShowTimeStatus();
+    }
+
+    /// <summary>What the format makes of the reader's own log, in their own words: how many of the sampled
+    /// lines it read, and one of them echoed back as a moment. That echo is the whole safety of the thing -
+    /// a proposal you can see reading your log correctly is not a guess you have to trust.</summary>
+    private void ShowTimeStatus()
+    {
+        if (_working.TimePart < 0)
+        {
+            _timeStatus.ForeColor = SystemColors.GrayText;
+            // Where the figures on screen are coming from when nobody has said, which is the answer to
+            // "what is that column measuring" without having to go looking for it.
+            _timeStatus.Text = _found is null
+                ? "No field is the timestamp, and none could be found at the start of the line - so there "
+                  + "are no elapsed times. Tick a field above to say where the stamp is."
+                : $"No field is the timestamp. Elapsed times are being read from the start of the line as "
+                  + $"\u201c{_found.Format.Source}\u201d; tick a field above to say otherwise.";
+            return;
+        }
+
+        if (_working.TimeFormat.Length == 0)
+        {
+            _timeStatus.ForeColor = SystemColors.GrayText;
+            _timeStatus.Text = "Press Guess, or choose a format above.";
+            return;
+        }
+
+        if (ClockFormat.Compile(_working.TimeFormat) is null)
+        {
+            _timeStatus.ForeColor = Color.FromArgb(192, 32, 32);
+            _timeStatus.Text = $"\u2715   \u201c{_working.TimeFormat}\u201d is not a format anything could be read with.";
+            return;
+        }
+
+        var clock = LogClock.From(_working);
+        if (clock is null)
+        {
+            _timeStatus.ForeColor = Color.FromArgb(192, 32, 32);
+            _timeStatus.Text = "\u2715   That field holds no text of its own to read a time out of.";
+            return;
+        }
+
+        var (read, total) = ClockDetector.Coverage(clock, _samples);
+        if (read == 0)
+        {
+            _timeStatus.ForeColor = Color.FromArgb(192, 32, 32);
+            _timeStatus.Text = $"\u2715   None of the {total} lines below could be read with that format.";
+            return;
+        }
+
+        clock.TryRead(FirstReadable(clock), out long ticks);
+        _timeStatus.ForeColor = read == total ? Color.FromArgb(24, 112, 48) : Color.FromArgb(180, 120, 0);
+        _timeStatus.Text = $"\u2713   {read:N0} of {total:N0} lines read \u00b7 {Canonical(clock, ticks)}";
+    }
+
+    private string FirstReadable(LogClock clock)
+    {
+        foreach (string line in _samples) if (clock.TryRead(line, out _)) return line;
+        return "";
+    }
+
+    /// <summary>A moment written out plainly, so that a stamp read wrongly - a day where a month was meant,
+    /// a fraction taken for seconds - is obvious rather than merely numeric. To the log's own precision and
+    /// no further, or the echo claims accuracy the log never had.</summary>
+    private static string Canonical(LogClock clock, long ticks)
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        if (clock.Format.Source.StartsWith("elapsed", StringComparison.OrdinalIgnoreCase))
+            return TimeSpan.FromTicks(ticks).ToString("g", culture) + " in";
+
+        string fraction = clock.FractionDigits > 0 ? "." + new string('f', clock.FractionDigits) : "";
+        string shape = (clock.Format.WrapsAtMidnight ? "HH:mm:ss" : "dd MMM yyyy HH:mm:ss") + fraction;
+        return new DateTime(ticks, DateTimeKind.Utc).ToString(shape, culture);
     }
 
     // ---- the sample ----
@@ -735,17 +910,20 @@ public sealed class ColumnsDialog : DialogBase
         int keep = _list.CurrentRow?.Index ?? 0;
         _list.Rows.Clear();
         foreach (var column in _working.Columns)
-            _list.Rows.Add("", column.Name, column.Visible,
+            _list.Rows.Add("", column.Name, column.Visible, column.Source == _working.TimePart,
                            column.Width == 0 ? "" : column.Width.ToString(), column.Align.ToString());
         if (_list.Rows.Count > 0)
             _list.CurrentCell = _list.Rows[Math.Clamp(keep, 0, _list.Rows.Count - 1)].Cells["name"];
+        _timeFormat.Text = _working.TimeFormat;
         _filling = false;
         UpdateListEnabled();
         UpdateHighlight();
+        ShowTimeStatus();
     }
 
     /// <summary>Width and alignment only mean anything to the Columns layout, so they are greyed rather
-    /// than left looking as though they do nothing.</summary>
+    /// than left looking as though they do nothing. The format goes the same way when no field is the time.
+    /// </summary>
     private void UpdateListEnabled()
     {
         bool grid = !_asInline.Checked;
@@ -757,10 +935,14 @@ public sealed class ColumnsDialog : DialogBase
         _list.Columns["width"]!.HeaderCell.Style.ForeColor = style;
         _list.Columns["align"]!.HeaderCell.Style.ForeColor = style;
         _list.Invalidate();
+
+        bool timed = _working.TimePart >= 0;
+        _timeLabel.Enabled = _timeFormat.Enabled = _guess.Enabled = timed;
     }
 
     private void PullFromList()
     {
+        int wasTime = _working.TimePart;
         for (int i = 0; i < _list.Rows.Count && i < _working.Columns.Count; i++)
         {
             var column = _working.Columns[i];
@@ -777,6 +959,28 @@ public sealed class ColumnsDialog : DialogBase
 
             column.Align = Enum.TryParse<ColumnAlign>(Convert.ToString(row.Cells["align"].Value), out var a) ? a : ColumnAlign.Left;
         }
+        PullTimeField(wasTime);
+    }
+
+    /// <summary>Only one field can be the time, so the tick behaves as a radio: whichever row was just
+    /// ticked wins and the rest spring back. Ticking a NEW field also proposes a format for it, since a
+    /// field named as the time with nothing that reads it is a half-finished answer.</summary>
+    private void PullTimeField(int wasTime)
+    {
+        int now = -1;
+        for (int i = 0; i < _list.Rows.Count && i < _working.Columns.Count; i++)
+        {
+            if (!Convert.ToBoolean(_list.Rows[i].Cells["time"].Value ?? false)) continue;
+            int part = _working.Columns[i].Source;
+            if (part != wasTime) { now = part; break; }
+            if (now < 0) now = part;
+        }
+
+        if (now == wasTime) return;
+        _working.TimePart = now;
+        if (now < 0) _working.TimeFormat = "";
+        else GuessTimeFormat(announce: false);
+        FillList();
     }
 
     /// <summary>The last field standing cannot be put away: a row with nothing in it says nothing, and the
@@ -1090,13 +1294,16 @@ public sealed class ColumnsDialog : DialogBase
 
     private void Apply()
     {
-        _list.EndEdit();
-        PullFromList();
+        _list.EndEdit();        PullFromList();
         _working.Template = _template.Text;
         _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns;
-        // Setting a template up and pressing OK plainly means "do it"; there is no separate switch to find.
+        // Writing a template and pressing OK plainly means "do it"; there is no separate switch to find.
         // Clearing it means the opposite, and turning it off again is Ctrl+Shift+C or the menu.
-        _working.Enabled = _working.Compiled.IsValid && _working.Compiled.PartCount > 0;
+        // But only the TEMPLATE says that. Someone who came here to say where the timestamp is has asked
+        // for elapsed times, not for their log to be laid out as a table - and the time is read either way.
+        bool wrote = !string.Equals(_template.Text, _templateAsOpened, StringComparison.Ordinal);
+        _working.Enabled = (_openedEnabled || wrote)
+                        && _working.Compiled.IsValid && _working.Compiled.PartCount > 0;
     }
 
     protected override void Dispose(bool disposing)
@@ -1104,6 +1311,19 @@ public sealed class ColumnsDialog : DialogBase
         if (disposing) { _tips.Dispose(); _legendMono?.Dispose(); _templateFont?.Dispose(); _bold?.Dispose(); }
         base.Dispose(disposing);
     }
+
+    // ---- harness seams ----
+
+    /// <summary>Ticks a row's Time box through the same handler a click goes through, so what a check
+    /// exercises is the wiring rather than the field behind it.</summary>
+    internal void TickTimeForTesting(int row)
+    {
+        _list.CurrentCell = _list.Rows[row].Cells["time"];
+        _list.Rows[row].Cells["time"].Value = true;
+    }
+
+    internal string TimeStatusForTesting => _timeStatus.Text;
+    internal string TimeFormatForTesting => _timeFormat.Text;
 
     // ---- seams, so the dialog can be driven without a mouse ----
 

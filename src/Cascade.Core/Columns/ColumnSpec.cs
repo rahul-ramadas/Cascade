@@ -77,12 +77,31 @@ public sealed class ColumnSpec
     /// <summary>The columns, in the order they are DRAWN.</summary>
     public List<ColumnDef> Columns { get; } = new();
 
+    /// <summary>Which part of the template holds the timestamp, or -1 for none. A PART index, like
+    /// <see cref="ColumnDef.Source"/>, so it moves with the template when one is added or taken away.
+    /// <para>This is display-independent on purpose: <see cref="Enabled"/> decides whether the fields are
+    /// drawn, and the time is read whether they are or not. Someone who only wants elapsed times need never
+    /// turn splitting on.</para></summary>
+    public int TimePart { get; set; } = -1;
+
+    /// <summary>How that field's text is read - a .NET custom date and time format string, or one of
+    /// <see cref="Timing.ClockFormat.NamedForms"/>.</summary>
+    public string TimeFormat { get; set; } = "";
+
+    /// <summary>Whether the reader has named a timestamp field themselves. When they have not, the document
+    /// falls back to what it can detect - see <see cref="Timing.ClockDetector"/>.</summary>
+    public bool HasTime => TimePart >= 0 && TimeFormat.Length > 0;
+
     /// <summary>Whether there is anything to draw: splitting is on, and the template actually found parts.</summary>
     public bool Active => Enabled && Columns.Count > 0 && Compiled.PartCount > 0 && Compiled.IsValid;
 
     public ColumnSpec Clone()
     {
-        var copy = new ColumnSpec { Enabled = Enabled, Layout = Layout, Template = Template };
+        var copy = new ColumnSpec
+        {
+            Enabled = Enabled, Layout = Layout, Template = Template,
+            TimePart = TimePart, TimeFormat = TimeFormat
+        };
         foreach (var column in Columns) copy.Columns.Add(column.Clone());
         return copy;
     }
@@ -95,6 +114,8 @@ public sealed class ColumnSpec
         Enabled = other.Enabled;
         Layout = other.Layout;
         Template = other.Template;
+        TimePart = other.TimePart;
+        TimeFormat = other.TimeFormat;
         Columns.Clear();
         foreach (var column in other.Columns) Columns.Add(column.Clone());
     }
@@ -107,6 +128,7 @@ public sealed class ColumnSpec
         Columns.Clear();
         for (int i = 0; i < Compiled.PartCount; i++)
             Columns.Add(new ColumnDef { Source = i, Name = DefaultName(i) });
+        TimePart = -1;
     }
 
     /// <summary>
@@ -125,6 +147,7 @@ public sealed class ColumnSpec
         {
             int at = Math.Clamp(caretPart, 0, before);
             foreach (var column in Columns) if (column.Source >= at) column.Source++;
+            if (TimePart >= at) TimePart++;
             int after = Columns.FindIndex(c => c.Source == at - 1);
             Columns.Insert(after < 0 ? 0 : after + 1, new ColumnDef { Source = at, Name = DefaultName(at) });
             return;
@@ -136,6 +159,8 @@ public sealed class ColumnSpec
             int where = Columns.FindIndex(c => c.Source == at);
             if (where >= 0) Columns.RemoveAt(where);
             foreach (var column in Columns) if (column.Source > at) column.Source--;
+            if (TimePart == at) TimePart = -1;
+            else if (TimePart > at) TimePart--;
             return;
         }
 
@@ -158,11 +183,18 @@ public sealed class ColumnSpec
         // Nothing the dialog does can make that happen; a hand-edited file can.
         var seen = new HashSet<int>();
         Columns.RemoveAll(c => !seen.Add(c.Source));
+
+        // A time field has to be a part that actually captures something. A piece of fixed text is a part
+        // too, and there is no text in it that changes from line to line to read a stamp out of.
+        if (TimePart >= 0 && (parts == 0 || TimePart >= parts || Compiled.ValueOfPart(TimePart) < 0))
+            TimePart = -1;
+        if (TimePart < 0) TimeFormat = "";
     }
 
     /// <summary>Everything worth saving, as one string - so "did that change anything?" is one comparison
     /// rather than a field-by-field walk that a new field could fall out of.</summary>
     public string Describe()
-        => string.Join('\u0001', new[] { Enabled.ToString(), Layout.ToString(), Template }
+        => string.Join('\u0001', new[] { Enabled.ToString(), Layout.ToString(), Template,
+                                         TimePart.ToString(System.Globalization.CultureInfo.InvariantCulture), TimeFormat }
             .Concat(Columns.Select(c => $"{c.Name}/{c.Visible}/{c.Width}/{c.WidthChars}/{c.Align}/{c.Source}")));
 }

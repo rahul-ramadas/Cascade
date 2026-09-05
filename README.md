@@ -107,6 +107,16 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - `Ctrl+F` searches the text, literal or regex, marking every occurrence on screen as you type.
 - Find works on every line, not just the shown ones: hits on hidden lines are counted separately, and it says so when a match lands on one.
 
+### Elapsed times
+
+![The log filtered down to errors: the line numbers skip, and the margin beside them shows the time between one error and the next falling from tenths of a second to thousandths as the incident starts](docs/images/elapsed.png)
+
+- Cascade finds the timestamp in your log by itself, and puts the time since the previous line in the margin.
+- The previous line **on screen** — so with the noise filtered away it measures between the lines you kept, which is a latency profile of whatever the filters select.
+- Select a line and the status bar says the same thing in words; select several and it says how long they cover.
+- Lines out of order read as negative, because that is what they are.
+- If your timestamp is somewhere the guess cannot reach, say where it is in **Field Settings**; **View ▸ Elapsed Time** turns either display off.
+
 ### The match map
 
 ![The match map beside the log: the whole file at a pixel a line, markers down the left edge, find hits down the right](docs/images/match-map.png)
@@ -182,6 +192,7 @@ template:   {[*]}{[*]}{[*]} {*}
 
 - `Ctrl+Shift+D` tries the template against real lines from the file: how many of them match, and where a line that doesn't stopped matching.
 - **Detect** writes the template for you when the line begins with bracketed groups: `[ ]`, `( )` or `< >`.
+- Tick a field as the **time** and Cascade proposes the format that reads it — a .NET format string like `yyyy-MM-dd HH:mm:ss.fff`, or `epoch:ms` — and shows it reading your own log back to you.
 
 ---
 

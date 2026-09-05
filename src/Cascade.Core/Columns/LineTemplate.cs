@@ -133,6 +133,14 @@ public sealed class LineTemplate
     public bool IsValid => _issues.Length == 0;
     public TemplatePart PartAt(int index) => _parts[index];
 
+    /// <summary>Which captured value belongs to a part, or -1 when that part captures nothing - a piece of
+    /// fixed text is a part too, and has no text of its own to read.</summary>
+    public int ValueOfPart(int part)
+    {
+        for (int v = 0; v < _valuePart.Length; v++) if (_valuePart[v] == part) return v;
+        return -1;
+    }
+
     /// <summary>True when the template asks for nothing at all, so there is nothing to draw.</summary>
     public bool IsEmpty => _parts.Length == 0;
 

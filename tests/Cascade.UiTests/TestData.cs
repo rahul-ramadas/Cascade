@@ -50,12 +50,16 @@ internal static class TestData
 
     /// <summary>As <see cref="WriteLogFile()"/>, but with the leading <c>[...]</c> groups a real log has,
     /// so "split into columns" has fields to find. Same line count and the same MATCH/other text, so every
-    /// helper that counts lines or looks for a match still applies.</summary>
+    /// helper that counts lines or looks for a match still applies.
+    /// <para>The stamp climbs a second a line and never turns back: a log whose clock runs backwards is not
+    /// one, so a fixture that wrapped its seconds would be judged - correctly - to have no clock at all.
+    /// </para></summary>
     public static string WriteBracketedLogFile()
     {
         var sb = new StringBuilder();
+        var at = new DateTime(2026, 8, 5, 9, 31, 0, DateTimeKind.Utc);
         for (int i = 0; i < LineCount; i++)
-            sb.Append($"[2026-08-05T09:31:{i % 60:00}][api-gateway][INFO ] ")
+            sb.Append($"[{at.AddSeconds(i):yyyy-MM-ddTHH:mm:ss}][api-gateway][INFO ] ")
               .Append(IsMatchLine(i) ? "MATCH line " : "other line ").Append(i).Append('\n');
         string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".log");
         File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));

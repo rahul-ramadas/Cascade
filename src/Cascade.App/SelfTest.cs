@@ -91,6 +91,7 @@ internal static class SelfTest
             ok &= Timed("find seed", RunFindSeedChecks);
             ok &= Timed("find bar room", RunFindBarRoomChecks);
             ok &= Timed("status bar", RunStatusBarChecks);
+            ok &= Timed("elapsed times", RunElapsedChecks);
             ok &= Timed("encoding menu", RunEncodingMenuChecks);
             ok &= Timed("line spacing", RunLineSpacingChecks);
             ok &= Timed("drop placement", RunDropPlacementChecks);
@@ -7939,12 +7940,244 @@ internal static class SelfTest
         }
     }
 
+    /// <summary>
+    /// The elapsed column and the elapsed slot, driven through a real window.
+    ///
+    /// <para>Two things are worth holding here that the engine's own tests cannot. One is that the margin
+    /// and the status bar always AGREE - they answer the same question about the same line, and two
+    /// displays of one number that can disagree are worse than one. The other is that the margin's width is
+    /// fixed: it is what the text to its right is placed by, so a column that resized as it scrolled would
+    /// slide the whole log sideways.</para>
+    /// </summary>
+    private static bool RunElapsedChecks()
+    {
+        Line("-- elapsed times --");
+
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_elapsed_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        // Line i is written at i seconds, so every expected answer is arithmetic on the line number - and
+        // every tenth line is a payment, which is what the filter below leaves showing.
+        string timed = Path.Combine(dir, "timed.log");
+        var start = new DateTime(2026, 8, 5, 9, 0, 0, DateTimeKind.Utc);
+        File.WriteAllLines(timed, Enumerable.Range(0, 300).Select(i =>
+            $"[{start.AddSeconds(i):yyyy-MM-ddTHH:mm:ss.fff}][{(i % 10 == 0 ? "payment-svc" : "api-gateway")}] request {i}"));
+        string untimed = Path.Combine(dir, "untimed.log");
+        File.WriteAllLines(untimed, Enumerable.Range(0, 300).Select(i => $"request {i} handled by worker {i % 8}"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), [timed])
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            for (int i = 0; i < 100 && form.DocForTesting.CompletedLineCount < 300; i++) { Thread.Sleep(20); Pump(); }
+
+            var grid = form.GridForTesting;
+            var doc = form.DocForTesting;
+
+            bool ok = Check("a log with a stamp at the front is read without being told anything",
+                            doc.Clock is not null, doc.Clock?.Format.Source ?? "(none)");
+            ok &= Check("and to the precision the log itself carries",
+                        doc.Clock?.FractionDigits == 3, $"{doc.Clock?.FractionDigits}");
+
+            ok &= Check("the margin says how long it was since the line above",
+                        grid.ElapsedForTesting(40) == "1.000", grid.ElapsedForTesting(40));
+            ok &= Check("and says nothing at all beside the first line there is",
+                        grid.ElapsedForTesting(0).Length == 0, $"\"{grid.ElapsedForTesting(0)}\"");
+
+            // The width is what the text to its right is placed by, so it has to come from the widest value
+            // the format can EVER draw rather than from the ones on screen.
+            int room = grid.ElapsedGutterWidthForTesting;
+            int wide = TextRenderer.MeasureText("-9999.999", grid.Font).Width;
+            ok &= Check("the margin is sized for the widest figure it could ever draw, not the ones on screen",
+                        room >= wide, $"{room}px of room for {wide}px of figure");
+
+            grid.GoToLine(41);
+            Pump();
+            ok &= Check("the status bar measures the same line the margin does",
+                        form.ElapsedSlotForTesting == "Gap: 1 s", form.ElapsedSlotForTesting);
+
+            grid.SelectRowForAccessibility(40);
+            for (int i = 0; i < 9; i++) grid.PressKeyForTesting(Keys.Down | Keys.Shift);
+            Pump();
+            ok &= Check("and calls a stretch of lines a span, not a gap",
+                        form.ElapsedSlotForTesting == "Span: 9 s", form.ElapsedSlotForTesting);
+
+            // The whole point of the column: with the noise filtered away it measures between one
+            // interesting line and the next, which is ten times the number the same two lines give unfiltered.
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Match = new FilterMatch { Text = "payment-svc" }, Enabled = true });
+            doc.SetFilters(filters);
+            for (int i = 0; i < 100 && !doc.IsFilterIdle; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("with the rest of the log hidden it measures between the lines still showing",
+                        grid.ElapsedForTesting(40) == "10.000", grid.ElapsedForTesting(40));
+
+            filters.ShowOnlyFilteredLines = false;
+            doc.ApplyFilters();
+            for (int i = 0; i < 100 && !doc.IsFilterIdle; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("and back to the line above once they are all showing again",
+                        grid.ElapsedForTesting(40) == "1.000", grid.ElapsedForTesting(40));
+
+            // A selection the filters then hide: the view falls back to showing the caret's line, and the
+            // slot has to measure THAT - what is measured must be what is highlighted.
+            grid.SelectRowForAccessibility(41);      // not a payment line, so filtering will hide it
+            Pump();
+            filters.ShowOnlyFilteredLines = true;
+            doc.ApplyFilters();
+            for (int i = 0; i < 100 && !doc.IsFilterIdle; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("a selection the filters have hidden is measured where the view puts it instead",
+                        form.ElapsedSlotForTesting.StartsWith("Gap: ", StringComparison.Ordinal)
+                        && !form.ElapsedSlotForTesting.Contains('\u2014', StringComparison.Ordinal),
+                        form.ElapsedSlotForTesting);
+            filters.ShowOnlyFilteredLines = false;
+            doc.ApplyFilters();
+            for (int i = 0; i < 100 && !doc.IsFilterIdle; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+
+            // Turning the margin off gives its room back to the text, and nothing else moves.
+            int with = grid.GutterWidthForTesting;
+            form.ClickMenuForTesting("View", "Elapsed Time", "In the Margin");
+            Pump();
+            int without = grid.GutterWidthForTesting;
+            ok &= Check("putting the margin away gives its room to the text",
+                        without == with - room, $"{with} -> {without}, column was {room}");
+            form.ClickMenuForTesting("View", "Elapsed Time", "In the Margin");
+            Pump();
+            ok &= Check("and bringing it back puts it exactly where it was",
+                        grid.GutterWidthForTesting == with, $"{with} -> {grid.GutterWidthForTesting}");
+
+            form.ClickMenuForTesting("View", "Elapsed Time", "In the Status Bar");
+            Pump();
+            ok &= Check("putting the slot away takes it off the bar rather than emptying it",
+                        form.ElapsedSlotForTesting.Length == 0, form.ElapsedSlotForTesting);
+
+            // The two paths are the only things on the bar that give way, so anything else given room is
+            // taking it from them - and the sum that decides how generous the counts may be has to know it.
+            // While it did not, the paths on a narrow window were worn down to a single character.
+            int roomAlone = PathRoomOf(form.StatusLayoutForTesting);
+            form.ClickMenuForTesting("View", "Elapsed Time", "In the Status Bar");
+            Pump();
+            string layout = form.StatusLayoutForTesting;
+            Line("   (" + layout + ")");
+            int roomShared = PathRoomOf(layout), slot = SlotOf(layout);
+            ok &= Check("the room the paths are left counts the slot that took it",
+                        slot > 0 && roomShared == roomAlone - slot, $"{roomAlone} -> {roomShared}, slot {slot}");
+
+            // A log with no times: the feature is absent, and the menu says where to say otherwise.
+            form.OpenForTesting(untimed);
+            for (int i = 0; i < 100 && form.DocForTesting.CompletedLineCount < 300; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("a log with no times in it simply has no clock", doc.Clock is null,
+                        doc.Clock?.Format.Source ?? "(none)");
+            ok &= Check("so the margin takes no room", grid.ElapsedGutterWidthForTesting == 0,
+                        $"{grid.ElapsedGutterWidthForTesting}px");
+            ok &= Check("and the slot is off the bar entirely", form.ElapsedSlotForTesting.Length == 0,
+                        form.ElapsedSlotForTesting);
+
+            string menu = form.ElapsedMenuForTesting();
+            Line("   (" + menu.Replace("\n", " / ", StringComparison.Ordinal) + ")");
+            ok &= Check("the menu says it cannot do it rather than doing nothing",
+                        menu.Contains("(unavailable)", StringComparison.Ordinal), menu);
+            ok &= Check("and says where to say where the stamp is",
+                        menu.Contains("Field Settings", StringComparison.Ordinal), menu);
+
+            ok &= CheckNamingTheTimeField();
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    private static int PathRoomOf(string layout) => Figure(layout, "pathroom=");
+    private static int SlotOf(string layout) => Figure(layout, "elapsed=");
+
+    private static int Figure(string layout, string key)
+    {
+        int at = layout.IndexOf(key, StringComparison.Ordinal);
+        if (at < 0) return -1;
+        int from = at + key.Length, to = from;
+        while (to < layout.Length && (char.IsAsciiDigit(layout[to]) || layout[to] == '-')) to++;
+        return int.TryParse(layout[from..to], out int n) ? n : -1;
+    }
+
+    /// <summary>Saying where the stamp is, in the field settings. What matters here is that the format is    /// PROPOSED and shown reading the reader's own log back to them - a guess you can watch being right is
+    /// a different thing from one you have to trust - and that saying it does not, on its own, turn the log
+    /// into a table.</summary>
+    private static bool CheckNamingTheTimeField()
+    {
+        // The level comes first, so nothing detection looks at could find this stamp: it has to be named.
+        var start = new DateTime(2026, 8, 5, 9, 0, 0, DateTimeKind.Utc);
+        var samples = Enumerable.Range(0, 40)
+            .Select(i => $"INFO  [{start.AddSeconds(i):HH:mm:ss.fff}] worker-{i % 4} handled req-{i}")
+            .ToList();
+
+        var spec = new ColumnSpec { Enabled = false, Template = "{*} {[*]} {*}" };
+        spec.Reset();
+
+        using var dlg = new ColumnsDialog(spec, samples);
+        dlg.Opacity = 0;
+        dlg.StartPosition = FormStartPosition.Manual;
+        dlg.Location = new Point(0, 0);
+        dlg.Show();
+        Pump();
+
+        bool ok = Check("with no field named, the settings say where the figures are coming from",
+                        dlg.TimeStatusForTesting.Contains("No field is the timestamp", StringComparison.Ordinal),
+                        dlg.TimeStatusForTesting);
+
+        dlg.TickTimeForTesting(1);
+        Pump();
+        ok &= Check("naming a field proposes what reads it",
+                    dlg.TimeFormatForTesting == "HH:mm:ss.fff", dlg.TimeFormatForTesting);
+        ok &= Check("and shows it reading the reader's own log back to them",
+                    dlg.TimeStatusForTesting.Contains("40 of 40", StringComparison.Ordinal)
+                    && dlg.TimeStatusForTesting.Contains("09:00:00.000", StringComparison.Ordinal),
+                    dlg.TimeStatusForTesting);
+
+        dlg.ApplyForTesting();
+        ok &= Check("the field is remembered", dlg.Result.TimePart == 1 && dlg.Result.HasTime,
+                    $"part {dlg.Result.TimePart}, format \u201c{dlg.Result.TimeFormat}\u201d");
+        ok &= Check("and saying where the stamp is does not lay the log out as a table",
+                    !dlg.Result.Enabled, "splitting was switched on");
+
+        // An edit that leaves the same NUMBER of fields still changes what the time field holds, so what
+        // the format makes of it has to be read again rather than left saying what it said before.
+        dlg.SetTemplateForTesting("{*} ZZZ{[*]} {*}");
+        Pump();
+        ok &= Check("editing the template re-reads what the time field now holds",
+                    !dlg.TimeStatusForTesting.Contains("40 of 40", StringComparison.Ordinal),
+                    dlg.TimeStatusForTesting);
+
+        // Whereas writing a template plainly does mean "split it up".
+        dlg.SetTemplateForTesting("{*} {[*]} {*} ");
+        Pump();
+        dlg.ApplyForTesting();
+        ok &= Check("writing a template still means the reader wants to see the fields", dlg.Result.Enabled);
+
+        dlg.Close();
+        Pump();
+        return ok;
+    }
+
     /// <summary>The Encoding menu. It is the only way to read a file whose bytes say nothing about how they
     /// were written - a code page, or UTF-16 with no mark - so what matters is that choosing an entry really
     /// re-reads the file, that the menu says which one is in effect, and that the choice survives a reload.
     /// </summary>
-    private static bool RunEncodingMenuChecks()
-    {
+    private static bool RunEncodingMenuChecks()    {
         Line("-- the encoding menu --");
 
         string dir = Path.Combine(Path.GetTempPath(), "cascade_enc_" + Guid.NewGuid().ToString("N"));

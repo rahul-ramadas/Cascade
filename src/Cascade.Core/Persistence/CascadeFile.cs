@@ -106,6 +106,8 @@ public static class CascadeFile
         Enabled = c.Enabled,
         Layout = c.Layout.ToString(),
         Template = c.Template,
+        TimePart = c.TimePart >= 0 ? c.TimePart : null,
+        TimeFormat = c.TimeFormat.Length > 0 ? c.TimeFormat : null,
         Columns = c.Columns.Select(col => new ColumnDefDto
         {
             Name = col.Name,
@@ -123,7 +125,9 @@ public static class CascadeFile
         {
             Enabled = d.Enabled,
             Layout = Enum.TryParse<FieldLayout>(d.Layout, out var l) ? l : FieldLayout.Columns,
-            Template = d.Template ?? ""
+            Template = d.Template ?? "",
+            TimePart = d.TimePart ?? -1,
+            TimeFormat = d.TimeFormat ?? ""
         };
 
         if (d.Columns is not null)
@@ -192,6 +196,11 @@ public static class CascadeFile
         public string? Layout { get; set; }
         public string? Template { get; set; }
         public List<ColumnDefDto>? Columns { get; set; }
+
+        /// <summary>Which part of the template holds the timestamp, and what reads it. Absent when the
+        /// reader has not said, which leaves the log's own clock to be detected instead.</summary>
+        public int? TimePart { get; set; }
+        public string? TimeFormat { get; set; }
 
         // Written only by builds before the template language. Read, migrated, never written again.
         public string? Mode { get; set; }

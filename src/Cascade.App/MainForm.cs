@@ -9,6 +9,7 @@ using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
 using Cascade.Core.Text;
+using Cascade.Core.Timing;
 using Cascade.Core.Updating;
 
 namespace Cascade.App;
@@ -30,6 +31,7 @@ public sealed class MainForm : Form
     private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left };
     private readonly ToolStripStatusLabel _busyLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _selLabel = new() { AutoSize = true };
+    private readonly ToolStripStatusLabel _elapsedLabel = new() { AutoSize = true, Visible = false };
     private readonly ToolStripStatusLabel _filLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _totalLabel = new() { AutoSize = true };
     private readonly ToolStripStatusLabel _showLabel = new() { AutoSize = true };
@@ -52,6 +54,7 @@ public sealed class MainForm : Form
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
+    private ToolStripMenuItem _miElapsed = null!, _miElapsedGutter = null!, _miElapsedStatus = null!, _miNoClock = null!;
     private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
@@ -82,6 +85,8 @@ public sealed class MainForm : Form
     private int _tallyGeneration = -1;
     private bool _tallyHiding, _tallySwept, _tallySettled;
     private int _activitySlot, _progressSlot, _baseActivitySlot;
+    private int _elapsedSlot;
+    private Font? _elapsedSlotFont;
     private bool _inStatusLayout;
     private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
@@ -94,7 +99,9 @@ public sealed class MainForm : Form
     internal string StatusForTesting => string.Join(" | ", _status.Items.OfType<ToolStripStatusLabel>().Select(l => l.Text));
 
     /// <summary>Clicks a menu item by the path a user would read, so a check drives the same wiring rather
-    /// than the method behind it.</summary>
+    /// than the method behind it. Each drop-down along the way is OPENED, because that is the only way a
+    /// reader can reach the item - and it is where a menu settles what it is currently able to offer.
+    /// </summary>
     internal bool ClickMenuForTesting(params string[] path)
     {
         ToolStripItemCollection? items = MainMenuStrip?.Items;
@@ -102,6 +109,7 @@ public sealed class MainForm : Form
         foreach (string want in path)
         {
             if (items is null) return false;
+            if (found is not null) Open(found);
             found = items.OfType<ToolStripMenuItem>()
                          .FirstOrDefault(i => (i.Text ?? "").Replace("&", "").TrimEnd('.', '\u2026') == want);
             if (found is null) return false;
@@ -110,6 +118,11 @@ public sealed class MainForm : Form
         if (found is null || !found.Enabled) return false;
         found.PerformClick();
         return true;
+
+        static void Open(ToolStripDropDownItem item)
+            => typeof(ToolStripDropDownItem).GetMethod("OnDropDownShow",
+                   System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+               .Invoke(item, [EventArgs.Empty]);
     }
 
     /// <summary>Set by the headless screenshot harness: never prompt to save filters when closing. There is
@@ -164,6 +177,42 @@ public sealed class MainForm : Form
     {
         _progress.Visible = true;
         SetProgress(fraction);
+    }
+
+    /// <summary>What the status bar's elapsed slot is saying, or nothing at all when it is not there. Read
+    /// through its own visibility rather than off the whole bar: a hidden label keeps whatever text it last
+    /// had, and "the slot is gone" is exactly what has to be checkable.</summary>
+    internal string ElapsedSlotForTesting => _elapsedLabel.Visible ? _elapsedLabel.Text ?? "" : "";
+
+    /// <summary>How the status bar has divided itself up: the fixed boxes, the room that leaves the two
+    /// springing paths, and what each of them could show in it. Everything on the bar competes for one row,
+    /// so "which of these took the paths' room" is the only way to answer a complaint about them.</summary>
+    internal string StatusLayoutForTesting
+    {
+        get
+        {
+            long magnitude = MetricMagnitude();
+            var parts = _status.Items.OfType<ToolStripStatusLabel>()
+                .Where(l => l.Visible)
+                .Select(l => $"{(l.Name?.StartsWith("stat.", StringComparison.Ordinal) == true ? l.Name[5..] : "path")}={l.Width}");
+            return $"bar={_status.Width} metrics={TotalMetricWidth(magnitude)} activity={_activitySlot} "
+                 + $"elapsed={ElapsedSlotWidth()} magnitude={magnitude:N0} pathroom={PathRoom(magnitude)} "
+                 + $"floor={Dpi(300)} | {string.Join(" ", parts)}";
+        }
+    }
+
+    /// <summary>What the Elapsed Time menu offers right now, one entry a line, opened the way Windows opens
+    /// it - so a check reads what a reader would see rather than the fields behind it.</summary>
+    internal string ElapsedMenuForTesting()
+    {
+        typeof(ToolStripDropDownItem).GetMethod("OnDropDownShow",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(_miElapsed, [EventArgs.Empty]);
+        return string.Join("\n", _miElapsed.DropDownItems.OfType<ToolStripMenuItem>()
+            .Where(i => i.Available)
+            .Select(i => (i.Text ?? "").Replace("&", "", StringComparison.Ordinal)
+                         + (i.Checked ? " *" : "")
+                         + (i.Enabled ? "" : " (unavailable)")));
     }
 
     internal bool NoSavePrompt;
@@ -495,6 +544,7 @@ public sealed class MainForm : Form
             _miWordWrap.Enabled = !(_doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns);
             _miFitColumns.Enabled = _doc.Columns.Active && _doc.Columns.Layout == FieldLayout.Columns;
             SyncColumnsMenu();
+            SyncElapsedMenu();
         };
         _miFilterTips = new ToolStripMenuItem("Show Matching Filters on Ho&ver", null, (_, _) =>
         {
@@ -505,6 +555,7 @@ public sealed class MainForm : Form
         { Checked = _settings.ShowFilterTooltips };
         view.DropDownItems.Add(_miFilterTips);
         view.DropDownItems.Add(BuildMarkersMenu());
+        view.DropDownItems.Add(BuildElapsedMenu());
         // The two layouts are not separate commands sitting beside the switch - they are the two ways the
         // switch can be thrown, and reading them as a flat list of three left it unclear that turning the
         // middle one on turned the top one on too. Nested, the shape says it: one thing, with a choice
@@ -635,6 +686,48 @@ public sealed class MainForm : Form
             item.Checked = (MarkerVisibilityMode)item.Tag! == _settings.MarkerVisibility;
     }
 
+    /// <summary>Where the two elapsed-time displays are turned on and off, and - when the log has no clock
+    /// anyone could find - where that is said.
+    ///
+    /// <para>The reason is a line of its own rather than a tip on a greyed item, because a tip has to be
+    /// hunted for and this is exactly the moment somebody wants telling. It says where to go rather than
+    /// offering to take them: Field Settings is four items further down this same menu, and a second door
+    /// into one dialog is two things to keep in step.</para></summary>
+    private ToolStripMenuItem BuildElapsedMenu()
+    {
+        _miElapsed = new ToolStripMenuItem("Elap&sed Time");
+
+        _miElapsedGutter = new ToolStripMenuItem("In the &Margin", null, (_, _) =>
+        {
+            _settings.ShowElapsedGutter = !_settings.ShowElapsedGutter;
+            _grid.RefreshView();
+            SaveSettingsSoon();
+        });
+        _miElapsedStatus = new ToolStripMenuItem("In the &Status Bar", null, (_, _) =>
+        {
+            _settings.ShowElapsedInStatusBar = !_settings.ShowElapsedInStatusBar;
+            UpdateStatus();
+            SaveSettingsSoon();
+        });
+        _miNoClock = new ToolStripMenuItem("No timestamp field \u2014 set one in Field Settings") { Enabled = false };
+
+        _miElapsed.DropDownItems.Add(_miElapsedGutter);
+        _miElapsed.DropDownItems.Add(_miElapsedStatus);
+        _miElapsed.DropDownItems.Add(_miNoClock);
+        _miElapsed.DropDownOpening += (_, _) => SyncElapsedMenu();
+        SyncElapsedMenu();
+        return _miElapsed;
+    }
+
+    private void SyncElapsedMenu()
+    {
+        bool have = _doc.Clock is not null;
+        _miElapsedGutter.Enabled = _miElapsedStatus.Enabled = have;
+        _miElapsedGutter.Checked = _settings.ShowElapsedGutter;
+        _miElapsedStatus.Checked = _settings.ShowElapsedInStatusBar;
+        _miNoClock.Available = !have;
+    }
+
     private ToolStripMenuItem BuildFilterLocationMenu()
     {
         var m = new ToolStripMenuItem("Filter List Loc&ation");
@@ -754,6 +847,12 @@ public sealed class MainForm : Form
             l.TextAlign = ContentAlignment.MiddleLeft;
             l.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
         }
+        // Beside the count it qualifies, and boxed like the rest: a figure that appeared and disappeared
+        // with the selection would shove everything to its right along twice a click.
+        _elapsedLabel.AutoSize = false;
+        _elapsedLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _elapsedLabel.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
+        _elapsedLabel.Name = "stat.elapsed";
         // Section dividers: counts, then what is being shown, then zoom.
         _selLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
         _showLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
@@ -769,7 +868,7 @@ public sealed class MainForm : Form
             // The label comes before the bar so the section's divider sits on an item whose left edge never
             // moves; with the bar first, hiding it dragged the divider left by the bar's width.
             _srcLabel, _filterLabel, _busyLabel, _progress,
-            _selLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel
+            _selLabel, _elapsedLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel
         });
 
         EnsureMetricWidths();
@@ -805,10 +904,15 @@ public sealed class MainForm : Form
 
         long magnitude = Math.Max(99_999_999, rounded);
         // Only a window too narrow to afford that falls back to what this file actually needs.
-        if (_status.Width > 0 && _status.Width - TotalMetricWidth(magnitude) - _activitySlot < Dpi(300))
+        if (_status.Width > 0 && PathRoom(magnitude) < Dpi(300))
             magnitude = rounded;
         return magnitude;
     }
+
+    /// <summary>What would be left for the two paths - everything on the bar that is not a fixed box. They
+    /// are the only things on it that spring, so anything else given room is taking it from them.</summary>
+    private int PathRoom(long magnitude)
+        => _status.Width - TotalMetricWidth(magnitude) - _activitySlot - ElapsedSlotWidth();
 
     private int CurrentMetricWidth()
     {
@@ -848,6 +952,76 @@ public sealed class MainForm : Form
         if (!has)
             _filterLabel.Width = TextRenderer.MeasureText("(no filter file)", _filterLabel.Font).Width + Dpi(14);
         return true;
+    }
+
+    /// <summary>Gives the elapsed slot its space only for a log whose clock could be read, so a log without
+    /// one never loses the room to the two paths. Returns true if it moved.</summary>
+    private bool EnsureElapsedSlot()
+    {
+        int want = ElapsedSlotWidth();
+        bool has = want > 0;
+        if (_elapsedLabel.Visible == has) return false;
+        if (has) _elapsedLabel.Width = want;
+        _elapsedLabel.Visible = has;
+        return true;
+    }
+
+    /// <summary>How wide the slot has to be, or nothing when there is to be no slot. Sized from the widest
+    /// value the wording can produce - not from the value on show, which changes with every click - and
+    /// measured again only when the font moves under it, since measuring on the 33ms tick is not free.
+    /// </summary>
+    private int ElapsedSlotWidth()
+    {
+        if (!_settings.ShowElapsedInStatusBar || _doc.Clock is null) return 0;
+        if (!ReferenceEquals(_elapsedSlotFont, _elapsedLabel.Font))
+        {
+            _elapsedSlotFont = _elapsedLabel.Font;
+            _elapsedSlot = 0;
+            foreach (string sample in ElapsedText.WidestStatus)
+            foreach (string prefix in new[] { GapPrefix, SpanPrefix })
+                _elapsedSlot = Math.Max(_elapsedSlot,
+                    TextRenderer.MeasureText(prefix + sample, _elapsedSlotFont).Width + Dpi(6));
+        }
+        return _elapsedSlot;
+    }
+
+    /// <summary>The two measurements are named apart on purpose. One line selected gives the time since the
+    /// line above it on screen; several give the stretch from the first to the last. They are different
+    /// questions with answers orders of magnitude apart, and one word over both would be read as the number
+    /// changing meaning under the reader.</summary>
+    private const string GapPrefix = "Gap: ", SpanPrefix = "Span: ";
+
+    private void UpdateElapsed()
+    {
+        if (!_elapsedLabel.Visible) return;
+
+        if (!_grid.SelectionBounds(out long first, out long last))
+        {
+            _elapsedLabel.Text = GapPrefix + ElapsedText.None;
+            _elapsedLabel.ToolTipText = "Select a line to see how long after the one above it it was written.";
+            return;
+        }
+
+        if (first == last)
+        {
+            bool have = _doc.TryElapsedBefore(first, out long gap);
+            _elapsedLabel.Text = GapPrefix + (have ? ElapsedText.Status(gap) : ElapsedText.None);
+            _elapsedLabel.ToolTipText = have
+                ? gap >= 0
+                    ? $"Line {first + 1:N0} was written {ElapsedText.Status(gap)} after the line above it on screen."
+                    // A log written by several threads at once really does arrive out of order, so this is
+                    // information rather than a fault - and it needs saying, or a minus sign reads as one.
+                    : $"Line {first + 1:N0} was written {ElapsedText.Status(-gap)} BEFORE the line above it "
+                      + "on screen - the log is not in the order it was written in here."
+                : "There is no time on this line, or none on any line above it, to measure from.";
+            return;
+        }
+
+        bool measured = _doc.TrySpan(first, last, out long span);
+        _elapsedLabel.Text = SpanPrefix + (measured ? ElapsedText.Status(span) : ElapsedText.None);
+        _elapsedLabel.ToolTipText = measured
+            ? $"Lines {first + 1:N0} to {last + 1:N0} cover {ElapsedText.Status(span)}."
+            : "There is no time on the first or the last of the selected lines to measure between.";
     }
 
     /// <summary>Shows as much of a path as fits, trimming the middle, with the whole thing on hover.</summary>
@@ -1696,7 +1870,7 @@ public sealed class MainForm : Form
     {
         string before = _doc.Columns.Describe();
         var samples = SampleLines(out int caretAt);
-        using var dlg = new ColumnsDialog(_doc.Columns, samples, caretAt);
+        using var dlg = new ColumnsDialog(_doc.Columns, samples, caretAt, _doc.Columns.HasTime ? null : _doc.Clock);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
             _doc.Columns.CopyFrom(dlg.Result);
@@ -1802,11 +1976,17 @@ public sealed class MainForm : Form
     }
 
     /// <summary>What is on screen has changed, so a note about a match being out of sight no longer answers
-    /// for anything: it is worked out afresh the next time a search lands somewhere.</summary>
+    /// for anything: it is worked out afresh the next time a search lands somewhere.
+    /// <para>The status bar is re-read here too. Naming the field that holds the timestamp brings a clock
+    /// into being, and nothing else about the window changes - so the 33ms tick, which only looks again
+    /// when the counts or the busy state move, would leave the bar as it was until something else did.
+    /// </para></summary>
     private void FieldsChanged()
     {
         _hiddenMatch = "";
         SyncColumnsMenu();
+        SyncElapsedMenu();
+        UpdateStatus();
     }
 
     /// <summary>Turns the header strip on or off, keeping the line the reader is looking at exactly where
@@ -2258,6 +2438,7 @@ public sealed class MainForm : Form
         // layout pass, and measuring against a stale width leaves a path needlessly truncated.
         bool structural = EnsureMetricWidths();
         structural |= EnsureFilterSlot();
+        structural |= EnsureElapsedSlot();
         if (structural && !_inStatusLayout)
         {
             _inStatusLayout = true;
@@ -2337,6 +2518,7 @@ public sealed class MainForm : Form
         }
 
         _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
+        UpdateElapsed();
         _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";
         _totalLabel.Text = $"Total: {_doc.CompletedLineCount:N0}";
         _showLabel.Text = _doc.FilteredMode ? ShowingMatchesOnly : ShowingAllLines;

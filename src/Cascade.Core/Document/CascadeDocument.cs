@@ -7,6 +7,7 @@ using Cascade.Core.IO;
 using Cascade.Core.Markers;
 using Cascade.Core.Model;
 using Cascade.Core.Text;
+using Cascade.Core.Timing;
 
 namespace Cascade.Core.Document;
 
@@ -338,6 +339,170 @@ public sealed class CascadeDocument : IDisposable
         if (line < 0 || line >= _index.Count) return "";
         _index.GetRange(line, _src.Length, out long s, out long e);
         return _uiReader.GetString(s, e);
+    }
+
+    // ---- times ----
+
+    private LogClock? _clock;
+    private LineTemplate? _clockTemplate;
+    private string _clockFormat = "\u0000";
+    private int _clockPart = int.MinValue;
+    private bool _clockSettled;
+    private long _detectedWith;
+
+    /// <summary>How many lines are read to propose a clock, and the fewest worth judging one by. A file this
+    /// long into its own index is available within a moment of opening even when the whole of it is hours
+    /// away, and it is far more of the log than a banner at the top of it can spoil.</summary>
+    private const int DetectFrom = 500, DetectAtLeast = 100;
+
+    /// <summary>How far back the search for a line to measure from will walk over lines carrying no time.
+    /// A capped walk, because a row must cost a bounded amount to draw however much of the log is stack
+    /// traces.</summary>
+    private const int WalkBack = 64;
+
+    /// <summary>How the timestamps in this log are read, or null when nobody has said and none could be
+    /// found. What the reader named in the field template wins; failing that, what could be detected.
+    ///
+    /// <para>Read on the UI thread, once per row per frame, so the steady state allocates nothing: the
+    /// template is compared by reference (a new one is built whenever its text changes) and the rest is two
+    /// comparisons.</para>
+    ///
+    /// <para>Detection runs at most twice per file and is worked out again rather than saved, so opening a
+    /// log can never write to the reader's filter set.</para></summary>
+    public LogClock? Clock
+    {
+        get
+        {
+            if (Columns.HasTime)
+            {
+                var template = Columns.Compiled;
+                if (_clockPart != Columns.TimePart || !ReferenceEquals(_clockTemplate, template)
+                    || !string.Equals(_clockFormat, Columns.TimeFormat, StringComparison.Ordinal))
+                {
+                    _clockPart = Columns.TimePart;
+                    _clockTemplate = template;
+                    _clockFormat = Columns.TimeFormat;
+                    _clock = LogClock.From(Columns);
+                    _clockSettled = true;
+                    _detectedWith = 0;
+                }
+                return _clock;
+            }
+
+            if (_clockPart != int.MinValue)
+            {
+                _clockPart = int.MinValue;
+                _clockTemplate = null;
+                _clockFormat = "";
+                _clock = null;
+                _clockSettled = false;
+                _detectedWith = 0;
+            }
+            if (!_clockSettled) Detect();
+            return _clock;
+        }
+    }
+
+    /// <summary>Proposes a clock from the head of the file. Tried as soon as there is enough of the index to
+    /// be worth reading, and again only when there is FOUR TIMES as much to go on - a file part way through
+    /// a long index would otherwise be re-read on every access, and this is asked once a row per frame.
+    /// </summary>
+    private void Detect()
+    {
+        long lines = CompletedLineCount;
+        bool complete = IsIndexComplete;
+        if (lines < DetectAtLeast && !(complete && lines > 0)) return;
+        if (_detectedWith > 0 && lines < _detectedWith * 4 && !complete) return;
+
+        int take = (int)Math.Min(DetectFrom, lines);
+        var sample = new List<string>(take);
+        for (int i = 0; i < take; i++) sample.Add(GetLineText(i));
+        _clock = ClockDetector.Detect(sample);
+        _detectedWith = take;
+        _clockSettled = take >= DetectFrom || complete;
+    }
+
+    /// <summary>Whether the reader named the time field rather than it being guessed at.</summary>
+    public bool TimeFieldIsSet => Columns.HasTime && Clock is not null;
+
+    /// <summary>The moment one line was written, or null when it carries no readable stamp.</summary>
+    public long? TimeOf(long line) => TimeOf(line, null);
+
+    private long? TimeOf(long line, string? text)
+    {
+        var clock = Clock;
+        if (clock is null || line < 0 || line >= _index.Count) return null;
+        return clock.TryRead(text ?? GetLineText(line), out long ticks) ? ticks : null;
+    }
+
+    /// <summary>How long after the previous line ON SHOW this one was written.
+    ///
+    /// <para>"On show" is the whole point of it: with filters hiding the noise between them, this is the
+    /// time between one interesting line and the next, which is a latency profile of whatever the filters
+    /// select and is not obtainable any other way. Reading it is helped by the line numbers beside it,
+    /// which visibly skip.</para>
+    ///
+    /// <para>Lines carrying no time are stepped over rather than breaking the chain, up to a limit.</para>
+    /// </summary>
+    public bool TryElapsedBefore(long line, out long elapsed) => TryElapsedBefore(line, null, out elapsed);
+
+    /// <summary><inheritdoc cref="TryElapsedBefore(long, out long)"/></summary>
+    /// <param name="text">The line's text where the caller already has it - the paint decodes every row it
+    /// draws, and reading it a second time would double what a frame costs.</param>
+    public bool TryElapsedBefore(long line, string? text, out long elapsed)
+    {
+        elapsed = 0;
+        var clock = Clock;
+        if (clock is null) return false;
+        if (TimeOf(line, text) is not { } now) return false;
+
+        long row = RowForLine(line);
+        if (row <= 0) return false;
+        for (int back = 1; back <= WalkBack && row - back >= 0; back++)
+        {
+            if (TimeOf(RowToLine(row - back)) is not { } then) continue;
+            elapsed = ClockMath.Elapsed(then, now, clock.Format.WrapsAtMidnight);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>How much time one stretch of the log covers, from the first line of it to the last.
+    ///
+    /// <para>Either end may be a line carrying no time - a stack trace caught by the end of a drag is the
+    /// ordinary case - so the ends are walked INWARD to the nearest line that has one. The stretch measured
+    /// is then a little shorter than the stretch selected, which is the honest answer and the only one
+    /// available.</para></summary>
+    public bool TrySpan(long firstLine, long lastLine, out long span)
+    {
+        span = 0;
+        var clock = Clock;
+        if (clock is null) return false;
+
+        long fromRow = RowAtOrAfterLine(Math.Min(firstLine, lastLine));
+        long toRow = RowAtOrAfterLine(Math.Max(firstLine, lastLine) + 1) - 1;
+        if (fromRow < 0 || toRow < fromRow) return false;
+
+        if (!WalkForTime(fromRow, toRow, +1, out long from)) return false;
+        if (!WalkForTime(toRow, fromRow, -1, out long to)) return false;
+        span = ClockMath.Elapsed(from, to, clock.Format.WrapsAtMidnight);
+        return true;
+    }
+
+    /// <summary>The first line from <paramref name="row"/> towards <paramref name="stopRow"/> that carries a
+    /// time, within the same capped walk the elapsed column uses.</summary>
+    private bool WalkForTime(long row, long stopRow, int step, out long ticks)
+    {
+        ticks = 0;
+        for (int n = 0; n <= WalkBack; n++)
+        {
+            long at = row + (long)n * step;
+            if (step > 0 ? at > stopRow : at < stopRow) return false;
+            if (TimeOf(RowToLine(at)) is not { } found) continue;
+            ticks = found;
+            return true;
+        }
+        return false;
     }
 
     public bool IsLineTruncated(long line)
@@ -962,6 +1127,14 @@ public sealed class CascadeDocument : IDisposable
         // The generation belongs to the file being let go: the next one must not inherit it, or the first
         // pass over the new file would think it was replacing a view that is already filtered.
         _generation = null;
+        // A detected clock belongs to the file it was read from, so the next one starts over. A clock the
+        // reader NAMED is in the filter set and stays; the comparison in the property rebuilds it either way.
+        _clockPart = int.MinValue;
+        _clockTemplate = null;
+        _clockFormat = "\u0000";
+        _clock = null;
+        _clockSettled = false;
+        _detectedWith = 0;
 
         var source = _src;
         _src = null!;
