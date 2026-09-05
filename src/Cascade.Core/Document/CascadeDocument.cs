@@ -573,7 +573,12 @@ public sealed class CascadeDocument : IDisposable
 
         long seconds = Math.Abs(ClockMath.Elapsed(first, last, clock.Format.WrapsAtMidnight))
                      / TimeSpan.TicksPerSecond;
-        return _widestSeconds = Math.Max(ElapsedText.DefaultWidestSeconds, seconds);
+        // Rounded UP to all-nines rather than taken as it is: a log has to grow tenfold before the column
+        // changes width, so indexing one does not widen the margin under the reader every few seconds, and
+        // a stretch running slightly past the ends that were sampled still has somewhere to be drawn.
+        long room = 9;
+        while (room < seconds && room < long.MaxValue / 10) room = room * 10 + 9;
+        return _widestSeconds = room;
     }
 
     /// <summary>The first time found walking from one end of the file, over the same capped run of lines

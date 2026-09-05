@@ -2911,8 +2911,10 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>The hairline between two margins: the line-number ink faded most of the way back into the
-    /// margin it is drawn on, so it separates without being read as something to look at.</summary>
-    private Color MarginRule => MiniMapControl.Blend(_settings.LineNumberColor, _settings.GutterBack, 0.22);
+    /// margin it is drawn on, so it separates without being read as something to look at. MEASURED off a
+    /// screenshot at 0.22: 225 against 246, which is eight per cent and reads as nothing at all - the two
+    /// columns still looked like one ragged block with a hole in it.</summary>
+    private Color MarginRule => MiniMapControl.Blend(_settings.LineNumberColor, _settings.GutterBack, 0.45);
 
     /// <summary>One right-aligned figure in the margin: filled to the margin's own colour, then the text
     /// laid into the part of the box it is allowed - the few pixels of air before the next thing along are

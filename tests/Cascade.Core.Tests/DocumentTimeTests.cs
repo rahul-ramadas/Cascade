@@ -406,26 +406,27 @@ public class DocumentTimeTests
     }
 
     /// <summary>The column is sized for the log's whole span, not for the origin in use, so that changing
-    /// what it measures from does not change its width and slide the text sideways. A file spanning ten
-    /// thousand seconds needs more room than the gap between two adjacent lines ever would.</summary>
+    /// what it measures from does not change its width and slide the text sideways. Rounded UP to all-nines,
+    /// which is what keeps it STILL: a log has to grow tenfold before the margin moves, so indexing one does
+    /// not widen it under the reader every few seconds.</summary>
     [Fact]
     public void The_column_is_sized_for_the_span_of_the_file()
     {
-        string brief = WriteLog(60);        // a minute
-        string long_ = WriteLog(40_000);    // eleven hours
+        string brief = WriteLog(60);        // 59 seconds
+        string long_ = WriteLog(40_000);    // 39,999 seconds
         try
         {
             using (var doc = new CascadeDocument())
             {
                 doc.Open(brief);
                 Wait(doc);
-                Assert.Equal(ElapsedText.DefaultWidestSeconds, doc.WidestElapsedSeconds());
+                Assert.Equal(99, doc.WidestElapsedSeconds());
             }
 
             using var wide = new CascadeDocument();
             wide.Open(long_);
             Wait(wide);
-            Assert.Equal(39_999, wide.WidestElapsedSeconds());
+            Assert.Equal(99_999, wide.WidestElapsedSeconds());
 
             // ...and the figure it produces really does fit in what it asked for.
             Assert.True(wide.TryElapsedFrom(39_000, ElapsedOrigin.FileStart, out long deep));
@@ -434,5 +435,29 @@ public class DocumentTimeTests
             Assert.True(drawn.Length <= ElapsedText.WidestGutter(3, wide.WidestElapsedSeconds()).Length);
         }
         finally { File.Delete(brief); File.Delete(long_); }
+    }
+
+    /// <summary>The width has to be the same answer at every size the file passes through while it is being
+    /// read, or the margin steps sideways over and over as a big log loads. Rounding to all-nines is what
+    /// buys that, and it is worth a check because nothing else would notice it being taken away.</summary>
+    [Fact]
+    public void The_column_width_does_not_move_as_the_file_grows()
+    {
+        string path = WriteLog(9_000);      // 8,999 seconds - the same 9,999 bracket throughout
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            var seen = new HashSet<long>();
+            for (int i = 0; i < 400 && !doc.IsIndexComplete; i++)
+            {
+                if (doc.Clock is not null) seen.Add(doc.WidestElapsedSeconds());
+                Thread.Sleep(1);
+            }
+            doc.WaitForIndex();
+            seen.Add(doc.WidestElapsedSeconds());
+            Assert.True(seen.Count <= 1, "the margin resized while the file was loading: " + string.Join(", ", seen));
+        }
+        finally { File.Delete(path); }
     }
 }

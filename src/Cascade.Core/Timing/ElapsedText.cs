@@ -83,9 +83,16 @@ public static class ElapsedText
         return overflow.Length > value.Length ? overflow : value;
     }
 
-    /// <summary>One value for the status bar: the unit that suits it, and said out loud.</summary>
+    /// <summary>One value for the status bar: the unit that suits it, and said out loud.
+    ///
+    /// <para>Nothing at all is just "0". Every unit measures the same amount of it, so naming one only
+    /// invites the question of why that one - and sitting on the reference line, where the reading is
+    /// zero by definition, is the first thing anybody does with it.</para>
+    /// </summary>
     public static string Status(long ticks)
     {
+        if (ticks == 0) return "0";
+
         string sign = ticks < 0 ? "-" : "";
         long abs = Math.Abs(ticks);
 

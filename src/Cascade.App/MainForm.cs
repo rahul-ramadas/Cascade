@@ -26,7 +26,7 @@ public sealed class MainForm : Form
     // list when it is docked along the bottom or top, and beneath it when it is down one side.
     private readonly SplitContainer _filterPane = new() { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, FixedPanel = FixedPanel.Panel2 };
     private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
-    private readonly StatusStrip _status = new();
+    private readonly StatusStrip _status = new() { ShowItemToolTips = true };
     private readonly ToolStripStatusLabel _srcLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly ToolStripStatusLabel _filterLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft, BorderSides = ToolStripStatusLabelBorderSides.Left };
     private readonly ToolStripStatusLabel _busyLabel = new() { AutoSize = true };
@@ -55,7 +55,7 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
     private ToolStripMenuItem _miElapsed = null!, _miElapsedGutter = null!, _miElapsedStatus = null!, _miNoClock = null!;
-    private ToolStripMenuItem _miMeasuredFrom = null!, _miSetReference = null!, _miClearReference = null!;
+    private ToolStripMenuItem _miMeasuredFrom = null!, _miNextOrigin = null!, _miSetReference = null!, _miClearReference = null!;
     private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
@@ -234,12 +234,19 @@ public sealed class MainForm : Form
                                               + $"={Words(i)}{(i.Available ? "" : "(off)")}"));
     }
 
-    /// <summary>The two elapsed entries, each with the key it advertises. They are not registered as
-    /// ShortcutKeys, so nothing but the displayed string tells a reader they exist - and the wording is
-    /// here too because the key is meant to BE the letter the entry underlines.</summary>
+    /// <summary>The elapsed entries that advertise a key, each with the key it shows. They are not
+    /// registered as ShortcutKeys, so nothing but the displayed string tells a reader they exist - and a
+    /// menu item paints EITHER a shortcut or a submenu arrow, so an item with children can advertise
+    /// nothing at all.</summary>
     internal string ElapsedMenuKeysForTesting()
-        => string.Join("|", new[] { _miElapsedGutter, _miElapsedStatus }
-            .Select(i => $"{i.Text}={i.ShortcutKeyDisplayString}"));
+        => string.Join("|", new[] { _miElapsedGutter, _miElapsedStatus, _miNextOrigin, _miSetReference }
+            .Select(i => $"{i.Text}={i.ShortcutKeyDisplayString}"
+                       + (i.HasDropDownItems ? " (ARROW HIDES IT)" : "")));
+
+    /// <summary>Whether the status bar will show the reasons written on it at all. A StatusStrip turns item
+    /// tooltips OFF by default, which quietly threw away every explanation on it.</summary>
+    internal string StatusTipsForTesting
+        => $"shown={_status.ShowItemToolTips} elapsed=\u201c{_elapsedLabel.ToolTipText}\u201d";
 
     internal bool ShowElapsedGutterForTesting => _settings.ShowElapsedGutter;
 
@@ -754,10 +761,15 @@ public sealed class MainForm : Form
         { ShortcutKeyDisplayString = "Ctrl+Shift+B" };
         _miNoClock = new ToolStripMenuItem("No timestamp field \u2014 set one in Field Settings") { Enabled = false };
 
-        _miMeasuredFrom = new ToolStripMenuItem("Measured F&rom") { ShortcutKeyDisplayString = "Ctrl+Shift+R" };
+        _miMeasuredFrom = new ToolStripMenuItem("Measured F&rom");
         foreach (var (origin, text) in Origins)
             _miMeasuredFrom.DropDownItems.Add(
                 new ToolStripMenuItem(text, null, (_, _) => MeasureFrom(origin)) { Tag = origin });
+        // A separate entry rather than a key on the submenu above it: a menu item paints EITHER a shortcut
+        // or a drop-down arrow in that column, never both, so a key put on "Measured From" is advertised
+        // nowhere at all - which a picture of the open menu is the only way to notice.
+        _miNextOrigin = new ToolStripMenuItem("S&witch to the Next", null, (_, _) => CycleOrigin())
+        { ShortcutKeyDisplayString = "Ctrl+Shift+R" };
         _miSetReference = new ToolStripMenuItem("Set the Reference &Here", null, (_, _) => SetReferenceHere())
         { ShortcutKeyDisplayString = "Ctrl+R" };
         _miClearReference = new ToolStripMenuItem("&Clear the Reference", null, (_, _) => ClearReference());
@@ -766,6 +778,7 @@ public sealed class MainForm : Form
         _miElapsed.DropDownItems.Add(_miElapsedStatus);
         _miElapsed.DropDownItems.Add(new ToolStripSeparator());
         _miElapsed.DropDownItems.Add(_miMeasuredFrom);
+        _miElapsed.DropDownItems.Add(_miNextOrigin);
         _miElapsed.DropDownItems.Add(_miSetReference);
         _miElapsed.DropDownItems.Add(_miClearReference);
         _miElapsed.DropDownItems.Add(_miNoClock);
@@ -823,7 +836,10 @@ public sealed class MainForm : Form
     private bool CycleOrigin()
     {
         if (_doc.Clock is null) return false;
-        int at = Array.FindIndex(Origins, o => o.Origin == _settings.ElapsedMeasuredFrom);
+        // From what the column is SHOWING, not from what the setting remembers. Opening a file drops the
+        // reference without touching the setting, so a cycle starting from the setting spent its first
+        // press moving off an origin that was already resolving to somewhere else - a key that did nothing.
+        int at = Array.FindIndex(Origins, o => o.Origin == EffectiveOrigin);
         for (int step = 1; step <= Origins.Length; step++)
         {
             var next = Origins[(at + step + Origins.Length) % Origins.Length].Origin;
@@ -872,6 +888,7 @@ public sealed class MainForm : Form
     {
         bool have = _doc.Clock is not null;
         _miElapsedGutter.Enabled = _miElapsedStatus.Enabled = _miMeasuredFrom.Enabled = have;
+        _miNextOrigin.Enabled = have;
         _miElapsedGutter.Checked = _settings.ShowElapsedGutter;
         _miElapsedStatus.Checked = _settings.ShowElapsedInStatusBar;
 
@@ -1204,12 +1221,19 @@ public sealed class MainForm : Form
             bool have = _doc.TryElapsedFrom(first, EffectiveOrigin, out long gap);
             _elapsedLabel.Text = prefix + (have ? ElapsedText.Status(gap) : ElapsedText.None);
             _elapsedLabel.ToolTipText = have
-                ? gap >= 0
-                    ? $"Line {first + 1:N0} was written {ElapsedText.Status(gap)} after {OriginSaid}."
-                    // A log written by several threads at once really does arrive out of order, and a line
-                    // above the reference is legitimately earlier than it - so a minus sign is information
-                    // rather than a fault, and it needs saying or it reads as one.
-                    : $"Line {first + 1:N0} was written {ElapsedText.Status(-gap)} BEFORE {OriginSaid}."
+                ? gap == 0
+                    // "Written 0 after line 21" is not a sentence, and on the reference itself it named the
+                    // same line twice - which is the FIRST thing anybody reads, the reference having just
+                    // been set from the line they are sitting on.
+                    ? first == _doc.ReferenceLine && EffectiveOrigin == ElapsedOrigin.Reference
+                        ? $"Line {first + 1:N0} is the reference everything is measured from."
+                        : $"Line {first + 1:N0} carries the same time as {OriginSaid}."
+                    : gap > 0
+                        ? $"Line {first + 1:N0} was written {ElapsedText.Status(gap)} after {OriginSaid}."
+                        // A log written by several threads at once really does arrive out of order, and a
+                        // line above the reference is legitimately earlier than it - so a minus sign is
+                        // information rather than a fault, and it needs saying or it reads as one.
+                        : $"Line {first + 1:N0} was written {ElapsedText.Status(-gap)} BEFORE {OriginSaid}."
                 : $"There is no time on this line, or none on {OriginSaid}, to measure from.";
             return;
         }
@@ -1217,7 +1241,9 @@ public sealed class MainForm : Form
         bool measured = _doc.TrySpan(first, last, out long span);
         _elapsedLabel.Text = SpanPrefix + (measured ? ElapsedText.Status(span) : ElapsedText.None);
         _elapsedLabel.ToolTipText = measured
-            ? $"Lines {first + 1:N0} to {last + 1:N0} cover {ElapsedText.Status(span)}."
+            ? span == 0
+                ? $"Lines {first + 1:N0} to {last + 1:N0} all carry the same time."
+                : $"Lines {first + 1:N0} to {last + 1:N0} cover {ElapsedText.Status(span)}."
             : "There is no time on the first or the last of the selected lines to measure between.";
     }
 

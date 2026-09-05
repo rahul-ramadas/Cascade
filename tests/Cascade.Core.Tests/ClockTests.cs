@@ -333,6 +333,17 @@ public class ElapsedTextTests
     [InlineData(-14_820_000L, "-1.482 s")]
     public void The_status_bar_takes_the_unit_that_suits_the_value(long ticks, string text)
         => Assert.Equal(text, ElapsedText.Status(ticks));
+
+    /// <summary>Nothing at all is named without a unit. Every unit measures the same amount of it, and the
+    /// reference line - where the reading is zero the moment it is set - would otherwise open on the one
+    /// unit nobody asked about.</summary>
+    [Fact]
+    public void No_time_at_all_is_not_measured_in_microseconds()
+    {
+        Assert.Equal("0", ElapsedText.Status(0));
+        Assert.DoesNotContain("\u00b5", ElapsedText.Status(0), StringComparison.Ordinal);
+        Assert.Equal("1 \u00b5s", ElapsedText.Status(10));
+    }
 }
 
 public class ClockSpecTests

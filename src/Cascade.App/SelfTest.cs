@@ -8174,18 +8174,28 @@ internal static class SelfTest
             ok &= Check("and puts it back", form.ElapsedSlotForTesting.Length > 0);
 
             // The rule the pair was chosen by, stated rather than written down twice: each key is the letter
-            // its own entry underlines, so there is one letter to learn per entry.
+            // its own entry underlines, so there is one letter to learn per entry. And an entry that opens a
+            // submenu can advertise NOTHING - the arrow takes the column the shortcut would go in - so a key
+            // parked on one is a key nobody can find.
             string advertised = form.ElapsedMenuKeysForTesting();
             Line("   (" + advertised + ")");
-            bool matched = advertised.Split('|').Length == 2 && advertised.Split('|').All(entry =>
+            bool matched = advertised.Split('|').Length == 4 && advertised.Split('|').All(entry =>
             {
                 string[] parts = entry.Split('=');
                 int amp = parts[0].IndexOf('&', StringComparison.Ordinal);
                 return parts.Length == 2 && amp >= 0 && amp + 1 < parts[0].Length
-                    && parts[1].StartsWith("Ctrl+Shift+", StringComparison.Ordinal)
-                    && parts[1][^1] == char.ToUpperInvariant(parts[0][amp + 1]);
+                    && !parts[1].Contains("ARROW", StringComparison.Ordinal)
+                    && parts[1].StartsWith("Ctrl+", StringComparison.Ordinal);
             });
-            ok &= Check("and each key is the letter its own entry underlines", matched, advertised);
+            ok &= Check("every key the menu offers is on an entry that can show it", matched, advertised);
+
+            // A StatusStrip turns item tooltips OFF by default, so every reason written on the bar - the
+            // whole path behind a trimmed one, why a figure is negative, which line it is measured from -
+            // was being thrown away silently.
+            string tips = form.StatusTipsForTesting;
+            ok &= Check("and the status bar will actually show the reasons written on it",
+                        tips.StartsWith("shown=True", StringComparison.Ordinal)
+                        && tips.Contains("after", StringComparison.Ordinal), tips);
 
             // On a log with no clock the key must fall through rather than silently flip a setting nobody
             // can see the effect of.
@@ -8272,6 +8282,17 @@ internal static class SelfTest
             ok &= Check("naming a reference measures from it there and then",
                         form.ElapsedOriginForTesting == "Reference ref=100 said=\u201c\u0394 Ref\u201d",
                         form.ElapsedOriginForTesting);
+
+            // The caret is ON the reference, so the reading is zero - the first thing anybody sees after
+            // pressing the key. "Written 0 microseconds after line 101" picks a unit at random for an amount
+            // every unit measures the same, and names the same line twice.
+            Line("   (" + form.StatusTipsForTesting + ")");
+            ok &= Check("and reading zero does not name a unit, or the same line twice",
+                        form.ElapsedSlotForTesting == "\u0394 Ref: 0"
+                        && form.StatusTipsForTesting.Contains(
+                               "Line 101 is the reference everything is measured from.", StringComparison.Ordinal),
+                        form.ElapsedSlotForTesting + " / " + form.StatusTipsForTesting);
+
             ok &= Check("a line after it reads as time since the reference",
                         grid.ElapsedForTesting(140) == "2400.000", grid.ElapsedForTesting(140));
             ok &= Check("and a line BEFORE it reads as a negative, which is what it is",
@@ -8319,8 +8340,7 @@ internal static class SelfTest
                         walk.Zip(walk.Skip(1)).All(p => p.First != p.Second), string.Join(" -> ", walk));
 
             // A line with no time cannot be measured from, so it is refused out loud.
-            string gappy = Path.Combine(dir, "gappy.log");
-            File.WriteAllLines(gappy, Enumerable.Range(0, 300).Select(i => i == 50
+            string gappy = Path.Combine(dir, "gappy.log");            File.WriteAllLines(gappy, Enumerable.Range(0, 300).Select(i => i == 50
                 ? "  at Payments.Charge(order) in Payments.cs:line 42"
                 : $"[{start.AddSeconds(i):yyyy-MM-ddTHH:mm:ss.fff}] request {i}"));
             form.OpenForTesting(gappy);
@@ -8333,6 +8353,23 @@ internal static class SelfTest
                         form.ElapsedOriginForTesting.StartsWith("PreviousShown", StringComparison.Ordinal)
                         && form.FindMessageForTesting.Contains("no time", StringComparison.OrdinalIgnoreCase),
                         form.ElapsedOriginForTesting + " / " + form.FindMessageForTesting);
+
+            // Opening a file drops the reference without the SETTING hearing about it, so the first press
+            // afterwards was moving off an origin the column had already stopped using - a key that did
+            // nothing. Found by driving the real app, not here, which is why it is written down here now.
+            grid.GoToLine(100);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.R);
+            Pump();
+            form.OpenForTesting(log);
+            for (int i = 0; i < 100 && form.DocForTesting.CompletedLineCount < 300; i++) { Thread.Sleep(20); Pump(); }
+            string opened = form.ElapsedOriginForTesting;
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+            Pump();
+            ok &= Check("and the first press after opening another file still moves the column",
+                        opened.StartsWith("PreviousShown", StringComparison.Ordinal)
+                        && form.ElapsedOriginForTesting.StartsWith("FileStart", StringComparison.Ordinal),
+                        opened + " -> " + form.ElapsedOriginForTesting);
             return ok;
         }
         finally
