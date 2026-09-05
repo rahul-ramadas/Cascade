@@ -8046,11 +8046,16 @@ internal static class SelfTest
             Pump();
 
             // The width is what the text to its right is placed by, so it has to come from the widest value
-            // the format can EVER draw rather than from the ones on screen.
+            // the format can EVER draw rather than from the ones on screen - and from no MORE than that.
+            // Counted in characters, exactly as the line numbers beside it are: asked of GDI without
+            // NoPadding it quotes for glyph overhang that is never drawn, and the column carried a whole
+            // character of margin nobody could put anything in.
+            string figure = grid.ElapsedWidestFigureForTesting;
             int room = grid.ElapsedGutterWidthForTesting;
-            int wide = TextRenderer.MeasureText("-9999.999", grid.Font).Width;
-            ok &= Check("the margin is sized for the widest figure it could ever draw, not the ones on screen",
-                        room >= wide, $"{room}px of room for {wide}px of figure");
+            int wide = figure.Length * Figure(margins, "char=");
+            ok &= Check("the margin is sized for the widest figure it could ever draw, and no wider",
+                        room == wide + 2 * pad,
+                        $"{room}px of room for \u201c{figure}\u201d, which draws {wide}px with {pad}px of air either side");
 
             grid.GoToLine(41);
             Pump();

@@ -1070,7 +1070,12 @@ public sealed class LineGridControl : Control
                 _elapsedWidthAt = _charWidth;
                 _elapsedWidthDigits = digits;
                 _elapsedWidthWidest = widest;
-                _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits, widest), FontRegular).Width
+                // NoPadding because that is how the figure is DRAWN. Measured any other way GDI quotes for
+                // glyph overhang nobody asked it to draw, which is a whole character of margin - and the
+                // line numbers beside it, sized by counting characters, do not pay for it.
+                _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits, widest), FontRegular,
+                                                         new Size(int.MaxValue, int.MaxValue),
+                                                         TextFormatFlags.NoPadding).Width
                               + 2 * MarginPad;
             }
             return _elapsedWidth;
@@ -1144,11 +1149,18 @@ public sealed class LineGridControl : Control
     /// numbers is drawn - so a check can go and look at the pixels rather than trust the arithmetic.</summary>
     internal int ElapsedGutterLeftForTesting => MarkerGutterWidth + LineNumberGutterWidth;
 
+    /// <summary>The widest figure the elapsed column can ever be asked to draw, which is the whole reason
+    /// it is as wide as it is - so a check can hold the width to it rather than to a number copied out.
+    /// </summary>
+    internal string ElapsedWidestFigureForTesting
+        => _doc?.Clock is { } clock ? ElapsedText.WidestGutter(clock.FractionDigits, _doc.WidestElapsedSeconds()) : "";
+
     /// <summary>How the margin has divided itself up. The air either side of a figure is the point of it:
     /// the two must match, and both must scale, or the numbers end up against the window edge.</summary>
     internal string MarginLayoutForTesting
         => $"markers={MarkerGutterWidth} numbers={LineNumberGutterWidth} "
-         + $"elapsed={ElapsedGutterWidth} pad={MarginPad} char={_charWidth}";
+         + $"elapsed={ElapsedGutterWidth} pad={MarginPad} char={_charWidth}"
+         + $" figure=\u201c{ElapsedWidestFigureForTesting}\u201d";
 
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
