@@ -215,9 +215,34 @@ public sealed class MainForm : Form
                          + (i.Enabled ? "" : " (unavailable)")));
     }
 
+    /// <summary>How wide the Elapsed Time drop-down comes out, against the WORDING in it. A menu item is
+    /// stretched to the width of the drop-down, so asking an item for its preferred size only hands the
+    /// same figure back - the text has to be measured directly to tell "the wording is long" from
+    /// "something not on show is still taking room".</summary>
+    internal string ElapsedMenuWidthForTesting()
+    {
+        SyncElapsedMenu();
+        _miElapsed.DropDown.PerformLayout();
+        static int Words(ToolStripMenuItem i)
+            => TextRenderer.MeasureText(i.Text ?? "", i.Font).Width
+             + TextRenderer.MeasureText(i.ShortcutKeyDisplayString ?? "", i.Font).Width;
+        var all = _miElapsed.DropDownItems.OfType<ToolStripMenuItem>().ToList();
+        int widest = all.Where(i => i.Available).Select(Words).DefaultIfEmpty(0).Max();
+        return $"drop={_miElapsed.DropDown.Width} widest={widest} | "
+             + string.Join(" ", all.Select(i => $"\u201c{(i.Text ?? "").Replace("&", "", StringComparison.Ordinal)}\u201d"
+                                              + $"={Words(i)}{(i.Available ? "" : "(off)")}"));
+    }
+
+    /// <summary>The keys the two elapsed entries advertise. They are not registered as ShortcutKeys, so
+    /// nothing but the displayed string tells a reader they exist - which makes it the thing to check.
+    /// </summary>
+    internal string ElapsedMenuKeysForTesting()
+        => $"{_miElapsedGutter.ShortcutKeyDisplayString}|{_miElapsedStatus.ShortcutKeyDisplayString}";
+
+    internal bool ShowElapsedGutterForTesting => _settings.ShowElapsedGutter;
+
     internal bool NoSavePrompt;
     private bool _offScreen;
-
     // Harness only: shows the update notice without an update actually being pending.
     internal string? UpdateNoticeOverride;
 
@@ -427,6 +452,10 @@ public sealed class MainForm : Form
             && (_findBar.ContainsFocus || !IsTextInputFocused())) { CloseFind(); return true; }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (keyData == SwitchLayoutKey && SwitchLayout()) return true;
+        // Handled here rather than registered on the menu items, because whether they may run depends on
+        // the log having a clock - and the items only learn that when the View menu is opened.
+        if (keyData == ElapsedGutterKey) return ToggleElapsed(margin: true);
+        if (keyData == ElapsedStatusKey) return ToggleElapsed(margin: false);
         if (!IsTextInputFocused())
         {
             switch (keyData)
@@ -697,18 +726,10 @@ public sealed class MainForm : Form
     {
         _miElapsed = new ToolStripMenuItem("Elap&sed Time");
 
-        _miElapsedGutter = new ToolStripMenuItem("In the &Margin", null, (_, _) =>
-        {
-            _settings.ShowElapsedGutter = !_settings.ShowElapsedGutter;
-            _grid.RefreshView();
-            SaveSettingsSoon();
-        });
-        _miElapsedStatus = new ToolStripMenuItem("In the &Status Bar", null, (_, _) =>
-        {
-            _settings.ShowElapsedInStatusBar = !_settings.ShowElapsedInStatusBar;
-            UpdateStatus();
-            SaveSettingsSoon();
-        });
+        _miElapsedGutter = new ToolStripMenuItem("In the &Margin", null, (_, _) => ToggleElapsed(margin: true))
+        { ShortcutKeyDisplayString = "Ctrl+Shift+E" };
+        _miElapsedStatus = new ToolStripMenuItem("In the &Status Bar", null, (_, _) => ToggleElapsed(margin: false))
+        { ShortcutKeyDisplayString = "Ctrl+Shift+B" };
         _miNoClock = new ToolStripMenuItem("No timestamp field \u2014 set one in Field Settings") { Enabled = false };
 
         _miElapsed.DropDownItems.Add(_miElapsedGutter);
@@ -719,13 +740,42 @@ public sealed class MainForm : Form
         return _miElapsed;
     }
 
+    private const Keys ElapsedGutterKey = Keys.Control | Keys.Shift | Keys.E;
+    private const Keys ElapsedStatusKey = Keys.Control | Keys.Shift | Keys.B;
+
+    /// <summary>Turns one of the two displays on or off, and answers whether it did - so the key can fall
+    /// through to whatever else wants it on a log with no clock, rather than appearing to do nothing.
+    /// </summary>
+    private bool ToggleElapsed(bool margin)
+    {
+        if (_doc.Clock is null) return false;
+        if (margin)
+        {
+            _settings.ShowElapsedGutter = !_settings.ShowElapsedGutter;
+            _grid.RefreshView();
+        }
+        else
+        {
+            _settings.ShowElapsedInStatusBar = !_settings.ShowElapsedInStatusBar;
+            UpdateStatus();
+        }
+        SaveSettingsSoon();
+        return true;
+    }
+
     private void SyncElapsedMenu()
     {
         bool have = _doc.Clock is not null;
         _miElapsedGutter.Enabled = _miElapsedStatus.Enabled = have;
         _miElapsedGutter.Checked = _settings.ShowElapsedGutter;
         _miElapsedStatus.Checked = _settings.ShowElapsedInStatusBar;
-        _miNoClock.Available = !have;
+
+        // TAKEN OUT of the list rather than hidden in it. MEASURED: a ToolStripDropDown that has once been
+        // laid out around an item does not give the width back when that item is hidden, so a sentence three
+        // times the length of the two entries left the menu that wide for the rest of the session.
+        bool listed = _miElapsed.DropDownItems.Contains(_miNoClock);
+        if (have && listed) _miElapsed.DropDownItems.Remove(_miNoClock);
+        else if (!have && !listed) _miElapsed.DropDownItems.Add(_miNoClock);
     }
 
     private ToolStripMenuItem BuildFilterLocationMenu()

@@ -779,7 +779,9 @@ internal static class DocShots
         ];
         var spec = doc.Columns.Clone();
         spec.Enabled = true;
-        ShotDialog(new ColumnsDialog(spec, samples), "field-settings");
+        // Handed the clock the app found for itself, as the real menu entry does - without it the dialog
+        // says no times could be read at all, which is not what anyone opening it on this log would see.
+        ShotDialog(new ColumnsDialog(spec, samples, 0, doc.Clock), "field-settings");
 
         ShotDialog(new PreferencesDialog(new AppSettings()), "preferences");
     }

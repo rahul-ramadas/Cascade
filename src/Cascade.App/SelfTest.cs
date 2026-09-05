@@ -7992,6 +7992,12 @@ internal static class SelfTest
             ok &= Check("and says nothing at all beside the first line there is",
                         grid.ElapsedForTesting(0).Length == 0, $"\"{grid.ElapsedForTesting(0)}\"");
 
+            // Two right-aligned figures with nothing but air between them read as one ragged column. Off the
+            // PIXELS: where the rule was meant to go says nothing about whether it was drawn.
+            ok &= Check("a hairline separates the line numbers from the figures beside them",
+                        RuleIsDrawnAt(grid, grid.ElapsedGutterLeftForTesting),
+                        $"nothing darker at x={grid.ElapsedGutterLeftForTesting}");
+
             // The width is what the text to its right is placed by, so it has to come from the widest value
             // the format can EVER draw rather than from the ones on screen.
             int room = grid.ElapsedGutterWidthForTesting;
@@ -8091,6 +8097,49 @@ internal static class SelfTest
             ok &= Check("and says where to say where the stamp is",
                         menu.Contains("Field Settings", StringComparison.Ordinal), menu);
 
+            // A drop-down is as wide as the widest thing in it, and the item explaining a MISSING clock is
+            // three times the width of the two entries. Hidden it must not still be paying for its room.
+            form.OpenForTesting(timed);
+            for (int i = 0; i < 100 && form.DocForTesting.Clock is null; i++) { Thread.Sleep(20); Pump(); }
+            string widths = form.ElapsedMenuWidthForTesting();
+            Line("   (" + widths + ")");
+            int drop = Figure(widths, "drop="), widest = Figure(widths, "widest=");
+            ok &= Check("the menu is no wider than the entries it is showing",
+                        drop > 0 && drop <= widest + form.LogicalToDeviceUnits(80), widths);
+
+            // Both displays have a key of their own. They are handled by the form rather than registered on
+            // the menu items, because whether they may run depends on the log having a clock - and the items
+            // only learn that when the View menu is opened.
+            int margin = grid.ElapsedGutterWidthForTesting;
+            ok &= Check("Ctrl+Shift+E takes the margin away",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+                        && grid.ElapsedGutterWidthForTesting == 0, $"{grid.ElapsedGutterWidthForTesting}px");
+            ok &= Check("and brings it back exactly as it was",
+                        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+                        && grid.ElapsedGutterWidthForTesting == margin,
+                        $"{margin} -> {grid.ElapsedGutterWidthForTesting}");
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B);
+            Pump();
+            ok &= Check("Ctrl+Shift+B takes the slot off the status bar",
+                        form.ElapsedSlotForTesting.Length == 0, form.ElapsedSlotForTesting);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B);
+            Pump();
+            ok &= Check("and puts it back", form.ElapsedSlotForTesting.Length > 0);
+
+            ok &= Check("and the menu says which keys they are",
+                        form.ElapsedMenuKeysForTesting() == "Ctrl+Shift+E|Ctrl+Shift+B",
+                        form.ElapsedMenuKeysForTesting());
+
+            // On a log with no clock the key must fall through rather than silently flip a setting nobody
+            // can see the effect of.
+            form.OpenForTesting(untimed);
+            for (int i = 0; i < 100 && doc.Clock is not null; i++) { Thread.Sleep(20); Pump(); }
+            bool wasOn = form.ShowElapsedGutterForTesting;
+            ok &= Check("and neither key claims itself on a log with no clock",
+                        !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.E)
+                        && !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B)
+                        && form.ShowElapsedGutterForTesting == wasOn);
+
             ok &= CheckNamingTheTimeField();
             return ok;
         }
@@ -8139,10 +8188,12 @@ internal static class SelfTest
                         dlg.TimeStatusForTesting.Contains("No field is the timestamp", StringComparison.Ordinal),
                         dlg.TimeStatusForTesting);
 
-        dlg.TickTimeForTesting(1);
+        dlg.PickTimeFieldForTesting(1);
         Pump();
         ok &= Check("naming a field proposes what reads it",
                     dlg.TimeFormatForTesting == "HH:mm:ss.fff", dlg.TimeFormatForTesting);
+        ok &= Check("and the field it is reading is named where it was chosen",
+                    dlg.TimeFieldForTesting == "Col 2", dlg.TimeFieldForTesting);
         ok &= Check("and shows it reading the reader's own log back to them",
                     dlg.TimeStatusForTesting.Contains("40 of 40", StringComparison.Ordinal)
                     && dlg.TimeStatusForTesting.Contains("09:00:00.000", StringComparison.Ordinal),
@@ -8167,6 +8218,33 @@ internal static class SelfTest
         Pump();
         dlg.ApplyForTesting();
         ok &= Check("writing a template still means the reader wants to see the fields", dlg.Result.Enabled);
+
+        // The first cell carries the field's colour, greyed when the field is not being shown. The fault it
+        // guards against was that the cell only caught up when something ELSE made the grid repaint, so what
+        // is watched is what the grid was ASKED to draw - a render would force it and prove nothing.
+        dlg.SelectRowForTesting(0);
+        dlg.SwatchPaintsForTesting();
+        dlg.ForgetSwatchPaintsForTesting();
+        dlg.SetCellForTesting(2, "show", false);
+        int[] drawn = dlg.SwatchPaintsForTesting();
+        ok &= Check("hiding a field redraws its colour there and then, without touching anything else",
+                    drawn.Contains(2), drawn.Length == 0 ? "nothing redrawn" : "rows " + string.Join(",", drawn));
+
+        // A button is several pixels taller than the box beside it, so a cell that anchors both to its TOP
+        // leaves them on visibly different lines. Measured through the middle of each control rather than
+        // off its box: what the eye reads as "level" is where the thing is, not how tall it is.
+        // MEASURED, which is where the 1px allowance comes from: the reported fault is "TextBox 0+31,
+        // Button 0+35" = 2px apart on the template row and 5px on the time row, while a combo box left at
+        // its own height in a button-tall row rounds to 1px and is not something anyone can see.
+        foreach (var row in dlg.MixedRowsForTesting)
+        {
+            var kids = row.Controls.Cast<Control>().Where(c => c.Visible).ToList();
+            int highest = kids.Min(c => c.Top + c.Height / 2), lowest = kids.Max(c => c.Top + c.Height / 2);
+            ok &= Check($"everything on the {(row == dlg.MixedRowsForTesting[0] ? "template" : "time")} row "
+                      + $"is centred on one line (middles {highest}-{lowest})",
+                        lowest - highest <= 1,
+                        string.Join(", ", kids.Select(c => $"{c.GetType().Name} {c.Top}+{c.Height}")));
+        }
 
         dlg.Close();
         Pump();

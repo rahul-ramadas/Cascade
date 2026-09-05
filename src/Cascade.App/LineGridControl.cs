@@ -1130,6 +1130,10 @@ public sealed class LineGridControl : Control
     internal string ElapsedForTesting(long line) => Elapsed(line, _doc?.GetLineText(line) ?? "");
     internal int ElapsedGutterWidthForTesting => ElapsedGutterWidth;
 
+    /// <summary>Where the elapsed column starts, which is where the hairline between it and the line
+    /// numbers is drawn - so a check can go and look at the pixels rather than trust the arithmetic.</summary>
+    internal int ElapsedGutterLeftForTesting => MarkerGutterWidth + LineNumberGutterWidth;
+
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
 
@@ -2877,8 +2881,18 @@ public sealed class LineGridControl : Control
         if (lnw > 0) DrawMarginText(ink, Digits(line + 1), markers, y, lnw, height, colour);
 
         int elw = ElapsedGutterWidth;
-        if (elw > 0) DrawMarginText(ink, elapsed ?? "", markers + lnw, y, elw, height, colour);
+        if (elw > 0)
+        {
+            DrawMarginText(ink, elapsed ?? "", markers + lnw, y, elw, height, colour);
+            // Two right-aligned figures with nothing but air between them read as one ragged column. The
+            // rule is drawn INSIDE the elapsed box, so saying where one column ends costs the other nothing.
+            if (lnw > 0) ink.Fill(new Rectangle(markers + lnw, y, 1, height), MarginRule);
+        }
     }
+
+    /// <summary>The hairline between two margins: the line-number ink faded most of the way back into the
+    /// margin it is drawn on, so it separates without being read as something to look at.</summary>
+    private Color MarginRule => MiniMapControl.Blend(_settings.LineNumberColor, _settings.GutterBack, 0.22);
 
     /// <summary>One right-aligned figure in the margin: filled to the margin's own colour, then the text
     /// laid into the part of the box it is allowed - the few pixels of air before the next thing along are

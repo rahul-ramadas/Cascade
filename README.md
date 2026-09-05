@@ -115,7 +115,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - The previous line **on screen** — so with the noise filtered away it measures between the lines you kept, which is a latency profile of whatever the filters select.
 - Select a line and the status bar says the same thing in words; select several and it says how long they cover.
 - Lines out of order read as negative, because that is what they are.
-- If your timestamp is somewhere the guess cannot reach, say where it is in **Field Settings**; **View ▸ Elapsed Time** turns either display off.
+- If your timestamp is somewhere the guess cannot reach, name the field it is in under **Field Settings**; **Ctrl+Shift+E** and **Ctrl+Shift+B** turn the two displays off.
 
 ### The match map
 
@@ -192,7 +192,7 @@ template:   {[*]}{[*]}{[*]} {*}
 
 - `Ctrl+Shift+D` tries the template against real lines from the file: how many of them match, and where a line that doesn't stopped matching.
 - **Detect** writes the template for you when the line begins with bracketed groups: `[ ]`, `( )` or `< >`.
-- Tick a field as the **time** and Cascade proposes the format that reads it — a .NET format string like `yyyy-MM-dd HH:mm:ss.fff`, or `epoch:ms` — and shows it reading your own log back to you.
+- Name a field as the **time** and Cascade proposes the format that reads it — a .NET format string like `yyyy-MM-dd HH:mm:ss.fff`, or `epoch:ms` — and shows it reading your own log back to you.
 
 ---
 
@@ -296,6 +296,7 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Match map or plain scrollbar / word wrap / split lines into fields |
 | `Ctrl+Shift+X` / `Ctrl+Shift+D` | Switch field layout / field settings |
+| `Ctrl+Shift+E` / `Ctrl+Shift+B` | Elapsed times in the margin / in the status bar |
 | `Ctrl+Shift+P` / `Ctrl+Shift+L` | Show or hide the presets pane / the filter list |
 | `Ctrl+Shift+T` / `Ctrl+Shift+F` | Focus the log view / the filter list |
 | `Ctrl+Shift+↑ ↓ ← →` | Dock the filter list |

@@ -65,6 +65,10 @@ public sealed class ColumnsDialog : DialogBase
     private readonly Button _down = new() { Text = "Move d&own", AutoSize = true };
     private readonly ToolTip _tips = new() { AutoPopDelay = 20000, InitialDelay = 400, ReshowDelay = 100 };
 
+    // No Alt key of its own: F, I, E and L are all claimed elsewhere in this dialog, and the "Tim&e"
+    // heading directly above already lands on this box - a label's mnemonic moves focus to the next stop.
+    private readonly Label _timeFieldLabel = new() { Text = "Field:", AutoSize = true };
+    private readonly ComboBox _timeField = new() { DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Time field" };
     private readonly Label _timeLabel = new() { Text = "Format:", AutoSize = true };
     private readonly ComboBox _timeFormat = new() { DropDownStyle = ComboBoxStyle.DropDown, AccessibleName = "Time format" };
     private readonly Button _guess = new() { Text = "&Guess", AutoSize = true };
@@ -287,7 +291,12 @@ public sealed class ColumnsDialog : DialogBase
         templateRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         templateRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         templateRow.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        // Anchored sideways only, so the cell centres each of them: a button is several pixels taller than
+        // the box beside it, and left to the default Top|Left they sit on visibly different lines.
+        _template.Dock = DockStyle.None;
+        _template.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         _template.Margin = new Padding(0, 0, Dpi(6), 0);
+        _detect.Anchor = AnchorStyles.Left;
         _detect.Margin = new Padding(0);
         templateRow.Controls.Add(_template, 0, 0);
         templateRow.Controls.Add(_detect, 1, 0);
@@ -341,26 +350,41 @@ public sealed class ColumnsDialog : DialogBase
 
     private Button? _ok;
 
-    /// <summary>How the field ticked as the time is read. The controls are always here and greyed when no
-    /// field is ticked, rather than appearing with the tick: a row that came and went would shift the OK
-    /// button under the pointer that had just ticked the box.</summary>
+    /// <summary>Which field holds the stamp, and how it is written. A LIST rather than a tick beside every
+    /// field: only one field can be the time, and a column of tick boxes says the opposite of that.
+    ///
+    /// <para>The controls are always here and greyed when no field is named, rather than appearing with the
+    /// choice: a row that came and went would shift the OK button under the pointer that had just used it.
+    /// </para></summary>
     private TableLayoutPanel TimeRow()
     {
         _timeFormat.Items.AddRange(CommonFormats);
-        _timeFormat.Margin = new Padding(0, 0, Dpi(6), 0);
-        _timeLabel.Anchor = AnchorStyles.Left;
-        _timeLabel.Margin = new Padding(0, 0, Dpi(6), 0);
+        foreach (var c in new Control[] { _timeFieldLabel, _timeField, _timeLabel, _timeFormat })
+        {
+            // Neither Top nor Bottom, so the cell centres it: a button is taller than the box beside it,
+            // and top-anchored they sit on different lines.
+            c.Anchor = AnchorStyles.Left;
+            c.Margin = new Padding(0, 0, Dpi(6), 0);
+        }
+        _timeField.Anchor = AnchorStyles.Left;
+        _timeField.Width = Dpi(260);
+        _timeFormat.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        _guess.Anchor = AnchorStyles.Left;
         _guess.Margin = new Padding(0);
 
-        var row = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
+        var row = new TableLayoutPanel { ColumnCount = 5, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(0) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        // A field name is a word; a format is a line of one. The rest of the row goes to the longer of them.
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         row.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _timeFormat.Dock = DockStyle.Fill;
-        row.Controls.Add(_timeLabel, 0, 0);
-        row.Controls.Add(_timeFormat, 1, 0);
-        row.Controls.Add(_guess, 2, 0);
+        row.Controls.Add(_timeFieldLabel, 0, 0);
+        row.Controls.Add(_timeField, 1, 0);
+        row.Controls.Add(_timeLabel, 2, 0);
+        row.Controls.Add(_timeFormat, 3, 0);
+        row.Controls.Add(_guess, 4, 0);
         return row;
     }
 
@@ -577,11 +601,6 @@ public sealed class ColumnsDialog : DialogBase
         {
             Name = "show", HeaderText = "Show", SortMode = DataGridViewColumnSortMode.NotSortable
         });
-        _list.Columns.Add(new DataGridViewCheckBoxColumn
-        {
-            Name = "time", HeaderText = "Time", SortMode = DataGridViewColumnSortMode.NotSortable,
-            ToolTipText = "Which field holds the timestamp. Only one can."
-        });
         _list.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "width", HeaderText = "Width (px)", SortMode = DataGridViewColumnSortMode.NotSortable
@@ -603,7 +622,6 @@ public sealed class ColumnsDialog : DialogBase
     {
         _list.Columns["swatch"]!.Width = GripWidth + Dpi(30);
         _list.Columns["show"]!.Width = HeaderRoom("Show", 34);
-        _list.Columns["time"]!.Width = HeaderRoom("Time", 34);
         _list.Columns["width"]!.Width = HeaderRoom("Width (px)", 34);
         _list.Columns["align"]!.Width = HeaderRoom("Center", 40);
     }
@@ -625,7 +643,17 @@ public sealed class ColumnsDialog : DialogBase
 
         _asColumns.CheckedChanged += (_, _) => { if (_filling) return; _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns; UpdateListEnabled(); Refresh0(); };
 
-        _list.CellValueChanged += (_, e) => { if (!_filling && e.RowIndex >= 0) { PullFromList(); KeepOneShown(e.RowIndex); Refresh0(); } };        _list.CurrentCellDirtyStateChanged += (_, _) =>
+        _list.CellValueChanged += (_, e) =>
+        {
+            if (_filling || e.RowIndex < 0) return;
+            PullFromList();
+            KeepOneShown(e.RowIndex);
+            // The first cell draws the field's colour, greyed when the field is not being shown - and the
+            // grid has no reason to know that ticking one cell changed what another one draws.
+            _list.InvalidateCell(_list.Columns["swatch"]!.Index, e.RowIndex);
+            Refresh0();
+        };
+        _list.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_list.IsCurrentCellDirty && _list.CurrentCell is DataGridViewCheckBoxCell or DataGridViewComboBoxCell)
                 _list.CommitEdit(DataGridViewDataErrorContexts.Commit);
@@ -640,6 +668,7 @@ public sealed class ColumnsDialog : DialogBase
         _down.Click += (_, _) => Reorder(+1);
         _preview.PartPicked += SelectField;
 
+        _timeField.SelectedIndexChanged += (_, _) => { if (!_filling) PickTimeField(_timeField.SelectedIndex - 1); };
         _timeFormat.TextChanged += (_, _) => { if (_filling) return; _working.TimeFormat = _timeFormat.Text.Trim(); ShowTimeStatus(); };
         _guess.Click += (_, _) => GuessTimeFormat(announce: true);
 
@@ -768,8 +797,8 @@ public sealed class ColumnsDialog : DialogBase
         }
         WriteTemplate(found, found.Length);
         // A header nearly always begins with the time, and a reader who pressed Detect wants the whole
-        // reading rather than the fields alone. Proposed, not imposed: it lands in the tick and the format
-        // box where it can be seen and changed.
+        // reading rather than the fields alone. Proposed, not imposed: it lands in the field list and the
+        // format box where it can be seen and changed.
         if (ClockDetector.GuessField(_samples, _working.Compiled) is { } time)
         {
             _working.TimePart = time.Part;
@@ -818,9 +847,9 @@ public sealed class ColumnsDialog : DialogBase
             // "what is that column measuring" without having to go looking for it.
             _timeStatus.Text = _found is null
                 ? "No field is the timestamp, and none could be found at the start of the line - so there "
-                  + "are no elapsed times. Tick a field above to say where the stamp is."
+                  + "are no elapsed times. Name the field the stamp is in."
                 : $"No field is the timestamp. Elapsed times are being read from the start of the line as "
-                  + $"\u201c{_found.Format.Source}\u201d; tick a field above to say otherwise.";
+                  + $"\u201c{_found.Format.Source}\u201d; name a field to say otherwise.";
             return;
         }
 
@@ -910,16 +939,34 @@ public sealed class ColumnsDialog : DialogBase
         int keep = _list.CurrentRow?.Index ?? 0;
         _list.Rows.Clear();
         foreach (var column in _working.Columns)
-            _list.Rows.Add("", column.Name, column.Visible, column.Source == _working.TimePart,
+            _list.Rows.Add("", column.Name, column.Visible,
                            column.Width == 0 ? "" : column.Width.ToString(), column.Align.ToString());
         if (_list.Rows.Count > 0)
             _list.CurrentCell = _list.Rows[Math.Clamp(keep, 0, _list.Rows.Count - 1)].Cells["name"];
+        FillTimeField();
         _timeFormat.Text = _working.TimeFormat;
         _filling = false;
         UpdateListEnabled();
         UpdateHighlight();
         ShowTimeStatus();
     }
+
+    /// <summary>The fields on offer as the timestamp, by the names they are listed under. Caller holds
+    /// <see cref="_filling"/>: refilling a ComboBox resets its selection, which would read as a choice.
+    /// </summary>
+    private void FillTimeField()
+    {
+        _timeField.Items.Clear();
+        _timeField.Items.Add(NoTimeField);
+        foreach (var column in _working.Columns) _timeField.Items.Add(column.Name);
+
+        int at = -1;
+        for (int i = 0; i < _working.Columns.Count; i++)
+            if (_working.Columns[i].Source == _working.TimePart) { at = i; break; }
+        _timeField.SelectedIndex = at + 1;
+    }
+
+    private const string NoTimeField = "(none)";
 
     /// <summary>Width and alignment only mean anything to the Columns layout, so they are greyed rather
     /// than left looking as though they do nothing. The format goes the same way when no field is the time.
@@ -942,7 +989,6 @@ public sealed class ColumnsDialog : DialogBase
 
     private void PullFromList()
     {
-        int wasTime = _working.TimePart;
         for (int i = 0; i < _list.Rows.Count && i < _working.Columns.Count; i++)
         {
             var column = _working.Columns[i];
@@ -959,24 +1005,16 @@ public sealed class ColumnsDialog : DialogBase
 
             column.Align = Enum.TryParse<ColumnAlign>(Convert.ToString(row.Cells["align"].Value), out var a) ? a : ColumnAlign.Left;
         }
-        PullTimeField(wasTime);
     }
 
-    /// <summary>Only one field can be the time, so the tick behaves as a radio: whichever row was just
-    /// ticked wins and the rest spring back. Ticking a NEW field also proposes a format for it, since a
-    /// field named as the time with nothing that reads it is a half-finished answer.</summary>
-    private void PullTimeField(int wasTime)
+    /// <summary>Naming a field as the timestamp, by its row in the list. Naming a NEW one also proposes a
+    /// format for it: a field named as the time with nothing that reads it is a half-finished answer.
+    /// </summary>
+    private void PickTimeField(int row)
     {
-        int now = -1;
-        for (int i = 0; i < _list.Rows.Count && i < _working.Columns.Count; i++)
-        {
-            if (!Convert.ToBoolean(_list.Rows[i].Cells["time"].Value ?? false)) continue;
-            int part = _working.Columns[i].Source;
-            if (part != wasTime) { now = part; break; }
-            if (now < 0) now = part;
-        }
+        int now = row >= 0 && row < _working.Columns.Count ? _working.Columns[row].Source : -1;
+        if (now == _working.TimePart) return;
 
-        if (now == wasTime) return;
         _working.TimePart = now;
         if (now < 0) _working.TimeFormat = "";
         else GuessTimeFormat(announce: false);
@@ -1162,6 +1200,7 @@ public sealed class ColumnsDialog : DialogBase
         if (e.RowIndex < 0) return;
         if (e.ColumnIndex == _list.Columns["width"]!.Index) { PaintWidth(e); return; }
         if (e.ColumnIndex != _list.Columns["swatch"]!.Index) return;
+        _swatchPaints.Add(e.RowIndex);
         e.PaintBackground(e.CellBounds, true);
         if (e.RowIndex < _working.Columns.Count)
         {
@@ -1294,7 +1333,8 @@ public sealed class ColumnsDialog : DialogBase
 
     private void Apply()
     {
-        _list.EndEdit();        PullFromList();
+        _list.EndEdit();
+        PullFromList();
         _working.Template = _template.Text;
         _working.Layout = _asInline.Checked ? FieldLayout.Inline : FieldLayout.Columns;
         // Writing a template and pressing OK plainly means "do it"; there is no separate switch to find.
@@ -1314,14 +1354,24 @@ public sealed class ColumnsDialog : DialogBase
 
     // ---- harness seams ----
 
-    /// <summary>Ticks a row's Time box through the same handler a click goes through, so what a check
-    /// exercises is the wiring rather than the field behind it.</summary>
-    internal void TickTimeForTesting(int row)
+    /// <summary>Names a listed field as the timestamp through the same handler a choice goes through, so
+    /// what a check exercises is the wiring rather than the field behind it.</summary>
+    internal void PickTimeFieldForTesting(int row) => _timeField.SelectedIndex = row + 1;
+
+    /// <summary>Which rows have had their first cell drawn since a check last asked. Whether the COLOUR is
+    /// right can be read off a render, but a render forces the whole grid to paint - so the only way to see
+    /// that a cell was left stale is to watch what the grid was asked to draw.</summary>
+    private readonly List<int> _swatchPaints = [];
+
+    internal void ForgetSwatchPaintsForTesting() => _swatchPaints.Clear();
+
+    internal int[] SwatchPaintsForTesting()
     {
-        _list.CurrentCell = _list.Rows[row].Cells["time"];
-        _list.Rows[row].Cells["time"].Value = true;
+        _list.Update();   // whatever is invalid, and nothing else
+        return [.. _swatchPaints];
     }
 
+    internal string TimeFieldForTesting => Convert.ToString(_timeField.SelectedItem) ?? "";
     internal string TimeStatusForTesting => _timeStatus.Text;
     internal string TimeFormatForTesting => _timeFormat.Text;
 
@@ -1432,6 +1482,11 @@ public sealed class ColumnsDialog : DialogBase
         => _list.ClientSize.Height / Math.Max(1, _list.Rows.Count > 0 ? _list.Rows[0].Height : _list.RowTemplate.Height);
     internal void DetectForTesting() => Detect();
     internal void ApplyForTesting() => Apply();
+
+    /// <summary>The two rows that mix a button with a box beside it, which is where they can end up on
+    /// different lines: a button is several pixels taller, and a cell anchored Top puts them both at the
+    /// top of it rather than through the middle.</summary>
+    internal Control[] MixedRowsForTesting => [_detect.Parent!, _guess.Parent!];
     internal void SetLayoutForTesting(FieldLayout layout) { _asInline.Checked = layout == FieldLayout.Inline; _asColumns.Checked = !_asInline.Checked; }
     internal int RowCountForTesting => _list.Rows.Count;
     internal bool WidthIsEditableForTesting => !_list.Columns["width"]!.ReadOnly;
