@@ -437,6 +437,42 @@ public class DocumentTimeTests
         finally { File.Delete(brief); File.Delete(long_); }
     }
 
+    /// <summary>Why the span is the ANSWER and not a lazy over-estimate of one. Sizing the column from the
+    /// largest gap between neighbouring lines looks tighter and is wrong: a filter can hide everything
+    /// between any two lines in the file and stand them next to each other, so the largest figure "time
+    /// since the previous line shown" can print is the whole span - the same bound the other two origins
+    /// have. There is nothing to win, and a column sized the tighter way spends the filtered view - the
+    /// view this feature exists for - saying ">" instead of a number.</summary>
+    [Fact]
+    public void A_filter_can_stand_the_two_ends_of_the_log_next_to_each_other()
+    {
+        string path = WriteLog(40_000, line: i =>
+        {
+            var at = Start.AddSeconds(i);
+            string tag = i is 0 or 39_999 ? "beacon" : "api";
+            return $"[{at.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture)}][{tag}] request {i}";
+        });
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Match = new FilterMatch { Text = "beacon" }, Enabled = true });
+            doc.SetFilters(filters);
+            Wait(doc);
+
+            // No two lines in this file are ever more than a second apart. Two are showing.
+            Assert.True(doc.TryElapsedBefore(39_999, out long shown));
+            Assert.Equal(TimeSpan.FromSeconds(39_999).Ticks, shown);
+
+            Assert.Equal("39999.000", ElapsedText.Gutter(shown, 3, doc.WidestElapsedSeconds()));
+            Assert.Equal(">9", ElapsedText.Gutter(shown, 3, 9));
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>The width has to be the same answer at every size the file passes through while it is being
     /// read, or the margin steps sideways over and over as a big log loads. Rounding to all-nines is what
     /// buys that, and it is worth a check because nothing else would notice it being taken away.</summary>
