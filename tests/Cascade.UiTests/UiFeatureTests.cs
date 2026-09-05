@@ -1125,6 +1125,64 @@ public class UiFeatureTests
         Assert.True(fails.Count == 0, "Field layout failures:\n  " + string.Join("\n  ", fails));
     }
 
+    /// <summary>
+    /// The find bar is a text box, and inside a text box the editing keys are the box's own.
+    ///
+    /// <para>Ctrl+A and Ctrl+C belong to the log on the Edit menu, and a menu shortcut is dispatched by the
+    /// form BEFORE the control with the keyboard is offered the key at all - so both of them reached over
+    /// the bar and selected and copied the whole LOG while the caret was sitting in the term. Driven with
+    /// posted keystrokes, because that is the only path that runs the pre-processing where a menu shortcut
+    /// is decided; sent straight to the window procedure, the fault cannot happen at all.</para>
+    /// </summary>
+    [Fact]
+    public void The_editing_keys_go_to_the_find_box_while_it_has_the_keyboard()
+    {
+        using var app = CascadeApp.Launch();
+        app.Activate();
+        var fails = new List<string>();
+        void Check(string name, bool cond, string detail = "") { if (!cond) fails.Add($"{name} :: {detail}"); }
+
+        // One line of the log picked out, so a Ctrl+A that went there instead would say "Sel: 1,000".
+        app.SelectLine(9);
+        Check("one line of the log is picked out", app.WaitStatus("Sel:", "Sel: 1"), app.StatusText("Sel:"));
+
+        app.OpenFind();
+        var box = app.FindInput();
+        app.SetText(box, "MATCH line 42");
+        app.FocusFindInput();
+        Check("the find box has the keyboard", app.WaitForArea("find bar"), app.FocusedArea());
+
+        app.SendKeyAsDialogKey(box, VirtualKeyShort.KEY_A, VirtualKeyShort.CONTROL);
+        Check("Ctrl+A in the find bar leaves the log's own selection alone",
+              app.WaitStatus("Sel:", "Sel: 1"), app.StatusText("Sel:"));
+
+        CascadeApp.SetClipboardText("something else entirely");
+        app.SendKeyAsDialogKey(box, VirtualKeyShort.KEY_C, VirtualKeyShort.CONTROL);
+        string clip = "";
+        Retry.WhileFalse(() => (clip = CascadeApp.ReadClipboardText()) == "MATCH line 42",
+                         TimeSpan.FromSeconds(3), TimeSpan.FromMilliseconds(25));
+        Check("Ctrl+C in the find bar copies the term, not the log", clip == "MATCH line 42", clip);
+
+        // Ctrl+Z is the filter list's undo everywhere else, and has to be the box's own here - typing over
+        // the term and taking it back is what a text box does with it.
+        app.SendKeyAsDialogKey(box, VirtualKeyShort.KEY_A, VirtualKeyShort.CONTROL);
+        app.SendKeyAsDialogKey(box, VirtualKeyShort.KEY_X);
+        Check("typing replaces the term", app.WaitFindTerm("x"), app.TextOf(app.FindInput()));
+        app.SendKeyAsDialogKey(box, VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+        Check("and Ctrl+Z takes the typing back rather than undoing a filter edit",
+              app.WaitFindTerm("MATCH line 42"), app.TextOf(app.FindInput()));
+
+        // ...and out of the box they are the log's again.
+        app.CloseFind();
+        app.ClickMenuOrThrow("View", "Focus Text Area");
+        var grid = app.Grid();
+        app.SendKeyAsDialogKey(grid, VirtualKeyShort.KEY_A, VirtualKeyShort.CONTROL);
+        Check("Ctrl+A back in the log still selects the whole log",
+              app.WaitStatus("Sel:", $"Sel: {TestData.LineCount:N0}"), app.StatusText("Sel:"));
+
+        Assert.True(fails.Count == 0, "Editing-key failures:\n  " + string.Join("\n  ", fails));
+    }
+
     [Fact]
     public void Copy_and_docking_work()
     {

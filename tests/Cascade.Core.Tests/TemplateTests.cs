@@ -284,6 +284,133 @@ public class TemplateTests
         Assert.Equal(["y"], Values(@"\\{*}", @"\y"));
     }
 
+    // ---- a dot: any one character ----
+
+    /// <summary>A dot stands for one character of any kind, which is what lets one template read a log
+    /// whose punctuation is not quite the same from line to line.</summary>
+    [Theory]
+    [InlineData("[a]-[b] the message")]
+    [InlineData("[a]+[b] the message")]
+    [InlineData("[a] [b] the message")]     // a space is a character like any other
+    public void A_dot_matches_whatever_one_character_is_there(string line)
+        => Assert.Equal(["a", "b", "the message"], Values("{[*]}.{[*]} {*}", line));
+
+    /// <summary>It stands for exactly one, though - so a line with nothing there does not match.</summary>
+    [Fact]
+    public void A_dot_is_one_character_and_not_none()
+        => Assert.False(new LineTemplate("{[*]}.{[*]} {*}").Match("[a][b] the message", new TemplateMatch()));
+
+    [Fact]
+    public void A_run_of_dots_matches_exactly_that_many_characters()
+    {
+        Assert.Equal(["hello"], Values("{..:..:..} {*}", "12:34:56 hello"));
+        Assert.False(new LineTemplate("{..:..:..} {*}").Match("12-34-56 hello", new TemplateMatch()));
+        Assert.Equal(["ab", "rest"], Values("{[*]}..{*}", "[ab]xyrest"));
+    }
+
+    /// <summary>Dots are counted, so a line one character short of what the template asks for is not a
+    /// match - and the failure names the dots, which are what is written at that point of the template.
+    /// </summary>
+    [Fact]
+    public void A_line_that_runs_out_under_the_dots_does_not_match()
+    {
+        var t = new LineTemplate("{[*]}...{*}");
+        var m = new TemplateMatch();
+        Assert.True(t.Match("[a]xyz", m));
+        Assert.False(t.Match("[a]xy", m));
+        Assert.Equal("...", m.FailureExpected);
+        Assert.Equal(3, m.FailurePosition);
+    }
+
+    /// <summary>What comes after the dots still has to be there, so a dot never swallows a line whole.</summary>
+    [Fact]
+    public void The_text_after_the_dots_still_has_to_line_up()
+    {
+        Assert.Equal(["a", "rest"], Values("{[*]}..X{*}", "[a]12Xrest"));
+        Assert.False(new LineTemplate("{[*]}..X{*}").Match("[a]1X2Xrest", new TemplateMatch()));
+    }
+
+    [Fact]
+    public void An_escaped_dot_is_an_ordinary_full_stop()
+    {
+        var t = new LineTemplate(@"{[*]}\.{*}");
+        Assert.True(t.IsValid);
+        Assert.Equal(["a", "b"], Values(@"{[*]}\.{*}", "[a].b"));
+        Assert.False(t.Match("[a]-b", new TemplateMatch()));
+    }
+
+    /// <summary>...and text written into a template on the reader's behalf keeps its full stops, or a
+    /// detected template would quietly mean something wider than the line it was read from.</summary>
+    [Fact]
+    public void Text_written_into_a_template_has_its_dots_escaped()
+    {
+        Assert.Equal(@"a\.b", LineTemplate.Escape("a.b"));
+        string detected = LineTemplate.Detect("[a]..[b] c");
+        Assert.Equal(@"{[*]}\.\.{[*]} {*}", detected);
+        Assert.False(new LineTemplate(detected).Match("[a]xx[b] c", new TemplateMatch()));
+    }
+
+    /// <summary>A dot belongs to the part it is written in, exactly as a literal does - so hiding that
+    /// field takes the character it stood for away with it.</summary>
+    [Fact]
+    public void A_dot_belongs_to_the_part_it_is_written_in()
+    {
+        Assert.Equal("[a]-", Part("{[*].}{*}", "[a]-rest", 0));
+
+        var spec = new ColumnSpec { Enabled = true, Template = "{[*].}{*}", Layout = FieldLayout.Inline };
+        spec.Reset();
+        spec.Columns[0].Visible = false;
+        var m = new TemplateMatch();
+        Assert.True(spec.Compiled.Match("[a]-rest", m));
+        var projection = new LineProjection();
+        projection.Build("[a]-rest", spec, m);
+        Assert.Equal("rest", projection.Text);
+    }
+
+    /// <summary>A run found by stepping back over dots is still found with one search per attempt. Tried
+    /// at every position instead, a template opening a run with a dot would be quadratic - and these run
+    /// on lines that may be megabytes long.</summary>
+    [Fact]
+    public void Dots_in_front_of_a_literal_do_not_make_the_scan_quadratic()
+    {
+        var t = new LineTemplate("{*}..zz{*}");
+        var m = new TemplateMatch();
+        t.Match("aa..zzb", m);   // warm
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(t.Match(new string('a', 400_000), m));
+        Assert.True(t.Match(new string('a', 400_000) + "xxzztail", m));
+        watch.Stop();
+        Assert.True(watch.ElapsedMilliseconds < 250, $"took {watch.ElapsedMilliseconds} ms");
+    }
+
+    /// <summary>The same for dots in front of a run of spaces: only the first space of each run can start
+    /// a match, whether that run is at the head of the template's own run or a few dots into it.</summary>
+    [Fact]
+    public void Dots_in_front_of_a_run_of_spaces_do_not_make_the_scan_quadratic()
+    {
+        var t = new LineTemplate("{*}.. z{*}");
+        var m = new TemplateMatch();
+        t.Match("aa   zb", m);   // warm
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(t.Match(new string(' ', 400_000) + "nothing to find", m));
+        watch.Stop();
+        Assert.True(watch.ElapsedMilliseconds < 250, $"took {watch.ElapsedMilliseconds} ms");
+    }
+
+    /// <summary>A value stops at the first place what follows it can match, and anywhere at all is where a
+    /// dot can match - so dots alone leave nothing for the value before them. Legal, and worth pinning
+    /// down: the dialog shows the split as it is typed, so what matters is that it is not a surprise
+    /// twice.</summary>
+    [Fact]
+    public void Dots_alone_leave_nothing_for_the_value_in_front_of_them()
+    {
+        Assert.Equal(["", "bc"], Values("{*}.{*}", "abc"));
+        Assert.Equal(["rest"], Values("{.*}", "Xrest"));
+        Assert.Equal(["rest"], Values("{...*}", "abcrest"));
+    }
+
     [Fact]
     public void A_part_may_capture_nothing_at_all()
     {

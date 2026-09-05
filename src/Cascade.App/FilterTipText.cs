@@ -48,14 +48,23 @@ internal static class FilterTipText
         if (f.Kind == FilterKind.Exclude) sb.Append("\u2260 ");   // ≠ : this one takes lines away
 
         string pattern = f.Match.ToDisplayString();
-        if (f.Match.Type == FilterMatchType.Text)
-        {
-            if (f.Match.Regex) pattern = "/" + pattern + "/";
-            if (f.Match.CaseSensitive) pattern += " (case)";
-        }
-
         if (!string.IsNullOrEmpty(f.Description)) sb.Append(f.Description).Append(" — ");
         sb.Append(pattern);
+        // Said in words rather than by wrapping the pattern in slashes: a pattern is quoted here exactly as
+        // it was typed, and slashes round it read as two more characters to match rather than as a remark
+        // about how it is read. Which matters most where it looks least like a regex - "Fdo::" shown as
+        // "/Fdo::/" says nothing at all to anyone who did not already know the convention.
+        if (f.Match.Type == FilterMatchType.Text)
+        {
+            string notes = (f.Match.Regex, f.Match.CaseSensitive) switch
+            {
+                (true, true) => "regex, case-sensitive",
+                (true, false) => "regex",
+                (false, true) => "case-sensitive",
+                _ => ""
+            };
+            if (notes.Length > 0) sb.Append(" (").Append(notes).Append(')');
+        }
         if (!f.Enabled) sb.Append(" (off)");
         return sb.ToString();
     }

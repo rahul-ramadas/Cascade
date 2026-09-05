@@ -180,6 +180,14 @@ public sealed class MainForm : Form
         SetProgress(fraction);
     }
 
+    /// <summary>What the status bar says, field by field, with a <c>|</c> in front of each one that carries a
+    /// divider down its left edge - which is how the bar reads as a row of separate measurements rather than
+    /// one long stretch of text.</summary>
+    internal string StatusDividersForTesting => string.Join(" ", _status.Items.OfType<ToolStripStatusLabel>()
+        .Where(l => l.Visible)
+        .Select(l => (l.BorderSides.HasFlag(ToolStripStatusLabelBorderSides.Left) ? "|" : "")
+                     + (l.Name?.StartsWith("stat.", StringComparison.Ordinal) == true ? l.Name[5..] : "path")));
+
     /// <summary>What the status bar's elapsed slot is saying, or nothing at all when it is not there. Read
     /// through its own visibility rather than off the whole bar: a hidden label keeps whatever text it last
     /// had, and "the slot is gone" is exactly what has to be checkable.</summary>
@@ -485,6 +493,9 @@ public sealed class MainForm : Form
         if (keyData == ElapsedStatusKey) return ToggleElapsed(margin: false);
         if (keyData == SetReferenceKey) return SetReferenceHere();
         if (keyData == CycleOriginKey) return CycleOrigin();
+        // Before anything the menu claims: a shortcut registered on a menu item is dispatched by the base
+        // call below, over the head of whatever has the focus.
+        if (EditFocusedText(keyData)) return true;
         if (!IsTextInputFocused())
         {
             switch (keyData)
@@ -1043,10 +1054,13 @@ public sealed class MainForm : Form
         _elapsedLabel.TextAlign = ContentAlignment.MiddleLeft;
         _elapsedLabel.Margin = new Padding(Dpi(6), 0, Dpi(2), 0);
         _elapsedLabel.Name = "stat.elapsed";
-        // Section dividers: counts, then what is being shown, then zoom.
-        _selLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
-        _showLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
-        _zoomLabel.BorderSides = ToolStripStatusLabelBorderSides.Left;
+        // Section dividers. Every box on this side of the bar gets one, so the row reads as the list of
+        // separate measurements it is - the counts used to run together as one long stretch of text, with
+        // the widest of them sized for a file of a hundred million lines and so acres of space between the
+        // number and the next word. The elapsed box takes one when it is there and its neighbour's divider
+        // stands in for it when it is not, so nothing moves as the slot comes and goes.
+        foreach (var l in new[] { _selLabel, _elapsedLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel })
+            l.BorderSides = ToolStripStatusLabelBorderSides.Left;
 
         _selLabel.Name = "stat.sel";
         _filLabel.Name = "stat.fil";
@@ -2082,11 +2096,77 @@ public sealed class MainForm : Form
         else _split.Panel2Collapsed = false;
     }
 
-    private bool IsTextInputFocused()
+    private bool IsTextInputFocused() => FocusedTextInput() is not null;
+
+    /// <summary>The box a keystroke is being typed into, or null when the focus is anywhere else.</summary>
+    private Control? FocusedTextInput()
     {
         Control? c = ActiveControl;
         while (c is ContainerControl cont && cont.ActiveControl is not null) c = cont.ActiveControl;
-        return c is TextBoxBase or ComboBox or NumericUpDown;
+        return c is TextBoxBase or ComboBox or NumericUpDown ? c : null;
+    }
+
+    /// <summary>
+    /// The editing keys, given to the box being typed into rather than to the log or the filter list.
+    ///
+    /// <para>A menu shortcut is dispatched by the form BEFORE the control with the focus is ever offered the
+    /// key, so the log's own Ctrl+A and Ctrl+C reached over the find bar and selected and copied the whole
+    /// log while the caret was sitting in the term - and Ctrl+Z undid a filter edit in the middle of typing
+    /// one. Every one of these means something else inside a text box, and the text box is what has to get
+    /// them.</para>
+    ///
+    /// <para>Only the four the menu claims are here. Cut and paste are nobody else's, so they already reach
+    /// the box on their own and are left alone.</para>
+    /// </summary>
+    private bool EditFocusedText(Keys keyData)
+    {
+        if (FocusedTextInput() is not { } box) return false;
+        switch (keyData)
+        {
+            case Keys.Control | Keys.A:
+                if (box is TextBoxBase all) all.SelectAll();
+                else if (box is ComboBox combo) combo.SelectAll();
+                else return false;
+                return true;
+
+            case Keys.Control | Keys.C:
+                if (box is TextBoxBase source) source.Copy();
+                else if (box is ComboBox picked) CopyText(picked.SelectedText);
+                else return false;
+                return true;
+
+            // A Windows text box undoes its own typing, and has no redo at all - so Ctrl+Y is taken off the
+            // filter list here and given to nobody, which is what every other text box on the system does.
+            case Keys.Control | Keys.Z:
+                if (box is TextBoxBase typed) typed.Undo();
+                else Undo(box);
+                return true;
+            case Keys.Control | Keys.Y:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private const int WM_UNDO = 0x0304;
+
+    /// <summary>Undoes the typing in a box WinForms gives no Undo of its own - the find bar's combo. The
+    /// message has to go to the edit window inside it: the combo does not pass this one on, so sent to the
+    /// combo itself it is quietly dropped and Ctrl+Z does nothing at all.</summary>
+    private static void Undo(Control box)
+    {
+        IntPtr edit = FindWindowEx(box.Handle, IntPtr.Zero, "EDIT", null);
+        if (edit != IntPtr.Zero) SendMessage(edit, WM_UNDO, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string? className, string? windowName);
+
+    private static void CopyText(string text)
+    {
+        if (text.Length == 0) return;   // nothing selected: a text box copies nothing rather than clearing
+        try { Clipboard.SetText(text); } catch { /* clipboard busy */ }
     }
 
     private void ShowColumns()

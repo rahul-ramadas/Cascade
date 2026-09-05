@@ -87,6 +87,7 @@ public sealed class LineGridControl : Control
 
     private long _firstRow;
     private int _hScroll;
+    private int _paintedHScroll;
     private int _maxContentWidth;
     private int _paints;
     private long _caretRow = -1;
@@ -947,7 +948,16 @@ public sealed class LineGridControl : Control
         int viewport = Math.Max(1, ContentWidth);
         int max = Math.Max(_maxContentWidth, viewport);
         _hbar.Configure(max, viewport);
-        if (_hScroll > max - viewport) _hScroll = Math.Max(0, max - viewport);
+        if (_hScroll > max - viewport)
+        {
+            // Scrolled out past what is on screen now - a very long line was left behind, and the rows that
+            // replaced it are nowhere near that wide. The view has to be REDRAWN at the position it has just
+            // been pulled back to: this runs after the paint that measured those rows, so leaving it would
+            // hold the old far-right frame - a blank window - and Home would then be a no-op, the offset it
+            // sets being the one already stored.
+            _hScroll = Math.Max(0, max - viewport);
+            Invalidate();
+        }
         _hbar.Value = _hScroll;
     }
 
@@ -1165,6 +1175,14 @@ public sealed class LineGridControl : Control
     /// <summary>The topmost display row, so a harness can tell where the view actually ended up.</summary>
     internal long FirstRowForTesting => _firstRow;
 
+    /// <summary>Where the view says it is scrolled sideways to, and where the picture on screen was actually
+    /// drawn from. They have to be the same number once everything has settled: the second is what the
+    /// reader is looking at, and a frame drawn at an offset the view has since moved away from is a window
+    /// showing something that is no longer true - which is what a blank screen after scrolling away from a
+    /// very long line was.</summary>
+    internal int HScrollForTesting => _hScroll;
+    internal int PaintedHScrollForTesting => _paintedHScroll;
+
     internal int VisibleRowCountForTesting => VisibleRowCount;
 
     internal long CaretRowForTesting => _caretRow;
@@ -1340,6 +1358,9 @@ public sealed class LineGridControl : Control
         var g = e.Graphics;
         if (_doc is null) { g.Clear(_settings.Background); DrawFocusBar(g); return; }
 
+        // What this frame is drawn from, kept so a check can hold the view and the picture to the same
+        // number. Everything below places text by it.
+        _paintedHScroll = Wrapping ? 0 : _hScroll;
         int gutter = GutterWidth();
         int contentW = ContentWidth;
         int headerH = HeaderHeight;

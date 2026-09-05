@@ -173,9 +173,10 @@ template:   {[*]}{[*]}{[*]} {*}
 | | |
 |---|---|
 | `*` | the text that changes — matches as little as it can, up to whatever you wrote next |
+| `.` | any one character, whatever it happens to be |
 | `{ }` | one **field**: the unit that gets hidden or moved, punctuation and all |
 | anything else | has to be there, except a run of spaces, which matches any run of spaces |
-| `\` | makes `{ } * \` ordinary |
+| `\` | makes `{ } * . \` ordinary |
 
 - Punctuation goes with the field, so hiding the middle of `[a][b][c]` leaves `[a][c]` rather than `[a][][c]`.
 

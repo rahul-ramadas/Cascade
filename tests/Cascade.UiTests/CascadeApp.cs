@@ -734,6 +734,10 @@ internal sealed class CascadeApp : IDisposable
         Settle();
     }
 
+    /// <summary>Waits for the term box to read exactly <paramref name="text"/>.</summary>
+    public bool WaitFindTerm(string text, int ms = 4000)
+        => Retry.WhileFalse(() => TextOf(FindInput()) == text, TimeSpan.FromMilliseconds(ms), Poll).Result;
+
     public void ToggleFilteredMode()
     {
         bool expected = TryReadFilteredModeFromMenu() is { } current ? !current : !VisibleRowsLookFiltered();
@@ -806,6 +810,16 @@ internal sealed class CascadeApp : IDisposable
         t.Start();
         t.Join(2000);
         return text;
+    }
+
+    /// <summary>Puts something known on the clipboard, so that "the app copied nothing at all" can be told
+    /// apart from "the app copied what was asked for".</summary>
+    public static void SetClipboardText(string text)
+    {
+        var t = new Thread(() => { try { System.Windows.Forms.Clipboard.SetText(text); } catch { /* busy */ } });
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join(2000);
     }
 
     public Window? FindDialog(string title)

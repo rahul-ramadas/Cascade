@@ -62,6 +62,8 @@ internal static class SelfTest
             ok &= Timed("settings", RunSettingsChecks);
             ok &= Timed("machine state", RunMachineStateChecks);
             ok &= Timed("render", RunRenderChecks);
+            ok &= Timed("scrolling sideways", RunHorizontalScrollChecks);
+            ok &= Timed("editing keys", RunEditingKeyChecks);
             ok &= Timed("columns", RunColumnChecks);
             ok &= Timed("field settings", RunFieldSettingsChecks);
             ok &= Timed("column mode", RunColumnModeChecks);
@@ -469,6 +471,257 @@ internal static class SelfTest
             try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
             doc.Dispose();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>
+    /// The sideways offset and the picture on screen have to agree once everything has settled.
+    ///
+    /// <para>The scrollbar's range is built from the rows on screen, because measuring every line of a
+    /// 14GB file is not on offer - so scrolling away from a very long line leaves the view further right
+    /// than anything now on screen goes, and the offset is pulled back to fit. That happens AFTER the paint
+    /// that measured the new rows, so unless the pull-back redraws, the window keeps the frame it drew at
+    /// the old offset: a blank screen. And Home then did nothing at all, because the offset it sets was
+    /// already the one stored - it was only the pixels that were somewhere else.</para>
+    /// </summary>
+    private static bool RunHorizontalScrollChecks()
+    {
+        Line("-- scrolling sideways --");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_hscroll_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        sb.Append("[00:00:00] ").Append(string.Join(' ', Enumerable.Repeat("an-enormously-long-line", 400))).Append('\n');
+        for (int i = 1; i < 200; i++) sb.Append($"[00:00:{i % 60:00}] short line {i}\n");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        var doc = new CascadeDocument();
+        Form? host = null;
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var settings = new AppSettings();
+            var grid = new LineGridControl { Dock = DockStyle.Fill };
+            host = new Form
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                ClientSize = new Size(520, 300),
+                Opacity = 0,
+                FormBorderStyle = FormBorderStyle.None
+            };
+            host.Controls.Add(grid);
+            grid.Attach(doc, settings);
+            host.Show();
+            Pump();
+
+            grid.PressKeyForTesting(Keys.End);
+            Pump();
+            bool ok = Check("End takes the view out to the end of the long line",
+                            grid.HScrollForTesting > 0, $"offset {grid.HScrollForTesting}");
+            int far = grid.HScrollForTesting;
+            ok &= Check("and that is what is drawn", grid.PaintedHScrollForTesting == far,
+                        $"drawn from {grid.PaintedHScrollForTesting}, view at {far}");
+
+            // Away to a stretch of the file where nothing is anywhere near that wide - scrolled the way a
+            // wheel scrolls, which is the whole point: the offset is pulled back by what the PAINT finds,
+            // long after whatever moved the view has finished.
+            grid.ScrollToRow(60);
+            Pump();
+            ok &= Check("scrolling away from it brings the view back to where the text now is",
+                        grid.HScrollForTesting < far, $"offset {grid.HScrollForTesting}, was {far}");
+            ok &= Check("and the picture on screen is drawn from where the view now is, not where it was",
+                        grid.PaintedHScrollForTesting == grid.HScrollForTesting,
+                        $"drawn from {grid.PaintedHScrollForTesting}, view at {grid.HScrollForTesting}");
+
+            // ...which is the left edge here, since no line on screen overflows the window at all.
+            ok &= Check("with short lines there is nothing to scroll, so it is the left edge",
+                        grid.HScrollForTesting == 0 && grid.HScrollBarForTesting.MaxValue == 0,
+                        $"offset {grid.HScrollForTesting}, max {grid.HScrollBarForTesting.MaxValue}");
+
+            // And the text is really there to be read, rather than the row being empty for another reason.
+            using (var picture = Capture(host))
+            {
+                var strip = new Rectangle(grid.GutterWidthForTesting, grid.RowTopForTesting(60),
+                                          host.ClientSize.Width - grid.GutterWidthForTesting - 20,
+                                          grid.RowHeightForTesting);
+                ok &= Check("and there is text in the window", HasInk(picture, strip, settings.Background),
+                            $"nothing but background in {strip}");
+            }
+
+            // Home from here is a no-op, and has to leave the view exactly where it is rather than being
+            // the only thing that ever puts the picture right.
+            grid.PressKeyForTesting(Keys.Home);
+            Pump();
+            ok &= Check("Home leaves it at the left edge", grid.HScrollForTesting == 0 &&
+                        grid.PaintedHScrollForTesting == 0, $"offset {grid.HScrollForTesting}");
+
+            // Back to the long line: the room to scroll comes back with it.
+            grid.ScrollToRow(0);
+            Pump();
+            grid.PressKeyForTesting(Keys.End);
+            Pump();
+            ok &= Check("and coming back to the long line gives it somewhere to go again",
+                        grid.HScrollForTesting > 0 && grid.PaintedHScrollForTesting == grid.HScrollForTesting,
+                        $"offset {grid.HScrollForTesting}, drawn from {grid.PaintedHScrollForTesting}");
+            return ok;
+        }
+        finally
+        {
+            try { host?.Close(); host?.Dispose(); } catch { /* ignore */ }
+            doc.Dispose();
+            try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Whether anything at all was drawn in a stretch of the window, as against the background it
+    /// would be if nothing had been.</summary>
+    private static bool HasInk(Bitmap picture, Rectangle area, Color background)
+    {
+        for (int y = area.Top; y < area.Bottom && y < picture.Height; y++)
+            for (int x = area.Left; x < area.Right && x < picture.Width; x++)
+            {
+                var c = picture.GetPixel(x, y);
+                if (Math.Abs(c.R - background.R) + Math.Abs(c.G - background.G) + Math.Abs(c.B - background.B) > 40)
+                    return true;
+            }
+        return false;
+    }
+
+    /// <summary>
+    /// The editing keys inside a text box belong to the text box.
+    ///
+    /// <para>A menu shortcut is dispatched by the form before the focused control is offered the key at
+    /// all, so the log's own Ctrl+A and Ctrl+C reached over the find bar and selected and copied the whole
+    /// LOG while the caret sat in the term - and the filter list's Ctrl+Z undid a filter edit in the middle
+    /// of typing one. Driven through the form's own shortcut handling, which is the path a real keystroke
+    /// takes.</para>
+    /// </summary>
+    private static bool RunEditingKeyChecks()
+    {
+        Line("-- the editing keys go to the box being typed in --");
+
+        string log = Path.Combine(Path.GetTempPath(), "cascade_st_keys_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(log, Enumerable.Range(1, 120).Select(i => $"line {i} of the log"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), new[] { log })
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 60 && doc.CompletedLineCount < 120; i++) { Thread.Sleep(20); Pump(); }
+            bool ok = Check("the file is open", doc.CompletedLineCount >= 120, doc.CompletedLineCount.ToString());
+            if (!ok) return false;
+
+            var grid = form.GridForTesting;
+            var bar = form.FindBarForTesting;
+
+            // With the log focused, the two keys are the log's own.
+            grid.Focus();
+            Pump();
+            ok &= Check("the log has the focus", form.FocusedAreaForTesting == "log", form.FocusedAreaForTesting);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.A);
+            Pump();
+            ok &= Check("Ctrl+A selects the whole log when the log is where you are",
+                        grid.SelectedCount == doc.CompletedLineCount, $"{grid.SelectedCount} lines");
+
+            // ...and inside the find bar they are the box's. The log is left with ONE line picked out, so a
+            // Ctrl+A that went to the log instead would be plain to see.
+            grid.SelectRowForAccessibility(3);
+            form.ClickMenuForTesting("Edit", "Find");
+            Pump();
+            bar.SetTermForTesting("timeout", 7, 0);
+            bar.FocusInput();
+            bar.SetTermForTesting("timeout", 7, 0);
+            Pump();
+            ok &= Check("the find bar has the focus", form.FocusedAreaForTesting == "find bar",
+                        form.FocusedAreaForTesting);
+
+            long selectedBefore = grid.SelectedCount;
+            ok &= Check("with one line of the log picked out", selectedBefore == 1, $"{selectedBefore} lines");
+            form.PressCmdKeyForTesting(Keys.Control | Keys.A);
+            Pump();
+            ok &= Check("Ctrl+A in the find bar picks out the term, not the log",
+                        bar.SelectionForTesting() == (0, "timeout".Length),
+                        $"selection {bar.SelectionForTesting()}");
+            ok &= Check("and leaves the log's own selection alone", grid.SelectedCount == selectedBefore,
+                        $"{grid.SelectedCount} lines, was {selectedBefore}");
+
+            // Copy takes what is picked out in the box. The clipboard is a shared machine resource, so what
+            // was on it goes back afterwards - and a busy clipboard is not a failure of this check.
+            string? restore = null;
+            try { restore = Clipboard.ContainsText() ? Clipboard.GetText() : null; } catch { /* busy */ }
+            try
+            {
+                Clipboard.SetText("something else entirely");
+                form.PressCmdKeyForTesting(Keys.Control | Keys.C);
+                Pump();
+                ok &= Check("Ctrl+C in the find bar copies the term, not the log",
+                            Clipboard.GetText() == "timeout", Clipboard.GetText());
+            }
+            catch (System.Runtime.InteropServices.ExternalException) { Line("   (clipboard busy; copy not checked)"); }
+            finally
+            {
+                try { if (restore is { Length: > 0 }) Clipboard.SetText(restore); else Clipboard.Clear(); }
+                catch { /* busy */ }
+            }
+
+            // Undo is the filter list's everywhere except in a box, where it has to mean "undo my typing".
+            // Checked one key at a time, and from both sides, or an undo that ran when it should not have
+            // leaves the redo it should not have run either with nothing to do - and both look like passes.
+            form.EditFilterForTesting(() => doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "line 4" } }));
+            Pump();
+            int before = doc.Filters.Roots.Count;
+            ok &= Check("there is a filter edit waiting to be undone", before > 0, $"{before} filters");
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Z);
+            Pump();
+            ok &= Check("Ctrl+Z while typing a term does not undo a filter edit",
+                        doc.Filters.Roots.Count == before, $"{doc.Filters.Roots.Count} filters, was {before}");
+
+            // Out of the box it is the filter list's again...
+            form.CloseFindForTesting();
+            grid.Focus();
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Z);
+            for (int i = 0; i < 100 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("and out of the box Ctrl+Z undoes the filter edit after all",
+                        doc.Filters.Roots.Count == before - 1, $"{doc.Filters.Roots.Count} filters, was {before}");
+
+            // ...and the same both ways round for redo, which now has something waiting for it.
+            form.ClickMenuForTesting("Edit", "Find");
+            bar.FocusInput();
+            Pump();
+            ok &= Check("back in the find bar", form.FocusedAreaForTesting == "find bar", form.FocusedAreaForTesting);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Y);
+            Pump();
+            ok &= Check("Ctrl+Y while typing a term does not redo a filter edit either",
+                        doc.Filters.Roots.Count == before - 1, $"{doc.Filters.Roots.Count} filters");
+
+            form.CloseFindForTesting();
+            grid.Focus();
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Y);
+            for (int i = 0; i < 100 && doc.IsBusy; i++) { Thread.Sleep(20); Pump(); }
+            Pump();
+            ok &= Check("and out of the box it redoes it", doc.Filters.Roots.Count == before,
+                        $"{doc.Filters.Roots.Count} filters, was {before}");
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { File.Delete(log); } catch { /* ignore */ }
         }
     }
 
@@ -1153,6 +1406,20 @@ internal static class SelfTest
             Pump();
             ok &= Check("a line that really does not fit is", preview.SaysWhyNotForTesting);
             dlg.StepSampleForTesting(-3);
+            Pump();
+
+            // --- a dot stands in for one character, so one template can read punctuation that varies ---
+
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]}.{*}");
+            Pump();
+            ok &= Check($"a template with a dot in it is read as four fields (\"{dlg.StatusForTesting}\")",
+                        dlg.StatusForTesting.Contains("4 fields", StringComparison.Ordinal), dlg.StatusForTesting);
+            ok &= Check("and the sample fits it, the dot standing for the space", !preview.SaysWhyNotForTesting);
+            dlg.SetTemplateForTesting(@"{[*]}{[*]}{[*]}\.{*}");
+            Pump();
+            ok &= Check("while an escaped dot is an ordinary full stop, which this line has not got there",
+                        preview.SaysWhyNotForTesting);
+            dlg.SetTemplateForTesting("{[*]}{[*]}{[*]} {*}");
             Pump();
 
             // --- Detect reads a bracketed header, and says so when there is not one ---
@@ -4834,8 +5101,18 @@ internal static class SelfTest
         ok &= Check("an exclude is marked as one", tip.StartsWith('\u2260'), tip);
 
         tip = FilterTipText.Build(new[] { rx });
-        ok &= Check("a regex reads as one", tip.Contains("/[0-9]+ms/"), tip);
-        ok &= Check("case sensitivity is spelled out", tip.Contains("(case)"), tip);
+        ok &= Check("a regex says so in words, with the pattern left as it was typed",
+                    tip.Contains("[0-9]+ms (regex") && !tip.Contains("/[0-9]+ms/"), tip);
+        ok &= Check("case sensitivity is spelled out", tip.Contains("case-sensitive"), tip);
+
+        var plainCase = new Filter { Enabled = true, Match = { Text = "Fdo::", CaseSensitive = true } };
+        ok &= Check("a plain pattern that only cares about case says just that",
+                    FilterTipText.Build(new[] { plainCase }) == "Fdo:: (case-sensitive)",
+                    FilterTipText.Build(new[] { plainCase }));
+
+        var plain = new Filter { Enabled = true, Match = { Text = "Fdo::" } };
+        ok &= Check("and one with nothing to remark on is quoted and nothing more",
+                    FilterTipText.Build(new[] { plain }) == "Fdo::", FilterTipText.Build(new[] { plain }));
 
         var many = new List<Filter>();
         for (int i = 0; i < FilterTipText.MaxListed + 5; i++)
@@ -7956,6 +8233,18 @@ internal static class SelfTest
             Pump();
             ok &= Check("and back again", form.StatusForTesting.Contains("Showing: all lines", StringComparison.Ordinal),
                         form.StatusForTesting);
+
+            // Every measurement is parted from the one beside it. Without a divider of its own each count
+            // ran into its neighbour - and since each box is sized for a file of a hundred million lines,
+            // that neighbour is a long way from where the number before it ended.
+            string dividers = form.StatusDividersForTesting;
+            Line("   (" + dividers + ")");
+            string[] parted = ["|sel", "|fil", "|total", "|show", "|zoom"];
+            ok &= Check("every count on the bar is parted from the one beside it",
+                        parted.All(p => dividers.Contains(p, StringComparison.Ordinal)), dividers);
+            // ...and the first thing on the bar carries none: it has nothing to its left to be parted from.
+            ok &= Check("and the first field carries no divider of its own",
+                        !dividers.StartsWith('|'), dividers);
             return ok;
         }
         finally

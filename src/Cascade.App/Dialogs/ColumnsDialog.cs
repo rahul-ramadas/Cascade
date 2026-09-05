@@ -306,6 +306,7 @@ public sealed class ColumnsDialog : DialogBase
         Row(Example(), SizeType.AutoSize, 0, 8);
         Row(Rules(
                 ("*", "the part that changes"),
+                (".", "any one character"),
                 ("{ }", "one field \u2014 moved and hidden whole, punctuation and all"),
                 ("space", "any run of spaces"),
                 ("\\", "the next character, exactly")), SizeType.AutoSize, 0, 4);

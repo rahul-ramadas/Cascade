@@ -89,10 +89,11 @@ public sealed class TemplateMatch
 ///
 /// <list type="bullet">
 /// <item><c>*</c> is a value: it matches as little as it can, up to whatever comes next.</item>
+/// <item><c>.</c> is any one character, whatever it happens to be.</item>
 /// <item><c>{ }</c> wrap a PART - the thing that is hidden or carried about, its punctuation with it.</item>
 /// <item>Anything else has to be there as written, except a run of spaces, which matches any run of
 /// spaces so that padded fields need not be counted out.</item>
-/// <item><c>\</c> escapes <c>{ } * \</c>.</item>
+/// <item><c>\</c> escapes <c>{ } * . \</c>.</item>
 /// </list>
 ///
 /// <para>A part holds at most one value, so a part that captures IS a column. That keeps the list of
@@ -103,15 +104,24 @@ public sealed class TemplateMatch
 /// literal runs and gaps, so matching is IndexOf chaining. Linear by construction - there is no
 /// backtracking to blow up on and so no need for a match timeout, which matters because this runs on
 /// lines that may be megabytes long. It is also what lets a failure name the literal it wanted and the
-/// character it wanted it at.</para>
+/// character it wanted it at. A <c>.</c> is a fixed WIDTH rather than a fixed character, so it costs the
+/// scan nothing: a run is still found by searching for the fixed text in it and stepping back over
+/// however many characters the dots before it stand for.</para>
 /// </summary>
 public sealed class LineTemplate
 {
-    private readonly struct Piece(string text, bool spaceRun, int part)
+    /// <summary>What a piece of a run asks of the line: text that has to be there, a run of spaces of any
+    /// length, or a fixed number of characters of no particular kind.</summary>
+    private enum PieceKind { Literal, Spaces, Any }
+
+    private readonly struct Piece(string text, PieceKind kind, int part)
     {
+        /// <summary>The text to match; for <see cref="PieceKind.Any"/> the dots themselves, whose LENGTH is
+        /// what is asked of the line and whose text is what a failure quotes back.</summary>
         public readonly string Text = text;
-        public readonly bool SpaceRun = spaceRun;
+        public readonly PieceKind Kind = kind;
         public readonly int Part = part;
+        public bool SpaceRun => Kind == PieceKind.Spaces;
     }
 
     private sealed class Run
@@ -119,6 +129,13 @@ public sealed class LineTemplate
         public Piece[] Pieces = [];
         public string Display = "";
         public bool IsEmpty => Pieces.Length == 0;
+
+        /// <summary>The piece this run is FOUND by - the first one that asks for anything in particular -
+        /// and how many characters of the run come before it. Everything ahead of it is dots, which are of a
+        /// fixed width, so finding it and stepping back lands exactly where the run must begin. -1 when the
+        /// run is nothing but dots, and any position with the characters to spare will do.</summary>
+        public int AnchorAt = -1;
+        public int AnchorOffset;
     }
 
     private readonly Run[] _runs;                    // _runs[i] precedes value i; the last one trails
@@ -163,7 +180,11 @@ public sealed class LineTemplate
         public readonly List<TemplatePart> Parts = [];
         public readonly List<int> ValuePart = [];
 
-        private readonly List<(string Text, int Part, bool IsValue)> _units = [];
+        private readonly List<(string Text, int Part, UnitKind Kind)> _units = [];
+
+        /// <summary>What one unit of the parsed template is: text to match, a captured value, or a run of
+        /// dots standing for that many characters of any kind.</summary>
+        private enum UnitKind { Literal, Value, Any }
 
         public void Run()
         {
@@ -174,7 +195,7 @@ public sealed class LineTemplate
             void Flush()
             {
                 if (sb.Length == 0) return;
-                _units.Add((sb.ToString(), literalPart, false));
+                _units.Add((sb.ToString(), literalPart, UnitKind.Literal));
                 sb.Clear();
             }
 
@@ -249,8 +270,19 @@ public sealed class LineTemplate
                         Flush();
                         partValue = ValuePart.Count;
                         ValuePart.Add(part);
-                        _units.Add(("", part, true));
+                        _units.Add(("", part, UnitKind.Value));
                         i++;
+                        break;
+
+                    // A dot stands for one character the template does not care about. Anywhere a literal
+                    // may go, so it belongs to whatever part is open exactly as a literal would, and a run
+                    // of them is kept together as one unit - what matters about it is only how many.
+                    case '.':
+                        Flush();
+                        int dots = i;
+                        while (dots < template.Length && template[dots] == '.') dots++;
+                        _units.Add((template[i..dots], part, UnitKind.Any));
+                        i = dots;
                         break;
 
                     default:
@@ -274,15 +306,25 @@ public sealed class LineTemplate
 
             void Close()
             {
-                runs.Add(new Run { Pieces = pieces.ToArray(), Display = display.ToString() });
+                var run = new Run { Pieces = pieces.ToArray(), Display = display.ToString() };
+                // Where the run can be FOUND from: the first piece that asks for anything in particular,
+                // with the dots ahead of it counted so the search can step back over them.
+                int ahead = 0;
+                for (int k = 0; k < run.Pieces.Length; k++)
+                {
+                    if (run.Pieces[k].Kind != PieceKind.Any) { run.AnchorAt = k; run.AnchorOffset = ahead; break; }
+                    ahead += run.Pieces[k].Text.Length;
+                }
+                runs.Add(run);
                 pieces.Clear();
                 display.Clear();
             }
 
-            foreach (var (text, unitPart, isValue) in _units)
+            foreach (var (text, unitPart, kind) in _units)
             {
-                if (isValue) { Close(); continue; }
+                if (kind == UnitKind.Value) { Close(); continue; }
                 display.Append(text);
+                if (kind == UnitKind.Any) { pieces.Add(new Piece(text, PieceKind.Any, unitPart)); continue; }
                 int k = 0;
                 while (k < text.Length)
                 {
@@ -295,13 +337,13 @@ public sealed class LineTemplate
                         // straight after it could never be satisfied and the template would match nothing
                         // at all - while still reporting itself perfectly valid.
                         if (pieces.Count > 0 && pieces[^1].SpaceRun) continue;
-                        pieces.Add(new Piece(text[from..k], true, unitPart));
+                        pieces.Add(new Piece(text[from..k], PieceKind.Spaces, unitPart));
                     }
                     else
                     {
                         int from = k;
                         while (k < text.Length && text[k] != ' ') k++;
-                        pieces.Add(new Piece(text[from..k], false, unitPart));
+                        pieces.Add(new Piece(text[from..k], PieceKind.Literal, unitPart));
                     }
                 }
             }
@@ -379,7 +421,21 @@ public sealed class LineTemplate
         int p = pos;
         foreach (var piece in run.Pieces)
         {
-            if (piece.SpaceRun)
+            // Literal first: it is what almost every piece of almost every template is, and this runs for
+            // every row of every frame.
+            if (piece.Kind == PieceKind.Literal)
+            {
+                if (p + piece.Text.Length > line.Length ||
+                    !line.AsSpan(p, piece.Text.Length).SequenceEqual(piece.Text))
+                {
+                    consumed = 0;
+                    failAt = p;
+                    failWant = piece.Text;
+                    return false;
+                }
+                p += piece.Text.Length;
+            }
+            else if (piece.Kind == PieceKind.Spaces)
             {
                 int n = 0;
                 while (p < line.Length && line[p] == ' ') { p++; n++; }
@@ -387,8 +443,8 @@ public sealed class LineTemplate
             }
             else
             {
-                if (p + piece.Text.Length > line.Length ||
-                    !line.AsSpan(p, piece.Text.Length).SequenceEqual(piece.Text))
+                // Any characters will do, so the only way this fails is the line running out under it.
+                if (p + piece.Text.Length > line.Length)
                 {
                     consumed = 0;
                     failAt = p;
@@ -411,7 +467,7 @@ public sealed class LineTemplate
         foreach (var piece in run.Pieces)
         {
             int from = p;
-            if (piece.SpaceRun) while (p < line.Length && line[p] == ' ') p++;
+            if (piece.Kind == PieceKind.Spaces) while (p < line.Length && line[p] == ' ') p++;
             else p += piece.Text.Length;
             into.Touch(piece.Part, from, p);
         }
@@ -422,30 +478,47 @@ public sealed class LineTemplate
     /// the template and so the place worth pointing at.</summary>
     private static int Find(string line, int from, Run run, out int length, out int failAt, out string failWant)
     {
-        var first = run.Pieces[0];
+        // What is searched for, and how far into the run it sits. Dots ahead of it are a fixed width, so a
+        // hit is stepped back over them to where the run itself would have to start - which is what keeps a
+        // template that opens a run with dots as cheap to match as any other.
+        int ahead = run.AnchorOffset;
+        var anchor = run.AnchorAt >= 0 ? run.Pieces[run.AnchorAt] : default;
+        bool spaces = run.AnchorAt >= 0 && anchor.SpaceRun;
         int bestAt = -1;
         string bestWant = "";
 
         int i = from;
         while (i <= line.Length)
         {
-            if (!first.SpaceRun)
+            if (run.AnchorAt < 0)
             {
-                int at = line.IndexOf(first.Text, i, StringComparison.Ordinal);
+                // Nothing but dots: any character will do, so this position is as good as the next.
+            }
+            else if (!spaces)
+            {
+                int at = line.IndexOf(anchor.Text, Math.Min(line.Length, i + ahead), StringComparison.Ordinal);
                 if (at < 0) break;
-                i = at;
+                i = at - ahead;
             }
             else
             {
-                while (i < line.Length && line[i] != ' ') i++;
-                if (i >= line.Length) break;
+                int at = i + ahead;
+                if (at > line.Length) break;
+                while (at < line.Length && line[at] != ' ') at++;
+                if (at >= line.Length) break;
+                i = at - ahead;
             }
 
             if (TryRun(line, i, run, out length, out int a, out string w)) { failAt = -1; failWant = ""; return i; }
             if (a > bestAt) { bestAt = a; bestWant = w; }
 
             // Past the whole run of spaces, not just one of them: see the remark above.
-            if (first.SpaceRun) { while (i < line.Length && line[i] == ' ') i++; }
+            if (spaces)
+            {
+                int at = i + ahead;
+                while (at < line.Length && line[at] == ' ') at++;
+                i = at - ahead;
+            }
             else i++;
         }
 
@@ -564,7 +637,7 @@ public sealed class LineTemplate
         var sb = new StringBuilder(text.Length);
         foreach (char c in text)
         {
-            if (c is '{' or '}' or '*' or '\\') sb.Append('\\');
+            if (c is '{' or '}' or '*' or '.' or '\\') sb.Append('\\');
             sb.Append(c);
         }
         return sb.ToString();
