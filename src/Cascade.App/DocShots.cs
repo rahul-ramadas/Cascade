@@ -632,6 +632,10 @@ internal static class DocShots
         using (var dialog = new FilterEditDialog(made.Clone(newIds: false), isNew: true,
                                                  doc.Filters.EnumerateDepthFirst().ToList()))
         {
+            // The animation drops the filter at the end of the list with nothing selected, so the dialog is
+            // shown offering exactly that - the picture would otherwise say one place and the list show
+            // another.
+            dialog.OfferPlacements(NewFilterPlacement.Default, null, addAtTop: false);
             dialog.StartPosition = FormStartPosition.Manual;
             dialog.Location = new Point(0, 0);
             dialog.Opacity = 0;

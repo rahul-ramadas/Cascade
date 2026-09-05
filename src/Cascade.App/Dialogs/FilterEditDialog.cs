@@ -82,10 +82,33 @@ public sealed class FilterEditDialog : DialogBase
     private readonly QuietCheckBox _italic = new() { Text = "&Italic", AutoSize = true, ThreeState = true, TurnsOnFirst = true, Margin = new Padding(0, 6, 24, 3) };
     private readonly QuietCheckBox _underline = new() { Text = "&Underline", AutoSize = true, ThreeState = true, TurnsOnFirst = true, Margin = new Padding(0, 6, 0, 3) };
 
+    // Where a new filter will go. Quiet ones, so changing your mind about the place leaves the keyboard in
+    // the pattern box; in a container of their own, so picking one of these cannot untick a match type.
+    private readonly QuietRadioButton _placeDefault = new() { Text = "&At the top of the list", AutoSize = true, Checked = true };
+    private readonly QuietRadioButton _placeAbove = new() { Text = "Abo&ve the selected filter", AutoSize = true };
+    private readonly QuietRadioButton _placeChild = new() { Text = "As a c&hild of the selected filter", AutoSize = true };
+    private readonly TableLayoutPanel _placeRow = new()
+    {
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        ColumnCount = 2
+    };
+
+    /// <summary>Whether the places are on offer at all - they are, exactly when a filter is being made.</summary>
+    private readonly bool _placing;
+
+    /// <summary>The filter "above" and "as a child" are measured from: whichever one the list is on.</summary>
+    private Filter? _anchor;
+
     private readonly IReadOnlyList<Filter> _siblings;
     /// <summary>Where this filter will hang, which decides what it inherits. A filter being added is not in
-    /// the tree yet, so its own Parent is still null and the caller has to say.</summary>
-    private readonly Filter? _parent;
+    /// the tree yet, so its own Parent is still null and the caller has to say. It follows the chosen place
+    /// while a filter is being made, so the preview shows what the filter would really look like there.</summary>
+    private Filter? _parent;
+
+    /// <summary>What the default place hangs under: the top level, unless the caller named a parent outright
+    /// and never offered the choice.</summary>
+    private readonly Filter? _defaultParent;
     private readonly ResolvedStyle _defaults;
     private int _lucky = -1;
 
@@ -102,7 +125,8 @@ public sealed class FilterEditDialog : DialogBase
     {
         _filter = filter;
         _siblings = siblings;
-        _parent = parent ?? filter.Parent;
+        _placing = isNew;
+        _defaultParent = _parent = parent ?? filter.Parent;
         _defaults = defaults ?? new ResolvedStyle(ToRgb(SystemColors.WindowText), ToRgb(SystemColors.Window), false, false);
         Text = isNew ? "Add Filter" : "Edit Filter";
 
@@ -154,6 +178,39 @@ public sealed class FilterEditDialog : DialogBase
         // All three options on one row: the excluding flag used to sit alone under a blank label, which
         // read as though it belonged to nothing.
         Row("Options:", Strip(_regex, _caseSensitive, _excluding));
+
+        // Where it goes, offered only while one is being made - an edit moves nothing. Stacked rather than
+        // strung along one line so the keys line up in a column of their own and can be read down, and
+        // because the three sentences are long enough that side by side they would set the dialog's width.
+        _placeRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _placeRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var places = new (QuietRadioButton Button, NewFilterPlacement Place)[]
+        {
+            (_placeDefault, NewFilterPlacement.Default),
+            (_placeAbove, NewFilterPlacement.Above),
+            (_placeChild, NewFilterPlacement.Child),
+        };
+        for (int i = 0; i < places.Length; i++)
+        {
+            places[i].Button.Margin = new Padding(0, Dpi(3), 0, Dpi(3));
+            // The key is written beside the choice, which a screen reader walking the radio group with the
+            // arrow keys never reaches, so each button carries it as well.
+            places[i].Button.AccessibleDescription = "Shortcut " + NewFilterKeys.TextFor(places[i].Place);
+            places[i].Button.CheckedChanged += (_, _) => FollowPlacement();
+            _placeRow.Controls.Add(places[i].Button, 0, i);
+            // The key beside the choice it picks, so the way to change your mind without the mouse is
+            // written where the choice is being made rather than only in the menu that opened this.
+            _placeRow.Controls.Add(new Label
+            {
+                Text = NewFilterKeys.TextFor(places[i].Place),
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                ForeColor = SystemColors.GrayText,
+                Margin = new Padding(Dpi(16), Dpi(3), 0, Dpi(3))
+            }, 1, i);
+        }
+        if (_placing) Row("Place:", _placeRow);
+
         // Colour and style are one idea - what a matching line looks like - and the note below covers both.
         // Both buttons offer a colour, so they belong with the swatches rather than after the style ticks.
         Row("Appearance:", Strip(_setFore, _foreBtn, _setBack, _backBtn, _luckyBtn, _chipsBtn, _bold, _italic, _underline));
@@ -206,6 +263,93 @@ public sealed class FilterEditDialog : DialogBase
 
         LoadFromFilter();
     }
+
+    // ---- where the new filter goes ----
+
+    /// <summary>Where the filter being made is to go: what the key that opened this asked for, or whatever it
+    /// was changed to since. Always the default place for an edit, which moves nothing.</summary>
+    public NewFilterPlacement Placement =>
+        !_placing ? NewFilterPlacement.Default
+        : _placeAbove.Checked ? NewFilterPlacement.Above
+        : _placeChild.Checked ? NewFilterPlacement.Child
+        : NewFilterPlacement.Default;
+
+    /// <summary>Offers the three places. <paramref name="anchor"/> is the filter the list is on, which the
+    /// other two are measured from, and <paramref name="addAtTop"/> is which end of the list the preference
+    /// sends the rest to - said here rather than worked out inside, because it is the same preference the
+    /// caller will obey when it actually puts the filter there.
+    ///
+    /// <para>A place that cannot be had - nothing selected to sit above, or nesting under it would go past
+    /// the deepest level allowed - is still shown, but shut off, and asking for it settles on the default
+    /// instead. The three read the same every time, which is what makes them worth learning a key for; a
+    /// dialog that dropped a choice would move the other two under the pointer.</para></summary>
+    public void OfferPlacements(NewFilterPlacement chosen, Filter? anchor, bool addAtTop)
+    {
+        if (!_placing) return;
+        _anchor = anchor;
+        _placeDefault.Text = addAtTop ? "&At the top of the list" : "&At the end of the list";
+        _placeAbove.Enabled = anchor is not null;
+        _placeChild.Enabled = anchor is not null && anchor.Depth + 1 < FilterCollection.MaxDepth;
+        Pick(chosen);
+        FollowPlacement();
+    }
+
+    /// <summary>Picks a place, falling back to the default one where what was asked for is shut off.</summary>
+    private void Pick(NewFilterPlacement placement)
+    {
+        var button = placement switch
+        {
+            NewFilterPlacement.Above => _placeAbove,
+            NewFilterPlacement.Child => _placeChild,
+            _ => _placeDefault
+        };
+        (button.Enabled ? button : _placeDefault).Checked = true;
+    }
+
+    /// <summary>Points the preview at whatever the chosen place would hang the filter under, so an unticked
+    /// colour is shown as the colour it would really inherit there rather than one place behind.</summary>
+    private void FollowPlacement()
+    {
+        _parent = Placement switch
+        {
+            NewFilterPlacement.Above => _anchor?.Parent,
+            NewFilterPlacement.Child => _anchor,
+            _ => _defaultParent
+        };
+        UpdatePreview();
+    }
+
+    /// <summary>The keys that ask for a place work in here too, so a mind changed after Ctrl+N has opened the
+    /// dialog costs one keystroke rather than a trip to the mouse. Swallowed even where the place they ask
+    /// for is shut off, so pressing one can never turn into something else.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (_placing && NewFilterKeys.Asked(keyData) is { } asked) { Pick(asked); return true; }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    /// <summary>Test seam: the key pressed the way WinForms delivers it, before anything with the focus sees
+    /// it - which is the whole point of these three.</summary>
+    internal bool PressKeyForTesting(Keys keys)
+    {
+        Message message = default;
+        return ProcessCmdKey(ref message, keys);
+    }
+
+    /// <summary>Test seam: what each place is called, the key written beside it, what a screen reader is told
+    /// about that key, and whether it can be picked - read off the row itself, in the order it offers them.</summary>
+    internal IReadOnlyList<(string Text, string Key, string Said, bool Enabled)> PlacementsForTesting =>
+        [.. Enumerable.Range(0, 3).Select(i =>
+            (((RadioButton)_placeRow.GetControlFromPosition(0, i)!).Text,
+             _placeRow.GetControlFromPosition(1, i)!.Text,
+             _placeRow.GetControlFromPosition(0, i)!.AccessibleDescription ?? "",
+             _placeRow.GetControlFromPosition(0, i)!.Enabled))];
+
+    /// <summary>Test seam: whether the places are on offer at all.</summary>
+    internal bool OffersPlacementForTesting => _placeRow.Parent is not null;
+
+    /// <summary>Test seam: the filter the preview is inheriting from, which follows the chosen place.</summary>
+    internal Filter? PreviewParentForTesting => _parent;
 
     /// <summary>Test seam: types into the pattern field, so a check can watch the error line appear.</summary>
     internal void SetTextForTesting(string text) => _text.Text = text;
@@ -462,7 +606,13 @@ public sealed class FilterEditDialog : DialogBase
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _noteTip.Dispose();
+        if (disposing)
+        {
+            _noteTip.Dispose();
+            // Built either way and hung on the dialog only while one is being made, so an edit still has to
+            // give back the row it never showed.
+            if (_placeRow.Parent is null) _placeRow.Dispose();
+        }
         base.Dispose(disposing);
     }
 }

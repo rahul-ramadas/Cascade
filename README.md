@@ -57,6 +57,20 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 - `Ctrl+N` turns the text you have selected inside a line — or the whole line under the caret — into a filter.
 
+### Where a new filter goes
+
+- Every new filter is made in the same dialog, which asks where it should go:
+
+| Key | Where it goes |
+|---|---|
+| `Ctrl+N` | The top of the list, or the end of it — your preference |
+| `Ctrl+Shift+N` | Directly above the selected filter, as its sibling |
+| `Ctrl+Alt+N` | Under the selected filter, as its child |
+
+- The key you press only picks a starting point. All three are offered in the dialog, each with its key beside it, and pressing another one there moves the choice — so changing your mind after `Ctrl+N` costs a keystroke and never the mouse.
+- The pattern box previews the colours the filter would really take where it is going, inheritance and all, so the preview follows the choice.
+- A place that cannot be had — nothing selected to sit above, or nesting that would run past the deepest level — is shown but greyed, and asking for it settles on the default.
+
 ### Colour
 
 ![The paint chips palette: every unused colour pair, each cell drawn as a matching line would look](docs/images/paint-chips.png)
@@ -299,7 +313,7 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+F` / `F3` / `Shift+F3` | Find / next / previous |
 | `Ctrl+G` / `Ctrl+Shift+G` | Go to a line you name / to the line you are measuring from |
 | `Ctrl+H` | Show only filtered lines |
-| `Ctrl+N` | New filter from the selection or the current line |
+| `Ctrl+N` / `Ctrl+Shift+N` / `Ctrl+Alt+N` | New filter from the selection or the current line, going to the usual end of the list / above the selected filter / under it as a child |
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Match map or plain scrollbar / word wrap / split lines into fields |
 | `Ctrl+Shift+X` / `Ctrl+Shift+D` | Switch field layout / field settings |

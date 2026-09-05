@@ -80,11 +80,11 @@ public sealed class FilterTreeControl : UserControl
 
     public event Action? FiltersChanged;
     public event Action<Filter>? EditRequested;
-    public event Action<Filter?>? AddRequested;
 
-    /// <summary>Raised to add a filter directly after this one, as its sibling - what the list's own menu
-    /// offers, since a filter is usually made next to the one that prompted it.</summary>
-    public event Action<Filter>? AddBelowRequested;
+    /// <summary>Raised to make a filter, saying which of the three places it should go to. What "above" and
+    /// "as a child" are measured from is the filter the list is on, which is the one that was right-clicked:
+    /// a right-click selects the row under it before the menu opens.</summary>
+    public event Action<NewFilterPlacement>? AddRequested;
     public event Action<Filter, bool>? FindFilterRequested; // (filter, forward)
 
     /// <summary>Raised with a label for the menu ("Remove Filter") immediately before the list changes the
@@ -414,7 +414,7 @@ public sealed class FilterTreeControl : UserControl
     private void HandleDoubleClickAt(Point at)
     {
         if (_tree.GetNodeAt(0, at.Y) is { } node) HandleDoubleClick(node, at.X);
-        else AddRequested?.Invoke(null);
+        else AddRequested?.Invoke(NewFilterPlacement.Default);
     }
 
     public Filter? SelectedFilter => _tree.SelectedNode?.Tag as Filter;
@@ -1374,7 +1374,7 @@ public sealed class FilterTreeControl : UserControl
         Filter? edit = null;
         bool add = false;
         void WatchEdit(Filter f) => edit = f;
-        void WatchAdd(Filter? _) => add = true;
+        void WatchAdd(NewFilterPlacement _) => add = true;
         EditRequested += WatchEdit;
         AddRequested += WatchAdd;
         try { HandleDoubleClickAt(at); }
@@ -1758,12 +1758,15 @@ public sealed class FilterTreeControl : UserControl
     private ContextMenuStrip BuildContextMenu()
     {
         var menu = new ContextMenuStrip();
-        var add = new ToolStripMenuItem("Add Filter…", null, (_, _) =>
-        {
-            if (ContextFilter is { } f) AddBelowRequested?.Invoke(f); else AddRequested?.Invoke(null);
-        });
+        // Above the row it was opened over, rather than below it: a line takes its colour from the first
+        // filter in the list that matches, so a filter made about a row is nearly always one that should be
+        // read before it.
+        var add = new ToolStripMenuItem("Add Filter\u2026", null, (_, _) =>
+            AddRequested?.Invoke(ContextFilter is null ? NewFilterPlacement.Default : NewFilterPlacement.Above));
         menu.Items.Add(add);
-        menu.Items.Add("Add Child Filter…", null, (_, _) => AddRequested?.Invoke(SelectedFilter));
+        var addChild = new ToolStripMenuItem("Add Child Filter\u2026", null, (_, _) => AddRequested?.Invoke(NewFilterPlacement.Child))
+        { ShortcutKeyDisplayString = NewFilterKeys.TextFor(NewFilterPlacement.Child) };
+        menu.Items.Add(addChild);
         var edit = new ToolStripMenuItem("Edit Filter…", null, (_, _) => RaiseEditRequest());
         var duplicate = new ToolStripMenuItem("Duplicate Filter", null, (_, _) => DuplicateSelected()) { ShortcutKeyDisplayString = "Ctrl+D" };
         var remove = new ToolStripMenuItem("Remove Filter", null, (_, _) => RemoveSelected());
@@ -1784,7 +1787,9 @@ public sealed class FilterTreeControl : UserControl
         menu.Opening += (_, _) =>
         {
             int n = SelectedCount;
-            add.Text = ContextFilter is null ? "Add Filter…" : "Add Filter Below…";
+            bool onFilter = ContextFilter is not null;
+            add.Text = onFilter ? "Add Filter Above\u2026" : "Add Filter\u2026";
+            add.ShortcutKeyDisplayString = NewFilterKeys.TextFor(onFilter ? NewFilterPlacement.Above : NewFilterPlacement.Default);
             edit.Text = n > 1 ? $"Edit Appearance of {n} Filters…" : "Edit Filter…";
             duplicate.Text = n > 1 ? $"Duplicate {n} Filters" : "Duplicate Filter";
             remove.Text = n > 1 ? $"Remove {n} Filters" : "Remove Filter";

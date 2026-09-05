@@ -110,6 +110,7 @@ internal static class SelfTest
             ok &= Timed("update credential", RunUpdateCredentialChecks);
             ok &= Timed("filter list sync", RunFilterSyncChecks);
             ok &= Timed("new filter", RunNewFilterChecks);
+            ok &= Timed("new filter place", RunFilterPlacementChecks);
             ok &= Timed("filter search bar", RunFilterSearchBarChecks);
             ok &= Timed("tab stops", RunTabStopChecks);
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
@@ -6164,16 +6165,39 @@ internal static class SelfTest
             tree.Rebuild();
             Pump();
 
-            ok = Check("with nothing to go below, the preference sends it to the top",
-                       MainForm.NewFilterIndex(addAtTop: true, after: null, filters) == 0);
+            ok = Check("with nothing to measure from, the preference sends it to the top",
+                       MainForm.NewFilterSpot(NewFilterPlacement.Default, null, addAtTop: true, filters) == (null, 0));
             ok &= Check("or to the end",
-                        MainForm.NewFilterIndex(addAtTop: false, after: null, filters) == -1);
-            ok &= Check("below a filter means the next place among its own siblings",
-                        MainForm.NewFilterIndex(addAtTop: true, after: roots[3], filters) == 4);
-            ok &= Check("and asking for below beats the preference",
-                        MainForm.NewFilterIndex(addAtTop: false, after: roots[3], filters) == 4);
-            ok &= Check("below a nested filter counts among ITS siblings, not the roots",
-                        MainForm.NewFilterIndex(addAtTop: true, after: kid, filters) == 1);
+                        MainForm.NewFilterSpot(NewFilterPlacement.Default, null, addAtTop: false, filters) == (null, -1));
+            ok &= Check("above a filter means exactly where that filter is now, which pushes it down",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Above, roots[3], addAtTop: true, filters) == (null, 3));
+            ok &= Check("and asking for above beats the preference",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Above, roots[3], addAtTop: false, filters) == (null, 3));
+            ok &= Check("above a nested filter counts among ITS siblings, and lands under ITS parent",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Above, kid, addAtTop: true, filters) == (roots[3], 0));
+            ok &= Check("a child goes under the filter itself, at whichever end the preference names",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Child, roots[3], addAtTop: true, filters) == (roots[3], 0) &&
+                        MainForm.NewFilterSpot(NewFilterPlacement.Child, roots[3], addAtTop: false, filters) == (roots[3], -1));
+            ok &= Check("with nothing selected, above and child both fall back to the default place",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Above, null, addAtTop: true, filters) == (null, 0) &&
+                        MainForm.NewFilterSpot(NewFilterPlacement.Child, null, addAtTop: true, filters) == (null, 0));
+
+            // Nesting has a floor, and the answer is the default place rather than a level that cannot exist.
+            var deep = new FilterCollection();
+            var chain = new Filter { Match = new FilterMatch { Text = "deep 0" } };
+            deep.Roots.Add(chain);
+            for (int d = 1; d < FilterCollection.MaxDepth; d++)
+            {
+                var next = new Filter { Match = new FilterMatch { Text = $"deep {d}" } };
+                deep.Add(next, chain);
+                chain = next;
+            }
+            ok &= Check($"the deepest filter really is at the floor (depth {chain.Depth})",
+                        chain.Depth == FilterCollection.MaxDepth - 1);
+            ok &= Check("and a child of it falls back to the default place rather than nesting past it",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Child, chain, addAtTop: true, deep) == (null, 0));
+            ok &= Check("while a sibling above it is still perfectly legal",
+                        MainForm.NewFilterSpot(NewFilterPlacement.Above, chain, addAtTop: true, deep) == (chain.Parent, 0));
 
             // ---- somewhere to double-click ----
             // The list cannot be made to scroll past its last filter: a native tree clamps that, MEASURED.
@@ -6191,13 +6215,13 @@ internal static class SelfTest
                         tree.TreeHeightForTesting - few.Roots.Count * rowH >= rowH);
 
             int asked = 0;
-            Filter? askedParent = null;
-            void CountAdds(Filter? p) { asked++; askedParent = p; }
+            var askedFor = NewFilterPlacement.Default;
+            void CountAdds(NewFilterPlacement p) { asked++; askedFor = p; }
             tree.AddRequested += CountAdds;
             tree.RaiseDoubleClickEventForTesting(new Point(tree.TreeWidthForTesting / 2, tree.TreeHeightForTesting - 2));
             Pump();
-            ok &= Check($"double-clicking it asks for a new top-level filter (raised {asked})",
-                        asked == 1 && askedParent is null);
+            ok &= Check($"double-clicking it asks for a filter in the default place (raised {asked}, {askedFor})",
+                        asked == 1 && askedFor == NewFilterPlacement.Default);
             tree.AddRequested -= CountAdds;
 
             // Opening the search bar makes the list shorter; closing it gives every pixel back.
@@ -6216,25 +6240,34 @@ internal static class SelfTest
                         tree.TreeAreaForTesting.Height == listBefore);
 
             // ---- what the list's own menu offers ----
-            Filter? below = null;
-            void NoteBelow(Filter f) => below = f;
-            tree.AddBelowRequested += NoteBelow;
             asked = 0;
             tree.AddRequested += CountAdds;
 
             var menu = tree.FilterMenuForTesting;
             var addItem = (ToolStripMenuItem)menu.Items[0];
+            var addChildItem = (ToolStripMenuItem)menu.Items[1];
             tree.ScrollToForTesting(roots[0]);
             Pump();
             tree.ClickFilterForTesting(roots[2], button: MouseButtons.Right);
             tree.OpenFilterMenuForTesting();
-            ok &= Check($"right-clicking a filter offers to add one below it [{addItem.Text}]",
-                        addItem.Text == "Add Filter Below\u2026");
+            ok &= Check($"right-clicking a filter offers to add one above it [{addItem.Text}]",
+                        addItem.Text == "Add Filter Above\u2026");
+            ok &= Check($"and says which key does that [{addItem.ShortcutKeyDisplayString}]",
+                        addItem.ShortcutKeyDisplayString == "Ctrl+Shift+N");
             addItem.PerformClick();
-            ok &= Check("and that is the filter it means", ReferenceEquals(below, roots[2]));
-            ok &= Check("without asking for a plain one as well", asked == 0);
+            ok &= Check($"and that is the place it asks for ({askedFor})",
+                        asked == 1 && askedFor == NewFilterPlacement.Above);
+            // Right-clicking a row selects it, which is what "the selected filter" then means to the dialog.
+            ok &= Check("having selected the filter it was opened over",
+                        ReferenceEquals(tree.SelectedFilter, roots[2]));
 
-            below = null;
+            tree.OpenFilterMenuForTesting();
+            ok &= Check($"the child entry says its own key too [{addChildItem.ShortcutKeyDisplayString}]",
+                        addChildItem.ShortcutKeyDisplayString == "Ctrl+Alt+N");
+            addChildItem.PerformClick();
+            ok &= Check($"and asks to nest under the selected filter ({askedFor})",
+                        asked == 2 && askedFor == NewFilterPlacement.Child);
+
             tree.MouseDownForTesting(new Point(20, tree.TreeAreaForTesting.Height - 2), button: MouseButtons.Right);
             tree.OpenFilterMenuForTesting();
             // The fixture fills the list, so the point above is a row - what matters is the empty case, and
@@ -6243,11 +6276,12 @@ internal static class SelfTest
             tree.OpenFilterMenuForTesting();
             ok &= Check($"right-clicking clear of every filter offers a plain one [{addItem.Text}]",
                         addItem.Text == "Add Filter\u2026");
+            ok &= Check($"on the plain key [{addItem.ShortcutKeyDisplayString}]",
+                        addItem.ShortcutKeyDisplayString == "Ctrl+N");
             addItem.PerformClick();
-            ok &= Check("and asks for it at the top level", asked == 1 && askedParent is null);
-            ok &= Check("not below anything", below is null);
+            ok &= Check($"and asks for the default place ({askedFor})",
+                        asked == 3 && askedFor == NewFilterPlacement.Default);
             tree.AddRequested -= CountAdds;
-            tree.AddBelowRequested -= NoteBelow;
 
             // ---- a new filter is on screen and selected ----
             // A row scrolled out of the list still reports a rectangle - with a top above the list, or below
@@ -6278,6 +6312,170 @@ internal static class SelfTest
 
         return ok;
     }
+
+    /// <summary>Choosing where a new filter goes, from inside the dialog that makes it.
+    ///
+    /// <para>The three places are the whole point of the row, so what is checked here is that all three are
+    /// always offered and always in the same order, that each says the key that picks it, that the key really
+    /// picks it while the dialog is open - the way a mind is changed after Ctrl+N has already opened it - and
+    /// that pressing one leaves the keyboard, the caret and the selection in the pattern box, since the
+    /// pattern is usually half typed at that moment.</para></summary>
+    private static bool RunFilterPlacementChecks()
+    {
+        Line("-- where a new filter goes --");
+
+        var defaults = new ResolvedStyle(new RgbColor(0, 0, 0), new RgbColor(255, 255, 255), false, false);
+        RgbColor amber = new(0xFF, 0xC0, 0x00), slate = new(0x30, 0x30, 0x40);
+        var branch = new Filter { Match = { Text = "ERROR" }, Style = { Foreground = amber, Background = slate } };
+        var twig = new Filter { Match = { Text = "payment" } };
+        var tree = new FilterCollection();
+        tree.Roots.Add(branch);
+        tree.Add(twig, branch);
+
+        static FilterEditDialog Open(Filter filter, bool isNew, IReadOnlyList<Filter> siblings, ResolvedStyle defaults)
+        {
+            var dlg = new FilterEditDialog(filter, isNew, siblings, null, defaults)
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Opacity = 0
+            };
+            dlg.Show();
+            Pump();
+            return dlg;
+        }
+
+        var all = tree.EnumerateDepthFirst().ToList();
+        bool ok;
+        using (var dlg = Open(new Filter { Match = { Text = "declined" } }, isNew: true, all, defaults))
+        {
+            dlg.OfferPlacements(NewFilterPlacement.Default, twig, addAtTop: true);
+            Pump();
+
+            var places = dlg.PlacementsForTesting;
+            ok = Check($"a filter being made is offered three places [{string.Join(" | ", places.Select(p => p.Text.Replace("&", "")))}]",
+                       places.Count == 3);
+            ok &= Check($"the first one follows the preference [{places[0].Text.Replace("&", "")}]",
+                        places[0].Text == "&At the top of the list");
+            dlg.OfferPlacements(NewFilterPlacement.Default, twig, addAtTop: false);
+            Pump();
+            ok &= Check($"and says so the other way round when new filters go to the end " +
+                        $"[{dlg.PlacementsForTesting[0].Text.Replace("&", "")}]",
+                        dlg.PlacementsForTesting[0].Text == "&At the end of the list");
+            dlg.OfferPlacements(NewFilterPlacement.Default, twig, addAtTop: true);
+            Pump();
+
+            // The keys are the reason the row is worth learning, so each must be written beside its own
+            // choice - and be the key that actually asks for it.
+            string[] keys = [.. dlg.PlacementsForTesting.Select(p => p.Key)];
+            ok &= Check($"each place shows the key that picks it [{string.Join(" | ", keys)}]",
+                        keys is ["Ctrl+N", "Ctrl+Shift+N", "Ctrl+Alt+N"]);
+            ok &= Check("and says the same key to a screen reader, which never reaches the label beside it",
+                        dlg.PlacementsForTesting.All(p => p.Said == "Shortcut " + p.Key),
+                        string.Join(" | ", dlg.PlacementsForTesting.Select(p => p.Said)));
+
+            // ---- the keys, pressed while the dialog is open ----
+            dlg.FocusTextForTesting(2, 3);
+            Pump();
+            ok &= Check("the pattern box has the keyboard before any of them is pressed", dlg.TextHasFocusForTesting);
+
+            bool took = dlg.PressKeyForTesting(NewFilterKeys.AddAbove);
+            ok &= Check($"Ctrl+Shift+N moves the choice to above the selected filter ({dlg.Placement})",
+                        took && dlg.Placement == NewFilterPlacement.Above);
+            took = dlg.PressKeyForTesting(NewFilterKeys.AddChild);
+            ok &= Check($"Ctrl+Alt+N moves it to a child of it ({dlg.Placement})",
+                        took && dlg.Placement == NewFilterPlacement.Child);
+            took = dlg.PressKeyForTesting(NewFilterKeys.Add);
+            ok &= Check($"and Ctrl+N moves it back to the default place ({dlg.Placement})",
+                        took && dlg.Placement == NewFilterPlacement.Default);
+            ok &= Check("changing your mind leaves the keyboard in the pattern box", dlg.TextHasFocusForTesting);
+            ok &= Check($"with the caret and selection where they were {dlg.TextSelectionForTesting}",
+                        dlg.TextSelectionForTesting == (2, 3));
+
+            // The same, from the Alt keys the row underlines - the mouse-free route for anyone who reads the
+            // dialog rather than the menu that opened it.
+            ok &= Check("Alt+V picks above too", AltKey(dlg, 'v') && dlg.Placement == NewFilterPlacement.Above);
+            ok &= Check("Alt+H picks the child", AltKey(dlg, 'h') && dlg.Placement == NewFilterPlacement.Child);
+            ok &= Check("Alt+A picks the default place", AltKey(dlg, 'a') && dlg.Placement == NewFilterPlacement.Default);
+            ok &= Check("and none of the three takes the keyboard either", dlg.TextHasFocusForTesting);
+            ok &= Check($"nor the caret and selection {dlg.TextSelectionForTesting}",
+                        dlg.TextSelectionForTesting == (2, 3));
+
+            // ---- the preview follows the choice ----
+            static bool Is(Color c, RgbColor want) => c.R == want.R && c.G == want.G && c.B == want.B;
+            dlg.PressKeyForTesting(NewFilterKeys.AddChild);
+            Pump();
+            var p = dlg.PreviewForTesting;
+            ok &= Check("nesting it under a filter previews what it would inherit there",
+                        ReferenceEquals(dlg.PreviewParentForTesting, twig) &&
+                        Is(p.Fore, amber) && Is(p.Back, slate));
+            dlg.PressKeyForTesting(NewFilterKeys.AddAbove);
+            Pump();
+            p = dlg.PreviewForTesting;
+            ok &= Check("putting it above that filter inherits from ITS parent instead",
+                        ReferenceEquals(dlg.PreviewParentForTesting, branch) &&
+                        Is(p.Fore, amber) && Is(p.Back, slate));
+            dlg.PressKeyForTesting(NewFilterKeys.Add);
+            Pump();
+            p = dlg.PreviewForTesting;
+            ok &= Check("and the default place puts it at the top level, where the view's own colours show",
+                        dlg.PreviewParentForTesting is null &&
+                        Is(p.Fore, defaults.Foreground) && Is(p.Back, defaults.Background));
+        }
+
+        // ---- what cannot be done is shown, and shut off ----
+        using (var dlg = Open(new Filter { Match = { Text = "declined" } }, isNew: true, all, defaults))
+        {
+            dlg.OfferPlacements(NewFilterPlacement.Above, null, addAtTop: true);
+            Pump();
+            var places = dlg.PlacementsForTesting;
+            ok &= Check($"with no filter selected, only the default place can be picked " +
+                        $"[{string.Join(" ", places.Select(q => q.Enabled))}]",
+                        places[0].Enabled && !places[1].Enabled && !places[2].Enabled);
+            ok &= Check($"and asking for one that cannot be had settles on the default ({dlg.Placement})",
+                        dlg.Placement == NewFilterPlacement.Default);
+            ok &= Check("while its key still does nothing else",
+                        dlg.PressKeyForTesting(NewFilterKeys.AddChild) &&
+                        dlg.Placement == NewFilterPlacement.Default);
+
+            // Nesting runs out of levels; sitting beside the deepest filter never does.
+            var deep = new FilterCollection();
+            var chain = new Filter { Match = { Text = "deep 0" } };
+            deep.Roots.Add(chain);
+            for (int d = 1; d < FilterCollection.MaxDepth; d++)
+            {
+                var next = new Filter { Match = { Text = $"deep {d}" } };
+                deep.Add(next, chain);
+                chain = next;
+            }
+            dlg.OfferPlacements(NewFilterPlacement.Child, chain, addAtTop: true);
+            Pump();
+            places = dlg.PlacementsForTesting;
+            ok &= Check($"at the deepest level a child is shut off but a sibling above is not " +
+                        $"[{string.Join(" ", places.Select(q => q.Enabled))}]",
+                        places[1].Enabled && !places[2].Enabled);
+            ok &= Check($"and asking to nest there settles on the default place ({dlg.Placement})",
+                        dlg.Placement == NewFilterPlacement.Default);
+        }
+
+        // An edit moves nothing, so it is not asked where the filter should go.
+        using (var dlg = Open(branch, isNew: false, all, defaults))
+        {
+            ok &= Check("editing a filter offers no places at all", !dlg.OffersPlacementForTesting);
+            ok &= Check("and answers with the default one", dlg.Placement == NewFilterPlacement.Default);
+            ok &= Check("and its keys are left to whatever else wants them",
+                        !dlg.PressKeyForTesting(NewFilterKeys.AddAbove));
+        }
+
+        return ok;
+    }
+
+    /// <summary>The call WinForms itself makes for Alt+letter, so a check exercises the real dispatch rather
+    /// than looking for an ampersand in a caption.</summary>
+    private static bool AltKey(Form form, char ch)
+        => (bool)typeof(Control)
+            .GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(form, new object[] { ch })!;
 
     private static bool RunFilterSyncChecks()
     {        Line("-- keeping the filter list still --");
@@ -6712,7 +6910,7 @@ internal static class SelfTest
             // Through the list's own event, not the seam: the empty part of the list is not a node, so the
             // tree's NodeMouseDoubleClick - where this used to be handled - never fires there.
             int asked = 0;
-            void CountAdds(Filter? _) => asked++;
+            void CountAdds(NewFilterPlacement _) => asked++;
             tree.AddRequested += CountAdds;
             tree.RaiseDoubleClickEventForTesting(new Point(tree.TreeWidthForTesting / 2, belowY));
             Pump();
@@ -7106,11 +7304,6 @@ internal static class SelfTest
 
         // The same call WinForms makes for Alt+letter, so this exercises the real dispatch rather than
         // just looking for an ampersand in the caption.
-        static bool AltKey(Form form, char ch)
-            => (bool)typeof(Control)
-                .GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .Invoke(form, new object[] { ch })!;
-
         static char? MnemonicOf(string text) => SelfTest.MnemonicOf(text);
 
         bool ok = true;
@@ -7174,7 +7367,9 @@ internal static class SelfTest
 
         var filter = new Filter { Match = { Text = "sample text" } };
         ok &= CheckDialog("filter", new FilterEditDialog(filter, isNew: true),
-                          "&Matches text", "Mar&ked by marker", "&Text:", "&Description:");
+                          "&Matches text", "Mar&ked by marker", "&Text:", "&Description:",
+                          "&At the top of the list", "Abo&ve the selected filter",
+                          "As a c&hild of the selected filter");
 
         var group = new List<Filter> { new() { Match = { Text = "one" } }, new() { Match = { Text = "two" } } };
         ok &= CheckDialog("appearance", new AppearanceDialog(group, group,
@@ -10534,7 +10729,10 @@ internal static class SelfTest
         // menus, and only one of them registers the key, so only a check on the DISPLAYED string covers both.
         string[] shortcuts =
         [
-            "Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C", "Field Settings\u2026\tCtrl+Shift+D"
+            "Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C", "Field Settings\u2026\tCtrl+Shift+D",
+            // The three places a new filter can go, each on the key the dialog writes beside that choice.
+            "Add Filter\u2026\tCtrl+N", "Add Filter Above Selected\u2026\tCtrl+Shift+N",
+            "Add Child Filter\u2026\tCtrl+Alt+N"
         ];
         var keys = System.ComponentModel.TypeDescriptor.GetConverter(typeof(Keys));
         var advertised = AllMenuItems(bar.Items)

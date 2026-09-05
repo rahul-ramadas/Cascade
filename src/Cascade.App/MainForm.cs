@@ -349,8 +349,9 @@ public sealed class MainForm : Form
         };
         _grid.ColumnSettingsRequested += ShowColumns;
         _filterTree.EditRequested += EditFilter;
-        _filterTree.AddRequested += AddFilter;
-        _filterTree.AddBelowRequested += after => AddFilter(after.Parent, after);
+        // Every way of asking for a filter goes through the one command, so a key advertised in the list's
+        // own menu does exactly what the same key does in the log: seed from the selection, offer the places.
+        _filterTree.AddRequested += NewFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
         _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
@@ -667,9 +668,11 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(BuildEncodingMenu());
 
         var filters = new ToolStripMenuItem("Fi&lters");
-        filters.DropDownItems.Add(Mi("&Add Filter…", (_, _) => AddFilter(null)));
-        filters.DropDownItems.Add(Mi("Add &Child Filter…", (_, _) => AddFilter(_filterTree.SelectedFilter)));
-        filters.DropDownItems.Add(Mi("New Filter from Se&lection…", (_, _) => NewFilterFromSelection(), Keys.Control | Keys.N));
+        // The three places a new filter can go, each on the key that pre-picks it in the dialog. They all
+        // seed the filter from whatever is picked out in the log, which is what Ctrl+N always did.
+        filters.DropDownItems.Add(Mi("&Add Filter\u2026", (_, _) => NewFilter(NewFilterPlacement.Default), NewFilterKeys.Add));
+        filters.DropDownItems.Add(Mi("Add Filter Abo&ve Selected\u2026", (_, _) => NewFilter(NewFilterPlacement.Above), NewFilterKeys.AddAbove));
+        filters.DropDownItems.Add(Mi("Add &Child Filter\u2026", (_, _) => NewFilter(NewFilterPlacement.Child), NewFilterKeys.AddChild));
         var miEdit = Mi("&Edit Filter…", (_, _) => { if (_filterTree.SelectedFilter is { } f) EditFilter(f); });
         var miDuplicate = Mi("Duplica&te Filter", (_, _) => _filterTree.DuplicateSelected(), Keys.Control | Keys.D);
         var miRemove = Mi("&Remove Filter", (_, _) => _filterTree.RemoveSelected());
@@ -694,7 +697,9 @@ public sealed class MainForm : Form
         };
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
-        filters.DropDownItems.Add(Mi("Find Pre&vious Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
+        // "Match" rather than "Previous": v now underlines the new filter placed above the selected one, and
+        // one letter cannot mean two things in one menu.
+        filters.DropDownItems.Add(Mi("Find Previous &Match", (_, _) => FindSelectedFilterMatch(false), Keys.Shift | Keys.F4));
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Hint("Enable &Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(true)));
         filters.DropDownItems.Add(Hint("Disa&ble Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(false)));
@@ -1584,25 +1589,26 @@ public sealed class MainForm : Form
         _miRedo.Text = _history.RedoLabel is { } r ? $"R&edo {r}" : "R&edo";
     }
 
-    private void AddFilter(Filter? parent) => AddFilter(parent, after: null);
-
-    /// <summary>Adds a filter. <paramref name="after"/> puts it directly below that one as its sibling -
-    /// what the list's own menu offers; otherwise the preference decides which end of the list it goes to.</summary>
-    private void AddFilter(Filter? parent, Filter? after)
+    /// <summary>Makes a filter and puts it where <paramref name="placement"/> asks. The place is only where
+    /// the choice starts: the dialog offers all three and answers with whichever the reader settled on, so a
+    /// key pressed in the log can be changed for another one after the dialog is already open.
+    ///
+    /// <para>"Above" and "as a child" are measured from the filter the list is on. There need not be one -
+    /// nothing is selected in a freshly opened file - and nesting can run out of levels, so the dialog shuts
+    /// those choices off rather than refusing the command; asking for a place that is not there simply lands
+    /// in the default one.</para></summary>
+    private void AddFilter(NewFilterPlacement placement, string pattern = "", string caution = "")
     {
-        if (after is not null) parent = after.Parent;
-        if (parent is not null && parent.Depth + 1 >= FilterCollection.MaxDepth)
-        {
-            MessageBox.Show(this, "Maximum nesting depth reached.", "Cascade", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-        var filter = new Filter { Enabled = true };
+        var anchor = _filterTree.SelectedFilter;
+        var filter = new Filter { Enabled = true, Match = { Text = pattern } };
         using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList(),
-                                             parent, ViewDefaults);
+                                             parent: null, ViewDefaults) { Caution = caution };
+        dlg.OfferPlacements(placement, anchor, _settings.AddNewFiltersAtTop);
         _history.Begin("Add Filter", _doc.Filters);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            _doc.Filters.Add(filter, parent, WhereNewFilterGoes(after));
+            var (parent, index) = NewFilterSpot(dlg.Placement, anchor, _settings.AddNewFiltersAtTop, _doc.Filters);
+            _doc.Filters.Add(filter, parent, index);
             _filterTree.SyncToModel();
             _filterTree.RevealFilter(filter);
             OnFiltersChanged();
@@ -1671,14 +1677,15 @@ public sealed class MainForm : Form
     private void CreateFilterFromLine(long line)
         => CreateFilterFromShownText(SeedPatternFromLine(DisplayedLine(line)), line);
 
-    /// <summary>Ctrl+N: a filter from whatever is selected. Part of a line if part of one is selected -
-    /// which is the point of being able to select part of one - and otherwise the whole caret line.</summary>
-    private void NewFilterFromSelection()
+    /// <summary>Ctrl+N and its two neighbours: a filter from whatever is selected, going where the key that
+    /// was pressed asks for. Part of a line if part of one is selected - which is the point of being able to
+    /// select part of one - and otherwise the whole caret line.</summary>
+    private void NewFilter(NewFilterPlacement placement)
     {
         long line = _grid.CaretLine;
         string? seed = NewFilterSeed(_grid.SelectedText, line >= 0 ? DisplayedLine(line) : null);
-        if (seed is null) AddFilter(null);
-        else CreateFilterFromShownText(seed, line);
+        if (seed is null) AddFilter(placement);
+        else AddFilter(placement, seed, CautionAboutShownText(seed, line));
     }
 
     /// <summary>The line as it is being SHOWN, which is what a filter seeded from it should start out
@@ -1712,9 +1719,10 @@ public sealed class MainForm : Form
         "Searching and filtering always run on the original line, not the one shown.";
 
     /// <summary>Starts a filter from a seed taken off the screen, warning when the screen and the file no
-    /// longer agree. Every path that seeds from a line comes through here.</summary>
+    /// longer agree. Every path that seeds from a line comes through here. A filter made this way goes to the
+    /// default place: a double-click in the log says nothing about the filter list.</summary>
     private void CreateFilterFromShownText(string seed, long line)
-        => CreateFilterFrom(seed, CautionAboutShownText(seed, line));
+        => AddFilter(NewFilterPlacement.Default, seed, CautionAboutShownText(seed, line));
 
     /// <summary>What a filter started with Ctrl+N arrives matching: the part of a line that is picked out,
     /// else the whole caret line, else nothing at all. Nothing is on the caret until something has been
@@ -1738,33 +1746,26 @@ public sealed class MainForm : Form
         if (line >= 0) CreateFilterFromLine(line);
     }
 
-    private void CreateFilterFrom(string pattern) => CreateFilterFrom(pattern, "");
-
-    private void CreateFilterFrom(string pattern, string caution)
+    /// <summary>Where a new filter lands: the list it belongs to and the place in it. An index of -1 means
+    /// the end of that list.
+    ///
+    /// <para>Above puts it exactly where the anchor is now, which pushes the anchor down - a sibling list
+    /// closes up behind an insert, so no arithmetic is needed to say "in front of this one". The other two
+    /// place it among the roots or among the anchor's own children, at whichever end the preference names.
+    /// Anything that cannot be done - no anchor to measure from, or a child that would nest past the deepest
+    /// level - falls back to the default place, which is the one the dialog was offering anyway.</para></summary>
+    internal static (Filter? Parent, int Index) NewFilterSpot(NewFilterPlacement placement, Filter? anchor,
+                                                              bool addAtTop, FilterCollection filters)
     {
-        var filter = new Filter { Enabled = true, Match = { Text = pattern } };
-        using var dlg = new FilterEditDialog(filter, isNew: true, _doc.Filters.EnumerateDepthFirst().ToList(),
-                                             parent: null, ViewDefaults) { Caution = caution };
-        _history.Begin("New Filter", _doc.Filters);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
+        int end = addAtTop ? 0 : -1;
+        if (anchor is null) return (null, end);
+        return placement switch
         {
-            _doc.Filters.Add(filter, null, WhereNewFilterGoes(null));
-            _filterTree.SyncToModel();
-            _filterTree.RevealFilter(filter);
-            OnFiltersChanged();
-        }
-        else _history.Abandon();
-    }
-
-    /// <summary>Where a new filter lands among its siblings: directly below the one it was asked for, else
-    /// whichever end of the list the reader prefers. -1 means the end.</summary>
-    private int WhereNewFilterGoes(Filter? after) => NewFilterIndex(_settings.AddNewFiltersAtTop, after, _doc.Filters);
-
-    internal static int NewFilterIndex(bool addAtTop, Filter? after, FilterCollection filters)
-    {
-        if (after is null) return addAtTop ? 0 : -1;
-        var siblings = after.Parent?.Children ?? filters.Roots;
-        return siblings.IndexOf(after) + 1;
+            NewFilterPlacement.Above =>
+                (anchor.Parent, Math.Max(0, (anchor.Parent?.Children ?? filters.Roots).IndexOf(anchor))),
+            NewFilterPlacement.Child when anchor.Depth + 1 < FilterCollection.MaxDepth => (anchor, end),
+            _ => (null, end)
+        };
     }
 
     private void FindSelectedFilterMatch(bool forward)

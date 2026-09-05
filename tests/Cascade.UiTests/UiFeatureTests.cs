@@ -243,7 +243,6 @@ public class UiFeatureTests
         Check("View has Find Filter", view.Any(n => n.Contains("Find Filter", StringComparison.OrdinalIgnoreCase)), string.Join(",", view));
         var filtersItems = app.MenuItemNames("Filters");
         Check("Filters has Find Next Match", filtersItems.Any(n => n.Contains("Find Next Match", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
-        Check("Filters has New Filter from Selection", filtersItems.Any(n => n.Contains("New Filter from Selection", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
 
         // ---- text find (dialog) ----
         app.FindText("other line 7");
@@ -268,7 +267,10 @@ public class UiFeatureTests
         Check("zoom out 100%", app.StatusText("Zoom:") == "Zoom: 100%", app.StatusText("Zoom:"));
 
         // ---- add-filter entry points present (the modal dialog's layout is covered by --screens) ----
+        // One per place a new filter can go, each carrying the key that pre-picks that place in the dialog.
         Check("Filters has Add Filter", filtersItems.Any(n => n.Contains("Add Filter", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
+        Check("Filters has Add Filter Above Selected", filtersItems.Any(n => n.Contains("Add Filter Above Selected", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
+        Check("Filters has Add Child Filter", filtersItems.Any(n => n.Contains("Add Child Filter", StringComparison.OrdinalIgnoreCase)), string.Join(",", filtersItems));
 
         Assert.True(fails.Count == 0, "Feature sweep failures:\n  " + string.Join("\n  ", fails));
     }
@@ -1377,6 +1379,87 @@ public class UiFeatureTests
             try { File.Delete(log); } catch { /* ignore */ }
             try { File.Delete(tat); } catch { /* ignore */ }
         }
+    }
+
+    [Fact]
+    public void The_add_filter_keys_pre_pick_where_it_goes_and_can_still_be_changed()
+    {
+        // Ctrl+N, Ctrl+Shift+N and Ctrl+Alt+N all open the same dialog; the only difference is which of the
+        // three places it opens with picked. Pressing one of them again while the dialog is up moves the
+        // choice, which is what makes "no, a child of this one" cost a keystroke instead of the mouse.
+        // Only a real window can prove this: the key has to survive menu-shortcut dispatch on the way in and
+        // reach a modal dialog's own key handling on the way round.
+        string log = TestData.WriteLogFile();
+        string tat = TestData.WriteFilterFile("MATCH", "line 999", "line 998");
+        try
+        {
+            using var app = CascadeApp.LaunchExisting(log, tat, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            app.FocusFilter("line 999");
+            Assert.True(app.WaitForSelectedFilter("line 999"), app.SelectedFilterName() ?? "(nothing selected)");
+
+            app.SendKeyAsDialogKey(app.Tree(), VirtualKeyShort.KEY_N,
+                                   VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
+            var dialog = app.FindDialog("Add Filter");
+            Assert.True(dialog is not null, "Ctrl+Shift+N did not open the Add Filter dialog");
+
+            try
+            {
+                Assert.Equal("Above the selected filter", PickedPlace(dialog!));
+
+                app.SendKeyAsDialogKey(dialog!, VirtualKeyShort.KEY_N, VirtualKeyShort.CONTROL, VirtualKeyShort.ALT);
+                Assert.Equal("As a child of the selected filter", PickedPlace(dialog!));
+
+                app.SendKeyAsDialogKey(dialog!, VirtualKeyShort.KEY_N, VirtualKeyShort.CONTROL);
+                Assert.Equal("At the top of the list", PickedPlace(dialog!));
+
+                // Back to above, and accepted, so where the filter really lands is checked as well as which
+                // button is filled in.
+                app.SendKeyAsDialogKey(dialog!, VirtualKeyShort.KEY_N,
+                                       VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
+                Assert.Equal("Above the selected filter", PickedPlace(dialog!));
+
+                var box = dialog!.FindFirstDescendant(cf => cf.ByName("Filter text"))
+                          ?? throw new InvalidOperationException("the Add Filter dialog has no pattern box");
+                app.SetText(box, "plum");
+                app.SendKeyAsDialogKey(dialog!, VirtualKeyShort.RETURN);
+            }
+            finally
+            {
+                if (app.FindDialog("Add Filter") is { } stillUp)
+                    app.SendKeyAsDialogKey(stillUp, VirtualKeyShort.ESCAPE);
+            }
+
+            Assert.True(app.WaitForFilter("plum"), string.Join(" | ", app.RootFilterNames()));
+            string[] roots = app.RootFilterNames();
+            int made = Array.FindIndex(roots, n => n.Contains("plum", StringComparison.Ordinal));
+            int anchor = Array.FindIndex(roots, n => n.Contains("line 999", StringComparison.Ordinal));
+            Assert.True(made >= 0 && anchor == made + 1,
+                        "the new filter did not land directly above the selected one: " + string.Join(" | ", roots));
+        }
+        finally
+        {
+            try { File.Delete(log); } catch { /* ignore */ }
+            try { File.Delete(tat); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Which of the three places the Add Filter dialog has filled in. A WinForms radio button
+    /// reaches automation through the accessibility bridge, which offers the answer as a selection on some
+    /// machines and only as a legacy state flag on others, so both are asked.</summary>
+    private static string PickedPlace(Window dialog)
+    {
+        string[] places = ["At the top of the list", "Above the selected filter", "As a child of the selected filter"];
+        var buttons = dialog.FindAllDescendants(cf => cf.ByControlType(ControlType.RadioButton))
+                            .Where(r => places.Contains(r.Name ?? "")).ToArray();
+        if (buttons.Length != places.Length)
+            return $"(found {buttons.Length} of {places.Length} places: {string.Join(" | ", buttons.Select(b => b.Name))})";
+
+        var picked = buttons.FirstOrDefault(r =>
+            r.Patterns.SelectionItem.PatternOrDefault?.IsSelected.ValueOrDefault == true ||
+            r.Patterns.LegacyIAccessible.PatternOrDefault?.State.ValueOrDefault
+             .HasFlag(AccessibilityState.STATE_SYSTEM_CHECKED) == true);
+        return picked?.Name ?? "(none picked)";
     }
 
     private static string Read(string path)

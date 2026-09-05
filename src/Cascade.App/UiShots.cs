@@ -43,6 +43,13 @@ internal static class UiShots
         };
         ShotDialog(new FilterEditDialog(demoFilter, isNew: false), outDir, "filter-edit");
 
+        // The same dialog as it opens for a filter that does not exist yet: the extra row of places, each
+        // with the key that picks it, and one of them already picked by the key that opened it.
+        var seeded = new Filter { Enabled = true, Match = { Text = "declined for order" } };
+        var adding = new FilterEditDialog(seeded, isNew: true, [demoFilter]);
+        adding.OfferPlacements(NewFilterPlacement.Above, demoFilter, addAtTop: true);
+        ShotDialog(adding, outDir, "filter-add");
+
         var badFilter = new Filter { Enabled = true, Match = { Text = @"\[payment-svc\s*\].+declined", Regex = true } };
         var filterError = new FilterEditDialog(badFilter, isNew: false);
         filterError.SetTextForTesting(@"\[payment-svc\s*\].+(declined");
