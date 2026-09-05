@@ -33,17 +33,22 @@ public static class ClockMath
 /// </summary>
 public static class ElapsedText
 {
-    /// <summary>How many seconds the gutter has room for. Past this it says so rather than growing, because
-    /// a column that changed width as it scrolled would slide the whole log sideways.</summary>
-    private const long WidestSeconds = 9999;
+    /// <summary>How many seconds the gutter has room for when nobody says otherwise - enough for any gap
+    /// between two adjacent lines that is worth reading as a number. A caller measuring from a fixed origin
+    /// passes the log's own span instead, since every value it can produce is bounded by that.</summary>
+    public const long DefaultWidestSeconds = 9999;
 
-    private const string TooLong = ">9999", TooLongBack = "<-9999", Nothing = "";
+    private const string Nothing = "";
 
     /// <summary>One value for the elapsed column: seconds, to whatever of a second the log itself carries.
     /// </summary>
-    public static string Gutter(long ticks, int fractionDigits)
+    /// <param name="widestSeconds">The largest figure the column has been sized for. Past it the column
+    /// says so rather than growing, because a column that changed width as it scrolled would slide the
+    /// whole log sideways.</param>
+    public static string Gutter(long ticks, int fractionDigits, long widestSeconds = DefaultWidestSeconds)
     {
         int digits = Math.Clamp(fractionDigits, 0, ClockFormat.MaxFractionDigits);
+        long widest = Math.Max(1, widestSeconds);
         bool negative = ticks < 0;
         long abs = Math.Abs(ticks);
 
@@ -52,7 +57,8 @@ public static class ElapsedText
         long divisor = Pow10(digits);
         long whole = units / divisor, fraction = units % divisor;
 
-        if (whole > WidestSeconds) return negative ? TooLongBack : TooLong;
+        if (whole > widest)
+            return (negative ? "<-" : ">") + widest.ToString(CultureInfo.InvariantCulture);
 
         string sign = negative ? "-" : "";
         return digits == 0
@@ -62,11 +68,19 @@ public static class ElapsedText
     }
 
     /// <summary>The longest the column can ever be asked to draw, which is what it is sized from - never
-    /// the values on screen, or scrolling would resize it.</summary>
-    public static string WidestGutter(int fractionDigits)
+    /// the values on screen, or scrolling would resize it.
+    ///
+    /// <para>Including the words it says instead of a value it cannot fit. On a log carrying whole seconds
+    /// and no fraction, "&lt;-9999" is a character LONGER than the widest figure - so a column sized for
+    /// the figures alone clipped the one thing it was drawing because it had run out of room.</para>
+    /// </summary>
+    public static string WidestGutter(int fractionDigits, long widestSeconds = DefaultWidestSeconds)
     {
         int digits = Math.Clamp(fractionDigits, 0, ClockFormat.MaxFractionDigits);
-        return digits == 0 ? "-9999" : "-9999." + new string('9', digits);
+        string seconds = Math.Max(1, widestSeconds).ToString(CultureInfo.InvariantCulture);
+        string value = digits == 0 ? "-" + seconds : "-" + seconds + "." + new string('9', digits);
+        string overflow = "<-" + seconds;
+        return overflow.Length > value.Length ? overflow : value;
     }
 
     /// <summary>One value for the status bar: the unit that suits it, and said out loud.</summary>

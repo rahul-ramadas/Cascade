@@ -508,6 +508,19 @@ internal static class DocShots
         Ready(form);
         Save(Crop(form, LogArea(form, rows: 16)), "elapsed");
 
+        // ...and the same lines measured from one of them, which is the other question the column answers:
+        // not "how fast is this going" but "how long after the thing I care about did each of these happen".
+        // The caret is moved off the reference afterwards, or the selection would cover the very thing the
+        // picture is of - the reference's own row picked out where the figures are.
+        grid.GoToLine(doc.RowToLine(row + 4));
+        form.PressCmdKeyForTesting(Keys.Control | Keys.R);
+        grid.GoToLine(doc.RowToLine(row + 9));
+        grid.ScrollToRow(row);
+        Ready(form);
+        Save(Crop(form, LogArea(form, rows: 16)), "elapsed-reference");
+        form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+        form.ClearReferenceForTesting();
+
         if (!wasFiltered) form.PressCmdKeyForTesting(Keys.Control | Keys.H);
         errors.Enabled = false;
         foreach (var f in wasOn) f.Enabled = true;

@@ -467,6 +467,128 @@ public sealed class CascadeDocument : IDisposable
         return false;
     }
 
+    /// <summary>The line every measurement is taken from while the origin is
+    /// <see cref="ElapsedOrigin.Reference"/>, or -1 for none. Belongs to the reading rather than to the log
+    /// or the filters, so it is never saved: a line number means nothing against a different file.</summary>
+    public long ReferenceLine { get; private set; } = -1;
+
+    /// <summary>Whether a line can be measured from - it has to carry a time of its own, or everything
+    /// measured against it would be nothing at all.</summary>
+    public bool TrySetReference(long line)
+    {
+        if (TimeOf(line) is null) return false;
+        ReferenceLine = line;
+        _originTicksFor = long.MinValue;
+        return true;
+    }
+
+    public void ClearReference()
+    {
+        ReferenceLine = -1;
+        _originTicksFor = long.MinValue;
+    }
+
+    /// <summary>What an asked-for origin really comes out as. The choice is a preference and is kept across
+    /// sessions; the reference LINE is not, so "from the reference" with none named reads as the previous
+    /// line rather than as an empty column.</summary>
+    public ElapsedOrigin Resolve(ElapsedOrigin wanted)
+        => wanted == ElapsedOrigin.Reference && ReferenceLine < 0 ? ElapsedOrigin.PreviousShown : wanted;
+
+    private long _originTicksFor = long.MinValue, _originTicks;
+
+    /// <summary>The moment a fixed origin stands at, worked out once rather than per row: this is asked for
+    /// every line of every frame, and the answer only moves when the reference or the clock does.</summary>
+    private bool TryOriginTicks(ElapsedOrigin origin, out long ticks)
+    {
+        long want = origin == ElapsedOrigin.Reference ? ReferenceLine : FirstTimedLine();
+        ticks = _originTicks;
+        if (want < 0) return false;
+        if (_originTicksFor == want) return true;
+
+        if (TimeOf(want) is not { } found) return false;
+        _originTicksFor = want;
+        ticks = _originTicks = found;
+        return true;
+    }
+
+    private long _firstTimed = long.MinValue;
+
+    /// <summary>The first line of the log carrying a time, within the same capped walk everything else
+    /// uses - a banner at the top of a file is not a reason to give up on the whole of it.</summary>
+    private long FirstTimedLine()
+    {
+        if (_firstTimed != long.MinValue) return _firstTimed;
+        for (long line = 0; line <= WalkBack && line < _index.Count; line++)
+            if (TimeOf(line) is not null) return _firstTimed = line;
+        return -1;   // not remembered: more of the file may yet be indexed
+    }
+
+    /// <summary>How long after <paramref name="origin"/> this line was written. Backwards reads as a
+    /// negative, which for a line above the reference is simply what it is.</summary>
+    public bool TryElapsedFrom(long line, ElapsedOrigin origin, out long elapsed)
+        => TryElapsedFrom(line, origin, null, out elapsed);
+
+    /// <summary><inheritdoc cref="TryElapsedFrom(long, ElapsedOrigin, out long)"/></summary>
+    /// <param name="text">The line's text where the caller already has it.</param>
+    public bool TryElapsedFrom(long line, ElapsedOrigin origin, string? text, out long elapsed)
+    {
+        if (origin == ElapsedOrigin.PreviousShown) return TryElapsedBefore(line, text, out elapsed);
+
+        elapsed = 0;
+        var clock = Clock;
+        if (clock is null) return false;
+        if (!TryOriginTicks(origin, out long from)) return false;
+        if (TimeOf(line, text) is not { } now) return false;
+        elapsed = ClockMath.Elapsed(from, now, clock.Format.WrapsAtMidnight);
+        return true;
+    }
+
+    private long _widestFor = -1, _widestSeconds = ElapsedText.DefaultWidestSeconds;
+    private bool _widestComplete;
+
+    /// <summary>The largest figure the elapsed column could be asked to draw, in whole seconds: no two
+    /// lines in the file are further apart than its own span, whatever it is measured from. The column is
+    /// sized from this so that it is the same width whichever origin is chosen - a column that changed
+    /// width when the origin did would slide the log sideways under the reader who changed it.
+    ///
+    /// <para>Read from the ends of the FILE and not of the view, or filtering something out would resize
+    /// the margin. It grows with the file while that is still being indexed, exactly as the line-number
+    /// column does, and is worked out again only when there is twice as much to go on - this is asked once
+    /// a frame.</para></summary>
+    public long WidestElapsedSeconds()
+    {
+        var clock = Clock;
+        if (clock is null) return ElapsedText.DefaultWidestSeconds;
+
+        long lines = CompletedLineCount;
+        bool complete = IsIndexComplete;
+        if (_widestFor >= 0 && lines < _widestFor * 2 && complete == _widestComplete) return _widestSeconds;
+        _widestFor = lines;
+        _widestComplete = complete;
+
+        _widestSeconds = ElapsedText.DefaultWidestSeconds;
+        if (lines <= 0) return _widestSeconds;
+        if (LineTimeFrom(0, +1, lines) is not { } first) return _widestSeconds;
+        if (LineTimeFrom(lines - 1, -1, lines) is not { } last) return _widestSeconds;
+
+        long seconds = Math.Abs(ClockMath.Elapsed(first, last, clock.Format.WrapsAtMidnight))
+                     / TimeSpan.TicksPerSecond;
+        return _widestSeconds = Math.Max(ElapsedText.DefaultWidestSeconds, seconds);
+    }
+
+    /// <summary>The first time found walking from one end of the file, over the same capped run of lines
+    /// carrying none that everything else here steps across.</summary>
+    private long? LineTimeFrom(long start, int step, long lines)
+    {
+        for (int n = 0; n <= WalkBack; n++)
+        {
+            long line = start + (long)n * step;
+            if (line < 0 || line >= lines) return null;
+            if (TimeOf(line) is { } found) return found;
+        }
+        return null;
+    }
+
     /// <summary>How much time one stretch of the log covers, from the first line of it to the last.
     ///
     /// <para>Either end may be a line carrying no time - a stack trace caught by the end of a drag is the
@@ -1135,6 +1257,10 @@ public sealed class CascadeDocument : IDisposable
         _clock = null;
         _clockSettled = false;
         _detectedWith = 0;
+        // The reference is a line number, which means nothing once a different file is open behind it.
+        ReferenceLine = -1;
+        _originTicksFor = long.MinValue;
+        _firstTimed = long.MinValue;
 
         var source = _src;
         _src = null!;

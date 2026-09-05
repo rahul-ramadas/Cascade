@@ -278,4 +278,161 @@ public class DocumentTimeTests
         }
         finally { File.Delete(path); }
     }
+
+    // ---- what the column measures from ----
+
+    /// <summary>The whole point of the second origin: measured from the head of the file, line i is i
+    /// seconds in, whatever the filters are hiding between them. Every expected figure is arithmetic on the
+    /// line number, so none of it is copied out of the implementation.</summary>
+    [Fact]
+    public void From_the_start_of_the_file_every_line_says_how_far_into_it_it_is()
+    {
+        string path = WriteLog(600);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            Assert.True(doc.TryElapsedFrom(0, ElapsedOrigin.FileStart, out long none));
+            Assert.Equal(0, none);
+            Assert.True(doc.TryElapsedFrom(41, ElapsedOrigin.FileStart, out long deep));
+            Assert.Equal(TimeSpan.FromSeconds(41).Ticks, deep);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>A reference is measured by TIME, not by position - so unlike the gap to the previous line
+    /// it does not move when the filters do. That difference is the reason both origins exist.</summary>
+    [Fact]
+    public void A_reference_measures_the_same_whatever_the_filters_hide()
+    {
+        string path = WriteLog(600, line: i =>
+            $"[{Start.AddSeconds(i).ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture)}]" +
+            $"[{(i % 10 == 0 ? "payment" : "api")}] request {i}");
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            Assert.True(doc.TrySetReference(100));
+            Assert.Equal(100, doc.ReferenceLine);
+            Assert.True(doc.TryElapsedFrom(140, ElapsedOrigin.Reference, out long after));
+            Assert.Equal(TimeSpan.FromSeconds(40).Ticks, after);
+
+            // A line ABOVE the reference is earlier than it, and says so.
+            Assert.True(doc.TryElapsedFrom(60, ElapsedOrigin.Reference, out long before));
+            Assert.Equal(TimeSpan.FromSeconds(-40).Ticks, before);
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Match = new FilterMatch { Text = "payment" }, Enabled = true });
+            doc.SetFilters(filters);
+            Wait(doc);
+
+            // The gap to the previous SHOWN line is now ten seconds rather than one, because nine lines
+            // between them are hidden - while the reference measure is untouched.
+            Assert.True(doc.TryElapsedFrom(140, ElapsedOrigin.PreviousShown, out long gap));
+            Assert.Equal(TimeSpan.FromSeconds(10).Ticks, gap);
+            Assert.True(doc.TryElapsedFrom(140, ElapsedOrigin.Reference, out long still));
+            Assert.Equal(after, still);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Nothing can be measured from a line carrying no time, so naming one is refused rather than
+    /// leaving an origin that answers nothing.</summary>
+    [Fact]
+    public void A_line_with_no_time_on_it_cannot_be_the_reference()
+    {
+        string path = WriteLog(600, line: i => i == 300
+            ? "  at Payments.Charge(order) in Payments.cs:line 42"
+            : $"[{Start.AddSeconds(i).ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture)}][api] request {i}");
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            Assert.False(doc.TrySetReference(300));
+            Assert.Equal(-1, doc.ReferenceLine);
+            Assert.True(doc.TrySetReference(299));
+            Assert.Equal(299, doc.ReferenceLine);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>The choice of origin is a preference and outlives a file; the LINE cannot, so asking to
+    /// measure from a reference nobody has named reads as the previous line rather than as an empty column.
+    /// </summary>
+    [Fact]
+    public void Measuring_from_a_reference_nobody_named_falls_back_to_the_previous_line()
+    {
+        string path = WriteLog(600);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            Assert.Equal(ElapsedOrigin.PreviousShown, doc.Resolve(ElapsedOrigin.Reference));
+            Assert.True(doc.TrySetReference(10));
+            Assert.Equal(ElapsedOrigin.Reference, doc.Resolve(ElapsedOrigin.Reference));
+
+            doc.ClearReference();
+            Assert.Equal(ElapsedOrigin.PreviousShown, doc.Resolve(ElapsedOrigin.Reference));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>A line number means nothing against a different file, so opening one forgets the reference
+    /// rather than carrying it over to whatever happens to be at that line next.</summary>
+    [Fact]
+    public void Opening_another_file_forgets_the_reference()
+    {
+        string first = WriteLog(600), second = WriteLog(600, "worker");
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(first);
+            Wait(doc);
+            Assert.True(doc.TrySetReference(100));
+
+            doc.Open(second);
+            Wait(doc);
+            Assert.Equal(-1, doc.ReferenceLine);
+        }
+        finally { File.Delete(first); File.Delete(second); }
+    }
+
+    /// <summary>The column is sized for the log's whole span, not for the origin in use, so that changing
+    /// what it measures from does not change its width and slide the text sideways. A file spanning ten
+    /// thousand seconds needs more room than the gap between two adjacent lines ever would.</summary>
+    [Fact]
+    public void The_column_is_sized_for_the_span_of_the_file()
+    {
+        string brief = WriteLog(60);        // a minute
+        string long_ = WriteLog(40_000);    // eleven hours
+        try
+        {
+            using (var doc = new CascadeDocument())
+            {
+                doc.Open(brief);
+                Wait(doc);
+                Assert.Equal(ElapsedText.DefaultWidestSeconds, doc.WidestElapsedSeconds());
+            }
+
+            using var wide = new CascadeDocument();
+            wide.Open(long_);
+            Wait(wide);
+            Assert.Equal(39_999, wide.WidestElapsedSeconds());
+
+            // ...and the figure it produces really does fit in what it asked for.
+            Assert.True(wide.TryElapsedFrom(39_000, ElapsedOrigin.FileStart, out long deep));
+            string drawn = ElapsedText.Gutter(deep, 3, wide.WidestElapsedSeconds());
+            Assert.Equal("39000.000", drawn);
+            Assert.True(drawn.Length <= ElapsedText.WidestGutter(3, wide.WidestElapsedSeconds()).Length);
+        }
+        finally { File.Delete(brief); File.Delete(long_); }
+    }
 }

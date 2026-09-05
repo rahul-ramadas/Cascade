@@ -8197,6 +8197,7 @@ internal static class SelfTest
                         && !form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.B)
                         && form.ShowElapsedGutterForTesting == wasOn);
 
+            ok &= CheckWhereTheColumnMeasuresFrom();
             ok &= CheckNamingTheTimeField();
             return ok;
         }
@@ -8210,6 +8211,137 @@ internal static class SelfTest
 
     private static int PathRoomOf(string layout) => Figure(layout, "pathroom=");
     private static int SlotOf(string layout) => Figure(layout, "elapsed=");
+
+    /// <summary>The column measures from one of three places, and which one it is has to be sayable from the
+    /// margin, from the status bar's wording and from the menu at once - three displays of one fact, which
+    /// is exactly where they can drift apart. Driven through the real keys and the real menu.</summary>
+    private static bool CheckWhereTheColumnMeasuresFrom()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "cascade_origin_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string log = Path.Combine(dir, "timed.log");
+        var start = new DateTime(2026, 8, 5, 9, 0, 0, DateTimeKind.Utc);
+        // A MINUTE a line, not a second: the file's span has to exceed the 9,999 seconds the column is sized
+        // for by default, or a column that wrongly sized itself from the origin would come out the same
+        // width either way and nothing would notice.
+        File.WriteAllLines(log, Enumerable.Range(0, 300).Select(i =>
+            $"[{start.AddMinutes(i):yyyy-MM-ddTHH:mm:ss.fff}] request {i}"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), [log])
+            {
+                NoSavePrompt = true, Opacity = 0, StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0), Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            for (int i = 0; i < 100 && form.DocForTesting.CompletedLineCount < 300; i++) { Thread.Sleep(20); Pump(); }
+            var grid = form.GridForTesting;
+
+            bool ok = Check("a log opens measuring from the line above, as it always did",
+                            form.ElapsedOriginForTesting.StartsWith("PreviousShown", StringComparison.Ordinal),
+                            form.ElapsedOriginForTesting);
+
+            // With no reference named there is nothing to see in that mode, so the key steps over it rather
+            // than stopping on an empty column.
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+            Pump();
+            ok &= Check("the cycling key moves on to the start of the file",
+                        form.ElapsedOriginForTesting.StartsWith("FileStart", StringComparison.Ordinal),
+                        form.ElapsedOriginForTesting);
+            ok &= Check("and the margin then says how far into the file each line is",
+                        grid.ElapsedForTesting(40) == "2400.000", grid.ElapsedForTesting(40));
+            ok &= Check("and the status bar names which end it is measuring from",
+                        form.ElapsedSlotForTesting.StartsWith("\u0394 Start:", StringComparison.Ordinal),
+                        form.ElapsedSlotForTesting);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+            Pump();
+            ok &= Check("and with nothing to measure from it passes over the reference and comes back round",
+                        form.ElapsedOriginForTesting.StartsWith("PreviousShown", StringComparison.Ordinal),
+                        form.ElapsedOriginForTesting);
+
+            // Naming a reference has to START measuring from it, or the key looks as though it did nothing.
+            // The log is a minute a line, so every figure below is arithmetic on the line number.
+            grid.GoToLine(100);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.R);
+            Pump();
+            ok &= Check("naming a reference measures from it there and then",
+                        form.ElapsedOriginForTesting == "Reference ref=100 said=\u201c\u0394 Ref\u201d",
+                        form.ElapsedOriginForTesting);
+            ok &= Check("a line after it reads as time since the reference",
+                        grid.ElapsedForTesting(140) == "2400.000", grid.ElapsedForTesting(140));
+            ok &= Check("and a line BEFORE it reads as a negative, which is what it is",
+                        grid.ElapsedForTesting(40) == "-3600.000", grid.ElapsedForTesting(40));
+
+            string offered = form.MeasuredFromMenuForTesting();
+            Line("   (" + offered.Replace("\n", " / ", StringComparison.Ordinal) + ")");
+            ok &= Check("the menu marks the one in force", offered.Contains("Reference Line *", StringComparison.Ordinal),
+                        offered);
+
+            // The width may not move with the origin, or changing it slides the log sideways under the hand
+            // that changed it. Sized for the file's whole span, which bounds every origin.
+            int wide = grid.ElapsedGutterWidthForTesting;
+            form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+            Pump();
+            ok &= Check("changing what it measures from does not change how wide it is",
+                        grid.ElapsedGutterWidthForTesting == wide,
+                        $"{wide} -> {grid.ElapsedGutterWidthForTesting}");
+
+            // Clearing it must not leave the column measuring from something that is gone. Put back FIRST:
+            // the width check above cycles away from the reference, and clearing something already stepped
+            // off proves nothing at all - which is exactly how this check passed while doing nothing.
+            form.PressCmdKeyForTesting(Keys.Control | Keys.R);
+            Pump();
+            form.ClickMenuForTesting("View", "Elapsed Time", "Clear the Reference");
+            Pump();
+            ok &= Check("clearing the reference really lets go of it, and falls back",
+                        form.ElapsedOriginForTesting == "PreviousShown ref=-1 said=\u201c\u0394 Prev\u201d"
+                        && grid.ElapsedForTesting(40) == "60.000",
+                        form.ElapsedOriginForTesting + " / " + grid.ElapsedForTesting(40));
+
+            // EVERY press has to change what is on screen. An origin nothing can be measured from resolves
+            // back to the previous line, so cycling ONTO it - or leaving the setting parked on it after the
+            // reference is cleared - spends a keypress showing what was already there. The state BEFORE the
+            // first press counts: the dead press is the first one when the setting was left dangling.
+            var walk = new List<string> { form.ElapsedOriginForTesting.Split(' ')[0] };
+            for (int i = 0; i < 6; i++)
+            {
+                form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.R);
+                Pump();
+                walk.Add(form.ElapsedOriginForTesting.Split(' ')[0]);
+            }
+            Line("   (" + string.Join(" -> ", walk) + ")");
+            ok &= Check("and every press of the cycling key changes what is being measured from",
+                        walk.Zip(walk.Skip(1)).All(p => p.First != p.Second), string.Join(" -> ", walk));
+
+            // A line with no time cannot be measured from, so it is refused out loud.
+            string gappy = Path.Combine(dir, "gappy.log");
+            File.WriteAllLines(gappy, Enumerable.Range(0, 300).Select(i => i == 50
+                ? "  at Payments.Charge(order) in Payments.cs:line 42"
+                : $"[{start.AddSeconds(i):yyyy-MM-ddTHH:mm:ss.fff}] request {i}"));
+            form.OpenForTesting(gappy);
+            for (int i = 0; i < 100 && form.DocForTesting.CompletedLineCount < 300; i++) { Thread.Sleep(20); Pump(); }
+            grid.GoToLine(50);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.R);
+            Pump();
+            ok &= Check("a line carrying no time is refused as a reference, and says why",
+                        form.ElapsedOriginForTesting.StartsWith("PreviousShown", StringComparison.Ordinal)
+                        && form.FindMessageForTesting.Contains("no time", StringComparison.OrdinalIgnoreCase),
+                        form.ElapsedOriginForTesting + " / " + form.FindMessageForTesting);
+            return ok;
+        }
+        finally
+        {
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
 
     /// <summary>How far the widest line number's ink sits from each end of the box it is drawn in, read off
     /// a render of the grid. The arithmetic says how wide the box is; only the pixels say where in it the

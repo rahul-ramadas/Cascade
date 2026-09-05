@@ -55,6 +55,7 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
     private ToolStripMenuItem _miElapsed = null!, _miElapsedGutter = null!, _miElapsedStatus = null!, _miNoClock = null!;
+    private ToolStripMenuItem _miMeasuredFrom = null!, _miSetReference = null!, _miClearReference = null!;
     private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
@@ -242,8 +243,26 @@ public sealed class MainForm : Form
 
     internal bool ShowElapsedGutterForTesting => _settings.ShowElapsedGutter;
 
-    internal bool NoSavePrompt;
-    private bool _offScreen;
+    /// <summary>What the column is measuring from and where it is measuring from, in one line - the two
+    /// have to agree, and a check reading only the setting would not notice when they stopped.</summary>
+    internal string ElapsedOriginForTesting
+        => $"{EffectiveOrigin} ref={_doc.ReferenceLine} said=\u201c{OriginPrefix.TrimEnd(' ', ':')}\u201d";
+    /// <summary>What "Measured From" offers, one entry a line, with the one in force marked.</summary>
+    internal string MeasuredFromMenuForTesting()
+    {
+        SyncElapsedMenu();
+        return string.Join("\n", _miMeasuredFrom.DropDownItems.OfType<ToolStripMenuItem>()
+            .Select(i => (i.Text ?? "").Replace("&", "", StringComparison.Ordinal)
+                         + (i.Checked ? " *" : "")
+                         + (i.Enabled ? "" : " (unavailable)")));
+    }
+
+    /// <summary>The short-lived message and the reason behind it, as the status bar is carrying them.</summary>
+    internal string FindMessageForTesting => $"{_findMsg} \u2014 {_findMsgDetail}";
+
+    internal void ClearReferenceForTesting() => ClearReference();
+
+    internal bool NoSavePrompt;    private bool _offScreen;
     // Harness only: shows the update notice without an update actually being pending.
     internal string? UpdateNoticeOverride;
 
@@ -457,6 +476,8 @@ public sealed class MainForm : Form
         // the log having a clock - and the items only learn that when the View menu is opened.
         if (keyData == ElapsedGutterKey) return ToggleElapsed(margin: true);
         if (keyData == ElapsedStatusKey) return ToggleElapsed(margin: false);
+        if (keyData == SetReferenceKey) return SetReferenceHere();
+        if (keyData == CycleOriginKey) return CycleOrigin();
         if (!IsTextInputFocused())
         {
             switch (keyData)
@@ -733,20 +754,99 @@ public sealed class MainForm : Form
         { ShortcutKeyDisplayString = "Ctrl+Shift+B" };
         _miNoClock = new ToolStripMenuItem("No timestamp field \u2014 set one in Field Settings") { Enabled = false };
 
+        _miMeasuredFrom = new ToolStripMenuItem("Measured F&rom") { ShortcutKeyDisplayString = "Ctrl+Shift+R" };
+        foreach (var (origin, text) in Origins)
+            _miMeasuredFrom.DropDownItems.Add(
+                new ToolStripMenuItem(text, null, (_, _) => MeasureFrom(origin)) { Tag = origin });
+        _miSetReference = new ToolStripMenuItem("Set the Reference &Here", null, (_, _) => SetReferenceHere())
+        { ShortcutKeyDisplayString = "Ctrl+R" };
+        _miClearReference = new ToolStripMenuItem("&Clear the Reference", null, (_, _) => ClearReference());
+
         _miElapsed.DropDownItems.Add(_miElapsedGutter);
         _miElapsed.DropDownItems.Add(_miElapsedStatus);
+        _miElapsed.DropDownItems.Add(new ToolStripSeparator());
+        _miElapsed.DropDownItems.Add(_miMeasuredFrom);
+        _miElapsed.DropDownItems.Add(_miSetReference);
+        _miElapsed.DropDownItems.Add(_miClearReference);
         _miElapsed.DropDownItems.Add(_miNoClock);
         _miElapsed.DropDownOpening += (_, _) => SyncElapsedMenu();
         SyncElapsedMenu();
         return _miElapsed;
     }
 
+    /// <summary>The three origins in the order the cycling key walks them, with the wording the menu shows.
+    /// One list, so the menu and the key can never come to offer different things.</summary>
+    private static readonly (ElapsedOrigin Origin, string Text)[] Origins =
+    [
+        (ElapsedOrigin.PreviousShown, "the &Previous Line Shown"),
+        (ElapsedOrigin.FileStart,     "the &Start of the File"),
+        (ElapsedOrigin.Reference,     "the &Reference Line"),
+    ];
+
     // Each key is the letter its own item underlines - "In the &Margin", "In the Status &Bar" - so there is
     // one letter to learn per entry rather than a shortcut vocabulary of its own. Ctrl+Shift+S would have
     // matched "Status" better still, but Ctrl+S here saves filters and every app in the world reads
-    // Ctrl+Shift+S as Save As.
+    // Ctrl+Shift+S as Save As. Ctrl+R sets the reference and Ctrl+Shift+R steps through what is measured
+    // from - one letter for one idea, the pairing Ctrl+Shift+X already uses for switching the field layout.
     private const Keys ElapsedGutterKey = Keys.Control | Keys.Shift | Keys.M;
     private const Keys ElapsedStatusKey = Keys.Control | Keys.Shift | Keys.B;
+    private const Keys SetReferenceKey = Keys.Control | Keys.R;
+    private const Keys CycleOriginKey = Keys.Control | Keys.Shift | Keys.R;
+
+    /// <summary>Names the caret's line as the one everything is measured from, and starts measuring from
+    /// it: setting an origin and leaving the column showing something else would look like the key had done
+    /// nothing at all.</summary>
+    private bool SetReferenceHere()
+    {
+        if (_doc.Clock is null) return false;
+        long line = _grid.SelectionBounds(out long first, out _) ? first : -1;
+        if (line < 0 || !_doc.TrySetReference(line))
+            NoMoreMatches(line < 0 ? "Select a line first" : "No time on that line",
+                          line < 0
+                              ? "Select a line to measure from."
+                              : $"Line {line + 1:N0} carries no time of its own, so nothing can be measured from it.");
+        else
+            MeasureFrom(ElapsedOrigin.Reference);
+        return true;
+    }
+
+    private void ClearReference()
+    {
+        _doc.ClearReference();
+        if (_settings.ElapsedMeasuredFrom == ElapsedOrigin.Reference) MeasureFrom(ElapsedOrigin.PreviousShown);
+        else RefreshElapsed();
+    }
+
+    /// <summary>Steps to the next origin there is anything to measure from. With no reference named there
+    /// is nothing to see in that mode, so the key passes over it rather than stopping on an empty column.
+    /// </summary>
+    private bool CycleOrigin()
+    {
+        if (_doc.Clock is null) return false;
+        int at = Array.FindIndex(Origins, o => o.Origin == _settings.ElapsedMeasuredFrom);
+        for (int step = 1; step <= Origins.Length; step++)
+        {
+            var next = Origins[(at + step + Origins.Length) % Origins.Length].Origin;
+            if (next == ElapsedOrigin.Reference && _doc.ReferenceLine < 0) continue;
+            MeasureFrom(next);
+            break;
+        }
+        return true;
+    }
+
+    private void MeasureFrom(ElapsedOrigin origin)
+    {
+        _settings.ElapsedMeasuredFrom = origin;
+        SaveSettingsSoon();
+        RefreshElapsed();
+    }
+
+    private void RefreshElapsed()
+    {
+        _grid.RefreshView();
+        SyncElapsedMenu();
+        UpdateStatus();
+    }
 
     /// <summary>Turns one of the two displays on or off, and answers whether it did - so the key can fall
     /// through to whatever else wants it on a log with no clock, rather than appearing to do nothing.
@@ -771,9 +871,23 @@ public sealed class MainForm : Form
     private void SyncElapsedMenu()
     {
         bool have = _doc.Clock is not null;
-        _miElapsedGutter.Enabled = _miElapsedStatus.Enabled = have;
+        _miElapsedGutter.Enabled = _miElapsedStatus.Enabled = _miMeasuredFrom.Enabled = have;
         _miElapsedGutter.Checked = _settings.ShowElapsedGutter;
         _miElapsedStatus.Checked = _settings.ShowElapsedInStatusBar;
+
+        bool named = _doc.ReferenceLine >= 0;
+        _miSetReference.Enabled = have;
+        _miClearReference.Enabled = named;
+        // Wording that does not move: an item renaming itself to carry the line number cannot be found by
+        // name afterwards, by a check or by anything else. Where the reference IS belongs on the status
+        // bar, which says so beside the figure it is producing.
+        _miClearReference.ToolTipText = named ? $"Line {_doc.ReferenceLine + 1:N0}" : "";
+        foreach (ToolStripMenuItem item in _miMeasuredFrom.DropDownItems)
+        {
+            var origin = (ElapsedOrigin)item.Tag!;
+            item.Checked = origin == EffectiveOrigin;
+            item.Enabled = origin != ElapsedOrigin.Reference || named;
+        }
 
         // TAKEN OUT of the list rather than hidden in it. MEASURED: a ToolStripDropDown that has once been
         // laid out around an item does not give the width back when that item is hidden, so a sentence three
@@ -782,6 +896,10 @@ public sealed class MainForm : Form
         if (have && listed) _miElapsed.DropDownItems.Remove(_miNoClock);
         else if (!have && !listed) _miElapsed.DropDownItems.Add(_miNoClock);
     }
+
+    /// <summary>What the figures are really measured from, resolved by the document so that the margin and
+    /// the status bar can never come to different answers.</summary>
+    private ElapsedOrigin EffectiveOrigin => _doc.Resolve(_settings.ElapsedMeasuredFrom);
 
     private ToolStripMenuItem BuildFilterLocationMenu()
     {
@@ -1033,45 +1151,66 @@ public sealed class MainForm : Form
             _elapsedSlotFont = _elapsedLabel.Font;
             _elapsedSlot = 0;
             foreach (string sample in ElapsedText.WidestStatus)
-            foreach (string prefix in new[] { GapPrefix, SpanPrefix })
+            foreach (string prefix in Prefixes)
                 _elapsedSlot = Math.Max(_elapsedSlot,
                     TextRenderer.MeasureText(prefix + sample, _elapsedSlotFont).Width + Dpi(6));
         }
         return _elapsedSlot;
     }
 
-    /// <summary>The two measurements are named apart on purpose. One line selected gives the time since the
-    /// line above it on screen; several give the stretch from the first to the last. They are different
-    /// questions with answers orders of magnitude apart, and one word over both would be read as the number
-    /// changing meaning under the reader.
+    /// <summary>What the status bar calls each measurement. Named apart on purpose: one selected line gives
+    /// the time since something, several give the stretch they cover, and those are different questions with
+    /// answers orders of magnitude apart. One word over all of them would read as the number changing
+    /// meaning under the reader.
     ///
-    /// <para>"Prev" rather than a bare delta because a difference between two lines has a DIRECTION, and
-    /// nothing in a signed number says which of the two neighbours it was measured against.</para></summary>
-    private const string GapPrefix = "\u0394 Prev: ", SpanPrefix = "Span: ";
+    /// <para>The word after the delta is the whole point of the wording - a difference between two moments
+    /// has a DIRECTION, and nothing in a signed number says which moment it was taken against.</para>
+    /// </summary>
+    private const string PrevPrefix = "\u0394 Prev: ", StartPrefix = "\u0394 Start: ",
+                         RefPrefix = "\u0394 Ref: ", SpanPrefix = "Span: ";
+
+    private static readonly string[] Prefixes = [PrevPrefix, StartPrefix, RefPrefix, SpanPrefix];
+
+    private string OriginPrefix => EffectiveOrigin switch
+    {
+        ElapsedOrigin.FileStart => StartPrefix,
+        ElapsedOrigin.Reference => RefPrefix,
+        _ => PrevPrefix
+    };
+
+    /// <summary>How the origin is named in a sentence, so the tooltip reads as English rather than as the
+    /// menu entry it came from.</summary>
+    private string OriginSaid => EffectiveOrigin switch
+    {
+        ElapsedOrigin.FileStart => "the first line of the file",
+        ElapsedOrigin.Reference => $"line {_doc.ReferenceLine + 1:N0}, the reference",
+        _ => "the line above it on screen"
+    };
 
     private void UpdateElapsed()
     {
         if (!_elapsedLabel.Visible) return;
 
+        string prefix = OriginPrefix;
         if (!_grid.SelectionBounds(out long first, out long last))
         {
-            _elapsedLabel.Text = GapPrefix + ElapsedText.None;
-            _elapsedLabel.ToolTipText = "Select a line to see how long after the one above it it was written.";
+            _elapsedLabel.Text = prefix + ElapsedText.None;
+            _elapsedLabel.ToolTipText = $"Select a line to see how long after {OriginSaid} it was written.";
             return;
         }
 
         if (first == last)
         {
-            bool have = _doc.TryElapsedBefore(first, out long gap);
-            _elapsedLabel.Text = GapPrefix + (have ? ElapsedText.Status(gap) : ElapsedText.None);
+            bool have = _doc.TryElapsedFrom(first, EffectiveOrigin, out long gap);
+            _elapsedLabel.Text = prefix + (have ? ElapsedText.Status(gap) : ElapsedText.None);
             _elapsedLabel.ToolTipText = have
                 ? gap >= 0
-                    ? $"Line {first + 1:N0} was written {ElapsedText.Status(gap)} after the line above it on screen."
-                    // A log written by several threads at once really does arrive out of order, so this is
-                    // information rather than a fault - and it needs saying, or a minus sign reads as one.
-                    : $"Line {first + 1:N0} was written {ElapsedText.Status(-gap)} BEFORE the line above it "
-                      + "on screen - the log is not in the order it was written in here."
-                : "There is no time on this line, or none on any line above it, to measure from.";
+                    ? $"Line {first + 1:N0} was written {ElapsedText.Status(gap)} after {OriginSaid}."
+                    // A log written by several threads at once really does arrive out of order, and a line
+                    // above the reference is legitimately earlier than it - so a minus sign is information
+                    // rather than a fault, and it needs saying or it reads as one.
+                    : $"Line {first + 1:N0} was written {ElapsedText.Status(-gap)} BEFORE {OriginSaid}."
+                : $"There is no time on this line, or none on {OriginSaid}, to measure from.";
             return;
         }
 

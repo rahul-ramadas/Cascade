@@ -1051,21 +1051,26 @@ public sealed class LineGridControl : Control
     }
 
     private int _elapsedWidth, _elapsedWidthAt = -1, _elapsedWidthDigits = -1;
+    private long _elapsedWidthWidest = -1;
 
     /// <summary>Room for the elapsed column, and nothing when there is no clock or the reader has put it
     /// away. Sized from the WIDEST value the format can ever produce rather than from the values on screen,
-    /// because a margin that resized as it scrolled would slide the whole log sideways.</summary>
+    /// because a margin that resized as it scrolled would slide the whole log sideways - and from the log's
+    /// whole span rather than from the origin in use, so that changing what it measures from does not move
+    /// the text under the reader who changed it.</summary>
     private int ElapsedGutterWidth
     {
         get
         {
             if (!_settings.ShowElapsedGutter || _doc?.Clock is not { } clock) return 0;
             int digits = clock.FractionDigits;
-            if (_elapsedWidthAt != _charWidth || _elapsedWidthDigits != digits)
+            long widest = _doc.WidestElapsedSeconds();
+            if (_elapsedWidthAt != _charWidth || _elapsedWidthDigits != digits || _elapsedWidthWidest != widest)
             {
                 _elapsedWidthAt = _charWidth;
                 _elapsedWidthDigits = digits;
-                _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits), FontRegular).Width
+                _elapsedWidthWidest = widest;
+                _elapsedWidth = TextRenderer.MeasureText(ElapsedText.WidestGutter(digits, widest), FontRegular).Width
                               + 2 * MarginPad;
             }
             return _elapsedWidth;
@@ -2894,7 +2899,11 @@ public sealed class LineGridControl : Control
         int elw = ElapsedGutterWidth;
         if (elw > 0)
         {
-            DrawMarginText(ink, elapsed ?? "", markers + lnw, y, elw, height, colour);
+            // The line everything is being measured from is picked out where the figures are, so that
+            // scrolling away from it and back does not mean hunting for it. Costs no width.
+            var ink2 = _doc is not null && line == _doc.ReferenceLine && !selected
+                     ? _settings.SelectionBack : colour;
+            DrawMarginText(ink, elapsed ?? "", markers + lnw, y, elw, height, ink2);
             // Two right-aligned figures with nothing but air between them read as one ragged column. The
             // rule is drawn INSIDE the elapsed box, so saying where one column ends costs the other nothing.
             if (lnw > 0) ink.Fill(new Rectangle(markers + lnw, y, 1, height), MarginRule);
@@ -2936,14 +2945,13 @@ public sealed class LineGridControl : Control
         return _digits.AsSpan(0, written);
     }
 
-    /// <summary>How long after the line above it on screen this one was written, as the margin shows it.
-    /// Empty for a line carrying no time, and for the first line there is - neither has anything to be
-    /// measured from.</summary>
+    /// <summary>How long after whatever the column measures from this line was written, as the margin shows
+    /// it. Empty for a line carrying no time, and for a line with nothing to be measured from.</summary>
     private string Elapsed(long line, string text)
     {
         if (_doc?.Clock is not { } clock) return "";
-        return _doc.TryElapsedBefore(line, text, out long ticks)
-            ? ElapsedText.Gutter(ticks, clock.FractionDigits)
+        return _doc.TryElapsedFrom(line, _doc.Resolve(_settings.ElapsedMeasuredFrom), text, out long ticks)
+            ? ElapsedText.Gutter(ticks, clock.FractionDigits, _doc.WidestElapsedSeconds())
             : "";
     }
 

@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Cascade.Core.IO;
+using Cascade.Core.Timing;
 
 namespace Cascade.App;
 
@@ -59,6 +60,11 @@ public sealed class AppSettings
 
     /// <summary>Whether the status bar measures whatever is selected.</summary>
     public bool ShowElapsedInStatusBar { get; set; } = true;
+
+    /// <summary>What the elapsed figures are measured from. A preference like any other, so it is kept -
+    /// but the reference LINE is not, so a setting saved as <see cref="ElapsedOrigin.Reference"/> reads as
+    /// the previous line again until one is named.</summary>
+    public ElapsedOrigin ElapsedMeasuredFrom { get; set; } = ElapsedOrigin.PreviousShown;
 
     /// <summary>When true, <see cref="MachineState.LastFilterFile"/> is reloaded automatically at startup.</summary>
     public bool AutoLoadLastFilterFile { get; set; } = true;

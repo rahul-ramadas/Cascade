@@ -289,6 +289,41 @@ public class ElapsedTextTests
         }
     }
 
+    /// <summary>Measured from a fixed origin the figures run to the whole span of the log, so the column is
+    /// told what to be wide enough for. Whatever it is told, nothing it can draw may overflow it - which is
+    /// the promise the fixed width rests on.</summary>
+    [Theory]
+    [InlineData(1L)]
+    [InlineData(9_999L)]
+    [InlineData(43_200L)]
+    [InlineData(2_592_000L)]
+    public void A_column_sized_for_a_span_holds_everything_that_span_can_produce(long widest)
+    {
+        for (int digits = 0; digits <= 7; digits++)
+        {
+            int room = ElapsedText.WidestGutter(digits, widest).Length;
+            foreach (long seconds in new[] { 0L, 1L, widest / 2, widest, widest + 1, widest * 1000 })
+                foreach (int sign in new[] { 1, -1 })
+                {
+                    string drawn = ElapsedText.Gutter(sign * seconds * TimeSpan.TicksPerSecond, digits, widest);
+                    Assert.True(drawn.Length <= room, $"\"{drawn}\" does not fit {room} at {digits} digits");
+                }
+        }
+    }
+
+    /// <summary>The span is what the column is sized for, so a figure inside it is drawn in full and one
+    /// past it says so - both of which the default 9999 would have got wrong on a log spanning half a day.
+    /// </summary>
+    [Fact]
+    public void A_wider_column_draws_what_the_narrow_one_could_only_call_too_long()
+    {
+        long halfADay = 43_200L * TimeSpan.TicksPerSecond;
+        Assert.Equal(">9999", ElapsedText.Gutter(halfADay, 3));
+        Assert.Equal("43200.000", ElapsedText.Gutter(halfADay, 3, 43_200));
+        Assert.Equal(">43200", ElapsedText.Gutter(halfADay * 2, 3, 43_200));
+        Assert.Equal("<-43200", ElapsedText.Gutter(-halfADay * 2, 3, 43_200));
+    }
+
     [Theory]
     [InlineData(8_400L, "840 \u00b5s")]
     [InlineData(124_570L, "12.457 ms")]
