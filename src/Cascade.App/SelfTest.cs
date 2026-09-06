@@ -127,6 +127,7 @@ internal static class SelfTest
             ok &= Timed("copying", RunCopyBudgetChecks);
             ok &= Timed("cropping", RunCropChecks);
             ok &= Timed("selection stability", RunSelectionStabilityChecks);
+            ok &= Timed("viewport stability", RunViewportStabilityChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -8092,6 +8093,139 @@ internal static class SelfTest
             Pump();
             ok &= Check("and unwinding both puts the caret back on it",
                         grid.SelectionRangesForTesting is [(1_002, 1_002)] && grid.CaretLine == 1_002);
+            return ok;
+        }
+        finally
+        {
+            if (form is not null) { form.Close(); form.Dispose(); }
+            Pump();
+            try { File.Delete(path); } catch { /* ignore */ }
+            try { File.Delete(Path.ChangeExtension(path, ".cascade")); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>Toggling what is shown and toggling it back must land the reader exactly where they were.
+    /// The selection surviving is not enough on its own: a selection restored off-screen is a selection the
+    /// reader has to go looking for.</summary>
+    private static bool RunViewportStabilityChecks()
+    {
+        Line("-- the viewport comes back to where it was --");
+        const int lines = 4_000;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_viewport_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 5 == 0 ? "KEEP" : "drop").Append(" line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        MainForm? form = null;
+        try
+        {
+            var filters = new FilterCollection();
+            filters.Add(new Filter { Enabled = true, Match = { Text = "KEEP" } });
+            string filterFile = Path.ChangeExtension(path, ".cascade");
+            CascadeFile.Save(filterFile, filters);
+
+            form = new MainForm(new AppSettings(), new MachineState(), [path, "/Filters:" + filterFile])
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 600),
+                Opacity = 0,
+                NoSavePrompt = true,
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            var grid = form.GridForTesting;
+            for (int i = 0; i < 400 && doc.CompletedLineCount < lines; i++) { Thread.Sleep(5); Pump(); }
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+
+            long TopLine() => doc.RowToLine(grid.FirstVisibleRow);
+            void ShowOnlyMatches(bool on)
+            {
+                if (doc.FilteredMode == on) return;
+                form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+                Pump();
+            }
+
+            // Parked well down the file, with the caret a few rows below the top so it is plainly on screen.
+            grid.ScrollToRow(1_000);
+            Pump();
+            grid.SelectLinesForTesting(1_003, 1_003);
+            Pump();
+            grid.ScrollToRow(1_000);
+            Pump();
+            long top = TopLine();
+            long caret = grid.CaretLine;
+            bool ok = Check($"parked at line {top:N0} with the caret at {caret:N0}", top == 1_000 && caret == 1_003);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            ok &= Check($"Ctrl+H and back leaves the top line where it was (line {TopLine():N0})", TopLine() == top);
+            ok &= Check($"and the caret is still on screen (row {grid.CaretRowForTesting:N0} of the window at {grid.FirstVisibleRow:N0})",
+                        grid.CaretRowForTesting >= grid.FirstVisibleRow
+                        && grid.CaretRowForTesting < grid.FirstVisibleRow + grid.VisibleRows);
+
+            // Four round trips, not one: an anchor that drifts by a line a time reads as steady once and
+            // walks off the screen by the fifth.
+            for (int i = 0; i < 4; i++)
+            {
+                form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+                Pump();
+                form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+                Pump();
+            }
+            ok &= Check($"and it does not creep over repeated toggles (line {TopLine():N0})", TopLine() == top);
+
+            // A crop taken with the caret on screen, which is the ordinary way one is taken.
+            grid.ScrollToRow(1_100);
+            Pump();
+            grid.SelectLinesForTesting(1_100, 1_400);
+            Pump();
+            grid.ScrollToRow(doc.RowForLine(1_200));
+            Pump();
+            long cropTop = TopLine();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check($"a crop taken and lifted leaves the top line where it was (line {TopLine():N0}, was {cropTop:N0})",
+                        TopLine() == cropTop);
+
+            // And one whose caret sits on a line the filters hide, so it is drawn against a stand-in from the
+            // moment the crop is taken to the moment it is lifted. Wide enough that the crop still has room
+            // to scroll: one shorter than the window has no position left to hold, and lands on its first row
+            // because that is the only row it can start at.
+            grid.SelectLinesForTesting(2_002, 3_400);            // 2,002 does not match KEEP
+            Pump();
+            ShowOnlyMatches(true);                               // now the caret's own line is hidden
+            grid.ScrollToRow(doc.RowForLine(2_500));
+            Pump();
+            long hiddenTop = TopLine();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check($"a crop round trip holds still with the caret on a hidden line (line {TopLine():N0}, was {hiddenTop:N0})",
+                        TopLine() == hiddenTop);
+
+            // Cropping to a selection the filters have hidden every line of takes the line standing in for it,
+            // so a crop always has something to show - there is no way to crop the view into blankness.
+            ShowOnlyMatches(false);
+            grid.SelectLinesForTesting(2_502, 2_502);            // does not match KEEP
+            Pump();
+            ShowOnlyMatches(true);                               // so now every chosen line is hidden
+            ok &= Check($"the chosen line is hidden, and a neighbour stands in ({grid.StandInLineForTesting:N0})",
+                        grid.StandInLineForTesting == 2_505);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+            Pump();
+            ok &= Check($"cropping to it crops to the line standing in for it ({doc.Crop})",
+                        doc.RowCount == 1 && doc.Crop is { From: 2_505, ToExclusive: 2_506 });
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ShowOnlyMatches(false);
             return ok;
         }
         finally

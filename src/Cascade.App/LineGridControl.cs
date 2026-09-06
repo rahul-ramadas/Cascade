@@ -728,15 +728,23 @@ public sealed class LineGridControl : Control
     /// and pass the result to <see cref="SetViewAnchor"/> after it.</summary>
     public ViewAnchor CaptureViewAnchor()
     {
-        if (_doc is null || _doc.RowCount == 0) return ViewAnchor.None;
+        if (_doc is null) return ViewAnchor.None;
         long rows = _doc.RowCount;
+        // Nothing on show has no position to hold, but the caret still belongs to a line - so a view emptied
+        // by a filter or a crop can still say where to come back to when the lines return.
+        if (rows == 0) return _caretLine >= 0 ? new ViewAnchor(_caretLine, 0, _caretLine) : ViewAnchor.None;
         long top = Math.Clamp(_firstRow, 0, rows - 1);
-        long caretLine = _caretLine;
         // Hold the caret line still when it is actually on screen; otherwise hold the top visible line, so
         // the text never jumps to a caret the user cannot see.
-        bool caretOnScreen = _caretRow >= top && _caretRow < Math.Min(rows, top + EffectiveVisibleRows);
-        long pin = caretOnScreen ? _caretRow : top;
-        return new ViewAnchor(_doc.RowToLine(pin), (int)(pin - top), caretLine);
+        bool caretOnScreen = _caretLine >= 0 && _caretRow >= top
+                             && _caretRow < Math.Min(rows, top + EffectiveVisibleRows);
+        // The caret's OWN line, never the line it happens to be drawn against. While its line is hidden the
+        // view stands a neighbour in for it, and anchoring to the STAND-IN is what made the text creep: each
+        // toggle pinned a line a little further down than the one before, so hiding and showing again landed
+        // short of where it started and never came back.
+        long pinLine = caretOnScreen ? _caretLine : _doc.RowToLine(top);
+        long pinRow = caretOnScreen ? _caretRow : top;
+        return new ViewAnchor(pinLine, (int)(pinRow - top), _caretLine);
     }
 
     /// <summary>Arms view stabilization: as the filtered view streams in, the anchor's line is held at the
