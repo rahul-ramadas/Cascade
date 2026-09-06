@@ -118,10 +118,10 @@ internal static class DocShots
         DimOrHideAnimation(form);
         FieldAnimation(form);
 
-        // Last of the shots that drive the window, so the state it leaves cannot reach any other picture.
-        CropShot(form);
-
         DialogShots(form);
+
+        // Last of all, so the state it leaves - a crop, a selection, the focus - cannot reach another picture.
+        CropShot(form);
 
         form.Close();
         form.Dispose();

@@ -115,7 +115,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 ![The log cropped to 281 lines: the menu bar says so, the line numbers still read in the millions, and every count is of the crop](docs/images/crop.png)
 
 - Select a run of lines and `Ctrl+[` throws the rest of the file away — a two-million-line log of forty test runs becomes the one test run you are reading.
-- Everything then behaves as though the file held only those lines: the counts, the match map, `Ctrl+End`, `Ctrl+A`, the find tally, **Save Current Lines**. Only the line numbers still read the file's own, so you never lose your place in it.
+- Everything then behaves as though the file held only those lines: the counts, the match map, the scrollbar, `Ctrl+End`, `Ctrl+A`, the find tally, elapsed times, **Save Current Lines**. Only the line numbers still read the file's own, so you never lose your place in it.
 - The crop takes everything between the first and last line you selected, **including lines the filters are hiding** — so `Ctrl+H` inside a crop reveals the rest of that stretch rather than a different one.
 - Filters still read the whole file, and a filter's count says how much of it is in front of you. Hover one for both numbers.
 - `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection.
@@ -142,6 +142,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 ![The same errors measured from one of them: the lines above the reference read as negative, the reference itself sits at zero and is picked out in the margin, and the ones below climb away from it](docs/images/elapsed-reference.png)
 
 - `Ctrl+Shift+R` steps between the three: the previous line, the start of the file, and your reference. The status bar says which — `Δ Prev`, `Δ Start`, `Δ Ref` — and the column stays the same width whichever it is.
+- Cropped, `Δ Start` measures from the start of the crop, so a test case reads from its own first line rather than from the top of the log.
 - `Ctrl+Shift+G` goes back to the reference, wherever you have scrolled to since.
 - Select a line and the status bar says the same thing in words; select several and it says how long they cover.
 - If your timestamp is somewhere the guess cannot reach, name the field it is in under **Field Settings**; **Ctrl+Shift+M** and **Ctrl+Shift+B** turn the two displays off.
