@@ -45,9 +45,19 @@ public sealed class FilterSnapshot
         /// <summary>Literals of a rewritten "L0.+L1" regex, matched with plain substring searches.</summary>
         public string[]? Sequence;
         /// <summary>Identifies the chain of predicates (root..this) that decides this filter's deep match, so a
-        /// cached result can be reused only while that whole chain is unchanged.</summary>
+        /// cached result can be reused only while that whole chain is unchanged. A marker predicate carries the
+        /// version of the marks it was worked out from, so moving a mark makes a new key rather than quietly
+        /// invalidating an old one.</summary>
         public string CacheKey = "";
-        /// <summary>False when the deep match depends on markers, which change independently of the filters.</summary>
+        /// <summary>The key of the chain above this node, or "" at a root. A marker-tailed filter's matches are
+        /// its parent's matches that also carry the mark, so this says where to find the half already known.</summary>
+        public string ParentKey = "";
+        public bool HasParent;
+        /// <summary>Which markers this node's chain (root..this) rests on, one bit each. A key naming their
+        /// versions is only good while they hold.</summary>
+        public int ChainMarkers;
+        /// <summary>False when the deep match cannot be named by <see cref="CacheKey"/> - a marker chain built
+        /// without the store to read the marks' version from.</summary>
         public bool Cacheable;
         /// <summary>Automaton bits for each literal in <see cref="Sequence"/>: all must occur for the
         /// sequence to have any chance, so this rejects almost every line without scanning it again.</summary>
@@ -104,7 +114,7 @@ public sealed class FilterSnapshot
 
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
         bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter,
-        LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton)
+        LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton, int[]? markerVersions)
     {
         _roots = roots;
         _rootBits = new int[roots.Length];
@@ -116,10 +126,33 @@ public sealed class FilterSnapshot
         HasAnyEnabled = hasAnyEnabled;
         HasEnabledInclude = hasEnabledInclude;
         HasMarkerFilter = hasMarkerFilter;
+        _markerVersions = markerVersions;
         _ciAutomaton = ciAutomaton;
         _csAutomaton = csAutomaton;
         _ciWords = ciAutomaton?.Words ?? 0;
         _hitWords = _ciWords + (csAutomaton?.Words ?? 0);
+    }
+
+    /// <summary>The version each marker stood at when this snapshot was built, or null when it was built
+    /// without the store. What its marker filters' cache keys name.</summary>
+    private readonly int[]? _markerVersions;
+
+    /// <summary>True when <paramref name="filter"/>'s chain rests on a marker whose marks have moved since
+    /// this snapshot was built, which makes its cache key name results that no longer describe them.
+    ///
+    /// <para>A snapshot lives as long as the filters do, while the marks beneath it can move at any moment -
+    /// and move <b>without</b> a new snapshot being built when no marker filter is switched on, because
+    /// nothing on screen would change. That leaves the filter list unchanged, the key unchanged, and the
+    /// answer behind it wrong: exactly the trap that keeping marker results out of the cache used to avoid.
+    /// Asked before a lookup, never before a store - what is stored is named by the marks it was made
+    /// from.</para></summary>
+    public bool ChainMarksMoved(Filter filter, MarkerStore markers)
+    {
+        if (_markerVersions is null || !_index.TryGetValue(filter, out int index)) return false;
+        int chain = _nodesByIndex[index].ChainMarkers;
+        for (int i = 0; chain != 0 && i < MarkerStore.MarkerCount; i++)
+            if ((chain & (1 << i)) != 0 && markers.VersionOf(i) != _markerVersions[i]) return true;
+        return false;
     }
 
     /// <summary>Scratch buffers for evaluating lines on one thread. Reused across calls on that thread.</summary>
@@ -160,18 +193,54 @@ public sealed class FilterSnapshot
     public int DeepMatchWords => (FilterCount + 63) / 64;
 
     /// <summary>The filters that take part in evaluation, each with the key identifying the predicate chain
-    /// behind its deep match. Returns false when any of them cannot be cached — marker filters depend on
-    /// markers, which change independently of the filter set, so those results must never be reused.</summary>
+    /// behind its deep match. Returns false when any of them cannot be cached, because the caller rebuilding
+    /// the whole view from cached sets needs every participating filter's answer - a conjunction cannot be
+    /// formed from some of its terms. Use <see cref="CacheableFilters"/> to decide what is worth
+    /// <i>storing</i>: one filter that cannot be named is no reason to stop remembering the others.</summary>
     public bool TryGetCacheableFilters(out List<CacheableFilter> filters)
     {
-        filters = new List<CacheableFilter>();
+        filters = CacheableFilters();
         foreach (var node in _nodesByIndex)
         {
             if (!node.SubtreeHasEnabled) continue;   // pruned: never evaluated, nothing to cache
             if (!node.Cacheable) { filters.Clear(); return false; }
-            filters.Add(new CacheableFilter(node.Index, node.CacheKey, node.Enabled, node.Kind == FilterKind.Exclude));
         }
         return true;
+    }
+
+    /// <summary>Every participating filter whose results can be named, and so stored. Unlike
+    /// <see cref="TryGetCacheableFilters"/> this is per filter: a marker chain built without the store to
+    /// read a version from is simply left out, rather than costing every other filter in the tree its
+    /// cached results.</summary>
+    public List<CacheableFilter> CacheableFilters()
+    {
+        var filters = new List<CacheableFilter>();
+        foreach (var node in _nodesByIndex)
+        {
+            if (!node.SubtreeHasEnabled || !node.Cacheable) continue;
+            filters.Add(new CacheableFilter(node.Index, node.CacheKey, node.Enabled, node.Kind == FilterKind.Exclude));
+        }
+        return filters;
+    }
+
+    /// <summary>A participating filter whose own predicate is a marker, with the key of the chain above it.
+    /// Such a filter matches exactly the lines its parent matches that also carry the mark, and both halves
+    /// are already known - the marks from the store, the parent from its own cached set - so its results can
+    /// be had without reading a single line of the file.</summary>
+    public readonly record struct MarkerTailedFilter(int Index, string Key, int MarkerIndex,
+                                                     string ParentKey, bool HasParent);
+
+    /// <summary>The participating marker-tailed filters, in index order.</summary>
+    public List<MarkerTailedFilter> MarkerTailedFilters()
+    {
+        var filters = new List<MarkerTailedFilter>();
+        foreach (var node in _nodesByIndex)
+        {
+            if (!node.SubtreeHasEnabled || !node.Cacheable || node.Type != FilterMatchType.Marker) continue;
+            filters.Add(new MarkerTailedFilter(node.Index, node.CacheKey, node.MarkerIndex,
+                                               node.ParentKey, node.HasParent));
+        }
+        return filters;
     }
 
     /// <summary>Every cache key this filter set could ask for, disabled filters included - their results
@@ -220,7 +289,8 @@ public sealed class FilterSnapshot
     }
 
     /// <summary>The key identifying a filter's deep-match results in the match cache. False when the filter
-    /// is not in this snapshot, or its chain involves a marker (whose results must never be reused).</summary>
+    /// is not in this snapshot, or its chain cannot be named (a marker chain in a snapshot built without the
+    /// marker store).</summary>
     public bool TryGetCacheKey(Filter filter, out string key)
     {
         key = "";
@@ -251,33 +321,54 @@ public sealed class FilterSnapshot
         return true;
     }
 
-    public static FilterSnapshot Build(FilterCollection filters) => Build(filters, null);
+    public static FilterSnapshot Build(FilterCollection filters) => Build(filters, null, null, null);
+
+    /// <summary>Builds a snapshot that can name the marks its marker filters were worked out from, which is
+    /// what makes their results cacheable. Every caller that will evaluate against a real file passes the
+    /// store; one built without it still evaluates identically, it just stores nothing for marker chains.</summary>
+    public static FilterSnapshot Build(FilterCollection filters, MarkerStore? markers)
+        => Build(filters, null, null, markers);
 
     /// <summary>Builds a snapshot in which <paramref name="forceEnabled"/> takes part in evaluation even when
     /// the user has it switched off. Used by "find this filter's next match", which has to compute exactly
     /// what enabling the filter would compute without changing what the view shows.</summary>
     public static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled)
-        => Build(filters, forceEnabled, null);
+        => Build(filters, forceEnabled, null, null);
+
+    /// <summary><inheritdoc cref="Build(FilterCollection, Filter?)"/></summary>
+    public static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, MarkerStore? markers)
+        => Build(filters, forceEnabled, null, markers);
 
     /// <summary>Builds a snapshot holding <paramref name="target"/> and its ancestors and nothing else, all
     /// taking part in evaluation. A filter's deep match - and the key it is cached under - depends on nothing
     /// but that chain, so the result is interchangeable with one worked out from the whole filter set while
     /// costing a handful of predicates per line instead of every filter in the list.</summary>
-    public static FilterSnapshot BuildForChain(FilterCollection filters, Filter target)
+    public static FilterSnapshot BuildForChain(FilterCollection filters, Filter target, MarkerStore? markers = null)
     {
         var chain = new HashSet<Filter>();
         for (Filter? f = target; f is not null; f = f.Parent) chain.Add(f);
-        return Build(filters, target, chain);
+        return Build(filters, target, chain, markers);
     }
 
-    private static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, HashSet<Filter>? chain)
+    private static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, HashSet<Filter>? chain,
+                                        MarkerStore? markers)
     {
         bool anyEnabled = false, anyInclude = false, anyMarker = false;
         int counter = 0;
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
 
-        Node Convert(Filter f, string parentKey, bool parentCacheable)
+        // Read once, before any key is made from it, so that what a key names and what the snapshot records
+        // having named cannot disagree - a mark moving mid-build would otherwise leave a key claiming marks
+        // the snapshot never saw.
+        int[]? markerVersions = null;
+        if (markers is not null)
+        {
+            markerVersions = new int[MarkerStore.MarkerCount];
+            for (int i = 0; i < markerVersions.Length; i++) markerVersions[i] = markers.VersionOf(i);
+        }
+
+        Node Convert(Filter f, string parentKey, bool parentCacheable, int parentChainMarkers)
         {
             bool enabled = f.Enabled || ReferenceEquals(f, forceEnabled);
             var node = new Node
@@ -294,13 +385,30 @@ public sealed class FilterSnapshot
             index[f] = node.Index;
             nodes.Add(node);
 
+            // A marker index outside 0..7 reaches here from a filter file, which may name a Marker match and
+            // leave the index at its -1 default. Evaluation already reads that as matching nothing (see
+            // Matches), so it needs no marks, has no version to name, and must not be used to index anything.
+            bool marker = f.Match.Type == FilterMatchType.Marker;
+            bool namedMarker = marker && f.Match.MarkerIndex >= 0 && f.Match.MarkerIndex < MarkerStore.MarkerCount;
+
             // A filter's deep match is decided by its own predicate and every ancestor's, so the cache key is
-            // the whole chain: editing a parent must invalidate its children too.
-            string own = f.Match.Type == FilterMatchType.Marker
-                ? $"M{f.Match.MarkerIndex}"
+            // the whole chain: editing a parent must invalidate its children too. A marker predicate names the
+            // version of its marks as well, because "marked by 3" describes the filter and not the answer -
+            // the filter is unchanged when a mark moves, and the answer is not. Keys therefore go stale by
+            // becoming unreachable rather than by needing to be found and dropped, and RetainOnly sweeps the
+            // superseded ones on the very next filter change.
+            string own = marker
+                ? (markerVersions is null || !namedMarker
+                    ? $"M{f.Match.MarkerIndex}"
+                    : $"M{f.Match.MarkerIndex}@{markerVersions[f.Match.MarkerIndex]}")
                 : $"T{(f.Match.Regex ? 'r' : 'l')}{(f.Match.CaseSensitive ? 'S' : 'i')}:{f.Match.Text}";
+            node.ParentKey = parentKey;
+            node.HasParent = f.Parent is not null;
+            node.ChainMarkers = parentChainMarkers | (namedMarker ? 1 << f.Match.MarkerIndex : 0);
             node.CacheKey = parentKey.Length == 0 ? own : parentKey + "\u0001" + own;
-            node.Cacheable = parentCacheable && f.Match.Type != FilterMatchType.Marker;
+            // Without the store there is no version to name, so such a result must never be stored: it would
+            // be indistinguishable from one taken under different marks.
+            node.Cacheable = parentCacheable && (!marker || (markers is not null && namedMarker));
 
             if (f.Match.Type == FilterMatchType.Text && f.Match.Regex && f.Match.Text.Length > 0)
             {
@@ -327,7 +435,8 @@ public sealed class FilterSnapshot
 
             var kept = new List<Node>(f.Children.Count);
             foreach (var child in f.Children)
-                if (chain is null || chain.Contains(child)) kept.Add(Convert(child, node.CacheKey, node.Cacheable));
+                if (chain is null || chain.Contains(child))
+                    kept.Add(Convert(child, node.CacheKey, node.Cacheable, node.ChainMarkers));
             node.Children = kept.ToArray();
 
             // Every descendant has now taken its index, so the counter is one past the last of them.
@@ -343,7 +452,7 @@ public sealed class FilterSnapshot
         foreach (var root in filters.Roots)
             if (chain is null || chain.Contains(root)) rootFilters.Add(root);
         var roots = new Node[rootFilters.Count];
-        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], "", true);
+        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], "", true, 0);
 
         // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
         // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character
@@ -388,7 +497,7 @@ public sealed class FilterSnapshot
         }
 
         return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines,
-            anyEnabled, anyInclude, anyMarker, ci, cs);
+            anyEnabled, anyInclude, anyMarker, ci, cs, markerVersions);
     }
 
     /// <summary>Evaluates a single line. <paramref name="markers"/> may be null when no marker

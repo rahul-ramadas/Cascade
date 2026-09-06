@@ -33,7 +33,24 @@ public sealed class MarkerStore
     /// the current one without comparing the marks themselves.</summary>
     public int Version => Volatile.Read(ref _version);
 
+    /// <summary>Steps whenever marker <paramref name="index"/> alone changes, so an answer worked out from
+    /// its marks can name <b>which</b> marks it was worked out from. A filter's cached results are keyed by
+    /// the predicates behind them, and a marker predicate means nothing without this: the filter is still
+    /// "marked by 3" after the marks move, while its answer is not. Per marker rather than one number for
+    /// all eight, so marking a line with marker 5 does not strand what is known about marker 3.</summary>
+    public int VersionOf(int index) => Volatile.Read(ref _markerVersions[index]);
+
     private int _version;
+    private readonly int[] _markerVersions = new int[MarkerCount];
+
+    /// <summary>Steps the global version and that of each marker in <paramref name="touched"/> (a bitmask).
+    /// Called under <see cref="_lock"/>, so a version and the marks it labels always move together.</summary>
+    private void Bump(int touched)
+    {
+        Interlocked.Increment(ref _version);
+        for (int i = 0; i < MarkerCount; i++)
+            if ((touched & (1 << i)) != 0) Interlocked.Increment(ref _markerVersions[i]);
+    }
 
     /// <summary>Every marked line with its mask, in line order. Marked lines are hand-picked, so this stays
     /// small however large the file - which is what lets a whole-file summary just walk it.
@@ -90,7 +107,7 @@ public sealed class MarkerStore
             // Stepped under the lock that made the change, so the version and the marks it labels are
             // always set together. Callers see the bump before Toggle returns either way; keeping it here
             // just means a reader overlapping a change can't pair new marks with the old number.
-            Interlocked.Increment(ref _version);
+            Bump(bit);
         }
         Changed?.Invoke();
         return set;
@@ -108,7 +125,7 @@ public sealed class MarkerStore
             else { m &= (byte)~bit; _byMarker[index].Remove(line); }
             if (m == 0) _mask.TryRemove(line, out _);
             else _mask[line] = m;
-            Interlocked.Increment(ref _version);
+            Bump(bit);
         }
         Changed?.Invoke();
     }
@@ -142,7 +159,7 @@ public sealed class MarkerStore
         {
             _mask.Clear();
             foreach (var s in _byMarker) s.Clear();
-            Interlocked.Increment(ref _version);
+            Bump(~0);
         }
         Changed?.Invoke();
     }

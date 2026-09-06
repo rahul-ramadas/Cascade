@@ -130,9 +130,14 @@ public sealed class FilterService : IDisposable
         // The accumulators are prepared here rather than on the worker so that a find arriving in the same
         // breath as the filter change already has something to read, instead of concluding that nothing is
         // working this filter out and starting a second pass of its own.
+        //
+        // Per filter, not all-or-nothing: whether one filter's results can be named has no bearing on
+        // another's, and treating it as a single decision meant one unnameable chain stopped the whole tree
+        // being remembered - turning every later filter change into a fresh pass over the file.
         FilterMatchCache.SetBuilder?[]? builders = null;
         List<FilterSnapshot.CacheableFilter>? cacheFilters = null;
-        if (snapshot.TryGetCacheableFilters(out var cacheable) && cacheable.Count > 0)
+        var cacheable = snapshot.CacheableFilters();
+        if (cacheable.Count > 0)
         {
             long lines = _completedCount();
             builders = new FilterMatchCache.SetBuilder?[snapshot.FilterCount];
@@ -193,6 +198,11 @@ public sealed class FilterService : IDisposable
         long lines = _completedCount();
         if (lines <= 0) return false;
         if (!snapshot.TryGetCacheKey(filter, out string key)) return false;
+        // The key names the marks this filter's chain rested on when the snapshot was built. Marks move
+        // without a new snapshot whenever no marker filter is switched on - nothing on screen would change -
+        // so a key can outlive what it names, and answering from it would be the very staleness that keeping
+        // marker results out of the cache used to prevent.
+        if (snapshot.ChainMarksMoved(filter, _markers)) return false;
         return _cache.TryGet(key, lines, out set);
     }
 
@@ -408,13 +418,25 @@ public sealed class FilterService : IDisposable
         }
     }
 
+    /// <summary>Test seam: never rebuild the view from cached results, so every filter change really sweeps
+    /// the file. Tests that watch a pass in flight - what a half-rewritten view draws, which filters explain
+    /// a stretch it has not reached - need a change that sweeps, and enabling a filter is exactly the change
+    /// the cache answers instantly. Before marker results could be remembered, those tests parked an unused
+    /// marker filter in the list to spoil the cache; saying so outright is honest, and does not break the
+    /// moment a marker filter becomes cacheable.</summary>
+    public bool SkipCacheForTesting { get; set; }
+
     /// <summary>Rebuilds the visible set purely from cached per-filter results. Only possible once indexing is
     /// finished and every participating filter has a cached set covering the whole file.</summary>
     private bool TryApplyFromCache(Generation gen)
     {
+        if (SkipCacheForTesting) return false;
         if (!_indexComplete()) return false;
         long lines = _completedCount();
         if (lines <= 0) return false;
+        // A marker predicate's answer is the marks themselves, which are already in hand - so those sets are
+        // made here rather than found, and the combine below then has every term it needs.
+        SeedMarkerTailedSets(gen.Snapshot, lines);
         if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return false;
 
         var includes = new List<FilterMatchCache.MatchSet>();
@@ -441,6 +463,73 @@ public sealed class FilterService : IDisposable
         }
         CacheHits++;
         return true;
+    }
+
+    /// <summary>Works out and stores the results of every marker-tailed filter whose chain above it is already
+    /// known, <b>without reading the file at all</b>.
+    ///
+    /// <para>A marker predicate is the one predicate whose answer the app is already holding: the marks are in
+    /// the store, so "which lines carry mark 3" needs no scan, no decode and no matching. A filter ending in
+    /// one therefore matches exactly its parent's matches that also carry the mark - an intersection of two
+    /// sets both in memory. Marking a line and watching a marker filter's results follow costs a walk of the
+    /// marked lines, which are hand-picked and so few, rather than a pass over millions.</para>
+    ///
+    /// <para>Taken in index order, which is the order the tree is drawn, so a chain of markers seeds each of
+    /// its own prefixes before it needs them.</para></summary>
+    private void SeedMarkerTailedSets(FilterSnapshot snapshot, long lines)
+    {
+        var tailed = snapshot.MarkerTailedFilters();
+        if (tailed.Count == 0) return;
+
+        // The key names the marks a result belongs to, so a result must only be stored under it while those
+        // are still the marks. Marking happens on the UI thread and this runs on the worker, so the two can
+        // overlap: were the check left out, a set worked out from marks that had already moved on could be
+        // filed under the key of the marks it was asked about. Nothing would read it - a version never comes
+        // round again - but the pass in flight would briefly show results that belong to no state at all.
+        int version = _markers.Version;
+        var marks = _markers.Snapshot();
+
+        foreach (var filter in tailed)
+        {
+            if (_cache.TryGet(filter.Key, lines, out _)) continue;
+
+            // A root marker filter is narrowing nothing, so every marked line qualifies. A nested one can only
+            // be built when its prefix is known - otherwise it is left to the pass, which computes the whole
+            // chain anyway.
+            FilterMatchCache.MatchSet? prefix = null;
+            if (filter.HasParent)
+            {
+                if (!_cache.TryGet(filter.ParentKey, lines, out var found)) continue;
+                prefix = found;
+            }
+
+            int bit = 1 << filter.MarkerIndex;
+            var builder = new FilterMatchCache.SetBuilder(lines);
+            // The marks arrive in line order, so whole 64-line words can be gathered and handed over in the
+            // ascending order the builder requires.
+            long currentWord = -1;
+            ulong word = 0;
+            foreach (var (line, mask) in marks)
+            {
+                if ((mask & bit) == 0 || line < 0 || line >= lines) continue;
+                if (prefix is not null && !prefix.Contains(line)) continue;
+
+                long w = line >> 6;
+                if (w != currentWord)
+                {
+                    if (word != 0) builder.AddWord(currentWord, word);
+                    currentWord = w;
+                    word = 0;
+                }
+                word |= 1UL << (int)(line & 63);
+            }
+            if (word != 0) builder.AddWord(currentWord, word);
+
+            // The marks moved while this was being worked out, so it describes neither the state the key
+            // names nor reliably the new one. Drop it: the change that moved them restarts the pass anyway.
+            if (_markers.Version != version) return;
+            _cache.Store(filter.Key, builder.Build(lines));
+        }
     }
 
     /// <summary>Stores the accumulated results once the pass has covered the whole file.</summary>
@@ -601,7 +690,18 @@ public sealed class FilterService : IDisposable
         if (!_indexComplete()) return;                       // partial coverage is never stored
         long lines = _completedCount();
         if (lines <= 0) return;
-        if (!snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return;
+
+        // A chain ending in a marker is answerable from the marks alone, so take what can be had for nothing
+        // before deciding there is a file to read.
+        SeedMarkerTailedSets(snapshot, lines);
+
+        var cacheable = snapshot.CacheableFilters();
+        if (cacheable.Count == 0) return;
+
+        // Whatever is already known - just seeded, or left behind by an earlier pass - needs neither a
+        // builder nor a scan. When that accounts for all of them there is nothing to read at all.
+        var filters = cacheable.FindAll(f => !_cache.TryGet(f.Key, lines, out _));
+        if (filters.Count == 0) return;
 
         var builders = new FilterMatchCache.SetBuilder?[snapshot.FilterCount];
         foreach (var f in filters) builders[f.Index] = new FilterMatchCache.SetBuilder(lines);

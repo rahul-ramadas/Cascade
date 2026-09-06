@@ -608,10 +608,11 @@ public class DocumentIntegrationTests
             doc.Markers.Toggle(7, 1);
             doc.SetFilters(filters);
             WaitFilter(doc);
-            Assert.Equal(0, doc.FilterCacheCount);       // the marker pass itself can never be remembered
+            // The marker filter's own results are remembered too, worked out from the marks themselves.
+            Assert.Equal(1, doc.FilterCacheCount);
 
             Assert.Equal(100, doc.FindLineMatchingFilter(target, 0, forward: true, CancellationToken.None));
-            Assert.Equal(1, doc.FilterCacheCount);
+            Assert.Equal(2, doc.FilterCacheCount);
 
             // And having been worked out once it is a bit scan from then on.
             long scanned = doc.FilterLinesScanned;
@@ -1116,6 +1117,10 @@ public class DocumentIntegrationTests
         using var doc = new CascadeDocument();
         try
         {
+            // The next pass has to really sweep the file, so that it can be held part way. Answered from the cache
+            // the whole set is replaced in one go and there is no half-finished state to test - though the window
+            // this is about is just as real there.
+            doc.SkipFilterCacheForTesting = true;
             doc.Open(path);
             doc.WaitForIndex();
             doc.SetFilters(filters);
@@ -1175,7 +1180,8 @@ public class DocumentIntegrationTests
         var filters = new FilterCollection { ShowOnlyFilteredLines = true };
         filters.Add(alpha);
         filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
-        // Enabled, matches nothing, and keeps the match cache out of it so the next change really sweeps.
+        // Enabled, matches nothing, and stands in the list purely so that something does: this test is about
+        // what a pass leaves behind, not about markers.
         filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
 
         var gate = new SemaphoreSlim(0);
@@ -1183,6 +1189,7 @@ public class DocumentIntegrationTests
         using var doc = new CascadeDocument();
         try
         {
+            doc.SkipFilterCacheForTesting = true;   // the next change has to really sweep, not be answered
             doc.Open(path);
             doc.WaitForIndex();
             doc.SetFilters(filters);
@@ -1246,7 +1253,8 @@ public class DocumentIntegrationTests
         var filters = new FilterCollection { ShowOnlyFilteredLines = true };
         filters.Add(alpha);
         filters.Add(new Filter { Enabled = true, Match = { Text = "BETA" } });
-        // Enabled, matches nothing, and keeps the match cache out of it so each change really sweeps.
+        // Enabled, matches nothing, and stands in the list purely so that something does: this test is about
+        // what a superseded pass leaves behind, not about markers.
         filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
 
         var gate = new SemaphoreSlim(0);
@@ -1254,6 +1262,7 @@ public class DocumentIntegrationTests
         using var doc = new CascadeDocument();
         try
         {
+            doc.SkipFilterCacheForTesting = true;   // each change has to really sweep, not be answered
             doc.Open(path);
             doc.WaitForIndex();
             doc.SetFilters(filters);
@@ -1312,12 +1321,13 @@ public class DocumentIntegrationTests
         };
         var filters = new FilterCollection { ShowOnlyFilteredLines = true };
         foreach (var f in toggles) filters.Add(f);
-        // Enabled and matching nothing: keeps the match cache out of it, so every round is a real pass.
+        // Enabled and matching nothing: stands in the list purely so that something does.
         filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 3 } });
 
         using var doc = new CascadeDocument();
         try
         {
+            doc.SkipFilterCacheForTesting = true;   // every round has to be a real pass
             doc.Open(path);
             doc.WaitForIndex();
             doc.SetFilters(filters);
@@ -1381,6 +1391,7 @@ public class DocumentIntegrationTests
         using var doc = new CascadeDocument();
         try
         {
+            doc.SkipFilterCacheForTesting = true;   // the pass has to really run, so it can be held part way
             doc.Open(path);
             doc.WaitForIndex();
             doc.SetFilters(filters);

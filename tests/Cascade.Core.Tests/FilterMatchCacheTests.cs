@@ -6,6 +6,7 @@ using Cascade.Core.Indexing;
 using Cascade.Core.IO;
 using Cascade.Core.Markers;
 using Cascade.Core.Model;
+using Cascade.Core.Persistence;
 
 namespace Cascade.Core.Tests;
 
@@ -302,10 +303,89 @@ public class FilterMatchCacheTests
         finally { File.Delete(path); }
     }
 
-    [Fact]
-    public void Marker_filters_are_never_served_from_the_cache()
+    [Theory]
+    [InlineData(null)]      // "MatchType": "Marker" with the index left out entirely
+    [InlineData(-1)]
+    [InlineData(8)]
+    [InlineData(int.MaxValue)]
+    public void A_marker_filter_naming_no_valid_marker_loads_and_matches_nothing(int? markerIndex)
     {
-        // Marker membership changes independently of the filters, so a cached result would go stale.
+        // Nothing clamps the index on the way in from a filter file: the match type and the index are read
+        // independently, and the index defaults to -1. Such a filter has always simply matched nothing, and
+        // has to go on doing so - a snapshot cannot use it to index the marks, and there is no version of a
+        // marker that does not exist for its key to name.
+        string index = markerIndex is null ? "" : $", \"markerIndex\": {markerIndex}";
+        string json = $$"""
+        { "schemaVersion": 2, "filters": [ { "matchType": "Marker", "enabled": true{{index}} } ] }
+        """;
+        string filterPath = Harness.TempFile(Encoding.UTF8.GetBytes(json));
+        string logPath = WriteLog();
+        try
+        {
+            var loaded = CascadeFile.Load(filterPath).Filters;
+            loaded.ShowOnlyFilteredLines = true;
+
+            using var doc = new CascadeDocument();
+            doc.Open(logPath);
+            doc.WaitForIndex();
+            doc.SetFilters(loaded);          // must not throw
+            WaitIdle(doc);
+
+            Assert.Equal(0, doc.MatchedLineCount);
+
+            // And the document stays usable: marking a line, and applying filters again, still work.
+            doc.Markers.Toggle(3, 0);
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.Equal(0, doc.MatchedLineCount);
+        }
+        finally { File.Delete(filterPath); File.Delete(logPath); }
+    }
+
+    [Fact]
+    public void A_switched_off_marker_filter_still_finds_a_line_marked_since()
+    {
+        // The trap the whole versioning scheme exists to avoid, by the one route that reaches it. Marking a
+        // line only re-filters when a marker filter is switched ON - otherwise nothing on screen would move -
+        // so with one switched OFF the marks can move while the snapshot, and the key it holds, stand still.
+        // Walking a switched-off filter's matches with F4 is exactly the thing that then asks about it.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var marker = new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } };
+            filters.Add(marker);
+            doc.Markers.Toggle(10, 1);
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.Equal(10, doc.FindLineMatchingFilter(marker, 0, forward: true, CancellationToken.None));
+
+            // Switched off, so marking does not re-filter and the snapshot is never rebuilt.
+            marker.Enabled = false;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.False(doc.CurrentSnapshot.HasMarkerFilter, "the premise: this marking will not re-filter");
+            doc.Markers.Toggle(20, 1);
+
+            // The answer has to include the line marked since, not the one the old key was filed under.
+            Assert.Equal(10, doc.FindLineMatchingFilter(marker, 0, forward: true, CancellationToken.None));
+            Assert.Equal(20, doc.FindLineMatchingFilter(marker, 11, forward: true, CancellationToken.None));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Marker_filters_follow_the_marks_without_rescanning_the_file()
+    {
+        // Marker membership changes independently of the filters, so a result worked out under one set of
+        // marks must never answer for another. The key names the marks' version, so it does not: the old
+        // answer becomes unreachable rather than stale. And because a marker predicate's answer IS the marks,
+        // following them costs a walk of the marked lines rather than a pass over the file.
+        // The filter itself is unchanged throughout - only the marks move.
         string path = WriteLog();
         try
         {
@@ -321,14 +401,158 @@ public class FilterMatchCacheTests
             WaitIdle(doc);
             Assert.Equal(1, doc.MatchedLineCount);
 
+            long scanned = doc.FilterLinesScanned;
             doc.Markers.Toggle(20, 1);
             doc.ApplyFilters();
             WaitIdle(doc);
 
-            Assert.Equal(0, doc.FilterCacheHits);      // must always re-evaluate
+            // The answer follows the marks...
             Assert.Equal(2, doc.MatchedLineCount);
             Assert.Equal(10, doc.RowToLine(0));
             Assert.Equal(20, doc.RowToLine(1));
+            // ...without a single line of the file being read to find it out.
+            Assert.Equal(scanned, doc.FilterLinesScanned);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Marking_a_line_never_serves_the_answer_from_before_it_was_marked()
+    {
+        // The failure this guards against: mark a line, and a filter still reporting what it matched under
+        // the previous marks. Checked one mark at a time, in both directions, because an answer that merely
+        // looks plausible after several changes says nothing about whether each one was really honoured.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } });
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.Equal(0, doc.MatchedLineCount);
+
+            long[] marked = [5, 40, 12, 7, 33];
+            for (int i = 0; i < marked.Length; i++)
+            {
+                doc.Markers.Toggle(marked[i], 1);
+                doc.ApplyFilters();
+                WaitIdle(doc);
+                Assert.Equal(i + 1, doc.MatchedLineCount);
+                foreach (long line in marked[..(i + 1)]) Assert.True(doc.IsLineVisible(line));
+            }
+
+            for (int i = marked.Length - 1; i >= 0; i--)
+            {
+                doc.Markers.Toggle(marked[i], 1);
+                doc.ApplyFilters();
+                WaitIdle(doc);
+                Assert.Equal(i, doc.MatchedLineCount);
+                Assert.False(doc.IsLineVisible(marked[i]));
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Marking_with_one_marker_leaves_what_is_known_about_another_alone()
+    {
+        // Versions are per marker, so marking with 2 must not strand marker 1's results. Were they shared,
+        // this would still give the right answer - just by throwing away and rebuilding work that was
+        // already correct - so the check is that nothing was scanned, not that the count is right.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } });
+            doc.Markers.Toggle(10, 1);
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            long hits = doc.FilterCacheHits;
+            doc.Markers.Toggle(30, 2);      // a marker no filter mentions
+            doc.ApplyFilters();
+            WaitIdle(doc);
+
+            Assert.Equal(1, doc.MatchedLineCount);
+            Assert.Equal(hits + 1, doc.FilterCacheHits);   // answered outright, nothing re-evaluated
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_marker_filter_no_longer_costs_the_rest_of_the_list_its_cache()
+    {
+        // One unnameable chain used to condemn the whole tree: builders were allocated only when EVERY
+        // participating filter could be cached, so a marker filter in a corner of the list meant no filter's
+        // results were ever remembered and every change swept the file again.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var text = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            filters.Add(text);
+            filters.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } });
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            long matched = doc.MatchedLineCount;
+
+            long scanned = doc.FilterLinesScanned;
+            text.Enabled = false;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            text.Enabled = true;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+
+            Assert.Equal(matched, doc.MatchedLineCount);
+            Assert.Equal(scanned, doc.FilterLinesScanned);   // both changes answered from what was remembered
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void A_marker_nested_under_a_filter_matches_only_where_both_do()
+    {
+        // The fast path builds such a filter by intersecting the marks with its parent's cached set, which is
+        // a different route to the answer than evaluating the chain line by line. It has to arrive at the
+        // same place, including for lines that are marked but do not match the parent.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var parent = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            var nested = new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 4 } };
+            filters.Add(parent);
+            filters.Add(nested, parent);
+
+            // Every line, so the marks alone would show far more than the pair may.
+            for (long line = 0; line < 60; line++) doc.Markers.Toggle(line, 4);
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+
+            var expected = new List<long>();
+            for (long line = 0; line < 60; line++)
+                if (doc.GetLineText(line).Contains("ERROR")) expected.Add(line);
+
+            Assert.NotEmpty(expected);
+            Assert.Equal(expected.Count, doc.MatchCountFor(nested));
+            foreach (long line in expected) Assert.True(doc.IsLineVisible(line));
         }
         finally { File.Delete(path); }
     }

@@ -214,6 +214,19 @@ public sealed class CascadeDocument : IDisposable
 
     private Action<long>? _filterCheckpoint;
 
+    /// <summary>Test seam: <inheritdoc cref="FilterService.SkipCacheForTesting"/> Survives <see cref="Open"/>.</summary>
+    public bool SkipFilterCacheForTesting
+    {
+        get => _skipFilterCache;
+        set
+        {
+            _skipFilterCache = value;
+            if (_filterService is not null) _filterService.SkipCacheForTesting = value;
+        }
+    }
+
+    private bool _skipFilterCache;
+
     /// <summary>Test seam: runs on a find sweep before each block, so a test can hold a search at a known
     /// point and exercise what happens while one is still reading the file. The sibling of
     /// <see cref="FilterCheckpointForTesting"/> for the search path, and the only way to hold a sweep
@@ -257,6 +270,7 @@ public sealed class CascadeDocument : IDisposable
             () => CompletedLinesOf(index, indexer), () => indexer.IsComplete);
         _filterService.Progress += _ => Updated?.Invoke();
         _filterService.AfterBlockForTesting = _filterCheckpoint;
+        _filterService.SkipCacheForTesting = _skipFilterCache;
 
         ApplyFilters();
 
@@ -296,7 +310,7 @@ public sealed class CascadeDocument : IDisposable
         if (IsFilterIdle) _viewSnapshots = [CurrentSnapshot];
         else if (FilterProcessedLineCount > 0)
             _viewSnapshots = [CurrentSnapshot, .. _viewSnapshots.Take(MaxRememberedViews - 1)];
-        CurrentSnapshot = FilterSnapshot.Build(Filters);
+        CurrentSnapshot = FilterSnapshot.Build(Filters, Markers);
         FilterGeneration++;
         if (_filterService is null)
         {
@@ -1112,15 +1126,14 @@ public sealed class CascadeDocument : IDisposable
             // Nothing to go on - typically the filter is switched off, so no pass evaluates it. Compute it
             // exactly as switching it on would, over its own chain of predicates and nothing else, and
             // remember the result: this costs one pass once and nothing on every later find.
-            var findSnapshot = FilterSnapshot.BuildForChain(Filters, filter);
+            var findSnapshot = FilterSnapshot.BuildForChain(Filters, filter, Markers);
             _filterService.PrimeCache(findSnapshot, ct, onProgress);
             if (_filterService.TryGetMatchSet(findSnapshot, filter, out var primed))
                 return VisibleMatch(primed, from, forward, count);
         }
 
-        // Fallback for the one case the cache cannot serve: a marker somewhere in the filter's own chain,
-        // whose results change independently of the filters and so must never be reused. A file still being
-        // indexed comes here too, since a set missing the tail of the file could not be stored.
+        // Fallback for the one case the cache cannot serve: a file still being indexed, since a set missing
+        // the tail of the file could not be stored.
         const int ProgressEvery = 64 * 1024;
         var reader = new LineReader(_src, _enc.Encoding);
         if (forward)
