@@ -128,6 +128,7 @@ internal static class SelfTest
             ok &= Timed("cropping", RunCropChecks);
             ok &= Timed("selection stability", RunSelectionStabilityChecks);
             ok &= Timed("viewport stability", RunViewportStabilityChecks);
+            ok &= Timed("crop selection", RunCropSelectionChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -8015,17 +8016,17 @@ internal static class SelfTest
             Pump();
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
             Pump();
-            ok &= Check($"cropping to the selection keeps it ({grid.SelectedCount:N0} lines)",
-                        grid.SelectionRangesForTesting is [(2_000, 2_050)]);
-            ok &= Check($"and leaves the caret where it was ({grid.CaretLine:N0})", grid.CaretLine == 2_000);
+            ok &= Check($"cropping to the selection takes it, leaving nothing chosen ({grid.SelectedCount:N0} lines)",
+                        grid.SelectionRangesForTesting.Length == 0);
 
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
             Pump();
-            ok &= Check("lifting the crop keeps it too", grid.SelectionRangesForTesting is [(2_000, 2_050)]);
+            ok &= Check("lifting the crop hands it back exactly",
+                        grid.SelectionRangesForTesting is [(2_000, 2_050)] && grid.CaretLine == 2_000);
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
             Pump();
-            ok &= Check("and putting the crop back does not move it to the crop's first line",
-                        grid.SelectionRangesForTesting is [(2_000, 2_050)] && grid.CaretLine == 2_000);
+            ok &= Check("and putting the crop back takes it away again, rather than moving it",
+                        grid.SelectionRangesForTesting.Length == 0);
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
             Pump();
 
@@ -8253,6 +8254,102 @@ internal static class SelfTest
             Pump();
             try { File.Delete(path); } catch { /* ignore */ }
             try { File.Delete(Path.ChangeExtension(path, ".cascade")); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>A crop borrows the selection and gives it back. The lines picked out are only the way of
+    /// naming the stretch; once the crop exists they say nothing, so it takes them and leaves the view as
+    /// bare as a freshly opened file. Lifting the crop hands them back exactly. The arrangement lasts only as
+    /// long as the reader leaves it alone: any choice of their own ends it, and from then on the crop does
+    /// not touch what is chosen at all.</summary>
+    private static bool RunCropSelectionChecks()
+    {
+        Line("-- a crop borrows the selection, and gives it back --");
+        const int lines = 3_000;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_cropsel_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        for (int i = 0; i < lines; i++) sb.Append("line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), [path])
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 600),
+                Opacity = 0,
+                NoSavePrompt = true,
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            var grid = form.GridForTesting;
+            for (int i = 0; i < 400 && doc.CompletedLineCount < lines; i++) { Thread.Sleep(5); Pump(); }
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+
+            void Crop() { form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets); Pump(); }
+            void Toggle() { form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets); Pump(); }
+
+            grid.SelectLinesForTesting(1_000, 1_199);
+            Pump();
+            bool ok = Check($"a stretch is picked out ({grid.SelectedCount:N0} lines)",
+                            grid.SelectionRangesForTesting is [(1_000, 1_199)]);
+
+            Crop();
+            ok &= Check($"cropping to it leaves nothing chosen ({grid.SelectedCount:N0} lines)",
+                        grid.SelectionRangesForTesting.Length == 0);
+            ok &= Check($"and no caret either, as a file just opened has ({grid.CaretLine})", grid.CaretLine < 0);
+            ok &= Check($"the crop is the stretch that was chosen ({doc.Crop})",
+                        doc.Crop is { From: 1_000, ToExclusive: 1_200 });
+            ok &= Check("and Crop to Selection has nothing left to act on", !form.CropToSelectionEnabledForTesting);
+
+            Toggle();
+            ok &= Check("hiding the crop hands the selection back exactly",
+                        grid.SelectionRangesForTesting is [(1_000, 1_199)] && grid.CaretLine == 1_000);
+
+            Toggle();
+            ok &= Check($"putting it back takes them away again ({grid.SelectedCount:N0} lines)",
+                        grid.SelectionRangesForTesting.Length == 0);
+
+            // Round and round: the two states have to keep pairing up, not decay after the first exchange.
+            for (int i = 0; i < 3; i++) { Toggle(); Toggle(); }
+            ok &= Check("and it still pairs up after several rounds",
+                        doc.Crop is not null && grid.SelectionRangesForTesting.Length == 0);
+            Toggle();
+            ok &= Check("with the selection still there to come back to",
+                        grid.SelectionRangesForTesting is [(1_000, 1_199)]);
+            Toggle();
+
+            // The reader chooses for themselves while cropped: from here the crop keeps its hands off.
+            grid.SelectLinesForTesting(1_050, 1_060);
+            Pump();
+            Toggle();
+            ok &= Check("a choice made while cropped survives the crop being lifted",
+                        grid.SelectionRangesForTesting is [(1_050, 1_060)]);
+            Toggle();
+            ok &= Check("and is not taken away when the crop comes back",
+                        grid.SelectionRangesForTesting is [(1_050, 1_060)]);
+            Toggle();
+
+            // Cropping again, deliberately, always takes the lines it was given.
+            grid.SelectLinesForTesting(2_000, 2_100);
+            Pump();
+            Crop();
+            ok &= Check($"cropping again takes the new selection ({doc.Crop})",
+                        doc.Crop is { From: 2_000, ToExclusive: 2_101 }
+                        && grid.SelectionRangesForTesting.Length == 0);
+            Toggle();
+            ok &= Check("and hands that one back",
+                        grid.SelectionRangesForTesting is [(2_000, 2_100)]);
+            return ok;
+        }
+        finally
+        {
+            if (form is not null) { form.Close(); form.Dispose(); }
+            Pump();
+            try { File.Delete(path); } catch { /* ignore */ }
         }
     }
 

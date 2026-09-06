@@ -224,6 +224,8 @@ public sealed class LineGridControl : Control
         long rows = _doc.RowCount;
         if (rows <= 0) { _caretRow = -1; return; }
         long row = _caretLine >= 0 ? ResolveRow(_caretLine) : -1;
+        // No caret at all: nothing to draw and nothing to hold, as on a file just opened.
+        if (_caretLine < 0) { _caretRow = -1; return; }
         // -1 means the streaming pass has not reached that line, so its row is not knowable yet: hold the
         // caret where it is rather than snapping it to the scan frontier.
         if (row < 0) { if (_caretRow >= rows) _caretRow = rows - 1; return; }
@@ -504,6 +506,45 @@ public sealed class LineGridControl : Control
 
     /// <summary>What the minimap needs to know about the selection having moved.</summary>
     internal long SelectionVersion => _sel.Version * 1_000_003L + _caretRow;
+
+    /// <summary>Steps whenever what is CHOSEN changes, and not when the view moves under it. Something that
+    /// borrowed the selection reads this to find out whether the reader has since chosen for themselves.</summary>
+    internal int ChosenVersion => _sel.Version;
+
+    /// <summary>Everything about what is chosen, enough to put it back exactly.</summary>
+    internal readonly record struct SelectionState((long A, long B)[] Ranges, long Anchor, long CaretLine)
+    {
+        public bool Any => Ranges.Length > 0;
+    }
+
+    internal SelectionState CaptureSelectionState()
+        => new(_sel.Ranges.ToArray(), _sel.Anchor, _caretLine);
+
+    /// <summary>Leaves nothing chosen and no caret, as a freshly opened file has. The anchor's caret is let go
+    /// with it, or the next lay-out would put back the very caret this just took away.</summary>
+    internal void ClearSelectionAndCaret()
+    {
+        ClearCharSelection();
+        _sel.Clear();
+        _caretRow = -1;
+        _caretLine = -1;
+        _anchorCaretLine = -1;
+        Invalidate();
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>Hands a captured selection back, caret included. The caret is restored as a LINE, so it lands
+    /// where it was even if the view has changed shape since.</summary>
+    internal void RestoreSelectionState(SelectionState state)
+    {
+        ClearCharSelection();
+        _sel.Restore(state.Ranges, state.Anchor);
+        _caretLine = state.CaretLine;
+        _anchorCaretLine = state.CaretLine;
+        RederiveCaretRow();
+        Invalidate();
+        SelectionChanged?.Invoke();
+    }
 
     /// <summary>The selected lines as ranges of display rows, worked out once rather than per pixel of the
     /// map: the map asks about hundreds of slots, and turning each slot's rows back into lines would be a

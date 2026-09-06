@@ -67,6 +67,16 @@ public sealed class LineSelection
         Version++;
     }
 
+    /// <summary>Puts back a set of ranges exactly as they were, anchor and all. For handing a selection back
+    /// to the reader after something borrowed it - the ranges are already normalized, having come from here.</summary>
+    public void Restore(IReadOnlyList<(long A, long B)> ranges, long anchor)
+    {
+        _ranges.Clear();
+        _ranges.AddRange(ranges);
+        Anchor = anchor;
+        Version++;
+    }
+
     public void ToggleSingle(long line)
     {
         if (line < 0) return;

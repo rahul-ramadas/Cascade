@@ -119,6 +119,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - The crop takes everything between the first and last line you selected, **including lines the filters are hiding** — so `Ctrl+H` inside a crop reveals the rest of that stretch rather than a different one.
 - Filters still read the whole file, and a filter's count says how much of it is in front of you. Hover one for both numbers.
 - `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection.
+- Cropping clears the selection, since the lines were only the way of naming the stretch. Lifting the crop hands them back, exactly — unless you have chosen something else in the meantime, which always wins.
 
 ---
 

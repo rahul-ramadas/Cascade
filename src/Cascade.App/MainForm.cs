@@ -79,6 +79,12 @@ public sealed class MainForm : Form
     // The crop most recently applied, kept after it is hidden so that it can be put back without the lines
     // being picked out again. Never saved: a line number means nothing against a different file.
     private (long From, long ToExclusive)? _lastCrop;
+    // What was chosen when that crop was taken. Taking a crop clears the selection - the lines were only ever
+    // the way of naming the stretch, and leaving them all lit afterwards says nothing - so hiding the crop has
+    // to be able to hand it back. Held with the version it was left at: the moment the reader chooses
+    // anything themselves the claim lapses, and from then on the crop does not touch the selection at all.
+    private LineGridControl.SelectionState? _cropSelection;
+    private int _cropSelectionVersion = -1;
     private ToolStripMenuItem _miCrop = null!, _miUncrop = null!;
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
@@ -132,6 +138,8 @@ public sealed class MainForm : Form
     internal string StatusForTesting => string.Join(" | ", _status.Items.OfType<ToolStripStatusLabel>().Select(l => l.Text));
 
     internal bool CropLabelVisibleForTesting => _cropLabel.Visible;
+
+    internal bool CropToSelectionEnabledForTesting { get { SyncCropCommands(); return _miCrop.Enabled; } }
 
     /// <summary>Opens and closes the View menu, which is what settles the state of the items in it.</summary>
     internal void OpenViewMenuForTesting()
@@ -1501,7 +1509,7 @@ public sealed class MainForm : Form
             _doc.Open(path, enc);
             // The remembered crop belongs to the file it was set on, so another file clears the offer to
             // put it back. The document has already decided about the crop in force.
-            if (!sameFile) _lastCrop = null;
+            if (!sameFile) { _lastCrop = null; ForgetBorrowedSelection(); }
             _forcedEncoding = enc;
             SyncEncodingMenu();
             _grid.Attach(_doc, _settings);
@@ -2870,12 +2878,13 @@ public sealed class MainForm : Form
     {
         if (!_grid.SelectionBounds(out long first, out long last)) return;
         // Captured before the change, in the row space the change is about to replace - the same dance every
-        // filter change does. The selection itself is never touched: it is held in lines, and the crop is a
-        // stretch of lines, so what was chosen is still chosen.
+        // filter change does.
         var anchor = _grid.CaptureViewAnchor();
         if (!_doc.SetCrop(first, last + 1)) return;
         _lastCrop = _doc.Crop;
-        AfterCropChanged(anchor);
+        // Asked for outright, with lines deliberately picked out, so this always takes them: the reader named
+        // the stretch and the crop now IS that stretch.
+        AfterCropChanged(anchor, TakeSelectionForCrop);
     }
 
     /// <summary>Goes back to the whole file, or returns to the crop last set. One key does both, because they
@@ -2884,17 +2893,63 @@ public sealed class MainForm : Form
     private void ToggleCrop()
     {
         var anchor = _grid.CaptureViewAnchor();
-        if (_doc.Crop is not null) _doc.ClearCrop();
-        else if (_lastCrop is not { } crop || !_doc.SetCrop(crop.From, crop.ToExclusive)) return;
-        AfterCropChanged(anchor);
+        if (_doc.Crop is not null)
+        {
+            _doc.ClearCrop();
+            AfterCropChanged(anchor, ReturnSelection);
+        }
+        else
+        {
+            if (_lastCrop is not { } crop || !_doc.SetCrop(crop.From, crop.ToExclusive)) return;
+            AfterCropChanged(anchor, BorrowSelection);
+        }
+    }
+
+    /// <summary>True while the selection is still the one the crop left behind - so still the crop's to give
+    /// back or take away. Any choice of the reader's own ends that, permanently.</summary>
+    private bool SelectionStillBorrowed
+        => _cropSelection is not null && _cropSelectionVersion == _grid.ChosenVersion;
+
+    /// <summary>Cropping leaves nothing chosen, and remembers what it took so it can be handed back. Called
+    /// only for a crop the reader asked for by picking lines out, where taking them is the whole point.</summary>
+    private void TakeSelectionForCrop()
+    {
+        _cropSelection = _grid.CaptureSelectionState();
+        _grid.ClearSelectionAndCaret();
+        _cropSelectionVersion = _grid.ChosenVersion;
+    }
+
+    /// <summary>Re-applying a crop leaves nothing chosen again - but only when the selection is still the one
+    /// this handed back. A choice the reader made in between is theirs, and ends the arrangement.</summary>
+    private void BorrowSelection()
+    {
+        if (!SelectionStillBorrowed) { ForgetBorrowedSelection(); return; }
+        _grid.ClearSelectionAndCaret();
+        _cropSelectionVersion = _grid.ChosenVersion;
+    }
+
+    /// <summary>Hands the selection back on the way out of a crop, if it is still the crop's to hand back.</summary>
+    private void ReturnSelection()
+    {
+        if (!SelectionStillBorrowed) { ForgetBorrowedSelection(); return; }
+        _grid.RestoreSelectionState(_cropSelection!.Value);
+        _cropSelectionVersion = _grid.ChosenVersion;
+    }
+
+    private void ForgetBorrowedSelection()
+    {
+        _cropSelection = null;
+        _cropSelectionVersion = -1;
     }
 
     /// <summary>Puts the view back together around the anchor taken before the crop moved. The rows have all
-    /// been renumbered, so the viewport and the caret are re-derived from the LINES they were on - and the
-    /// selection is left exactly as the reader left it, whether or not the crop is currently showing it.</summary>
-    private void AfterCropChanged(ViewAnchor anchor)
+    /// been renumbered, so the viewport and the caret are re-derived from the LINES they were on.
+    /// <para><paramref name="selection"/> runs after the anchor is armed and before the view is laid out
+    /// again, so what it says about the caret is what the lay-out uses.</para></summary>
+    private void AfterCropChanged(ViewAnchor anchor, Action selection)
     {
         _grid.SetViewAnchor(anchor);
+        selection();
         _grid.RefreshView();
         _anchorActive = anchor.IsValid;
         _grid.InvalidateMatchMap();
