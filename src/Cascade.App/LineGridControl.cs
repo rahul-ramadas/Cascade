@@ -728,6 +728,16 @@ public sealed class LineGridControl : Control
     /// and pass the result to <see cref="SetViewAnchor"/> after it.</summary>
     public ViewAnchor CaptureViewAnchor()
     {
+        // The reader's own position, if they have not moved since it was taken. Re-deriving it from the view
+        // each time is what let it creep: the answer depends on which lines happen to be shown right now.
+        if (_restorePoint is { } held) return held;
+        var taken = TakeViewAnchor();
+        if (taken.IsValid) _restorePoint = taken;
+        return taken;
+    }
+
+    private ViewAnchor TakeViewAnchor()
+    {
         if (_doc is null) return ViewAnchor.None;
         long rows = _doc.RowCount;
         // Nothing on show has no position to hold, but the caret still belongs to a line - so a view emptied
@@ -757,7 +767,30 @@ public sealed class LineGridControl : Control
         _anchorOffset = Math.Clamp(anchor.Offset, 0, Math.Max(0, EffectiveVisibleRows - 1));
     }
 
-    public void ClearViewAnchor() { _anchorLine = -1; _anchorCaretLine = -1; }
+    public void ClearViewAnchor()
+    {
+        RetireViewAnchor();
+        _restorePoint = null;
+    }
+
+    /// <summary>Drops the streaming anchor once the pass it was steadying has finished, WITHOUT forgetting
+    /// where the reader put the view. The two are different things: the anchor stops the text drifting under
+    /// a running pass and has done its job when the pass ends, while the restore point outlives it and is the
+    /// reader's own position.</summary>
+    public void RetireViewAnchor()
+    {
+        _anchorLine = -1;
+        _anchorCaretLine = -1;
+    }
+
+    /// <summary>Where the reader last put the view, in file lines, kept until they move it again.
+    ///
+    /// <para>Every change to the visible set re-derives the viewport from a line, and a line that the new set
+    /// does not show has to give way to its nearest neighbour. Captured afresh each time, that neighbour then
+    /// becomes the anchor for the next change, and the next - so hiding and showing again lands a little
+    /// further down each round. Held instead, the reader's own position is what every change is measured
+    /// from, and toggling what is shown returns to the very line and the very height it started at.</para></summary>
+    private ViewAnchor? _restorePoint;
 
     /// <summary>While a filter pass is running the viewport must be identified by a <b>line</b>, never by a bare
     /// row index: rows shift continuously as lines are added and dropped before it. Every user navigation
@@ -3384,7 +3417,7 @@ public sealed class LineGridControl : Control
     private void NavigateMarker(int index, bool forward)
     {
         if (_doc is null) return;
-        _anchorLine = -1;
+        ClearViewAnchor();
         long first = _doc.FirstDisplayLine, last = _doc.LastDisplayLine;
         // Start the walk at the crop's edge rather than the file's, and refuse a mark beyond it: a marked
         // line outside the crop is not one of the lines this view has, so stepping to it would land the
@@ -3424,7 +3457,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return;
         ClearCharSelection();
-        _anchorLine = -1;
+        ClearViewAnchor();
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         PlaceCaret(row);
         if (extend && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, LineAt(row));
@@ -3662,7 +3695,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return;
         ClearCharSelection();
-        _anchorLine = -1;
+        ClearViewAnchor();
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
@@ -3680,7 +3713,7 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return;
         ClearCharSelection();
-        _anchorLine = -1;
+        ClearViewAnchor();
         _sel.SetRange(first, last);
         long row = _doc.RowForLine(first);
         if (row < 0) row = _doc.RowAtOrAfterLine(first);
@@ -3808,7 +3841,7 @@ public sealed class LineGridControl : Control
         if (_doc is null) return;
         if (InvokeRequired) { BeginInvoke(() => SelectRowForAccessibility(row)); return; }
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
-        _anchorLine = -1;
+        ClearViewAnchor();
         PlaceCaret(row);
         _sel.SetSingle(LineAt(row));
         EnsureVisible(row);

@@ -52,12 +52,25 @@ public sealed class MainForm : Form
     // saying the file is cropped costs no room at all: the alternative was a bar of its own above the log,
     // and a permanent strip is a high price for a state that is usually off. Clickable, unlike the update
     // notice beside it - it is the quickest way back to the whole file.
+    // Hidden unless a crop is in force. Centred in the menu bar, which is otherwise empty in the middle, so
+    // saying the file is cropped costs no room at all: the alternative was a bar of its own above the log,
+    // and a permanent strip is a high price for a state that is usually off.
+    //
+    // Drawn as a link, because it is one: it takes the pointer's hand cursor and underlines under it, which
+    // is what says "this can be clicked" without spending a sentence of the menu bar on saying so. The
+    // trailing X says what clicking it does. The keystroke lives on the tip, where it is looked for once.
     private readonly ToolStripLabel _cropLabel = new()
     {
         Visible = false,
         Name = "menu.crop",
         Overflow = ToolStripItemOverflow.Never,
-        AutoSize = true
+        AutoSize = true,
+        IsLink = true,
+        LinkBehavior = LinkBehavior.HoverUnderline,
+        // A quiet slate rather than the default link blue, which shouts across a menu bar and reads as a web
+        // page. Dark enough to sit against the chrome, coloured enough to say it is not just a label.
+        LinkColor = Color.FromArgb(0x1F, 0x4E, 0x79),
+        ActiveLinkColor = Color.FromArgb(0x0F, 0x2E, 0x4C),
     };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Visible = false, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
@@ -411,7 +424,7 @@ public sealed class MainForm : Form
                 ShowFindMessage($"Hang recorded: {dump}", Path.Combine(HangWatchdog.Folder, dump));
             if (_pendingRefresh) { _pendingRefresh = false; _grid.RefreshView(); _grid.InvalidateMatchMap(); _filterTree.RefreshCounts(); }
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
-            if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.ClearViewAnchor(); _anchorActive = false; }
+            if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.RetireViewAnchor(); _anchorActive = false; }
             _doc.DropRememberedViews();
             UpdateStatusIfChanged();
             FlushConfig();
@@ -2953,8 +2966,8 @@ public sealed class MainForm : Form
         }
 
         long rows = _doc.DisplayLineCount;
-        string text = $"\u25A3  Cropped to {_doc.FirstDisplayLine + 1:N0}\u2013{_doc.LastDisplayLine + 1:N0}"
-                    + $"  \u00B7  {rows:N0} {(rows == 1 ? "line" : "lines")}";
+        string text = $"Cropped to {_doc.FirstDisplayLine + 1:N0}\u2013{_doc.LastDisplayLine + 1:N0}"
+                    + $"  \u00B7  {rows:N0} {(rows == 1 ? "line" : "lines")}   \u00D7";
         bool changed = _cropLabel.Text != text;
         if (changed) _cropLabel.Text = text;
         if (!_cropLabel.Visible)
@@ -2962,8 +2975,8 @@ public sealed class MainForm : Form
             _cropLabel.Visible = true;
             changed = true;
         }
-        _cropLabel.ToolTipText = $"Showing {rows:N0} of {_doc.CompletedLineCount:N0} lines. "
-                               + "Click, or press Ctrl+], to see the whole file again.";
+        _cropLabel.ToolTipText = $"Showing {rows:N0} of {_doc.CompletedLineCount:N0} lines.\n"
+                               + "Click to see the whole file again \u00B7 Ctrl+] toggles the crop";
         if (changed) CentreCropLabel();
     }
 

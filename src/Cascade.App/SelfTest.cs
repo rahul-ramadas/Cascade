@@ -8178,6 +8178,25 @@ internal static class SelfTest
                 Pump();
             }
             ok &= Check($"and it does not creep over repeated toggles (line {TopLine():N0})", TopLine() == top);
+            ok &= Check($"with the caret still at the same height ({grid.CaretRowForTesting - grid.FirstVisibleRow} rows down, was 3)",
+                        grid.CaretRowForTesting - grid.FirstVisibleRow == 3);
+
+            // The harder case: the top line is itself one the filter hides, and the caret is nowhere near it.
+            // There is then no caret to hold the view by, and the top line has to give way to its neighbour -
+            // so this is where a re-derived anchor creeps and a remembered one does not.
+            grid.SelectLinesForTesting(5, 5);
+            Pump();
+            grid.ScrollToRow(1_002);              // 1,002 does not match KEEP, and the caret is far above it
+            Pump();
+            long hiddenTopLine = TopLine();
+            ok &= Check($"parked on a line the filter hides ({hiddenTopLine:N0})", hiddenTopLine == 1_002);
+            for (int i = 0; i < 3; i++)
+            {
+                ShowOnlyMatches(true);
+                ShowOnlyMatches(false);
+            }
+            ok &= Check($"toggling returns to that very line, not its neighbour (line {TopLine():N0})",
+                        TopLine() == hiddenTopLine);
 
             // A crop taken with the caret on screen, which is the ordinary way one is taken.
             grid.ScrollToRow(1_100);
