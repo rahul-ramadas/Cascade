@@ -152,12 +152,15 @@ public sealed class MainForm : Form
 
     internal string CropLabelTextForTesting => _cropLabel.Text ?? "";
 
-    /// <summary>How far the crop chip's middle is from the middle of the menu bar, in pixels. The margin that
-    /// centres it is worked out from where it landed, so the check is that it really did land there.</summary>
-    internal int CropLabelCentreOffsetForTesting =>
+    /// <summary>How far the crop chip's middle is from the middle of the menu bar, in pixels, with the bar's
+    /// width beside it. The width belongs in the answer: an offset measured against the same width the
+    /// centring used would agree with itself however wrong both were.</summary>
+    internal (int Offset, int BarWidth) CropLabelCentringForTesting =>
         MainMenuStrip is { } menu && _cropLabel.Visible
-            ? _cropLabel.Bounds.Left + _cropLabel.Width / 2 - menu.ClientSize.Width / 2
-            : 0;
+            ? (_cropLabel.Bounds.Left + _cropLabel.Width / 2 - menu.ClientSize.Width / 2, menu.ClientSize.Width)
+            : (0, 0);
+
+    internal int CropLabelCentreOffsetForTesting => CropLabelCentringForTesting.Offset;
 
     /// <summary>Clicks a menu item by the path a user would read, so a check drives the same wiring rather
     /// than the method behind it. Each drop-down along the way is OPENED, because that is the only way a

@@ -47,7 +47,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 ![The filter list: nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
 
-- **Count** is how many lines in the whole file match, not how many are on screen.
+- **Count** is how many lines in the whole file match, not how many are on screen — or how many are in the crop, when you have one.
 - `Shift+Space` switches a filter's whole subtree on or off.
 - The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`) — and comes back next time on the same edge, at the same size.
 
@@ -118,7 +118,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - Everything then behaves as though the file held only those lines: the counts, the match map, the scrollbar, `Ctrl+End`, `Ctrl+A`, the find tally, elapsed times, **Save Current Lines**. Only the line numbers still read the file's own, so you never lose your place in it.
 - The crop takes everything between the first and last line you selected, **including lines the filters are hiding** — so `Ctrl+H` inside a crop reveals the rest of that stretch rather than a different one.
 - Filters still read the whole file, and a filter's count says how much of it is in front of you. Hover one for both numbers.
-- `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection.
+- `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection. Clicking the crop in the menu bar does the same.
 - Cropping clears the selection, since the lines were only the way of naming the stretch. Lifting the crop hands them back, exactly — unless you have chosen something else in the meantime, which always wins.
 
 ---
@@ -171,7 +171,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 ### Getting lines out
 
-- **File ▸ Save Current Lines…** writes out exactly what the filters are showing.
+- **File ▸ Save Current Lines…** writes out exactly what the view is showing — the filters' verdict, and the crop if you have one.
 - **Edit ▸ Copy with Line Numbers** copies the file's own line numbers along with the text.
 
 ---

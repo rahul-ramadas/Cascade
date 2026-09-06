@@ -7877,6 +7877,23 @@ internal static class SelfTest
                         && form.CropLabelTextForTesting.Contains("1,300"));
             ok &= Check($"and the chip is centred in the bar ({form.CropLabelCentreOffsetForTesting:+0;-0;0} px off)",
                         Math.Abs(form.CropLabelCentreOffsetForTesting) <= 2);
+
+            // And on a maximised window, which is how a log is usually read and a far wider bar than the one
+            // above. Taken once at that size, as a reader gets there - toggling repeatedly would nudge the
+            // chip nearer each time and hide a fault that only shows on the first lay-out.
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            form.WindowState = FormWindowState.Maximized;
+            Pump();
+            Thread.Sleep(300);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check($"and centred on a maximised window too ({form.CropLabelCentringForTesting})",
+                        Math.Abs(form.CropLabelCentringForTesting.Offset) <= 2
+                        && form.CropLabelCentringForTesting.BarWidth >= 1_200);
+            form.WindowState = FormWindowState.Normal;
+            Pump();
             ok &= Check($"Total counts the crop ({form.StatusForTesting})",
                         form.StatusForTesting.Contains("Total: 300"));
 
