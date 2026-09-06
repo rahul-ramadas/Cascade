@@ -91,6 +91,12 @@ public sealed class LineGridControl : Control
     private int _maxContentWidth;
     private int _paints;
     private long _caretRow = -1;
+    // The line the caret is really on, which is the truth; _caretRow is only where that line is currently
+    // DRAWN. A row means a different line the moment the visible set changes - a filter switched on, Ctrl+H,
+    // a crop applied - so a caret kept as a row is silently redefined by every one of them. Kept as a line,
+    // hiding it moves only where it is shown, and putting the lines back puts the caret back with them.
+    // Changed by the user moving it, and by nothing else.
+    private long _caretLine = -1;
     private bool _dragging;
     // View stabilization across streaming view rebuilds: hold _anchorLine at _anchorOffset rows from the top
     // of the viewport, and keep the caret on _anchorCaretLine, as rows are discovered beneath them.
@@ -191,7 +197,38 @@ public sealed class LineGridControl : Control
         RebuildFonts();
     }
 
+    /// <summary>The line the caret is DRAWN on: its own when the view is showing it, else the nearest line the
+    /// view does have. What the reader's eye is on, and so what every command acting "from here" means.</summary>
     public long CaretLine => _caretRow >= 0 && _doc is not null ? _doc.RowToLine(_caretRow) : -1;
+
+    /// <summary>The line the caret really belongs to, shown or not. Only the reader moves it; a change to the
+    /// visible set moves the ROW it is drawn on and leaves this alone, which is what lets hiding a line and
+    /// showing it again put the caret back where it was rather than where the fallback stood.</summary>
+    internal long CaretTrueLineForTesting => _caretLine;
+
+    /// <summary>Puts the caret on a row and remembers the line it landed on. Everything that moves the caret
+    /// on the reader's behalf goes through here; anything that merely re-maps rows must not.</summary>
+    private void PlaceCaret(long row)
+    {
+        _caretRow = row;
+        _caretLine = row >= 0 ? LineAt(row) : -1;
+    }
+
+    /// <summary>Works out which row the caret's line is on now. Called whenever the visible set has moved
+    /// underneath it - and it leaves the LINE alone, which is the whole point: a line the filters have just
+    /// hidden is still where the caret is, it simply has to be drawn against its nearest neighbour until the
+    /// line comes back.</summary>
+    private void RederiveCaretRow()
+    {
+        if (_doc is null) return;
+        long rows = _doc.RowCount;
+        if (rows <= 0) { _caretRow = -1; return; }
+        long row = _caretLine >= 0 ? ResolveRow(_caretLine) : -1;
+        // -1 means the streaming pass has not reached that line, so its row is not knowable yet: hold the
+        // caret where it is rather than snapping it to the scan frontier.
+        if (row < 0) { if (_caretRow >= rows) _caretRow = rows - 1; return; }
+        _caretRow = Math.Clamp(row, 0, rows - 1);
+    }
 
     /// <summary>The file line a display row is showing, or -1 when there is no such row. Everything the
     /// reader picked out is remembered by line, so this is where rows are turned into that.</summary>
@@ -694,7 +731,7 @@ public sealed class LineGridControl : Control
         if (_doc is null || _doc.RowCount == 0) return ViewAnchor.None;
         long rows = _doc.RowCount;
         long top = Math.Clamp(_firstRow, 0, rows - 1);
-        long caretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
+        long caretLine = _caretLine;
         // Hold the caret line still when it is actually on screen; otherwise hold the top visible line, so
         // the text never jumps to a caret the user cannot see.
         bool caretOnScreen = _caretRow >= top && _caretRow < Math.Min(rows, top + EffectiveVisibleRows);
@@ -725,7 +762,7 @@ public sealed class LineGridControl : Control
         if (rows == 0) return;
         _anchorLine = _doc.RowToLine(Math.Clamp(_firstRow, 0, rows - 1));
         _anchorOffset = 0;
-        _anchorCaretLine = _caretRow >= 0 && _caretRow < rows ? _doc.RowToLine(_caretRow) : -1;
+        _anchorCaretLine = _caretLine;
     }
 
     /// <summary>Row currently displaying <paramref name="line"/> (or the nearest following visible line), or
@@ -768,7 +805,8 @@ public sealed class LineGridControl : Control
     }
 
     /// <summary>Keeps the caret on its original line as rows shift. The selection is left alone: it is held
-    /// in lines, so hiding some of it is a question of what is drawn, not of what is chosen.</summary>
+    /// in lines, so hiding some of it is a question of what is drawn, not of what is chosen. The caret's own
+    /// line is left alone too - only the row it is drawn on moves.</summary>
     private void PinCaretToAnchor()
     {
         if (_doc is null || _anchorCaretLine < 0) return;
@@ -830,6 +868,7 @@ public sealed class LineGridControl : Control
         _firstRow = 0;
         _hScroll = 0;
         _caretRow = -1;
+        _caretLine = -1;
         _naturalKey = null;
         _colWidths = [];
         _sel.Clear();
@@ -922,7 +961,9 @@ public sealed class LineGridControl : Control
         DropSelectionIfArrangementChanged();
 
         _firstRow = ClampFirstRow(_firstRow);
-        if (_caretRow >= rows) _caretRow = rows - 1;
+        // The caret belongs to a line, so re-derive the row it is drawn on rather than clamping the old one:
+        // after the visible set moves, the row it held stands for a different line entirely.
+        RederiveCaretRow();
 
         int vMax = (int)Math.Min(int.MaxValue, Math.Max(0, rows - 1));
         _vbar.Configure(rows, visible);
@@ -1186,6 +1227,11 @@ public sealed class LineGridControl : Control
     internal int VisibleRowCountForTesting => VisibleRowCount;
 
     internal long CaretRowForTesting => _caretRow;
+
+    /// <summary>The stretches of the log that are chosen, whatever the view is currently showing of them.
+    /// A check that the selection SURVIVED a change to the visible set has to read this: what is drawn falls
+    /// back to a stand-in when the chosen lines are hidden, and would hide the very thing under test.</summary>
+    internal (long A, long B)[] SelectionRangesForTesting => _sel.Ranges.ToArray();
 
     internal void PressKeyForTesting(Keys key) => OnKeyDown(new KeyEventArgs(key));
 
@@ -2765,7 +2811,7 @@ public sealed class LineGridControl : Control
         _charAnchor = Math.Clamp(start + from, start, end);
         _charFocus = Math.Clamp(start + to, start, end);
         _sel.SetSingle(_charLine);
-        _caretRow = row;
+        PlaceCaret(row);
         Invalidate();
     }
 
@@ -3040,7 +3086,7 @@ public sealed class LineGridControl : Control
         else if ((ModifierKeys & Keys.Control) != 0) _sel.ToggleSingle(line);
         else _sel.SetSingle(line);
 
-        _caretRow = row;
+        PlaceCaret(row);
         _dragging = true;
         _charDragging = false;
         _charOriginRow = -1;
@@ -3083,7 +3129,7 @@ public sealed class LineGridControl : Control
                 {
                     _charFocus = at;
                     _charDragging = true;
-                    _caretRow = row;
+                    PlaceCaret(row);
                     _sel.SetSingle(_charLine);
                     Invalidate();
                     Update();
@@ -3095,7 +3141,7 @@ public sealed class LineGridControl : Control
                 // Left the row: this is a selection of whole lines after all.
                 ClearCharSelection();
                 _sel.SetRange(_sel.Anchor, LineAt(row));
-                _caretRow = row;
+                PlaceCaret(row);
                 EnsureVisible(row);
                 Invalidate();
                 Update();
@@ -3341,7 +3387,7 @@ public sealed class LineGridControl : Control
         if (line < 0 || line < first || line > last) { NoMoreMarkers?.Invoke(index); return; }
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
-        _caretRow = row;
+        PlaceCaret(row);
         _sel.SetSingle(LineAt(row));
         RevealRow(row);
         Invalidate();
@@ -3372,7 +3418,7 @@ public sealed class LineGridControl : Control
         ClearCharSelection();
         _anchorLine = -1;
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
-        _caretRow = row;
+        PlaceCaret(row);
         if (extend && _sel.Anchor >= 0) _sel.SetRange(_sel.Anchor, LineAt(row));
         else _sel.SetSingle(LineAt(row));
         if (reveal) EnsureVisible(row);
@@ -3612,7 +3658,7 @@ public sealed class LineGridControl : Control
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
-        _caretRow = row;
+        PlaceCaret(row);
         _sel.SetSingle(LineAt(row));
         RevealRow(row);
         Invalidate();
@@ -3630,7 +3676,7 @@ public sealed class LineGridControl : Control
         _sel.SetRange(first, last);
         long row = _doc.RowForLine(first);
         if (row < 0) row = _doc.RowAtOrAfterLine(first);
-        _caretRow = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
+        PlaceCaret(Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1)));
         RevealRow(_caretRow);
         Invalidate();
         SelectionChanged?.Invoke();
@@ -3755,7 +3801,7 @@ public sealed class LineGridControl : Control
         if (InvokeRequired) { BeginInvoke(() => SelectRowForAccessibility(row)); return; }
         row = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
         _anchorLine = -1;
-        _caretRow = row;
+        PlaceCaret(row);
         _sel.SetSingle(LineAt(row));
         EnsureVisible(row);
         Invalidate();

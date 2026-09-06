@@ -126,6 +126,7 @@ internal static class SelfTest
             ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
             ok &= Timed("copying", RunCopyBudgetChecks);
             ok &= Timed("cropping", RunCropChecks);
+            ok &= Timed("selection stability", RunSelectionStabilityChecks);
             if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
             else Line("(no real file supplied; skipped large-file checks)");
 
@@ -7938,6 +7939,132 @@ internal static class SelfTest
             if (form is not null) { form.Close(); form.Dispose(); }
             Pump();
             try { File.Delete(path); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>The selection belongs to the reader, and only the reader changes it. Every change to the
+    /// VISIBLE set - a filter switched on, Ctrl+H, a crop applied or lifted - re-maps which rows exist, and
+    /// each one is a chance to quietly redefine what is chosen. What may change is where the choice is DRAWN:
+    /// with every chosen line hidden the view stands a neighbour in for it, so the reader keeps their place.
+    /// Put the lines back and the original must return, untouched.</summary>
+    private static bool RunSelectionStabilityChecks()
+    {
+        Line("-- the selection survives the view changing under it --");
+        const int lines = 4_000;
+        string path = Path.Combine(Path.GetTempPath(), "cascade_st_selstable_" + Guid.NewGuid().ToString("N") + ".log");
+        var sb = new StringBuilder();
+        // Only every fifth line matches, so a line picked at random is very likely to be one a filter hides.
+        for (int i = 0; i < lines; i++)
+            sb.Append(i % 5 == 0 ? "KEEP" : "drop").Append(" line ").Append(i).Append('\n');
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+
+        MainForm? form = null;
+        try
+        {
+            var filters = new FilterCollection();
+            var keep = new Filter { Enabled = true, Match = { Text = "KEEP" } };
+            filters.Add(keep);
+            string filterFile = Path.ChangeExtension(path, ".cascade");
+            CascadeFile.Save(filterFile, filters);
+
+            form = new MainForm(new AppSettings(), new MachineState(), [path, "/Filters:" + filterFile])
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 600),
+                Opacity = 0,
+                NoSavePrompt = true,
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            var grid = form.GridForTesting;
+            for (int i = 0; i < 400 && doc.CompletedLineCount < lines; i++) { Thread.Sleep(5); Pump(); }
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+
+            bool ok = Check("every line is on show to begin with", doc.RowCount == lines && !doc.FilteredMode);
+
+            // 1,001 does not match, so switching to matches-only must hide it.
+            grid.SelectLinesForTesting(1_001, 1_001);
+            Pump();
+            ok &= Check($"a line the filter does not match is chosen ({grid.CaretLine:N0})",
+                        grid.CaretLine == 1_001 && grid.SelectionRangesForTesting is [(1_001, 1_001)]);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            ok &= Check("hiding the rest does not change what is chosen",
+                        grid.SelectionRangesForTesting is [(1_001, 1_001)]);
+            ok &= Check($"nor which line the caret belongs to ({grid.CaretTrueLineForTesting:N0})",
+                        grid.CaretTrueLineForTesting == 1_001);
+            ok &= Check($"a neighbour stands in for it on screen ({grid.StandInLineForTesting:N0})",
+                        grid.StandInLineForTesting >= 0 && grid.StandInLineForTesting != 1_001
+                        && doc.IsLineVisible(grid.StandInLineForTesting));
+            ok &= Check("and the hidden line itself is not drawn as chosen",
+                        !doc.IsLineVisible(1_001));
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            ok &= Check("showing them again restores the selection",
+                        grid.SelectionRangesForTesting is [(1_001, 1_001)]);
+            ok &= Check($"and the caret with it ({grid.CaretLine:N0})", grid.CaretLine == 1_001);
+            ok &= Check("with nothing standing in for anything", grid.StandInLineForTesting < 0);
+
+            // The same, over a crop rather than a filter.
+            grid.SelectLinesForTesting(2_000, 2_050);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+            Pump();
+            ok &= Check($"cropping to the selection keeps it ({grid.SelectedCount:N0} lines)",
+                        grid.SelectionRangesForTesting is [(2_000, 2_050)]);
+            ok &= Check($"and leaves the caret where it was ({grid.CaretLine:N0})", grid.CaretLine == 2_000);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check("lifting the crop keeps it too", grid.SelectionRangesForTesting is [(2_000, 2_050)]);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check("and putting the crop back does not move it to the crop's first line",
+                        grid.SelectionRangesForTesting is [(2_000, 2_050)] && grid.CaretLine == 2_000);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+
+            // A crop that does not contain the selection at all: still only what is DRAWN may change.
+            grid.SelectLinesForTesting(3_500, 3_502);
+            Pump();
+            grid.SelectLinesForTesting(100, 120);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+            Pump();
+            grid.SelectLinesForTesting(105, 105);
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            ok &= Check("a selection made inside a crop outlives the crop",
+                        grid.SelectionRangesForTesting is [(105, 105)] && grid.CaretLine == 105);
+
+            // Switching a filter off and on again is a visible-set change like any other.
+            grid.SelectLinesForTesting(1_501, 1_501);   // does not match KEEP
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            form.FilterTreeForTesting.ToggleCheckboxForTesting(keep, false);
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+            Pump();
+            form.FilterTreeForTesting.ToggleCheckboxForTesting(keep, true);
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            ok &= Check("a filter switched off and on again leaves the selection alone",
+                        grid.SelectionRangesForTesting is [(1_501, 1_501)] && grid.CaretLine == 1_501);
+            return ok;
+        }
+        finally
+        {
+            if (form is not null) { form.Close(); form.Dispose(); }
+            Pump();
+            try { File.Delete(path); } catch { /* ignore */ }
+            try { File.Delete(Path.ChangeExtension(path, ".cascade")); } catch { /* ignore */ }
         }
     }
 

@@ -2856,9 +2856,13 @@ public sealed class MainForm : Form
     private void CropToSelection()
     {
         if (!_grid.SelectionBounds(out long first, out long last)) return;
+        // Captured before the change, in the row space the change is about to replace - the same dance every
+        // filter change does. The selection itself is never touched: it is held in lines, and the crop is a
+        // stretch of lines, so what was chosen is still chosen.
+        var anchor = _grid.CaptureViewAnchor();
         if (!_doc.SetCrop(first, last + 1)) return;
         _lastCrop = _doc.Crop;
-        AfterCropChanged(first);
+        AfterCropChanged(anchor);
     }
 
     /// <summary>Goes back to the whole file, or returns to the crop last set. One key does both, because they
@@ -2866,25 +2870,20 @@ public sealed class MainForm : Form
     /// merely to look outside them for a moment.</summary>
     private void ToggleCrop()
     {
-        if (_doc.Crop is not null)
-        {
-            long at = _grid.CaretLine;
-            _doc.ClearCrop();
-            AfterCropChanged(at);
-        }
-        else if (_lastCrop is { } crop && _doc.SetCrop(crop.From, crop.ToExclusive))
-        {
-            AfterCropChanged(crop.From);
-        }
+        var anchor = _grid.CaptureViewAnchor();
+        if (_doc.Crop is not null) _doc.ClearCrop();
+        else if (_lastCrop is not { } crop || !_doc.SetCrop(crop.From, crop.ToExclusive)) return;
+        AfterCropChanged(anchor);
     }
 
-    /// <summary>Puts the view back together around <paramref name="at"/>. The rows have all been renumbered,
-    /// so the caret and the scroll position are set from the LINE they were on rather than left where they
-    /// were - a row index means something different on either side of this.</summary>
-    private void AfterCropChanged(long at)
+    /// <summary>Puts the view back together around the anchor taken before the crop moved. The rows have all
+    /// been renumbered, so the viewport and the caret are re-derived from the LINES they were on - and the
+    /// selection is left exactly as the reader left it, whether or not the crop is currently showing it.</summary>
+    private void AfterCropChanged(ViewAnchor anchor)
     {
+        _grid.SetViewAnchor(anchor);
         _grid.RefreshView();
-        if (at >= 0) _grid.GoToLine(Math.Clamp(at, _doc.FirstDisplayLine, Math.Max(_doc.FirstDisplayLine, _doc.LastDisplayLine)));
+        _anchorActive = anchor.IsValid;
         _grid.InvalidateMatchMap();
         _filterTree.RefreshCounts();
         UpdateStatus();
