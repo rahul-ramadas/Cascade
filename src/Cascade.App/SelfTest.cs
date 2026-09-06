@@ -8057,6 +8057,41 @@ internal static class SelfTest
             Pump();
             ok &= Check("a filter switched off and on again leaves the selection alone",
                         grid.SelectionRangesForTesting is [(1_501, 1_501)] && grid.CaretLine == 1_501);
+
+            // A crop cutting the selection away entirely: the two ways of hiding a line, one on top of the
+            // other, and still only what is DRAWN may change.
+            grid.SelectLinesForTesting(200, 210);
+            Pump();
+            doc.SetCrop(3_000, 3_100);
+            form.GridForTesting.RefreshView();
+            Pump();
+            ok &= Check("a crop that excludes the selection does not change it",
+                        grid.SelectionRangesForTesting is [(200, 210)]);
+            ok &= Check($"and stands a line of the crop in for it ({grid.StandInLineForTesting:N0})",
+                        grid.StandInLineForTesting >= 3_000 && grid.StandInLineForTesting < 3_100);
+            doc.ClearCrop();
+            form.GridForTesting.RefreshView();
+            Pump();
+            ok &= Check("lifting it brings the selection back",
+                        grid.SelectionRangesForTesting is [(200, 210)] && grid.StandInLineForTesting < 0);
+
+            // Ctrl+H inside a crop: two visible-set changes stacked, and the selection outlives both.
+            grid.SelectLinesForTesting(1_002, 1_002);   // does not match KEEP
+            Pump();
+            doc.SetCrop(1_000, 1_100);
+            form.GridForTesting.RefreshView();
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            ok &= Check("hiding non-matching lines inside a crop leaves the selection alone",
+                        grid.SelectionRangesForTesting is [(1_002, 1_002)]);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.H);
+            Pump();
+            doc.ClearCrop();
+            form.GridForTesting.RefreshView();
+            Pump();
+            ok &= Check("and unwinding both puts the caret back on it",
+                        grid.SelectionRangesForTesting is [(1_002, 1_002)] && grid.CaretLine == 1_002);
             return ok;
         }
         finally
