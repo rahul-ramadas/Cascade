@@ -83,6 +83,9 @@ internal sealed class MiniMapControl : Control
     private bool _builtFilteredMode;
     private int _builtMarkers = -1;
     private long _builtFindHits = -1;
+    // Two different crops of the same length have the same number of rows and the same everything else, so
+    // where the rows START has to be part of what says the picture is still good.
+    private long _builtCropFrom = -1;
     private long _drawnSelection = -1;
     private (int Top, int Height) _drawnViewport = (-1, -1);
 
@@ -231,11 +234,13 @@ internal sealed class MiniMapControl : Control
         // but not a rebuild - which matters, because holding an arrow key asks for one per keypress.
         if (_builtGeneration == doc.FilterGeneration && _builtRows == rows && _builtTop == _top &&
             _builtHeight == height && _builtWidth == width && _builtFilteredMode == doc.FilteredMode &&
-            _builtMarkers == doc.Markers.Version && _builtFindHits == findHits)
+            _builtMarkers == doc.Markers.Version && _builtFindHits == findHits &&
+            _builtCropFrom == doc.FirstDisplayLine)
             return;
 
         _builtGeneration = doc.FilterGeneration;
         _builtRows = rows;
+        _builtCropFrom = doc.FirstDisplayLine;
         _builtHeight = height;
         _builtWidth = width;
         _builtFilteredMode = doc.FilteredMode;
@@ -299,11 +304,14 @@ internal sealed class MiniMapControl : Control
         // With nothing enabled no row can have a colour, so the whole file is blank without reading a line.
         bool anyColour = doc.CurrentSnapshot.HasAnyEnabled;
         long lastRow = Math.Min(rows, _top + (long)slots * _step);
-        long firstWord = _top >> 6;
-        var matched = anyColour ? ReadMatchedRows(doc, firstWord, lastRow) : ReadOnlySpan<ulong>.Empty;
+        // What a row is called in the file. Zero unless the view is cropped, and then only in dim mode -
+        // filtered mode has no bitmap to read a row out of and takes the lookup path instead.
+        long lineOffset = doc.FilteredMode ? 0 : doc.FirstDisplayLine;
+        long firstWord = (_top + lineOffset) >> 6;
+        var matched = anyColour ? ReadMatchedRows(doc, firstWord, lastRow + lineOffset) : ReadOnlySpan<ulong>.Empty;
 
         PrepareBlocks(doc, rows);
-        if (anyColour) ResolveColours(doc, rows, lastRow, matched, firstWord, defaults, settings);
+        if (anyColour) ResolveColours(doc, rows, lastRow, matched, firstWord, lineOffset, defaults, settings);
 
         int at = 0;
         for (; at < slots; at++)
@@ -323,7 +331,7 @@ internal sealed class MiniMapControl : Control
             int kinds = 0;
             for (long row = from; row < to; row++)
             {
-                if (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0) continue;
+                if (!matched.IsEmpty && !MatchedLine(matched, firstWord, row + lineOffset)) continue;
                 int argb = ColourOfRow(row);
                 if (argb == 0) continue;
                 int k = 0;
@@ -409,7 +417,7 @@ internal sealed class MiniMapControl : Control
     /// all.</para>
     /// </summary>
     private void ResolveColours(CascadeDocument doc, long rows, long lastRow, ReadOnlySpan<ulong> matched,
-        long firstWord, ResolvedStyle defaults, AppSettings settings)
+        long firstWord, long lineOffset, ResolvedStyle defaults, AppSettings settings)
     {
         int want = (int)Math.Min(int.MaxValue, Math.Max(0, lastRow - _top));
         if (want <= 0) return;
@@ -431,7 +439,7 @@ internal sealed class MiniMapControl : Control
         {
             long row = _top + i;
             bool skip = _cache[i] != Unknown || KnownBlock(row) != Unknown ||
-                        (!matched.IsEmpty && (matched[(int)((row >> 6) - firstWord)] >> (int)(row & 63) & 1) == 0);
+                        (!matched.IsEmpty && !MatchedLine(matched, firstWord, row + lineOffset));
             if (skip) _wantLines[i] = -1; else asked++;
         }
         for (int i = found; i < want; i++) _wantLines[i] = -1;
@@ -498,14 +506,25 @@ internal sealed class MiniMapControl : Control
     /// <summary>Which of the rows the map is over the filters match, one bit each - read in one go, because
     /// asking a line at a time is a rank and a select apiece. Empty means every row matches, which is the
     /// answer in filtered mode and whenever nothing is being hidden.</summary>
-    private ReadOnlySpan<ulong> ReadMatchedRows(CascadeDocument doc, long firstWord, long lastRow)
+    /// <summary>Reads the filters' verdict for the file lines <c>[firstWord * 64, lastLine)</c>. In lines, not
+    /// rows: the two are the same thing only when the whole file is on show, and a crop offsets one from the
+    /// other by an amount that is not a multiple of 64.</summary>
+    private ReadOnlySpan<ulong> ReadMatchedRows(CascadeDocument doc, long firstWord, long lastLine)
     {
         if (doc.FilteredMode || doc.MatchedWords is not { } read) return ReadOnlySpan<ulong>.Empty;
-        int words = (int)(((lastRow + 63) >> 6) - firstWord);
+        int words = (int)(((lastLine + 63) >> 6) - firstWord);
         if (words <= 0) return ReadOnlySpan<ulong>.Empty;
         if (_words.Length < words) _words = new ulong[words];
         read(firstWord, _words.AsSpan(0, words));
         return _words.AsSpan(0, words);
+    }
+
+    /// <summary>Whether the filters matched one file line, read out of the words gathered for this window.</summary>
+    private static bool MatchedLine(ReadOnlySpan<ulong> matched, long firstWord, long line)
+    {
+        long index = (line >> 6) - firstWord;
+        if (index < 0 || index >= matched.Length) return false;
+        return (matched[(int)index] >> (int)(line & 63) & 1) != 0;
     }
 
     private static ResolvedStyle Defaults(AppSettings settings) => new(
@@ -647,7 +666,10 @@ internal sealed class MiniMapControl : Control
 
         foreach (var (line, mask) in doc.Markers.Snapshot())
         {
-            long row = doc.FilteredMode ? doc.RowForLine(line) : line;
+            // Asked of the document in both modes. Dim mode used to take the line as the row outright, which
+            // is only true while the whole file is on show - a crop offsets one from the other, and reading a
+            // line as a row put every mark in the crop off the map and marks from outside it onto it.
+            long row = doc.RowForLine(line);
             if (row < first || row > last) continue;
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
             g.FillRectangle(MarkerBrush(index), left, SlotOf(row) * _rowPixels, edge, Math.Max(2, _rowPixels));
@@ -705,6 +727,7 @@ internal sealed class MiniMapControl : Control
     {
         if (!Visible || _grid.Document is not { } doc) return;
         if (_builtRows != doc.RowCount || _builtFilteredMode != doc.FilteredMode ||
+            _builtCropFrom != doc.FirstDisplayLine ||
             _builtGeneration != doc.FilterGeneration || _builtMarkers != doc.Markers.Version ||
             _builtFindHits != doc.FindHitCount || _drawnSelection != _grid.SelectionVersion)
         {

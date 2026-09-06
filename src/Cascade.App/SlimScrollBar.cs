@@ -198,7 +198,9 @@ internal sealed class SlimScrollBar : Control
         var track = Track;
         foreach (var (line, mask) in marks)
         {
-            long row = doc.FilteredMode ? doc.RowForLine(line) : line;
+            // The row the document says, in either mode: a crop offsets rows from lines, so taking the line
+            // as the row would drop every mark inside the crop and draw ones from outside it.
+            long row = doc.RowForLine(line);
             if (row < 0 || row >= _total) continue;
             int y = track.Top + (int)(row * (track.Height - MarkThickness) / _total);
             int index = System.Numerics.BitOperations.TrailingZeroCount(mask);

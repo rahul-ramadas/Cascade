@@ -110,6 +110,16 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - `Ctrl+H` switches between dimming the lines that didn't match and hiding them altogether.
 - Line numbers are always the file's own, either way.
 
+### Crop to one stretch
+
+![The log cropped to 281 lines: the menu bar says so, the line numbers still read in the millions, and every count is of the crop](docs/images/crop.png)
+
+- Select a run of lines and `Ctrl+[` throws the rest of the file away — a two-million-line log of forty test runs becomes the one test run you are reading.
+- Everything then behaves as though the file held only those lines: the counts, the match map, `Ctrl+End`, `Ctrl+A`, the find tally, **Save Current Lines**. Only the line numbers still read the file's own, so you never lose your place in it.
+- The crop takes everything between the first and last line you selected, **including lines the filters are hiding** — so `Ctrl+H` inside a crop reveals the rest of that stretch rather than a different one.
+- Filters still read the whole file, and a filter's count says how much of it is in front of you. Hover one for both numbers.
+- `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection.
+
 ---
 
 ## Reading the log
@@ -313,6 +323,7 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+F` / `F3` / `Shift+F3` | Find / next / previous |
 | `Ctrl+G` / `Ctrl+Shift+G` | Go to a line you name / to the line you are measuring from |
 | `Ctrl+H` | Show only filtered lines |
+| `Ctrl+[` / `Ctrl+]` | Crop to the selected lines / show the whole file again, or return to the crop |
 | `Ctrl+N` / `Ctrl+Shift+N` / `Ctrl+Alt+N` | New filter from the selection or the current line, going to the usual end of the list / above the selected filter / under it as a child |
 | `Ctrl+E` | Search the filter list |
 | `Ctrl+L` / `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Line numbers / match map or plain scrollbar / word wrap / split lines into fields |

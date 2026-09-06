@@ -118,6 +118,9 @@ internal static class DocShots
         DimOrHideAnimation(form);
         FieldAnimation(form);
 
+        // Last of the shots that drive the window, so the state it leaves cannot reach any other picture.
+        CropShot(form);
+
         DialogShots(form);
 
         form.Close();
@@ -357,8 +360,27 @@ internal static class DocShots
     /// quarter of an hour showing as a band, markers down the left edge and find hits down the right. The
     /// filter list is put away for this one - the point of the thing is the shape of a file too big to
     /// scroll through, and half a map says nothing about that.</summary>
-    private static void MatchMapShot(MainForm form)
+    /// <summary>The window cropped to one stretch of the log: the chip in the middle of the menu bar, the line
+    /// numbers still the file's own, and every count of what is left.</summary>
+    private static void CropShot(MainForm form)
     {
+        var grid = form.GridForTesting;
+        var doc = form.DocForTesting;
+
+        grid.SelectLinesForTesting(Incident - 20, Incident + 260);
+        Ready(form);
+        form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets);
+        Ready(form);
+        Save(Whole(form), "crop");
+
+        form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+        Ready(form);
+        if (doc.Crop is not null) throw new InvalidOperationException("the crop did not lift");
+        grid.SelectLinesForTesting(Incident, Incident);
+        Ready(form);
+    }
+
+    private static void MatchMapShot(MainForm form)    {
         var grid = form.GridForTesting;
         var doc = form.DocForTesting;
         for (int i = 0; i < 9; i++) doc.Markers.Toggle(Incident + i * 180_000 - 800_000, i % 4);

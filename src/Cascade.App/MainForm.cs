@@ -48,9 +48,25 @@ public sealed class MainForm : Form
         ForeColor = Color.SeaGreen,
         Overflow = ToolStripItemOverflow.Never
     };
+    // Hidden unless a crop is in force. Centred in the menu bar, which is otherwise empty in the middle, so
+    // saying the file is cropped costs no room at all: the alternative was a bar of its own above the log,
+    // and a permanent strip is a high price for a state that is usually off. Clickable, unlike the update
+    // notice beside it - it is the quickest way back to the whole file.
+    private readonly ToolStripLabel _cropLabel = new()
+    {
+        Visible = false,
+        Name = "menu.crop",
+        Overflow = ToolStripItemOverflow.Never,
+        AutoSize = true
+    };
     private readonly ToolStripProgressBar _progress = new() { Style = ProgressBarStyle.Continuous, Visible = false, AutoSize = false, Width = 120 };
     private readonly System.Windows.Forms.Timer _refreshTimer = new() { Interval = 33 };
     private HangWatchdog? _watchdog;
+
+    // The crop most recently applied, kept after it is hidden so that it can be put back without the lines
+    // being picked out again. Never saved: a line number means nothing against a different file.
+    private (long From, long ToExclusive)? _lastCrop;
+    private ToolStripMenuItem _miCrop = null!, _miUncrop = null!;
 
     private ToolStripMenuItem _miFilteredMode = null!, _miLineNumbers = null!, _miMarkers = null!;
     private ToolStripMenuItem _miPresets = null!, _miMatchMap = null!, _miWordWrap = null!, _miFilterTips = null!;
@@ -101,6 +117,26 @@ public sealed class MainForm : Form
     internal CascadeDocument DocForTesting => _doc;
     internal FilterTreeControl FilterTreeForTesting => _filterTree;
     internal string StatusForTesting => string.Join(" | ", _status.Items.OfType<ToolStripStatusLabel>().Select(l => l.Text));
+
+    internal bool CropLabelVisibleForTesting => _cropLabel.Visible;
+
+    /// <summary>Opens and closes the View menu, which is what settles the state of the items in it.</summary>
+    internal void OpenViewMenuForTesting()
+    {
+        if (MainMenuStrip?.Items.OfType<ToolStripMenuItem>().FirstOrDefault(i => i.Text == "&View") is not { } view)
+            return;
+        view.ShowDropDown();
+        view.HideDropDown();
+    }
+
+    internal string CropLabelTextForTesting => _cropLabel.Text ?? "";
+
+    /// <summary>How far the crop chip's middle is from the middle of the menu bar, in pixels. The margin that
+    /// centres it is worked out from where it landed, so the check is that it really did land there.</summary>
+    internal int CropLabelCentreOffsetForTesting =>
+        MainMenuStrip is { } menu && _cropLabel.Visible
+            ? _cropLabel.Bounds.Left + _cropLabel.Width / 2 - menu.ClientSize.Width / 2
+            : 0;
 
     /// <summary>Clicks a menu item by the path a user would read, so a check drives the same wiring rather
     /// than the method behind it. Each drop-down along the way is OPENED, because that is the only way a
@@ -332,7 +368,7 @@ public sealed class MainForm : Form
         // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
         // A note about a match being out of sight answers for the line the search landed on, so moving to
         // another line by hand retires it; the next search will say so again if it still applies.
-        _grid.SelectionChanged += () => { _hiddenMatch = ""; UpdateStatus(); _status.Update(); };
+        _grid.SelectionChanged += () => { _hiddenMatch = ""; SyncCropCommands(); UpdateStatus(); _status.Update(); };
         _grid.NewFilterRequested += NewFilterFromDoubleClick;
         _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); _findBar.SnapHeightTo(_grid.RowPitch); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
@@ -657,6 +693,13 @@ public sealed class MainForm : Form
         _miColumns.DropDownItems.Add(_miFitColumns);
         view.DropDownItems.Add(Mi("Field Settin&gs…", (_, _) => ShowColumns(), Keys.Control | Keys.Shift | Keys.D));
         view.DropDownItems.Add(new ToolStripSeparator());
+        _miCrop = Mi("&Crop to Selection", (_, _) => CropToSelection(), Keys.Control | Keys.OemOpenBrackets, "Ctrl+[");
+        _miCrop.ToolTipText = "Show only the selected lines, and treat the file as if it held nothing else.";
+        _miUncrop = Mi("Hide or Re-appl&y Crop", (_, _) => ToggleCrop(), Keys.Control | Keys.OemCloseBrackets, "Ctrl+]");
+        _miUncrop.ToolTipText = "Go back to the whole file, or return to the crop you last set.";
+        view.DropDownItems.Add(_miCrop);
+        view.DropDownItems.Add(_miUncrop);
+        view.DropDownItems.Add(new ToolStripSeparator());
         view.DropDownItems.Add(Mi("Zoom &In", (_, _) => _grid.Zoom(10), Keys.Control | Keys.Oemplus, "Ctrl++"));
         view.DropDownItems.Add(Mi("Zoom &Out", (_, _) => _grid.Zoom(-10), Keys.Control | Keys.OemMinus, "Ctrl+-"));
         view.DropDownItems.Add(Mi("&Reset Zoom", (_, _) => _grid.ResetZoom(), Keys.Control | Keys.D0));
@@ -675,6 +718,7 @@ public sealed class MainForm : Form
         view.DropDownItems.Add(_miPresets);
         view.DropDownItems.Add(BuildFilterLocationMenu());
         view.DropDownItems.Add(BuildEncodingMenu());
+        view.DropDownOpening += (_, _) => SyncCropMenu();
 
         var filters = new ToolStripMenuItem("Fi&lters");
         // The three places a new filter can go, each on the key that pre-picks it in the dialog. They all
@@ -724,7 +768,9 @@ public sealed class MainForm : Form
         var help = new ToolStripMenuItem("&Help");
         help.DropDownItems.Add(Mi("&About Cascade", (_, _) => ShowAbout()));
 
-        menu.Items.AddRange(new ToolStripItem[] { file, edit, view, filters, help, _updateLabel });
+        menu.Items.AddRange(new ToolStripItem[] { file, edit, view, filters, help, _cropLabel, _updateLabel });
+        menu.SizeChanged += (_, _) => CentreCropLabel();
+        _cropLabel.Click += (_, _) => ToggleCrop();
         MainMenuStrip = menu;
         Controls.Add(menu);
         RefreshRecentMenus();
@@ -1438,7 +1484,11 @@ public sealed class MainForm : Form
         try
         {
             Cursor = Cursors.WaitCursor;
+            bool sameFile = string.Equals(_doc.FilePath, path, StringComparison.OrdinalIgnoreCase);
             _doc.Open(path, enc);
+            // The remembered crop belongs to the file it was set on, so another file clears the offer to
+            // put it back. The document has already decided about the crop in force.
+            if (!sameFile) _lastCrop = null;
             _forcedEncoding = enc;
             SyncEncodingMenu();
             _grid.Attach(_doc, _settings);
@@ -1785,7 +1835,7 @@ public sealed class MainForm : Form
     {
         if (string.IsNullOrEmpty(_doc.FilePath)) return;
         long caret = _grid.CaretLine;
-        long start = caret < 0 ? (forward ? 0 : _doc.CompletedLineCount - 1) : caret + (forward ? 1 : -1);
+        long start = caret < 0 ? (forward ? _doc.FirstDisplayLine : _doc.LastDisplayLine) : caret + (forward ? 1 : -1);
 
         // A filter scan decodes and matches every line, which on a multi-gigabyte file takes long enough
         // that doing it inline would freeze the window with no sign of progress.
@@ -2786,14 +2836,136 @@ public sealed class MainForm : Form
 
     private void GoTo()
     {
-        using var dlg = new GoToDialog(Math.Max(1, _doc.CompletedLineCount), Math.Max(1, _grid.CaretLine + 1));
+        using var dlg = new GoToDialog(_doc.FirstDisplayLine + 1, Math.Max(1, _doc.LastDisplayLine + 1),
+                                       Math.Max(1, _grid.CaretLine + 1));
         if (dlg.ShowDialog(this) == DialogResult.OK) GoToLine(dlg.LineNumber);
     }
 
     private void GoToLine(long oneBased)
     {
-        long line = Math.Clamp(oneBased - 1, 0, Math.Max(0, _doc.CompletedLineCount - 1));
+        long line = Math.Clamp(oneBased - 1, _doc.FirstDisplayLine, Math.Max(_doc.FirstDisplayLine, _doc.LastDisplayLine));
         _grid.GoToLine(line);
+    }
+
+    // ---- crop ----
+
+    /// <summary>Shows only the stretch of the log the selection covers - the first selected line to the last,
+    /// everything between them included whether or not it is selected, and whether or not the filters are
+    /// currently hiding it. A crop is a stretch of the FILE, so switching the filters off inside one reveals
+    /// the lines it always held rather than a different stretch.</summary>
+    private void CropToSelection()
+    {
+        if (!_grid.SelectionBounds(out long first, out long last)) return;
+        if (!_doc.SetCrop(first, last + 1)) return;
+        _lastCrop = _doc.Crop;
+        AfterCropChanged(first);
+    }
+
+    /// <summary>Goes back to the whole file, or returns to the crop last set. One key does both, because they
+    /// are the same question asked twice - and remembering the crop is what saves picking the lines out again
+    /// merely to look outside them for a moment.</summary>
+    private void ToggleCrop()
+    {
+        if (_doc.Crop is not null)
+        {
+            long at = _grid.CaretLine;
+            _doc.ClearCrop();
+            AfterCropChanged(at);
+        }
+        else if (_lastCrop is { } crop && _doc.SetCrop(crop.From, crop.ToExclusive))
+        {
+            AfterCropChanged(crop.From);
+        }
+    }
+
+    /// <summary>Puts the view back together around <paramref name="at"/>. The rows have all been renumbered,
+    /// so the caret and the scroll position are set from the LINE they were on rather than left where they
+    /// were - a row index means something different on either side of this.</summary>
+    private void AfterCropChanged(long at)
+    {
+        _grid.RefreshView();
+        if (at >= 0) _grid.GoToLine(Math.Clamp(at, _doc.FirstDisplayLine, Math.Max(_doc.FirstDisplayLine, _doc.LastDisplayLine)));
+        _grid.InvalidateMatchMap();
+        _filterTree.RefreshCounts();
+        UpdateStatus();
+        _status.Update();
+        SyncCropMenu();
+    }
+
+    /// <summary>Keeps the crop commands in step with the selection.
+    /// <para>A menu item's shortcut is dispatched through the item, and a disabled item swallows it - so one
+    /// left greyed takes its key down with it. Opening the View menu with nothing selected once would have
+    /// killed Ctrl+[ until the menu happened to be opened again with something selected, which is a dead key
+    /// and no way of telling why.</para></summary>
+    private void SyncCropCommands()
+    {
+        _miCrop.Enabled = _grid.SelectionBounds(out _, out _);
+        _miUncrop.Enabled = _doc.Crop is not null || _lastCrop is not null;
+    }
+
+    private void SyncCropMenu()
+    {
+        SyncCropCommands();
+        // One entry, one wording, whichever way it will go. Naming both halves is what says the crop is kept
+        // when it is hidden - a label reading only "Hide Crop" would leave re-applying it undiscoverable.
+        _miUncrop.ToolTipText = _doc.Crop is not null
+            ? "Go back to the whole file. The crop is kept, so Ctrl+] brings it back."
+            : $"Show lines {(_lastCrop?.From ?? 0) + 1:N0}\u2013{_lastCrop?.ToExclusive ?? 0:N0} again.";
+    }
+
+    /// <summary>Draws the crop in the middle of the menu bar. ToolStrip has no notion of centring, so the item
+    /// is given the left margin that puts it there - measured against the whole bar rather than the space left
+    /// over, because the middle of the window is where the eye goes and it must not drift as menu text
+    /// changes.
+    /// <para>Worked out from where the item actually LANDED rather than from what it should measure: a strip
+    /// adds padding of its own between and around its items, and guessing at that put the chip a good forty
+    /// pixels off centre. Correcting by the error instead is exact whatever the padding turns out to be, and
+    /// settles in one step. Clamped so it can never ride over the last menu or under the update notice.</para></summary>
+    private void CentreCropLabel()
+    {
+        if (MainMenuStrip is not { } menu || !_cropLabel.Visible) return;
+        menu.PerformLayout();
+
+        int width = _cropLabel.Width;
+        if (width <= 0) return;
+
+        int menusEnd = 0;
+        foreach (ToolStripItem item in menu.Items)
+            if (item is ToolStripMenuItem { Available: true } m) menusEnd = Math.Max(menusEnd, m.Bounds.Right);
+
+        int gap = Dpi(16);
+        int room = menu.ClientSize.Width - (_updateLabel.Visible ? _updateLabel.Width + gap : 0) - width;
+        int want = Math.Clamp((menu.ClientSize.Width - width) / 2, menusEnd + gap, Math.Max(menusEnd + gap, room));
+
+        int delta = want - _cropLabel.Bounds.Left;
+        if (Math.Abs(delta) <= 1) return;
+        int left = Math.Max(0, _cropLabel.Margin.Left + delta);
+        if (left == _cropLabel.Margin.Left) return;
+        _cropLabel.Margin = new Padding(left, 0, 0, 0);
+        menu.PerformLayout();
+    }
+
+    private void UpdateCropLabel()
+    {
+        if (_doc.Crop is not { } crop)
+        {
+            if (_cropLabel.Visible) { _cropLabel.Visible = false; _cropLabel.Text = ""; }
+            return;
+        }
+
+        long rows = _doc.DisplayLineCount;
+        string text = $"\u25A3  Cropped to {_doc.FirstDisplayLine + 1:N0}\u2013{_doc.LastDisplayLine + 1:N0}"
+                    + $"  \u00B7  {rows:N0} {(rows == 1 ? "line" : "lines")}";
+        bool changed = _cropLabel.Text != text;
+        if (changed) _cropLabel.Text = text;
+        if (!_cropLabel.Visible)
+        {
+            _cropLabel.Visible = true;
+            changed = true;
+        }
+        _cropLabel.ToolTipText = $"Showing {rows:N0} of {_doc.CompletedLineCount:N0} lines. "
+                               + "Click, or press Ctrl+], to see the whole file again.";
+        if (changed) CentreCropLabel();
     }
 
     // ---- status ----
@@ -2972,7 +3144,11 @@ public sealed class MainForm : Form
         _selLabel.Text = $"Sel: {_grid.SelectedCount:N0}";
         UpdateElapsed();
         _filLabel.Text = $"Fil: {_doc.MatchedLineCount:N0}";
-        _totalLabel.Text = $"Total: {_doc.CompletedLineCount:N0}";
+        _totalLabel.Text = $"Total: {_doc.DisplayLineCount:N0}";
+        _totalLabel.ToolTipText = _doc.Crop is null
+            ? null
+            : $"Lines in the crop. The file has {_doc.CompletedLineCount:N0}.";
+        UpdateCropLabel();
         _showLabel.Text = _doc.FilteredMode ? ShowingMatchesOnly : ShowingAllLines;
         _showLabel.ToolTipText = _doc.FilteredMode
             ? "Only lines a filter matched are shown (Ctrl+H shows them all)"

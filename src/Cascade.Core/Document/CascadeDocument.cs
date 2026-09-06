@@ -98,23 +98,83 @@ public sealed class CascadeDocument : IDisposable
 
     public bool FilteredMode => Filters.ShowOnlyFilteredLines;
 
-    /// <summary>Rows currently displayed (matched lines in filtered mode, all lines in dim mode).</summary>
-    public long RowCount => FilteredMode ? MatchView.Count : CompletedLineCount;
+    /// <summary>The stretch of the file the reader has cropped to, or null for the whole of it. Purely a
+    /// matter of what is shown: filtering still reads and remembers every line, and every count the crop
+    /// reports is taken from those same whole-file results by two rank lookups.</summary>
+    public (long From, long ToExclusive)? Crop { get; private set; }
 
-    public long RowToLine(long row) => FilteredMode ? MatchView.LineAt(row) : row;
+    /// <summary>Shows only the file lines in <c>[from, toExclusive)</c>. Clamped to the file, and ignored
+    /// when that leaves nothing.</summary>
+    public bool SetCrop(long from, long toExclusive)
+    {
+        from = Math.Max(0, from);
+        if (toExclusive <= from) return false;
+        if (Crop is { } now && now.From == from && now.ToExclusive == toExclusive) return true;
+        Crop = (from, toExclusive);
+        InvalidateElapsedOrigin();
+        Updated?.Invoke();
+        return true;
+    }
+
+    public void ClearCrop()
+    {
+        if (Crop is null) return;
+        Crop = null;
+        InvalidateElapsedOrigin();
+        Updated?.Invoke();
+    }
+
+    /// <summary>The start of the log is the start of the crop, so moving one moves the other.</summary>
+    private void InvalidateElapsedOrigin()
+    {
+        _firstTimed = long.MinValue;
+        _firstTimedFrom = long.MinValue;
+        _originTicksFor = long.MinValue;
+    }
+
+    /// <summary>The rows on show: the filters' verdict, or every line in dim mode, narrowed to the crop. The
+    /// one place the two choices meet, so nothing downstream has to remember to apply either.</summary>
+    private FilteredView DisplayView => Cropped(FilteredMode ? MatchView : _identityView, ref _displayCrop);
+
+    /// <summary>What the filters match, narrowed to the crop. Everything the reader is told about matches -
+    /// counts, the map, where the next one is - has to stop at the crop's edge, or the file it appears to be
+    /// reading would have more in it than it shows.</summary>
+    private FilteredView CroppedMatchView => Cropped(MatchView, ref _matchCrop);
+
+    /// <summary>A cropped view is a wrapper worth making once. It is asked for per row of every frame, and
+    /// the map asks per pixel of a rebuild, so making one each time would put thousands of throwaway objects
+    /// through gen0 for a picture that has not changed. Kept until the crop moves or the view beneath it is
+    /// replaced, and swapped as one reference so a reader can never pair a base with another's crop.</summary>
+    private sealed record CropOf(FilteredView Base, long From, long ToExclusive, FilteredView View);
+
+    private CropOf? _displayCrop, _matchCrop;
+
+    private FilteredView Cropped(FilteredView view, ref CropOf? cache)
+    {
+        if (Crop is not { } crop) return view;
+        var held = cache;
+        if (held is not null && ReferenceEquals(held.Base, view)
+            && held.From == crop.From && held.ToExclusive == crop.ToExclusive)
+            return held.View;
+        var made = view.Cropped(crop.From, crop.ToExclusive);
+        cache = new CropOf(view, crop.From, crop.ToExclusive, made);
+        return made;
+    }
+
+    /// <summary>Rows currently displayed (matched lines in filtered mode, all lines in dim mode).</summary>
+    public long RowCount => DisplayView.Count;
+
+    public long RowToLine(long row) => DisplayView.LineAt(row);
 
     /// <summary>Maps a file line to its current display row, or -1 if not currently visible.</summary>
-    public long RowForLine(long line)
-        => FilteredMode ? MatchView.RowForLine(line) : (line >= 0 && line < CompletedLineCount ? line : -1);
+    public long RowForLine(long line) => DisplayView.RowForLine(line);
 
     /// <summary>Row of the nearest visible line at or after <paramref name="line"/> (never negative).</summary>
-    public long RowAtOrAfterLine(long line)
-        => FilteredMode ? MatchView.RowAtOrAfterLine(line) : Math.Clamp(line, 0, Math.Max(0, CompletedLineCount));
+    public long RowAtOrAfterLine(long line) => DisplayView.RowAtOrAfterLine(line);
 
     /// <summary>True when the view can actually show <paramref name="line"/>. In dim mode that is every
-    /// line; in filtered mode a line can match one filter and still be hidden by an exclude.</summary>
-    public bool IsLineVisible(long line)
-        => FilteredMode ? MatchView.IsVisible(line) : line >= 0 && line < CompletedLineCount;
+    /// line the crop admits; in filtered mode a line can match one filter and still be hidden by an exclude.</summary>
+    public bool IsLineVisible(long line) => DisplayView.IsVisible(line);
 
     /// <summary>The first line at or after <paramref name="line"/> that the filters match, or -1 when there
     /// is none. A rank lookup and a bit scan, so skipping a million unmatched lines costs the same as
@@ -122,7 +182,7 @@ public sealed class CascadeDocument : IDisposable
     public long NextMatchedLine(long line)
     {
         if (line < 0) line = 0;
-        var view = MatchView;
+        var view = CroppedMatchView;
         long row = view.RowAtOrAfterLine(line);
         return row >= view.Count ? -1 : view.LineAt(row);
     }
@@ -131,7 +191,7 @@ public sealed class CascadeDocument : IDisposable
     public long PrevMatchedLine(long line)
     {
         if (line < 0) return -1;
-        var view = MatchView;
+        var view = CroppedMatchView;
         long row = view.RowAtOrAfterLine(line + 1);
         return row <= 0 ? -1 : view.LineAt(row - 1);
     }
@@ -142,27 +202,27 @@ public sealed class CascadeDocument : IDisposable
     /// dropping lines while the UI paints, so resolving row by row would mix two states inside one frame.
     /// Returns the first row.</summary>
     public long ResolveWindow(long anchorLine, int anchorOffset, Span<long> lines, out int count)
-    {
-        if (FilteredMode) return MatchView.ResolveWindow(anchorLine, anchorOffset, lines, out count);
-        long first = Math.Clamp(anchorLine - anchorOffset, 0, Math.Max(0, CompletedLineCount - lines.Length));
-        count = FillLines(first, lines);
-        return first;
-    }
+        => DisplayView.ResolveWindow(anchorLine, anchorOffset, lines, out count);
 
     /// <summary>Fills <paramref name="lines"/> with the file lines shown from <paramref name="firstRow"/> on,
     /// resolved against a single snapshot. Returns how many were filled.</summary>
-    public int LinesForRows(long firstRow, Span<long> lines)
-        => FilteredMode ? MatchView.LinesForRows(firstRow, lines) : FillLines(Math.Max(0, firstRow), lines);
+    public int LinesForRows(long firstRow, Span<long> lines) => DisplayView.LinesForRows(firstRow, lines);
 
-    private int FillLines(long firstRow, Span<long> lines)
-    {
-        int count = (int)Math.Clamp(CompletedLineCount - firstRow, 0, lines.Length);
-        for (int i = 0; i < count; i++) lines[i] = firstRow + i;
-        return count;
-    }
+    /// <summary>Number of lines matching the filters (the status-bar "Fil" count), within the crop.</summary>
+    public long MatchedLineCount => CroppedMatchView.Count;
 
-    /// <summary>Number of lines matching the filters (the status-bar "Fil" count).</summary>
-    public long MatchedLineCount => MatchView.Count;
+    /// <summary>Lines the file has, as far as the view is concerned: the crop's own length, so everything
+    /// reads as though the file were only that long.</summary>
+    public long DisplayLineCount
+        => Crop is { } crop ? Math.Max(0, Math.Min(crop.ToExclusive, CompletedLineCount) - crop.From)
+                            : CompletedLineCount;
+
+    /// <summary>The first line the view admits, and the last. The file's own numbers, which is what the
+    /// reader still sees beside every row.</summary>
+    public long FirstDisplayLine => Crop?.From ?? 0;
+
+    public long LastDisplayLine
+        => Crop is { } crop ? Math.Min(crop.ToExclusive, CompletedLineCount) - 1 : CompletedLineCount - 1;
 
     /// <summary>Bumped every time the filters are re-applied. Anything that summarises the whole file can
     /// key its cache on this instead of recomputing per paint.</summary>
@@ -170,12 +230,13 @@ public sealed class CascadeDocument : IDisposable
 
     /// <summary>How many matching lines fall in <c>[from, toExclusive)</c>. Two rank lookups, so summarising
     /// the whole file a band at a time costs the same as summarising one line.</summary>
-    public long MatchedLinesInRange(long from, long toExclusive) => MatchView.CountInRange(from, toExclusive);
+    public long MatchedLinesInRange(long from, long toExclusive)
+        => CroppedMatchView.CountInRange(from, toExclusive);
 
     /// <summary>Reads which lines the filters match, 64 to a word, or null when every line does. A summary
     /// that has to know where the matches are wants this rather than a lookup a line at a time: one read
     /// covers thousands of lines, where <see cref="NextMatchedLine"/> is a rank and a select apiece.</summary>
-    public VisibleWordReader? MatchedWords => MatchView.VisibleWords;
+    public VisibleWordReader? MatchedWords => CroppedMatchView.VisibleWords;
 
     /// <summary>The cached set of lines deep-matching <paramref name="filter"/>, when there is one. Only a
     /// summary of the whole file needs this; everything else asks about one line at a time.</summary>
@@ -248,6 +309,12 @@ public sealed class CascadeDocument : IDisposable
 
     public void Open(string path, Encoding? forcedEncoding = null)
     {
+        // A crop names lines in the file it was set on. Re-reading the SAME file is still that file - F5 after
+        // it has grown, or reading it again as another encoding - so the crop stays and is simply clamped to
+        // whatever the file now holds. Another file is another set of lines entirely, and it goes.
+        if (!string.Equals(FilePath, path, StringComparison.OrdinalIgnoreCase)) Crop = null;
+        InvalidateElapsedOrigin();
+
         DisposeCurrent(releaseAsync: true);
 
         FilePath = path;
@@ -544,14 +611,23 @@ public sealed class CascadeDocument : IDisposable
     }
 
     private long _firstTimed = long.MinValue;
+    private long _firstTimedFrom = long.MinValue;
 
     /// <summary>The first line of the log carrying a time, within the same capped walk everything else
-    /// uses - a banner at the top of a file is not a reason to give up on the whole of it.</summary>
+    /// uses - a banner at the top of a file is not a reason to give up on the whole of it.
+    /// <para>Of the crop, when there is one: "measured from the start" has to mean the start of the file the
+    /// reader appears to be looking at, or every row in a cropped view would read as an offset from a line
+    /// the view does not admit.</para></summary>
     private long FirstTimedLine()
     {
-        if (_firstTimed != long.MinValue) return _firstTimed;
-        for (long line = 0; line <= WalkBack && line < _index.Count; line++)
-            if (TimeOf(line) is not null) return _firstTimed = line;
+        long from = Crop?.From ?? 0;
+        if (_firstTimed != long.MinValue && _firstTimedFrom == from) return _firstTimed;
+        for (long line = from; line <= from + WalkBack && line < _index.Count; line++)
+            if (TimeOf(line) is not null)
+            {
+                _firstTimedFrom = from;
+                return _firstTimed = line;
+            }
         return -1;   // not remembered: more of the file may yet be indexed
     }
 
@@ -685,9 +761,9 @@ public sealed class CascadeDocument : IDisposable
         var src = _src;
         var index = _index;
         var encoding = _enc.Encoding;
-        var view = MatchView;
-        bool filtered = FilteredMode;
-        long rows = RowCount;
+        // The rows on show, crop and all: what this writes out has to be what the reader is looking at.
+        var view = DisplayView;
+        long rows = view.Count;
 
         var task = Task.Run(() => AtomicFile.Write(path, writer =>
         {
@@ -701,7 +777,7 @@ public sealed class CascadeDocument : IDisposable
                     token.ThrowIfCancellationRequested();
                     progress?.Report((double)r / rows);
                 }
-                long line = filtered ? view.LineAt(r) : r;
+                long line = view.LineAt(r);
                 if (line < 0 || line >= index.Count) continue;
                 index.GetRange(line, src.Length, out long s, out long e);
                 writer.WriteLine(reader.GetString(s, e));
@@ -872,7 +948,18 @@ public sealed class CascadeDocument : IDisposable
             && _filterService.TryGetMatchSet(gen.Snapshot, filter, out var known))
         {
             final = true;
-            return known.Matches;
+            return Crop is { } crop ? known.CountInRange(crop.From, crop.ToExclusive) : known.Matches;
+        }
+
+        // Cropped, with nothing remembered for this filter yet - which is only so while the file is still
+        // being indexed, since a set is stored the moment it covers the whole of it. The pass accumulates one
+        // number for the whole file and cannot say how much of it fell inside the crop, and a whole-file count
+        // shown against a cropped view would be a plain lie. "Still counting" is the honest answer, and it is
+        // the one already drawn for a number that has not settled.
+        if (Crop is not null)
+        {
+            final = false;
+            return -1;
         }
 
         // Read before the count, never after: an idle seen first can only mean the count read next is at
@@ -885,19 +972,30 @@ public sealed class CascadeDocument : IDisposable
         }
     }
 
+    /// <summary>What <paramref name="filter"/> matches in the whole file, whatever the crop is showing. The
+    /// count beside a filter is of the crop; this is what that is a part of, which is the comparison worth
+    /// having when a crop is on. -1 when it is not known.</summary>
+    public long WholeFileMatchCountFor(Filter filter)
+    {
+        var gen = _generation;
+        if (gen is null || !gen.Snapshot.TryGetIndex(filter, out _)) return -1;
+        return filter.Enabled && _filterService is not null
+               && _filterService.TryGetMatchSet(gen.Snapshot, filter, out var known) ? known.Matches : -1;
+    }
+
     public long FindLine(FindQuery query, long startLine, bool forward, CancellationToken ct, Action<double>? onProgress = null)
     {
         if (_src is null) return -1;
         var reader = new LineReader(_src, _enc.Encoding);
 
-        // In dim mode every line is visible, so search the whole file.
-        if (!FilteredMode)
+        // In dim mode with the whole file on show every line is visible, so search it end to end.
+        if (!FilteredMode && Crop is null)
             return FindEngine.Find(reader, _index, _src.Length, CompletedLineCount, query, startLine, forward, ct, onProgress);
 
-        // In filtered mode, search ONLY the visible (matched) lines, so the hit is always a line the
-        // user can see — otherwise a match on a hidden line would snap the highlight to a different,
+        // Otherwise search ONLY the rows on show, so the hit is always a line the user can see — a match on
+        // a hidden line, or on one the crop keeps out of sight, would snap the highlight to a different,
         // non-matching visible line.
-        var view = MatchView;
+        var view = DisplayView;
         long rows = view.Count;
         if (rows <= 0) return -1;
 
@@ -958,17 +1056,26 @@ public sealed class CascadeDocument : IDisposable
     public bool FindComplete => _search?.Complete ?? true;
 
     /// <summary>How much the current term matches, split by what the view is showing. Null when no term is
-    /// live.</summary>
+    /// live. A crop hides lines as surely as a filter does, so it too has words to intersect with - which is
+    /// what stops a tally counting hits in a stretch the reader has put out of sight.</summary>
     public FindTally? FindTally(long currentLine)
-        => _search?.Count(FilteredMode ? MatchView.VisibleWords : null, currentLine);
+        => _search?.Count(DisplayView.VisibleWords, currentLine);
 
     /// <summary>Lines the current find term has been found on so far, or 0 when nothing is being looked for.
     /// A summary of the whole file keys its cache on this, so that a sweep filling in matches behind it is
     /// noticed without polling the bitmap.</summary>
     public long FindHitCount => _search?.Found ?? 0;
 
-    /// <summary>How many of the find term's lines fall in <c>[from, toExclusive)</c>.</summary>
-    public long FindHitsInRange(long from, long toExclusive) => _search?.HitsInRange(from, toExclusive) ?? 0;
+    /// <summary>How many of the find term's lines fall in <c>[from, toExclusive)</c>, within the crop.</summary>
+    public long FindHitsInRange(long from, long toExclusive)
+    {
+        if (Crop is { } crop)
+        {
+            from = Math.Max(from, crop.From);
+            toExclusive = Math.Min(toExclusive, crop.ToExclusive);
+        }
+        return toExclusive <= from ? 0 : _search?.HitsInRange(from, toExclusive) ?? 0;
+    }
 
     /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
     /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept

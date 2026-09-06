@@ -841,6 +841,9 @@ public sealed class FilterTreeControl : UserControl
     {
         if (!_tree.IsHandleCreated) return;
         EnsureFonts();
+        // While a crop is on, a count is of the crop, and the number it is a fraction of is the interesting
+        // half of the comparison. Both are already known, so the tip says both.
+        bool cropped = _doc?.Crop is not null;
         foreach (var n in _flat)
         {
             if (n.Tag is not Filter f) { n.ToolTipText = ""; continue; }
@@ -848,9 +851,17 @@ public sealed class FilterTreeControl : UserControl
             bool patternCut = Measure(n.Text, Pick(FontStyle.Bold)) > patternRoom;
             bool descCut = !string.IsNullOrWhiteSpace(f.Description)
                            && Measure(f.Description, Pick(FontStyle.Bold)) > _columns.DescriptionWidth - Inset * 2;
-            n.ToolTipText = patternCut || descCut
+            string text = patternCut || descCut
                 ? (string.IsNullOrWhiteSpace(f.Description) ? n.Text : $"{n.Text}\n{f.Description}")
                 : "";
+            if (cropped && f.Enabled && _doc!.WholeFileMatchCountFor(f) is var whole && whole >= 0)
+            {
+                long here = _doc.MatchCountFor(f);
+                if (here >= 0)
+                    text = (text.Length > 0 ? text + "\n" : "")
+                         + $"{here:N0} in the crop \u00B7 {whole:N0} in the whole file";
+            }
+            n.ToolTipText = text;
         }
     }
 

@@ -429,8 +429,27 @@ internal static class ScrollBench
             filters.ShowOnlyFilteredLines = true;
             doc.SetFilters(filters);
         });
+        // A crop is meant to cost nothing: it is a row offset and a count taken off the same rank index every
+        // other row lookup uses, so dragging through a cropped file should read the same as dragging through
+        // the whole one. Measured over most of the file so the moves are real scrolling, not a few rows.
+        yield return ("cropped, dim mode", () =>
+        {
+            doc.ClearCrop();
+            doc.Filters.ShowOnlyFilteredLines = false;
+            doc.SetFilters(Filters());
+            doc.SetCrop(doc.CompletedLineCount / 10, doc.CompletedLineCount * 9 / 10);
+        });
+        yield return ("cropped, filtered mode", () =>
+        {
+            doc.ClearCrop();
+            var filters = Filters();
+            filters.ShowOnlyFilteredLines = true;
+            doc.SetFilters(filters);
+            doc.SetCrop(doc.CompletedLineCount / 10, doc.CompletedLineCount * 9 / 10);
+        });
         yield return ("fields, in columns", () =>
         {
+            doc.ClearCrop();
             doc.Filters.ShowOnlyFilteredLines = false;
             doc.SetFilters(Filters());
             SplitIntoFields(doc, FieldLayout.Columns);

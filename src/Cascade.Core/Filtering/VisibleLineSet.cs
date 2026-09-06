@@ -280,29 +280,53 @@ public sealed class VisibleLineSet
     /// while the UI paints, resolving row by row would mix two states within one frame; doing it in one shot
     /// makes every frame internally consistent and exactly anchored. Returns the first row.</summary>
     public long ResolveWindow(long anchorLine, int anchorOffset, Span<long> lines, out int count)
+        => ResolveWindow(anchorLine, anchorOffset, lines, out count, 0, long.MaxValue);
+
+    /// <summary>The same, restricted to the file lines in <c>[lo, hiExclusive)</c> - the rows the reader has
+    /// cropped to. Row 0 is the first visible line at or after <paramref name="lo"/>, so a crop offsets the
+    /// row space without disturbing it.
+    /// <para>Taking the crop here rather than composing two calls is what keeps a cropped frame as coherent as
+    /// an uncropped one: the offset the crop introduces and the lines filled from it are read from the same
+    /// snapshot, where two calls could straddle a pass that moved the rows between them.</para></summary>
+    public long ResolveWindow(long anchorLine, int anchorOffset, Span<long> lines, out int count,
+                              long lo, long hiExclusive)
     {
         var idx = Volatile.Read(ref _index);
         long[][] pages = Volatile.Read(ref _pages);
-        long anchorRow = anchorLine <= 0 ? 0
-            : anchorLine >= idx.Lines ? idx.Total
-            : RankBefore(idx, pages, anchorLine);
-        long first = Math.Clamp(anchorRow - anchorOffset, 0, Math.Max(0, idx.Total - lines.Length));
-        count = Fill(idx, pages, first, lines);
+        long rowLo = RankAt(idx, pages, lo);
+        long rows = RankAt(idx, pages, hiExclusive) - rowLo;
+
+        long anchorRow = RankAt(idx, pages, Math.Clamp(anchorLine, lo, hiExclusive)) - rowLo;
+        long first = Math.Clamp(anchorRow - anchorOffset, 0, Math.Max(0, rows - lines.Length));
+        count = Fill(idx, pages, rowLo + first, lines, rows - first);
         return first;
     }
 
     /// <summary>Fills <paramref name="lines"/> with the file lines shown at rows starting at
     /// <paramref name="firstRow"/>, all resolved against a single snapshot. Returns how many were filled.</summary>
     public int LinesForRows(long firstRow, Span<long> lines)
-        => Fill(Volatile.Read(ref _index), Volatile.Read(ref _pages), firstRow, lines);
+        => Fill(Volatile.Read(ref _index), Volatile.Read(ref _pages), firstRow, lines, long.MaxValue);
+
+    /// <summary>The same, in the row space of the crop <c>[lo, hiExclusive)</c>.</summary>
+    public int LinesForRows(long firstRow, Span<long> lines, long lo, long hiExclusive)
+    {
+        var idx = Volatile.Read(ref _index);
+        long[][] pages = Volatile.Read(ref _pages);
+        long rowLo = RankAt(idx, pages, lo);
+        long rows = RankAt(idx, pages, hiExclusive) - rowLo;
+        firstRow = Math.Max(0, firstRow);
+        return Fill(idx, pages, rowLo + firstRow, lines, rows - firstRow);
+    }
 
     /// <summary>Walks set bits forward from <paramref name="firstRow"/> — one select, then a linear scan, so a
-    /// whole screen costs about as much as a single lookup.</summary>
-    private static int Fill(Index idx, long[][] pages, long firstRow, Span<long> lines)
+    /// whole screen costs about as much as a single lookup. <paramref name="limit"/> caps how many rows may be
+    /// taken, which is what stops a crop's last screen running past its end.</summary>
+    private static int Fill(Index idx, long[][] pages, long firstRow, Span<long> lines, long limit)
     {
-        if (idx.Total <= 0 || lines.Length == 0) return 0;
+        if (idx.Total <= 0 || lines.Length == 0 || limit <= 0) return 0;
         firstRow = Math.Max(0, firstRow);
         if (firstRow >= idx.Total) return 0;
+        int room = (int)Math.Min(lines.Length, limit);
 
         long line = SelectLine(idx, pages, firstRow);
         int n = 0;
@@ -313,7 +337,7 @@ public sealed class VisibleLineSet
         ulong w = (ulong)GetWord(pages, word) & ~((1UL << bit) | ((1UL << bit) - 1)); // drop bits 0..bit
         long lastWord = (idx.Lines + WordBits - 1) / WordBits;
 
-        while (n < lines.Length)
+        while (n < room)
         {
             while (w == 0)
             {

@@ -3331,9 +3331,14 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return;
         _anchorLine = -1;
-        long fromLine = CaretLine < 0 ? (forward ? -1 : _doc.CompletedLineCount) : CaretLine;
+        long first = _doc.FirstDisplayLine, last = _doc.LastDisplayLine;
+        // Start the walk at the crop's edge rather than the file's, and refuse a mark beyond it: a marked
+        // line outside the crop is not one of the lines this view has, so stepping to it would land the
+        // caret somewhere else entirely.
+        long fromLine = CaretLine < 0 ? (forward ? first - 1 : last + 1) : CaretLine;
+        fromLine = forward ? Math.Max(fromLine, first - 1) : Math.Min(fromLine, last + 1);
         long line = forward ? _doc.Markers.Next(fromLine, index) : _doc.Markers.Previous(fromLine, index);
-        if (line < 0) { NoMoreMarkers?.Invoke(index); return; }
+        if (line < 0 || line < first || line > last) { NoMoreMarkers?.Invoke(index); return; }
         long row = _doc.RowForLine(line);
         if (row < 0) row = _doc.RowAtOrAfterLine(line);
         _caretRow = row;
@@ -3522,7 +3527,9 @@ public sealed class LineGridControl : Control
     {
         if (_doc is null) return;
         ClearCharSelection();
-        _sel.SelectAll(_doc.CompletedLineCount);
+        // Of the crop, when there is one: "all" has to mean all of what is on show, or a copy would carry
+        // lines the reader cannot see.
+        _sel.SetRange(_doc.FirstDisplayLine, _doc.LastDisplayLine);
         Invalidate();
         SelectionChanged?.Invoke();
     }
@@ -3608,6 +3615,23 @@ public sealed class LineGridControl : Control
         _caretRow = row;
         _sel.SetSingle(LineAt(row));
         RevealRow(row);
+        Invalidate();
+        SelectionChanged?.Invoke();
+    }
+
+    /// <summary>Selects the stretch of the log from <paramref name="first"/> to <paramref name="last"/> and
+    /// scrolls to it, exactly as dragging over it or shift-clicking would. For the harnesses that have to set
+    /// up a selection without a mouse.</summary>
+    internal void SelectLinesForTesting(long first, long last)
+    {
+        if (_doc is null) return;
+        ClearCharSelection();
+        _anchorLine = -1;
+        _sel.SetRange(first, last);
+        long row = _doc.RowForLine(first);
+        if (row < 0) row = _doc.RowAtOrAfterLine(first);
+        _caretRow = Math.Clamp(row, 0, Math.Max(0, _doc.RowCount - 1));
+        RevealRow(_caretRow);
         Invalidate();
         SelectionChanged?.Invoke();
     }

@@ -148,7 +148,7 @@ internal static class UiShots
         ShotDialog(new ColumnsDialog(cols, longSamples), outDir, "columns-scrolled",
                    d => d.PreviewForTesting.ScrollToForTesting(d.PreviewForTesting.FurthestScrollForTesting()));
         ShotDialog(new PreferencesDialog(new AppSettings()), outDir, "preferences");
-        ShotDialog(new GoToDialog(8_295_214, 1), outDir, "goto");
+        ShotDialog(new GoToDialog(1, 8_295_214, 1), outDir, "goto");
         ShotDialog(new AboutDialog((Cascade.Core.Updating.UpdateService?)null), outDir, "about");
         // A failed check is the state nobody ever sees while it is being written, and the reason for it is
         // the whole point of the row - so it gets a picture of its own.
