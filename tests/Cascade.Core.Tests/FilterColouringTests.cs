@@ -677,10 +677,25 @@ public class FilterColouringTests
         foreach (var f in all)
         {
             if (!f.Enabled || !ReferenceDeepMatch(f, line)) continue;
-            if (f.Kind == FilterKind.Exclude) return false;
+            if (f.Kind == FilterKind.Exclude)
+            {
+                // An exclude is overruled by anything enabled nested under it that matched the line too:
+                // the narrower filter is the more specific word about this line.
+                if (ReferenceDescendants(f).Any(d => d.Enabled && ReferenceDeepMatch(d, line))) continue;
+                return false;
+            }
             included = true;
         }
         return included;
+    }
+
+    private static IEnumerable<Filter> ReferenceDescendants(Filter f)
+    {
+        foreach (var child in f.Children)
+        {
+            yield return child;
+            foreach (var deeper in ReferenceDescendants(child)) yield return deeper;
+        }
     }
 
     /// <summary>The colour rule, written out longhand: read the list top to bottom, the first enabled

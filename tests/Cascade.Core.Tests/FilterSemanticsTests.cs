@@ -108,6 +108,210 @@ public class FilterSemanticsTests
     }
 
     [Fact]
+    public void An_enabled_filter_nested_under_an_exclude_overrules_it()
+    {
+        // Show everything with A, except AB, but keep ABC. The exclude's veto is the least specific word said
+        // about an ABC line, so the filter nested under it wins - and colours the line.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        var abc = Make("ABC", true);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(abc, notAb);
+
+        var plain = Eval(c, "xAx");
+        Assert.True(plain.Shown);
+        Assert.Same(a, plain.ColorFilter);
+
+        Assert.False(Eval(c, "xABx").Shown);          // still excluded: nothing narrower had anything to say
+
+        var kept = Eval(c, "xABCx");
+        Assert.True(kept.Shown);
+        Assert.Same(abc, kept.ColorFilter);           // and the filter that rescued it claims the colour
+    }
+
+    [Fact]
+    public void Overruling_alternates_to_any_depth()
+    {
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        var abc = Make("ABC", true);
+        var notAbcd = Make("ABCD", true, FilterKind.Exclude);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(abc, notAb);
+        c.Add(notAbcd, abc);
+
+        Assert.True(Eval(c, "xAx").Shown);
+        Assert.False(Eval(c, "xABx").Shown);
+        Assert.True(Eval(c, "xABCx").Shown);
+        Assert.False(Eval(c, "xABCDx").Shown);        // the deepest word wins again
+    }
+
+    [Fact]
+    public void Only_nesting_overrules_a_sibling_exclude_still_takes_the_line_away()
+    {
+        // The exclude and the include are both children of A, so neither is speaking about the narrower case:
+        // the veto stands. This is what keeps a list of excludes at the foot of a filter set working.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        c.Add(a);
+        c.Add(Make("ABC", true), a);
+        c.Add(Make("AB", true, FilterKind.Exclude), a);
+
+        Assert.True(Eval(c, "xAx").Shown);
+        Assert.False(Eval(c, "xABx").Shown);
+        Assert.False(Eval(c, "xABCx").Shown);
+    }
+
+    [Fact]
+    public void An_exclude_in_another_branch_still_vetoes_outright()
+    {
+        // Overruling is a matter of nesting alone. An exclude somewhere else in the list is not narrower than
+        // anything here, so it takes the line away however deeply the include that claimed it was nested.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        var abc = Make("ABC", true);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(abc, notAb);
+        c.Add(Make("quiet", true, FilterKind.Exclude));
+
+        Assert.True(Eval(c, "xABCx").Shown);
+        Assert.False(Eval(c, "xABCx quiet").Shown);
+    }
+
+    [Fact]
+    public void A_switched_off_filter_under_an_exclude_overrules_nothing()
+    {
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        var abc = Make("ABC", false);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(abc, notAb);
+
+        Assert.False(Eval(c, "xABCx").Shown);   // switched off, so the exclude has the last word after all
+    }
+
+    [Fact]
+    public void An_overruling_filter_must_match_the_line_itself()
+    {
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(Make("ABC", true), notAb);
+
+        Assert.False(Eval(c, "xABDx").Shown);   // ABC has nothing to say about this line
+    }
+
+    [Fact]
+    public void An_exclude_under_an_exclude_hides_the_line_either_way()
+    {
+        // Both words agree, so which of them is heard cannot matter - and did not before, either.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(Make("ABC", true, FilterKind.Exclude), notAb);
+
+        Assert.True(Eval(c, "xAx").Shown);
+        Assert.False(Eval(c, "xABx").Shown);
+        Assert.False(Eval(c, "xABCx").Shown);
+    }
+
+    [Fact]
+    public void An_overruled_exclude_still_counts_the_lines_it_matched()
+    {
+        // A count says how many lines the filter matches, not how many it got its way on - the same rule that
+        // already lets a filter count lines another filter is hiding.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        var abc = Make("ABC", true);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(abc, notAb);
+
+        var snapshot = FilterSnapshot.Build(c);
+        var counts = new long[snapshot.FilterCount];
+        foreach (var line in new[] { "xAx", "xABx", "xABCx" })
+            snapshot.Evaluate(line.AsSpan(), 0, null, counts);
+
+        long CountOf(Filter f)
+        {
+            Assert.True(snapshot.TryGetIndex(f, out int i));
+            return counts[i];
+        }
+
+        Assert.Equal(3, CountOf(a));
+        Assert.Equal(2, CountOf(notAb));
+        Assert.Equal(1, CountOf(abc));
+    }
+
+    [Fact]
+    public void Only_an_enabled_include_under_an_enabled_exclude_can_overrule()
+    {
+        var c = new FilterCollection();
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        c.Add(notAb);
+        Assert.False(FilterSnapshot.Build(c).HasOverruledExclude);
+
+        var abc = Make("ABC", false);
+        c.Add(abc, notAb);
+        Assert.False(FilterSnapshot.Build(c).HasOverruledExclude);   // switched off
+
+        abc.Enabled = true;
+        Assert.True(FilterSnapshot.Build(c).HasOverruledExclude);
+
+        notAb.Enabled = false;
+        Assert.False(FilterSnapshot.Build(c).HasOverruledExclude);   // nothing vetoing to overrule
+    }
+
+    [Fact]
+    public void One_matching_filter_under_an_exclude_is_enough_whatever_its_siblings_do()
+    {
+        // The rule is about what is nested under the exclude, not about every path through it: a sibling that
+        // has nothing to say about this line does not get to reinstate the veto.
+        var c = new FilterCollection();
+        var a = Make("A", true);
+        var notAb = Make("AB", true, FilterKind.Exclude);
+        c.Add(a);
+        c.Add(notAb, a);
+        c.Add(Make("ABC", true), notAb);
+        c.Add(Make("ABD", true), notAb);
+
+        Assert.True(Eval(c, "xABCx").Shown);    // the first child matched, the second did not
+        Assert.True(Eval(c, "xABDx").Shown);    // and the other way round
+        Assert.False(Eval(c, "xABEx").Shown);   // neither: the veto stands
+    }
+
+    [Fact]
+    public void Overruling_an_exclude_buys_no_claim_on_the_colour()
+    {
+        // The line is rescued by a filter in the second branch, but the colour rule is untouched: the first
+        // filter in the list that matched still claims it, and only its own descendants may take over.
+        var c = new FilterCollection();
+        var alpha = Make("A", true);
+        var notB = Make("B", true, FilterKind.Exclude);
+        var rescuer = Make("C", true);
+        c.Add(alpha);
+        c.Add(notB);
+        c.Add(rescuer, notB);
+
+        var r = Eval(c, "A B C");
+        Assert.True(r.Shown);
+        Assert.Same(alpha, r.ColorFilter);   // not the rescuer, which is in a branch of its own
+    }
+
+    [Fact]
     public void Flat_topmost_wins_color_on_ties()
     {
         var c = new FilterCollection();

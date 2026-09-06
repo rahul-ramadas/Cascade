@@ -29,7 +29,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 ![The filter editor: match type, pattern, options, colours and the three style flags](docs/images/filter-edit.png)
 
 - Matches a **substring**, a **.NET regular expression**, or **marked by marker 1–8**.
-- A line is shown when an enabled **include** matches it and no enabled **exclude** does.
+- A line is shown when an enabled **include** matches it and no enabled **exclude** does — unless an enabled filter nested under that exclude matched it too, which [overrules it](#nesting).
 - Colour, background, bold, italic and underline are each **on, off, or inherited**.
 
 ### Nesting
@@ -39,7 +39,9 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - A child narrows its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*.
 - A child matches a line only if **every one of its ancestors matches it too** — whether or not those ancestors are switched on.
 - So switching a parent off does not stop it narrowing its children: you can scope a branch without showing everything the parent matches.
-- A line takes its colour from the **first filter in the list** that matched it, refined by whichever of that filter's own descendants matched too — never by a filter in a branch further down, however deeply nested.
+- An **enabled** filter nested under an **exclude** overrules it on the lines they both match, so exceptions read straight down the list: `A` → `≠ AB` → `ABC` shows everything with `A`, except `AB`, but keeps `ABC`. Nest another exclude under that one and it takes over again, as deep as you like. Switch the nested filter off and the exclude has the last word again.
+- Only nesting overrules. An exclude elsewhere in the list — a sibling, or another branch — still takes the line away outright.
+- A line takes its colour from the **first include in the list** that matched it, refined by whichever of that include's own descendants matched too — never by a filter in a branch further down, however deeply nested. Overruling an exclude wins the line back but claims no colour, so a rescued line may well be coloured by an include somewhere above.
 - Whatever the winning filter leaves unset it inherits from the filters above it, so a filter with no colour of its own draws the line in the view's default colours.
 - Nest with `Alt+→`, or by dragging.
 

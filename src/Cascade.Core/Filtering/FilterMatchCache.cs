@@ -373,19 +373,66 @@ public sealed class FilterMatchCache
         int words = (int)((lines + 63) / 64);
         var span = shown.AsSpan(0, words);
 
+        Include(span, includes, hasEnabledInclude, lines);
+        foreach (var set in excludes) AndNot(span, set, lines);
+        ClearTail(span, lines, words);
+    }
+
+    /// <summary>An enabled exclude together with the cached sets of the enabled filters nested under it that
+    /// overrule its veto: on a line they match too, the narrower word wins and the exclude says nothing.
+    /// <see cref="Overruling"/> is null for the ordinary shape - an exclude with nothing enabled beneath it -
+    /// which is then combined exactly as it always was.</summary>
+    public readonly record struct ExcludeTerm(MatchSet Set, IReadOnlyList<MatchSet>? Overruling);
+
+    /// <summary><inheritdoc cref="Combine(IReadOnlyList{MatchSet}, IReadOnlyList{MatchSet}, bool, long, ulong[])"/>
+    /// <para>Excludes carry whatever overrules them, so an exclude with an enabled include nested under it
+    /// vetoes only the lines that include did not claim.</para></summary>
+    public static void Combine(IReadOnlyList<MatchSet> includes, IReadOnlyList<ExcludeTerm> excludes,
+        bool hasEnabledInclude, long lines, ulong[] shown)
+    {
+        int words = (int)((lines + 63) / 64);
+        var span = shown.AsSpan(0, words);
+
+        Include(span, includes, hasEnabledInclude, lines);
+
+        // One scratch buffer, made only if an exclude actually has something overruling it and reused by all
+        // of them: an exclude's effective veto has to be materialized before it can be applied, and the
+        // alternative - a buffer per exclude - would cost a bitmap per filter, which is exactly what storing
+        // the sets sparsely set out to avoid.
+        ulong[]? scratch = null;
+        foreach (var term in excludes)
+        {
+            if (term.Overruling is not { Count: > 0 })
+            {
+                AndNot(span, term.Set, lines);
+                continue;
+            }
+            scratch ??= new ulong[words];
+            var veto = scratch.AsSpan(0, words);
+            veto.Clear();
+            Or(veto, term.Set, lines);
+            foreach (var winner in term.Overruling) AndNot(veto, winner, lines);
+            for (int w = 0; w < words; w++) span[w] &= ~veto[w];
+        }
+
+        ClearTail(span, lines, words);
+    }
+
+    private static void Include(Span<ulong> span, IReadOnlyList<MatchSet> includes, bool hasEnabledInclude,
+        long lines)
+    {
         // Sets differ enormously in shape and it is worth treating them differently: in a real filter file
         // most match nothing at all, most of the rest match a fraction of a percent, and only a handful are
         // dense enough to be worth walking a word at a time. Asking every set for every word costs
         // O(lines x filters) whatever they hold; splitting by shape costs O(lines x dense sets + sparse bits).
-        if (!hasEnabledInclude) span.Fill(ulong.MaxValue);   // no include filters: everything qualifies
-        else
-        {
-            span.Clear();
-            foreach (var set in includes) Or(span, set, lines);
-        }
-        foreach (var set in excludes) AndNot(span, set, lines);
+        if (!hasEnabledInclude) { span.Fill(ulong.MaxValue); return; }   // no include filters: everything qualifies
+        span.Clear();
+        foreach (var set in includes) Or(span, set, lines);
+    }
 
-        // Clear any bits past the end of the file in the final word.
+    /// <summary>Clears any bits past the end of the file in the final word.</summary>
+    private static void ClearTail(Span<ulong> span, long lines, int words)
+    {
         int tail = (int)(lines & 63);
         if (tail != 0 && words > 0) span[words - 1] &= (1UL << tail) - 1;
     }

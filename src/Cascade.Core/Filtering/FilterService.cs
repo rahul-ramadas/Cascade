@@ -440,14 +440,46 @@ public sealed class FilterService : IDisposable
         if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return false;
 
         var includes = new List<FilterMatchCache.MatchSet>();
-        var excludes = new List<FilterMatchCache.MatchSet>();
+        var excludes = new List<FilterMatchCache.ExcludeTerm>();
         var counts = new long[gen.Counts.Length];
-        foreach (var filter in filters)
+
+        var sets = new FilterMatchCache.MatchSet[filters.Count];
+        for (int i = 0; i < filters.Count; i++)
         {
-            if (!_cache.TryGet(filter.Key, lines, out var set)) return false;
+            if (!_cache.TryGet(filters[i].Key, lines, out var set)) return false;
+            sets[i] = set;
+        }
+
+        // Which enabled filters overrule which exclude. Worked out only when the filter set actually holds an
+        // exclude with an enabled include under it - every other set combines exactly as it always did, so
+        // the ordinary case pays nothing for this.
+        List<FilterMatchCache.MatchSet>?[]? overruling = null;
+        if (gen.Snapshot.HasOverruledExclude)
+        {
+            var vetoes = new bool[gen.Counts.Length];
+            foreach (var filter in filters)
+                if (filter.Enabled && filter.IsExclude) vetoes[filter.Index] = true;
+
+            overruling = new List<FilterMatchCache.MatchSet>?[gen.Counts.Length];
+            for (int i = 0; i < filters.Count; i++)
+            {
+                var filter = filters[i];
+                // The nearest enabled ancestor is the only one that needs telling: anything above it has this
+                // filter's lines taken from it wholesale when that ancestor's own veto is narrowed.
+                if (!filter.Enabled || filter.EnabledParent < 0 || !vetoes[filter.EnabledParent]) continue;
+                (overruling[filter.EnabledParent] ??= new List<FilterMatchCache.MatchSet>()).Add(sets[i]);
+            }
+        }
+
+        for (int i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
             if (!filter.Enabled) continue;                 // counts only track enabled filters
-            counts[filter.Index] = set.Matches;
-            (filter.IsExclude ? excludes : includes).Add(set);
+            counts[filter.Index] = sets[i].Matches;
+            if (filter.IsExclude)
+                excludes.Add(new FilterMatchCache.ExcludeTerm(sets[i], overruling?[filter.Index]));
+            else
+                includes.Add(sets[i]);
         }
 
         var shown = new ulong[(lines + 63) / 64];

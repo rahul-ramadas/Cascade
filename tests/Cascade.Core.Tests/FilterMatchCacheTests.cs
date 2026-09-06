@@ -1076,6 +1076,189 @@ public class FilterMatchCacheTests
                 }
     }
 
+    [Fact]
+    public void Combine_lets_a_nested_filter_overrule_an_exclude()
+    {
+        const long lines = 500;
+        FilterMatchCache.MatchSet Make(Func<long, bool> predicate)
+        {
+            var b = new FilterMatchCache.SetBuilder(lines);
+            for (long w = 0; w < (lines + 63) / 64; w++)
+            {
+                ulong bits = 0;
+                for (int i = 0; i < 64; i++)
+                {
+                    long line = w * 64 + i;
+                    if (line < lines && predicate(line)) bits |= 1UL << i;
+                }
+                b.AddWord(w, bits);
+            }
+            return b.Build(lines);
+        }
+
+        // "A" is every line, the exclude takes every second one, and the filter nested under it keeps back
+        // every sixth - a deep-match set, so a subset of its parent's, as nesting guarantees.
+        var all = Make(_ => true);
+        var evens = Make(l => l % 2 == 0);
+        var sixths = Make(l => l % 6 == 0);
+        var shown = new ulong[(lines + 63) / 64];
+
+        FilterMatchCache.Combine(new[] { all, sixths },
+                                 new[] { new FilterMatchCache.ExcludeTerm(evens, new[] { sixths }) },
+                                 hasEnabledInclude: true, lines, shown);
+        for (long l = 0; l < lines; l++)
+            Assert.Equal(l % 2 != 0 || l % 6 == 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
+
+        // Nothing overruling it, and the veto is whole again - which is what the old shape must still do.
+        FilterMatchCache.Combine(new[] { all, sixths },
+                                 new[] { new FilterMatchCache.ExcludeTerm(evens, null) },
+                                 hasEnabledInclude: true, lines, shown);
+        for (long l = 0; l < lines; l++)
+            Assert.Equal(l % 2 != 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
+    }
+
+    [Fact]
+    public void Combine_with_overruled_excludes_agrees_with_a_line_by_line_reference()
+    {
+        var rng = new Random(20260906);
+
+        (FilterMatchCache.MatchSet Set, HashSet<long> Members) Make(double density, long covered)
+        {
+            var members = new HashSet<long>();
+            var b = new FilterMatchCache.SetBuilder(covered);
+            for (long w = 0; w < (covered + 63) / 64; w++)
+            {
+                ulong bits = 0;
+                for (int i = 0; i < 64; i++)
+                {
+                    long line = w * 64 + i;
+                    if (line < covered && rng.NextDouble() < density) { bits |= 1UL << i; members.Add(line); }
+                }
+                b.AddWord(w, bits);
+            }
+            return (b.Build(covered), members);
+        }
+
+        // Every shape an exclude's veto can be in: unopposed, opposed by a set that matches nothing, by a
+        // sparse one, by a dense one, and by several at once.
+        foreach (long lines in new long[] { 1, 63, 64, 65, 4_097, 100_001 })
+            foreach (long extra in new long[] { 0, 500 })
+                foreach (bool hasEnabledInclude in new[] { true, false })
+                {
+                    long covered = lines + extra;
+                    var inc = new[] { 0.0, 0.002, 0.6 }.Select(d => Make(d, covered)).ToArray();
+                    var plain = Make(0.3, covered);
+                    var opposed = Make(0.4, covered);
+                    var winners = new[] { 0.0, 0.00001, 0.05 }.Select(d => Make(d, covered)).ToArray();
+
+                    var terms = new[]
+                    {
+                        new FilterMatchCache.ExcludeTerm(plain.Set, null),
+                        new FilterMatchCache.ExcludeTerm(opposed.Set, winners.Select(w => w.Set).ToArray()),
+                    };
+
+                    var shown = new ulong[(lines + 63) / 64 + 3];        // headroom must be left alone
+                    Array.Fill(shown, 0xDEADBEEFDEADBEEFUL);
+                    FilterMatchCache.Combine(inc.Select(x => x.Set).ToArray(), terms,
+                                             hasEnabledInclude, lines, shown);
+
+                    for (long l = 0; l < lines; l++)
+                    {
+                        bool included = !hasEnabledInclude || inc.Any(x => x.Members.Contains(l));
+                        bool vetoed = plain.Members.Contains(l) ||
+                                      (opposed.Members.Contains(l) && !winners.Any(w => w.Members.Contains(l)));
+                        bool expected = included && !vetoed;
+                        bool actual = (shown[l >> 6] & (1UL << (int)(l & 63))) != 0;
+                        Assert.True(expected == actual,
+                            $"line {l} of {lines} (covered {covered}, includes on {hasEnabledInclude}): " +
+                            $"expected {expected}, got {actual}");
+                    }
+
+                    int words = (int)((lines + 63) / 64);
+                    int tail = (int)(lines & 63);
+                    if (tail != 0) Assert.Equal(0UL, shown[words - 1] >> tail);
+                    for (int w = words; w < shown.Length; w++) Assert.Equal(0xDEADBEEFDEADBEEFUL, shown[w]);
+                }
+    }
+
+    /// <summary>A filter set holding the one shape whose veto can be overruled, so the cached path has to do
+    /// more than union the sets. Toggling it is the case that would quietly disagree with a fresh scan.</summary>
+    private static FilterCollection OverruleFilters(out List<Filter> flat)
+    {
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        var list = new List<Filter>();
+        Filter Add(string text, FilterKind kind, Filter? parent)
+        {
+            var f = new Filter { Enabled = true, Kind = kind, Match = { Text = text } };
+            filters.Add(f, parent);
+            list.Add(f);
+            return f;
+        }
+
+        // Every line, except the ones with "disk", but keep the ones that also say "net".
+        var all = Add("line", FilterKind.Include, null);
+        var noDisk = Add("disk", FilterKind.Exclude, all);
+        Add("net", FilterKind.Include, noDisk);
+        Add("noise", FilterKind.Exclude, null);        // an unrelated veto, which nothing overrules
+        flat = list;
+        return filters;
+    }
+
+    private static (List<long> Visible, long[] Counts) FreshOverrule(string path, Action<List<Filter>> configure)
+    {
+        using var doc = new CascadeDocument();
+        doc.Open(path);
+        doc.WaitForIndex();
+        var filters = OverruleFilters(out var flat);
+        configure(flat);
+        doc.SetFilters(filters);
+        WaitIdle(doc);
+        Assert.Equal(0, doc.FilterCacheHits);
+        return Capture(doc, flat);
+    }
+
+    [Fact]
+    public void Toggling_an_overruled_exclude_from_cache_matches_a_fresh_evaluation()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = OverruleFilters(out var flat);
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.True(doc.FilterCacheBytes > 0, "the first pass should have populated the cache");
+
+            var configurations = new Action<List<Filter>>[]
+            {
+                _ => { },                                   // the shape itself, straight from the cache
+                f => f[2].Enabled = false,                  // the overruling filter off: the veto is whole again
+                f => f[1].Enabled = false,                  // the exclude off: nothing left to overrule
+                f => { f[1].Enabled = false; f[2].Enabled = false; },
+                f => f[3].Enabled = false,                  // the unrelated veto off
+                f => f[0].Enabled = false,                  // the ancestor off: it still narrows its children
+            };
+
+            long hitsBefore = doc.FilterCacheHits;
+            foreach (var configure in configurations)
+            {
+                foreach (var f in flat) f.Enabled = true;
+                configure(flat);
+                doc.ApplyFilters();
+                WaitIdle(doc);
+
+                var cached = Capture(doc, flat);
+                var fresh = FreshOverrule(path, configure);
+                Assert.Equal(fresh.Visible, cached.Visible);
+                Assert.Equal(fresh.Counts, cached.Counts);
+            }
+            Assert.True(doc.FilterCacheHits > hitsBefore, "none of those toggles was served from the cache");
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>Deleting a filter has to take its cached results with it. The key is the whole predicate
     /// chain, so a deleted filter's results can never be asked for again - kept, they would simply
     /// accumulate for as long as the file stayed open.</summary>

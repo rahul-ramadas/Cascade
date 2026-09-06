@@ -12,11 +12,15 @@ public readonly record struct LineEval(bool Shown, Filter? ColorFilter);
 /// An immutable, compiled snapshot of the filter tree used to evaluate lines on background threads
 /// without racing UI edits. Regexes are compiled once. Implements the exact hierarchical semantics:
 /// a line is shown iff some enabled include filter <i>deep-matches</i> (it and all ancestors' predicates
-/// match) and no enabled exclude deep-matches.
+/// match) and no enabled exclude deep-matches <i>with nothing enabled nested under it matching too</i> -
+/// an exclude is overruled by anything enabled below it that also matched, which is what makes
+/// "everything with A, except AB, but keep ABC" a matter of nesting three filters.
 /// <para>The color comes from the <b>first</b> enabled include that deep-matches, reading the list top to
 /// bottom as it is drawn - even when that filter sets no style, in which case the line takes the view's
 /// defaults. Only a filter <b>nested under</b> that one may take it from there, and among those, again the
 /// first. Depth is not a criterion: a deeper filter in a later branch loses to an earlier, shallower one.
+/// Overruling an exclude buys no claim on the colour: a line rescued that way is coloured by the same rule
+/// as any other, which need not be the filter that rescued it.
 /// </para>
 /// </summary>
 public sealed class FilterSnapshot
@@ -30,6 +34,14 @@ public sealed class FilterSnapshot
         public bool IsRegex;
         public int MarkerIndex;
         public bool Enabled;
+        /// <summary>Precomputed <c>Enabled &amp;&amp; Kind == Exclude</c>: this node takes lines away unless
+        /// something nested under it overrules. One field rather than two tests, because it is read once per
+        /// matched node on the hot path.</summary>
+        public bool Vetoes;
+        /// <summary>True when this node or an ancestor of it vetoes - so whether it matched can change what
+        /// an exclude ends up saying. False for the whole tree of an ordinary filter set, where the walk then
+        /// need not carry any answer back up at all.</summary>
+        public bool VetoInScope;
         public FilterKind Kind;
         public int Index;
         /// <summary>One past the last index in this node's subtree. Indices are handed out in the order the
@@ -37,6 +49,13 @@ public sealed class FilterSnapshot
         /// <c>x.Index &lt; SubtreeEnd</c> - no walk up the parents, no depth arithmetic.</summary>
         public int SubtreeEnd;
         public bool SubtreeHasEnabled;
+        /// <summary>True when this node or something below it is an enabled include. What tells an exclude
+        /// above whether anything nested under it could ever overrule its veto.</summary>
+        public bool SubtreeHasEnabledInclude;
+        /// <summary>Index of the nearest <b>enabled</b> ancestor, or -1. That is the filter whose word this
+        /// one overrules when both match, so it is also where the cached-set path subtracts this node's
+        /// lines from.</summary>
+        public int EnabledParent = -1;
         public Node[] Children = Array.Empty<Node>();
         public Filter Source = null!;
 
@@ -106,6 +125,9 @@ public sealed class FilterSnapshot
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
     public bool HasEnabledInclude { get; }
+    /// <summary>True when an enabled exclude has an enabled include nested under it - the one shape whose
+    /// veto can be overruled, and so the one shape whose cached sets need more than a plain union.</summary>
+    public bool HasOverruledExclude { get; }
     /// <summary>True if a marker-type filter participates in filtering (it is enabled, or it is an ancestor
     /// of an enabled filter). When false, toggling a line marker cannot change any filter result, so the
     /// view need not be re-filtered.</summary>
@@ -114,7 +136,8 @@ public sealed class FilterSnapshot
 
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
         bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter,
-        LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton, int[]? markerVersions)
+        bool hasOverruledExclude, LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton,
+        int[]? markerVersions)
     {
         _roots = roots;
         _rootBits = new int[roots.Length];
@@ -126,6 +149,7 @@ public sealed class FilterSnapshot
         HasAnyEnabled = hasAnyEnabled;
         HasEnabledInclude = hasEnabledInclude;
         HasMarkerFilter = hasMarkerFilter;
+        HasOverruledExclude = hasOverruledExclude;
         _markerVersions = markerVersions;
         _ciAutomaton = ciAutomaton;
         _csAutomaton = csAutomaton;
@@ -186,8 +210,12 @@ public sealed class FilterSnapshot
         }
     }
 
-    /// <summary>A filter taking part in evaluation, described for the match cache.</summary>
-    public readonly record struct CacheableFilter(int Index, string Key, bool Enabled, bool IsExclude);
+    /// <summary>A filter taking part in evaluation, described for the match cache.
+    /// <paramref name="EnabledParent"/> is the index of its nearest enabled ancestor (or -1): when both match
+    /// a line, this filter is the more specific word and overrules that one. Only meaningful when the whole
+    /// participating set is in hand, which is what <see cref="TryGetCacheableFilters"/> guarantees.</summary>
+    public readonly record struct CacheableFilter(int Index, string Key, bool Enabled, bool IsExclude,
+                                                  int EnabledParent);
 
     /// <summary>Words needed for a deep-match bitset (one bit per filter).</summary>
     public int DeepMatchWords => (FilterCount + 63) / 64;
@@ -218,7 +246,8 @@ public sealed class FilterSnapshot
         foreach (var node in _nodesByIndex)
         {
             if (!node.SubtreeHasEnabled || !node.Cacheable) continue;
-            filters.Add(new CacheableFilter(node.Index, node.CacheKey, node.Enabled, node.Kind == FilterKind.Exclude));
+            filters.Add(new CacheableFilter(node.Index, node.CacheKey, node.Enabled,
+                                            node.Kind == FilterKind.Exclude, node.EnabledParent));
         }
         return filters;
     }
@@ -353,7 +382,7 @@ public sealed class FilterSnapshot
     private static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, HashSet<Filter>? chain,
                                         MarkerStore? markers)
     {
-        bool anyEnabled = false, anyInclude = false, anyMarker = false;
+        bool anyEnabled = false, anyInclude = false, anyMarker = false, anyOverruled = false;
         int counter = 0;
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
@@ -368,9 +397,11 @@ public sealed class FilterSnapshot
             for (int i = 0; i < markerVersions.Length; i++) markerVersions[i] = markers.VersionOf(i);
         }
 
-        Node Convert(Filter f, string parentKey, bool parentCacheable, int parentChainMarkers)
+        Node Convert(Filter f, string parentKey, bool parentCacheable, int parentChainMarkers,
+                     int enabledParent, bool vetoAbove)
         {
             bool enabled = f.Enabled || ReferenceEquals(f, forceEnabled);
+            bool vetoes = enabled && f.Kind == FilterKind.Exclude;
             var node = new Node
             {
                 Type = f.Match.Type,
@@ -378,8 +409,11 @@ public sealed class FilterSnapshot
                 CaseSensitive = f.Match.CaseSensitive,
                 MarkerIndex = f.Match.MarkerIndex,
                 Enabled = enabled,
+                Vetoes = vetoes,
+                VetoInScope = vetoAbove || vetoes,
                 Kind = f.Kind,
                 Index = counter++,
+                EnabledParent = enabledParent,
                 Source = f
             };
             index[f] = node.Index;
@@ -436,15 +470,24 @@ public sealed class FilterSnapshot
             var kept = new List<Node>(f.Children.Count);
             foreach (var child in f.Children)
                 if (chain is null || chain.Contains(child))
-                    kept.Add(Convert(child, node.CacheKey, node.Cacheable, node.ChainMarkers));
+                    kept.Add(Convert(child, node.CacheKey, node.Cacheable, node.ChainMarkers,
+                                     enabled ? node.Index : enabledParent, node.VetoInScope));
             node.Children = kept.ToArray();
 
             // Every descendant has now taken its index, so the counter is one past the last of them.
             node.SubtreeEnd = counter;
 
             node.SubtreeHasEnabled = enabled;
-            foreach (var c in node.Children) node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
+            node.SubtreeHasEnabledInclude = enabled && f.Kind == FilterKind.Include;
+            foreach (var c in node.Children)
+            {
+                node.SubtreeHasEnabled |= c.SubtreeHasEnabled;
+                node.SubtreeHasEnabledInclude |= c.SubtreeHasEnabledInclude;
+            }
             if (node.Type == FilterMatchType.Marker && node.SubtreeHasEnabled) anyMarker = true;
+            if (enabled && f.Kind == FilterKind.Exclude)
+                foreach (var c in node.Children)
+                    if (c.SubtreeHasEnabledInclude) { anyOverruled = true; break; }
             return node;
         }
 
@@ -452,7 +495,7 @@ public sealed class FilterSnapshot
         foreach (var root in filters.Roots)
             if (chain is null || chain.Contains(root)) rootFilters.Add(root);
         var roots = new Node[rootFilters.Count];
-        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], "", true, 0);
+        for (int i = 0; i < rootFilters.Count; i++) roots[i] = Convert(rootFilters[i], "", true, 0, -1, false);
 
         // Collect the plain literals into one automaton per case mode, so a line is scanned once for all of
         // them instead of once per filter. Case-sensitive and -insensitive patterns cannot share a character
@@ -497,7 +540,7 @@ public sealed class FilterSnapshot
         }
 
         return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines,
-            anyEnabled, anyInclude, anyMarker, ci, cs, markerVersions);
+            anyEnabled, anyInclude, anyMarker, anyOverruled, ci, cs, markerVersions);
     }
 
     /// <summary>Evaluates a single line. <paramref name="markers"/> may be null when no marker
@@ -556,16 +599,19 @@ public sealed class FilterSnapshot
         return new LineEval(shown, shown ? best : null);
     }
 
-    private static void Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
+    /// <summary>Walks one node and its subtree. Returns whether anything <b>enabled</b> at or below it
+    /// deep-matched, which is what tells an exclude above that it has been overruled.</summary>
+    private static bool Dfs(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, long[]? counts,
         MatchContext context, Span<ulong> deepMatches, ref int bestEnd, ref Filter? best, ref bool excluded, ref bool anyIncludeMatched)
     {
-        if (!node.SubtreeHasEnabled) return;          // prune: nothing enabled at/below
-        if (!Matches(node, line, lineNumber, markers, context)) return; // prune: descendants require this match
+        if (!node.SubtreeHasEnabled) return false;    // prune: nothing enabled at/below
+        if (!Matches(node, line, lineNumber, markers, context)) return false; // prune: descendants require this match
 
         // Reaching here means every ancestor matched too, so this is a deep match.
         if (!deepMatches.IsEmpty) deepMatches[node.Index >> 6] |= 1UL << (node.Index & 63);
 
-        if (node.Enabled)
+        bool enabled = node.Enabled;
+        if (enabled)
         {
             if (counts is not null) counts[node.Index]++;
             if (node.Kind == FilterKind.Include)
@@ -574,14 +620,37 @@ public sealed class FilterSnapshot
                 // Nothing has claimed the line yet, or this is nested under whatever has.
                 if (node.Index < bestEnd) { best = node.Source; bestEnd = node.SubtreeEnd; }
             }
-            else
-            {
-                excluded = true;
-            }
         }
 
+        // With no exclude at or above this node, whether anything below it matched cannot change what any
+        // exclude says, so the subtree's answer is neither collected nor passed up. That is the whole of an
+        // ordinary filter set - excludes there sit at the foot of the list with nothing nested under them -
+        // and it walks exactly as it did before any of this.
+        if (!node.VetoInScope)
+        {
+            foreach (var child in node.Children)
+                Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
+            return false;
+        }
+
+        bool deeper = false;
         foreach (var child in node.Children)
-            Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
+            deeper |= Dfs(child, line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
+        if (deeper) return true;
+
+        // An exclude's veto is the least specific word said about this line: anything enabled nested under it
+        // that matched too is speaking about a narrower case, and overrules it. Held back until the children
+        // have been walked for exactly that reason - on the way down there is no way to know yet. Note that
+        // one matching enabled descendant anywhere below is enough; its siblings need not match.
+        //
+        // Includes need no such handling. Once the excludes are settled, "some enabled include deep-matched"
+        // and "some enabled include deep-matched with nothing enabled below it matching" hold of exactly the
+        // same lines: take a matching enabled include and walk down to a matching enabled filter with none
+        // below it, and either it is an exclude - which then hides the line anyway - or it is an include
+        // saying show it. Leaving that side alone is what keeps colouring - first in list order, refined only
+        // by its own descendants - exactly as it was.
+        if (node.Vetoes) excluded = true;
+        return enabled;
     }
 
     private static bool Matches(Node node, ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers,
