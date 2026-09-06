@@ -93,6 +93,8 @@ public sealed class MainForm : Form
     private (string Path, int Width) _shownSrc, _shownFilter;
     private int _treePanel = 2; // which split panel holds the filter tree (for show/hide)
     private bool _snapping;     // guards the divider being set from inside its own moved handler
+    private bool _layoutSettled;// false until OnLoad has put the panes where the settings say they belong
+    private bool _arranging;    // true while the app is moving the divider itself, rather than the user
 
     internal LineGridControl GridForTesting => _grid;
     internal SplitContainer SplitForTesting => _split;
@@ -132,6 +134,8 @@ public sealed class MainForm : Form
     internal ProgressBar? StatusProgressForTesting => _progress.Control as ProgressBar;
 
     internal int SplitterDistanceForTesting => _split.SplitterDistance;
+    internal bool FilterListVisibleForTesting => FilterListVisible;
+    internal bool FilterListIsFirstPanelForTesting => _treePanel == 1;
     internal int RowPitchForTesting => _grid.RowPitch;
     internal int FindBarHeightForTesting => _findBar.Height;
     internal bool FindBarIsOpenForTesting => _findBar.Visible;
@@ -290,8 +294,6 @@ public sealed class MainForm : Form
     /// the message loop ends.</summary>
     private readonly UpdateService? _updater;
 
-    private enum FilterDock { Bottom, Top, Left, Right }
-
     public MainForm(AppSettings settings, MachineState state, string[] args, UpdateService? updater = null)
     {
         Automation.Suppress(this);
@@ -317,7 +319,7 @@ public sealed class MainForm : Form
         Controls.Add(_split);
         Controls.Add(_status);
         _split.BringToFront();
-        _split.SplitterMoved += (_, _) => SnapSplitter();
+        _split.SplitterMoved += (_, _) => { SnapSplitter(); RememberFilterListSize(); };
         _grid.ChromeChanged += SnapSplitter;
 
         _grid.Attach(_doc, _settings);
@@ -448,10 +450,17 @@ public sealed class MainForm : Form
         // Sized here, not in the constructor: asked any earlier the form has not scaled itself yet and
         // settles at MinimumSize, which squeezes the filter pane down to nothing.
         if (_offScreen) Size = new Size(1600, 1000);
-        // Seven tenths of the window to the log, which the divider then rounds up to a whole number of lines.
-        try { _split.SplitterDistance = (int)(ClientSize.Height * 0.7); } catch { /* size not ready */ }
+        // The window comes back the way it was left: the list on the edge it was docked to, given the share
+        // of the window it was dragged to, and out of sight if that is where it was put. The divider then
+        // rounds up to a whole number of lines. The defaults are the layout the app has always opened with,
+        // so a machine that has never rearranged anything sees no change at all.
+        ApplyFilterDock(_settings.FilterListDock);
+        ApplyFilterListSize();
+        SetFilterListVisible(_settings.ShowFilterList);
         LayoutPresetPane();
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
+        // Only now are the panes the size they are going to keep, so only now is a divider worth recording.
+        _layoutSettled = true;
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -587,7 +596,7 @@ public sealed class MainForm : Form
             _grid.RefreshView();
             SaveSettingsSoon();
         })
-        { Checked = _settings.ShowLineNumbers };
+        { Checked = _settings.ShowLineNumbers, ShortcutKeys = Keys.Control | Keys.L };
         view.DropDownItems.Add(_miFilteredMode);
         view.DropDownItems.Add(_miLineNumbers);
         _miMatchMap = new ToolStripMenuItem("Show Matc&h Map", null, (_, _) =>
@@ -754,8 +763,8 @@ public sealed class MainForm : Form
         return _miMarkers;
     }
 
-    /// <summary>Ticks whichever marker mode is actually in effect. Preferences can change the same setting,
-    /// so the menu has to re-read it rather than assume it still owns it.</summary>
+    /// <summary>Ticks whichever marker mode is actually in effect. Importing a settings file can change the
+    /// same setting, so the menu has to re-read it rather than assume it still owns it.</summary>
     private void SyncMarkersMenu()
     {
         foreach (ToolStripMenuItem item in _miMarkers.DropDownItems)
@@ -2044,12 +2053,104 @@ public sealed class MainForm : Form
         finally { _snapping = false; }
     }
 
+    /// <summary>The room the divider has to move in, measured the way it is currently turned.</summary>
+    private int SplitTravel =>
+        (_split.Orientation == Orientation.Vertical ? _split.Width : _split.Height) - _split.SplitterWidth;
+
+    /// <summary>The filter list's share of the window - whichever of the two saved fractions applies to the
+    /// way the panes are turned right now.</summary>
+    private double FilterListFraction
+    {
+        get => SaneShare(_split.Orientation == Orientation.Vertical
+                             ? _settings.FilterListWidthFraction
+                             : _settings.FilterListHeightFraction);
+        set
+        {
+            if (_split.Orientation == Orientation.Vertical) _settings.FilterListWidthFraction = value;
+            else _settings.FilterListHeightFraction = value;
+        }
+    }
+
+    /// <summary>A share that leaves both panes on screen. Also the guard against a hand-edited settings file
+    /// - or one from a version that never wrote this - handing over a nonsense number.</summary>
+    private static double SaneShare(double fraction) => double.IsFinite(fraction) ? Math.Clamp(fraction, 0.05, 0.95) : 0.3;
+
+    /// <summary>Puts the divider where the saved share asks for.
+    ///
+    /// <para>What is stored is the filter LIST's share, not the divider's own position: the list moves
+    /// between the two panels as it is docked to one edge or another, so a number measured from the divider
+    /// would mean the log on some edges and the list on others.</para></summary>
+    private void ApplyFilterListSize()
+    {
+        int total = SplitTravel;
+        if (total <= 0) return;
+        // The 60px floor is what docking has always given a list on a small window - a pane too narrow to
+        // read a filter in is no more use than no pane at all.
+        int list = Math.Clamp((int)Math.Round(total * FilterListFraction), Math.Min(60, total / 2), total - 1);
+        WhileArranging(() =>
+        {
+            try { _split.SplitterDistance = _treePanel == 1 ? list : total - list; }
+            catch { /* sizes not ready */ }
+        });
+    }
+
+    /// <summary>Runs a layout change without recording the divider positions it passes through. Rearranging
+    /// the panes moves the divider several times on the way to where it is being put - re-parenting a
+    /// control alone lays the split out again - and none of those are the user's doing. Recorded, they would
+    /// overwrite the very share being restored with whatever the window looked like halfway through it.
+    /// Nested, because sizing the panes is part of docking them.</summary>
+    private void WhileArranging(Action change)
+    {
+        bool was = _arranging;
+        _arranging = true;
+        try { change(); }
+        finally { _arranging = was; }
+    }
+
+    /// <summary>Records the share the divider has just been left at. Nothing is written while the app is
+    /// moving the divider itself or while the window is still being laid out, and nothing is written for a
+    /// move too small to have been meant - a resize re-rounds the divider to whole lines, and a settings
+    /// file rewritten on every drag of a window edge is a settings file being written for no reason.
+    /// </summary>
+    private void RememberFilterListSize()
+    {
+        if (_arranging || !_layoutSettled || _split.Panel1Collapsed || _split.Panel2Collapsed) return;
+        int total = SplitTravel;
+        if (total <= 0) return;
+        double fraction = SaneShare((_treePanel == 1 ? _split.SplitterDistance : total - _split.SplitterDistance) / (double)total);
+        if (Math.Abs(fraction - FilterListFraction) < 0.005) return;
+        FilterListFraction = fraction;
+        SaveSettingsSoon();
+    }
+
+    /// <summary>Moves the filter list to an edge and remembers it. The list arrives at whatever share of the
+    /// window it was last given on that edge, and a hidden list is brought back, so all three parts of where
+    /// the list is stay in step.</summary>
     private void SetFilterDock(FilterDock dock)
-    {        bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
+    {
+        ApplyFilterDock(dock);
+        SetFilterListVisible(true);
+        _settings.FilterListDock = dock;
+        SaveSettingsSoon();
+    }
+
+    /// <summary>The layout half of docking, with nothing recorded - so restoring the saved edge at startup
+    /// and applying an imported one go through the very code the menu item does.
+    ///
+    /// <para>An edge already in effect is left completely alone. Re-docking rebuilds the panes and gives the
+    /// list back the share saved for that edge, which is what moving it should do and emphatically not what
+    /// pressing OK in Preferences should: that would throw away a divider the user had just dragged.</para>
+    /// </summary>
+    private void ApplyFilterDock(FilterDock dock)
+    {
+        bool treeFirst = dock is FilterDock.Top or FilterDock.Left;
         var orientation = dock is FilterDock.Left or FilterDock.Right ? Orientation.Vertical : Orientation.Horizontal;
         int wantedPanel = treeFirst ? 1 : 2;
+        // The panel the tree sits in and the way the divider is turned name one of the four edges between
+        // them, so together they say whether there is anything to do.
+        if (_treePanel == wantedPanel && _split.Orientation == orientation) return;
 
-        WithoutRedraw(() =>
+        WhileArranging(() => WithoutRedraw(() =>
         {
             _split.SuspendLayout();
             _split.Panel1Collapsed = false;
@@ -2072,13 +2173,9 @@ public sealed class MainForm : Form
             // when it is down one edge.
             _filterPane.Orientation = orientation == Orientation.Vertical ? Orientation.Horizontal : Orientation.Vertical;
             LayoutPresetPane();
-
-            int total = orientation == Orientation.Vertical ? _split.Width : _split.Height;
-            int treeSize = Math.Max(60, (int)(total * 0.3));
-            try { _split.SplitterDistance = treeFirst ? treeSize : Math.Max(1, total - treeSize - _split.SplitterWidth); }
-            catch { /* sizes not ready */ }
+            ApplyFilterListSize();
             _split.ResumeLayout();
-        });
+        }));
     }
 
     /// <summary>Applies a layout change with painting switched off for the whole window, so it shows the
@@ -2107,10 +2204,24 @@ public sealed class MainForm : Form
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
 
-    private void ToggleFilterList()
+    /// <summary>Whether the filter list is on screen, read off the pane rather than the setting: the two are
+    /// kept in step through <see cref="SetFilterListVisible"/>, and the pane is the one that is true.</summary>
+    private bool FilterListVisible => !(_treePanel == 1 ? _split.Panel1Collapsed : _split.Panel2Collapsed);
+
+    private void ToggleFilterList() => SetFilterListVisible(!FilterListVisible);
+
+    private void EnsureFilterListVisible() => SetFilterListVisible(true);
+
+    /// <summary>Shows or hides the filter list and remembers which. The pane is set either way - this is
+    /// also how the saved state is put back at startup, when the setting already says what is wanted - and
+    /// only a preference that actually moved is worth writing a settings file for.</summary>
+    private void SetFilterListVisible(bool visible)
     {
-        if (_treePanel == 1) _split.Panel1Collapsed = !_split.Panel1Collapsed;
-        else _split.Panel2Collapsed = !_split.Panel2Collapsed;
+        if (_treePanel == 1) _split.Panel1Collapsed = !visible;
+        else _split.Panel2Collapsed = !visible;
+        if (_settings.ShowFilterList == visible) return;
+        _settings.ShowFilterList = visible;
+        SaveSettingsSoon();
     }
 
     private void FocusTextArea() => _grid.Focus();
@@ -2127,12 +2238,6 @@ public sealed class MainForm : Form
         _ = forward;   // with two areas both directions are the same move
         if (_grid.Focused) FocusFilterList();
         else FocusTextArea();
-    }
-
-    private void EnsureFilterListVisible()
-    {
-        if (_treePanel == 1) _split.Panel1Collapsed = false;
-        else _split.Panel2Collapsed = false;
     }
 
     private bool IsTextInputFocused() => FocusedTextInput() is not null;
@@ -2363,6 +2468,11 @@ public sealed class MainForm : Form
         _miFilterTips.Checked = _settings.ShowFilterTooltips;
         _grid.SetMatchMapVisible(_settings.ShowMatchMap);
         LayoutPresetPane();
+        // The dock leaves an edge already in effect alone, so this costs nothing on the Preferences path and
+        // rearranges the window on the import one - where the share may have arrived changed as well.
+        ApplyFilterDock(_settings.FilterListDock);
+        ApplyFilterListSize();
+        SetFilterListVisible(_settings.ShowFilterList);
         SyncMarkersMenu();
         _grid.ApplySettings(_settings);
         // The line height may have moved with it, and the bar is measured in whole log lines.

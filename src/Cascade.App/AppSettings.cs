@@ -9,6 +9,10 @@ namespace Cascade.App;
 
 public enum MarkerVisibilityMode { Always, Never, WhenInUse }
 
+/// <summary>Which edge of the window the filter list is docked to. Bottom is first so that a settings file
+/// written before this was remembered reads as the layout the app has always opened with.</summary>
+public enum FilterDock { Bottom, Top, Left, Right }
+
 /// <summary>Where the preferences and the per-machine state both live. Overridable with
 /// <c>CASCADE_SETTINGS_DIR</c> so tests never touch the user's real configuration.</summary>
 internal static class SettingsFolder
@@ -74,6 +78,29 @@ public sealed class AppSettings
 
     /// <summary>Whether the filter presets pane shares the filter pane.</summary>
     public bool ShowFilterPresets { get; set; } = true;
+
+    /// <summary>Which edge the filter list is docked to, and whether it is on screen at all. Where the panes
+    /// sit is how a window is set up to be worked in, and having to lay it out again on every launch is the
+    /// sort of thing that is only noticed by being done for the hundredth time.</summary>
+    public FilterDock FilterListDock { get; set; } = FilterDock.Bottom;
+
+    /// <inheritdoc cref="FilterListDock"/>
+    public bool ShowFilterList { get; set; } = true;
+
+    /// <summary>How much of the window the filter list takes, as a fraction of the divider's travel. Two of
+    /// them because the divider means different things on different edges: a list that reads well as a strip
+    /// along the bottom is a cramped column down the side, so the depth it was given as one is no guide to
+    /// the width it should have as the other.
+    ///
+    /// <para>A fraction rather than the pixel count the divider actually deals in. The window is a different
+    /// size on the next monitor, at the next DPI and on the next machine, and this file is meant to survive
+    /// all three - a saved 480 pixels would restore a different layout, not the same one. It is also how the
+    /// divider already behaves: the panes are left proportional, so they keep their shares as the window is
+    /// resized.</para></summary>
+    public double FilterListHeightFraction { get; set; } = 0.3;
+
+    /// <inheritdoc cref="FilterListHeightFraction"/>
+    public double FilterListWidthFraction { get; set; } = 0.3;
 
     /// <summary>Whether the match map replaces the log view's vertical scrollbar.</summary>
     public bool ShowMatchMap { get; set; } = true;

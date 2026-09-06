@@ -49,7 +49,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 - **Count** is how many lines in the whole file match, not how many are on screen.
 - `Shift+Space` switches a filter's whole subtree on or off.
-- The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`).
+- The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`) — and comes back next time on the same edge, at the same size.
 
 ### From the log to a filter
 
@@ -315,7 +315,7 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+H` | Show only filtered lines |
 | `Ctrl+N` / `Ctrl+Shift+N` / `Ctrl+Alt+N` | New filter from the selection or the current line, going to the usual end of the list / above the selected filter / under it as a child |
 | `Ctrl+E` | Search the filter list |
-| `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Match map or plain scrollbar / word wrap / split lines into fields |
+| `Ctrl+L` / `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Line numbers / match map or plain scrollbar / word wrap / split lines into fields |
 | `Ctrl+Shift+X` / `Ctrl+Shift+D` | Switch field layout / field settings |
 | `Ctrl+Shift+M` / `Ctrl+Shift+B` | Elapsed times in the margin / in the status bar |
 | `Ctrl+R` / `Ctrl+Shift+R` | Measure from this line / step through what to measure from |

@@ -116,6 +116,7 @@ internal static class SelfTest
             ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
             ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
             ok &= Timed("divider", RunSplitterChecks);
+            ok &= Timed("filter pane memory", RunFilterPaneMemoryChecks);
             ok &= Timed("window snapping", RunWindowSnapChecks);
             ok &= Timed("closing", RunClosingChecks);
             ok &= Timed("file drop", RunFileDropChecks);
@@ -9524,6 +9525,22 @@ internal static class SelfTest
                         settings.ShowLineNumbers && grid.GutterWidthForTesting == gutter,
                         $"gutter is {grid.GutterWidthForTesting}, was {gutter}");
 
+            // And the key does it too. Preferences no longer carries a second copy of this setting, so the
+            // View menu is the only place it is offered - which makes the key that saves opening the menu
+            // worth pressing here rather than taking on trust.
+            grid.Focus();
+            Pump();
+            form.PressCmdKeyForTesting(Keys.Control | Keys.L);
+            Pump();
+            ok &= Check("Ctrl+L takes the numbers away too",
+                        !settings.ShowLineNumbers && grid.GutterWidthForTesting < gutter,
+                        $"gutter {gutter} -> {grid.GutterWidthForTesting}");
+            form.PressCmdKeyForTesting(Keys.Control | Keys.L);
+            Pump();
+            ok &= Check("and again brings them back",
+                        settings.ShowLineNumbers && grid.GutterWidthForTesting == gutter,
+                        $"gutter is {grid.GutterWidthForTesting}, was {gutter}");
+
             ok &= Check("View > Show Match Map takes the map away",
                         form.ClickMenuForTesting("View", "Show Match Map") &&
                         !settings.ShowMatchMap && grid.MapWidthForTesting == 0,
@@ -9570,9 +9587,62 @@ internal static class SelfTest
                                 $"{grid.Height - grid.ChromeHeight}px of text, a line is {grid.RowPitch}px");
                 ok &= Check($"  and the log is still on screen with the list {where[5..]}",
                             grid.Width > 50 && grid.Height > 50, $"{grid.Width}x{grid.Height}");
+                ok &= Check($"  and remembers that the list is {where[5..]}",
+                            settings.FilterListDock == Enum.Parse<FilterDock>(where[5..]),
+                            settings.FilterListDock.ToString());
             }
             form.ClickMenuForTesting("View", "Filter List Location", "Dock Bottom");
             Pump();
+
+            // Docking to the edge it is already on has to leave the divider where it is. The same code runs
+            // when Preferences is closed and when a settings file is imported, and either of those resetting
+            // a divider the user had dragged would be a change nobody asked for.
+            form.SplitForTesting.SplitterDistance = form.SplitterDistanceForTesting - 60;
+            Pump();
+            int dragged = form.SplitterDistanceForTesting;
+            ok &= Check("docking where it already is leaves a dragged divider alone",
+                        form.ClickMenuForTesting("View", "Filter List Location", "Dock Bottom") &&
+                        form.SplitterDistanceForTesting == dragged,
+                        $"{dragged} -> {form.SplitterDistanceForTesting}");
+
+            ok &= Check("View > Filter List Location > Show/Hide Filter List takes the list away",
+                        form.ClickMenuForTesting("View", "Filter List Location", "Show/Hide Filter List") &&
+                        !form.FilterListVisibleForTesting && !settings.ShowFilterList,
+                        $"on screen {form.FilterListVisibleForTesting}, remembered {settings.ShowFilterList}");
+            ok &= Check("and again brings it back",
+                        form.ClickMenuForTesting("View", "Filter List Location", "Show/Hide Filter List") &&
+                        form.FilterListVisibleForTesting && settings.ShowFilterList,
+                        $"on screen {form.FilterListVisibleForTesting}, remembered {settings.ShowFilterList}");
+
+            // Dragging the divider is how the list is given its size, so that is what has to be recorded.
+            double wasHeight = settings.FilterListHeightFraction;
+            form.SplitForTesting.SplitterDistance = form.SplitterDistanceForTesting - 80;
+            Pump();
+            ok &= Check("dragging the divider records the list's new share of the window",
+                        settings.FilterListHeightFraction > wasHeight + 0.02,
+                        $"{wasHeight:F3} -> {settings.FilterListHeightFraction:F3}");
+            ok &= Check("and it is the share the divider actually settled on",
+                        Math.Abs(settings.FilterListHeightFraction -
+                                 Share(form.SplitForTesting, form.FilterListIsFirstPanelForTesting)) < 0.01,
+                        $"recorded {settings.FilterListHeightFraction:F3}, " +
+                        $"on screen {Share(form.SplitForTesting, form.FilterListIsFirstPanelForTesting):F3}");
+
+            // The two edges keep separate sizes: a strip along the bottom and a column down the side are not
+            // the same shape, so a drag of one must not resize the other.
+            double bottomShare = settings.FilterListHeightFraction;
+            form.ClickMenuForTesting("View", "Filter List Location", "Dock Left");
+            Pump();
+            form.SplitForTesting.SplitterDistance = form.SplitterDistanceForTesting + 90;
+            Pump();
+            ok &= Check("a drag with the list down the side records the width, not the height",
+                        settings.FilterListHeightFraction == bottomShare &&
+                        settings.FilterListWidthFraction > 0.3,
+                        $"height {settings.FilterListHeightFraction:F3} (was {bottomShare:F3}), " +
+                        $"width {settings.FilterListWidthFraction:F3}");
+            ok &= Check("and docking back to the bottom restores the height it had there",
+                        form.ClickMenuForTesting("View", "Filter List Location", "Dock Bottom") &&
+                        Math.Abs(Share(form.SplitForTesting, form.FilterListIsFirstPanelForTesting) - bottomShare) < 0.03,
+                        $"wanted {bottomShare:F3}, got {Share(form.SplitForTesting, form.FilterListIsFirstPanelForTesting):F3}");
 
             // Filters: the two that touch every filter at once.
             ok &= Check("Filters > Disable All switches them all off",
@@ -9718,6 +9788,123 @@ internal static class SelfTest
                     $"{Lines(split.SplitterDistance)}px of text at window height {form.Height}");
 
         form.Close();
+        return ok;
+    }
+
+    /// <summary>The filter list's share of a divider's travel, worked out the way the app records it: from
+    /// the list's own side, whichever of the two panels that happens to be on the edge it is docked to.
+    /// </summary>
+    private static double Share(SplitContainer split, bool listIsFirstPanel)
+    {
+        int total = (split.Orientation == Orientation.Vertical ? split.Width : split.Height) - split.SplitterWidth;
+        if (total <= 0) return 0;
+        return (listIsFirstPanel ? split.SplitterDistance : total - split.SplitterDistance) / (double)total;
+    }
+
+    /// <summary>Where the filter list was left is where it comes back. The edge it is docked to, the share of
+    /// the window it was given there and whether it was on screen at all are preferences like any other, so a
+    /// window built from a settings file naming them has to OPEN that way - being able to set the layout up
+    /// again by hand is not the same thing.
+    ///
+    /// <para>Checked on a form that is actually shown, because the layout is restored in OnLoad: the panes
+    /// are worked out from the window's size, and asked any earlier they would measure the wrong one.</para>
+    /// </summary>
+    private static bool RunFilterPaneMemoryChecks()
+    {
+        Line("-- the filter list comes back where it was left --");
+
+        static MainForm Open(AppSettings settings)
+        {
+            var form = new MainForm(settings, new MachineState(), Array.Empty<string>())
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = new Size(900, 700),
+            };
+            form.Show();
+            Pump();
+            return form;
+        }
+
+        var saved = new AppSettings { FilterListDock = FilterDock.Left };
+        bool ok;
+        using (var form = Open(saved))
+        {
+            var split = form.SplitForTesting;
+            ok = Check("a saved edge of Left turns the divider on its side",
+                       split.Orientation == Orientation.Vertical, split.Orientation.ToString());
+            ok &= Check("and puts the list in the panel on the left",
+                        form.FilterListIsFirstPanelForTesting &&
+                        split.Panel2.Controls.Contains(form.GridForTesting));
+            ok &= Check("and the list is on screen", form.FilterListVisibleForTesting);
+            ok &= Check("and opening the window has not changed what was saved",
+                        saved.FilterListDock == FilterDock.Left && saved.ShowFilterList,
+                        $"{saved.FilterListDock}, shown {saved.ShowFilterList}");
+            form.Close();
+        }
+        Pump();
+
+        // Hidden is the awkward one: the pane it collapses belongs to whichever side the dock just put the
+        // list on, so the two settings have to be applied in that order or the wrong panel disappears and
+        // the log goes with it.
+        var hidden = new AppSettings { FilterListDock = FilterDock.Top, ShowFilterList = false };
+        using (var form = Open(hidden))
+        {
+            ok &= Check("a list saved hidden opens hidden", !form.FilterListVisibleForTesting);
+            ok &= Check("and it is the list that is gone, not the log",
+                        form.GridForTesting.Width > 50 && form.GridForTesting.Height > 50,
+                        $"{form.GridForTesting.Width}x{form.GridForTesting.Height}");
+            ok &= Check("and it comes back on the edge it was saved on",
+                        form.ClickMenuForTesting("View", "Filter List Location", "Show/Hide Filter List") &&
+                        form.FilterListVisibleForTesting && form.FilterListIsFirstPanelForTesting &&
+                        form.SplitForTesting.Orientation == Orientation.Horizontal,
+                        $"first panel {form.FilterListIsFirstPanelForTesting}, {form.SplitForTesting.Orientation}");
+            form.Close();
+        }
+        Pump();
+
+        // And the default is the layout the app has always opened with, so a machine that has never moved
+        // the list sees no change at all.
+        using (var form = Open(new AppSettings()))
+        {
+            var split = form.SplitForTesting;
+            int total = split.Height - split.SplitterWidth;
+            ok &= Check("with nothing saved the list is still under the log",
+                        split.Orientation == Orientation.Horizontal && !form.FilterListIsFirstPanelForTesting &&
+                        form.FilterListVisibleForTesting);
+            ok &= Check("and the divider still opens at about seven tenths",
+                        split.SplitterDistance > total * 0.6 && split.SplitterDistance < total * 0.85,
+                        $"{split.SplitterDistance} of {total}");
+            form.Close();
+        }
+        Pump();
+
+        // A saved share has to survive the window being a different size than it was on: the whole reason it
+        // is kept as a fraction rather than as the pixel count the divider deals in.
+        var sized = new AppSettings { FilterListHeightFraction = 0.55 };
+        foreach (var size in new[] { new Size(900, 700), new Size(1300, 980) })
+        {
+            sized.FilterListHeightFraction = 0.55;
+            using var form = new MainForm(sized, new MachineState(), Array.Empty<string>())
+            {
+                NoSavePrompt = true,
+                Opacity = 0,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0),
+                Size = size,
+            };
+            form.Show();
+            Pump();
+            double share = Share(form.SplitForTesting, form.FilterListIsFirstPanelForTesting);
+            // Half a line of slack: the divider is rounded to whole lines after the share is applied.
+            ok &= Check($"a saved share of 0.55 opens at 0.55 in a {size.Width}x{size.Height} window",
+                        Math.Abs(share - 0.55) < 0.03, $"{share:F3}");
+            form.Close();
+            Pump();
+        }
+
         return ok;
     }
 
@@ -10730,6 +10917,7 @@ internal static class SelfTest
         string[] shortcuts =
         [
             "Find Filter\tCtrl+E", "Split Lines Into Fields\tCtrl+Shift+C", "Field Settings\u2026\tCtrl+Shift+D",
+            "Show Line Numbers\tCtrl+L",
             // The three places a new filter can go, each on the key the dialog writes beside that choice.
             "Add Filter\u2026\tCtrl+N", "Add Filter Above Selected\u2026\tCtrl+Shift+N",
             "Add Child Filter\u2026\tCtrl+Alt+N"
@@ -11015,6 +11203,10 @@ internal static class SelfTest
                 TabSize = 7,
                 ShowLineNumbers = false,
                 MarkerVisibility = MarkerVisibilityMode.Never,
+                FilterListDock = FilterDock.Right,
+                ShowFilterList = false,
+                FilterListHeightFraction = 0.42,
+                FilterListWidthFraction = 0.18,
                 ForegroundArgb = Color.Teal.ToArgb(),
                 BackgroundArgb = Color.Ivory.ToArgb(),
                 AutoLoadLastFilterFile = false

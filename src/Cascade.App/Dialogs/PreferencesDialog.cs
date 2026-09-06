@@ -3,7 +3,12 @@ using System.Windows.Forms;
 
 namespace Cascade.App;
 
-/// <summary>Edits <see cref="AppSettings"/> (font, colors, tab size, line numbers, markers).</summary>
+/// <summary>Edits the parts of <see cref="AppSettings"/> that have nowhere else to live: font, colors, tab
+/// size, and the switches nobody throws often enough to want a menu entry for.
+///
+/// <para>Anything the View menu already toggles is left there and not repeated here. A setting offered in
+/// two places is two places to look for it and two things to keep ticked in step, and the menu wins every
+/// time: it says what it is set to without being opened, and it can carry a key.</para></summary>
 public sealed class PreferencesDialog : DialogBase
 {
     private readonly AppSettings _s;
@@ -11,12 +16,10 @@ public sealed class PreferencesDialog : DialogBase
     private readonly NumericUpDown _size = new() { Minimum = 6, Maximum = 48, DecimalPlaces = 1, Increment = 0.5m };
     private readonly NumericUpDown _tab = new() { Minimum = 1, Maximum = 16 };
     private readonly NumericUpDown _lineSpacing = new() { Minimum = 0, Maximum = 12 };
-    private readonly CheckBox _lineNumbers = new() { Text = "Show line numbers", AutoSize = true };
     private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
     private readonly CheckBox _newFiltersAtTop = new() { Text = "Add new filters at the top of the list", AutoSize = true };
     private readonly CheckBox _hangWatchdog = new() { Text = "Write a memory dump to %TEMP% if the window stops responding", AutoSize = true };
     private readonly CheckBox _automation = new() { Text = "Support screen readers and UI automation (takes effect at next launch)", AutoSize = true };
-    private readonly ComboBox _markers = new() { DropDownStyle = ComboBoxStyle.DropDownList };
 
     private readonly Button _fg = new() { FlatStyle = FlatStyle.Flat };
     private readonly Button _bg = new() { FlatStyle = FlatStyle.Flat };
@@ -29,8 +32,6 @@ public sealed class PreferencesDialog : DialogBase
         Text = "Preferences";
 
         foreach (var f in FontFamily.Families) _font.Items.Add(f.Name);
-        _markers.Items.AddRange(new object[] { "Always", "Never", "When in use" });
-        _markers.Width = Dpi(150);
         _size.Width = Dpi(70);
         _tab.Width = Dpi(70);
         _lineSpacing.Width = Dpi(70);
@@ -71,8 +72,6 @@ public sealed class PreferencesDialog : DialogBase
         Row("Selection:", _selBg);
         Row("Dimmed text:", _dim);
         Row("Tab size:", _tab);
-        Row("Markers:", _markers);
-        Row("", _lineNumbers);
         Row("", _autoLoadFilters);
         Row("", _newFiltersAtTop);
         Row("", _hangWatchdog);
@@ -111,12 +110,10 @@ public sealed class PreferencesDialog : DialogBase
         _size.Value = (decimal)Math.Clamp(_s.FontSize, 6f, 48f);
         _tab.Value = Math.Clamp(_s.TabSize, 1, 16);
         _lineSpacing.Value = Math.Clamp(_s.ExtraLineSpacing, 0, 12);
-        _lineNumbers.Checked = _s.ShowLineNumbers;
         _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
         _newFiltersAtTop.Checked = _s.AddNewFiltersAtTop;
         _hangWatchdog.Checked = _s.HangWatchdog;
         _automation.Checked = _s.Automation;
-        _markers.SelectedIndex = (int)_s.MarkerVisibility;
     }
 
     private void Apply()
@@ -125,11 +122,9 @@ public sealed class PreferencesDialog : DialogBase
         _s.FontSize = (float)_size.Value;
         _s.TabSize = (int)_tab.Value;
         _s.ExtraLineSpacing = (int)_lineSpacing.Value;
-        _s.ShowLineNumbers = _lineNumbers.Checked;
         _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
         _s.AddNewFiltersAtTop = _newFiltersAtTop.Checked;
         _s.HangWatchdog = _hangWatchdog.Checked;
         _s.Automation = _automation.Checked;
-        _s.MarkerVisibility = (MarkerVisibilityMode)_markers.SelectedIndex;
     }
 }
