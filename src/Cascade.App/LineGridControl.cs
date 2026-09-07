@@ -815,6 +815,9 @@ public sealed class LineGridControl : Control
     {
         _map?.InvalidateColors();
         Invalidate();
+        // An edit that changed only how a filter looks still changes what a tip about it SAYS - the tip
+        // names the description, and an appearance-only edit is one that leaves the matching alone.
+        RetellTip();
     }
 
     internal MiniMapControl? MatchMapForTesting => _map;
@@ -1128,6 +1131,9 @@ public sealed class LineGridControl : Control
         if (_anchorLine >= 0) ApplyViewAnchor();
         SyncVScrollValue(); // reflect the final position in the (possibly grown) range
         Invalidate();
+        // The lines have moved; the pointer has not. Last, so the tip is worked out from the view as it
+        // has just been left rather than as it was.
+        RetellTip();
     }
 
     private void UpdateHScroll()
@@ -3422,6 +3428,42 @@ public sealed class LineGridControl : Control
         ShowTipNow();
     }
 
+    /// <summary>Says the line tip again when the lines have moved under a pointer that has not.
+    ///
+    /// <para>A tip answers "what is under my pointer", and what is under it changes without the mouse
+    /// moving every time the visible set does - a filter switched on or off, the filtered-out lines hidden
+    /// or brought back, a crop taken away. Left to the next mouse move, the words go on describing a line
+    /// that is somewhere else now, or gone.</para>
+    ///
+    /// <para>The rule is simply that while the pointer rests on a row the tip says what is on that row: it
+    /// is rewritten when the words change, taken down when there is nothing left to say, and put back up
+    /// when there is something again. Called from the two places the view's CONTENT changes
+    /// (<see cref="RefreshView"/> and <see cref="RefreshColors"/>), not from painting or scrolling - so it
+    /// costs one field test unless the pointer is actually resting on a line, and disturbs the window on
+    /// screen only when the words really do come out different.</para></summary>
+    private void RetellTip()
+    {
+        // Nothing settled under the pointer: it is off the text, on a chip, or still counting down - and a
+        // countdown reads the view for itself when it fires.
+        if (_tipRow < 0 || _tipChip != -1 || _tipTimer.Enabled || _doc is null) return;
+
+        long row = RowAtY(_tipPoint.Y);
+        if (row < 0 || row >= _doc.RowCount) { HideTip(); return; }
+        _tipRow = row;
+        string text = BuildTip(row);
+        if (text == _tipText) return;
+        if (text.Length == 0)
+        {
+            // Nothing to say about this line any more. The pointer is still resting on it, so the hover
+            // stays armed and words return the moment there are any.
+            _tips.Hide(this);
+            _tipShowing = false;
+            _tipText = "";
+            return;
+        }
+        SayTip(text);
+    }
+
     private void ShowTipNow()
     {
         _tipTimer.Stop();
@@ -3430,27 +3472,30 @@ public sealed class LineGridControl : Control
         if (_tipChip >= 0)
         {
             if (_tipChip >= _doc.Columns.Columns.Count) return;
-            Say(ChipTipText(_tipChip));
+            SayTip(ChipTipText(_tipChip));
             return;
         }
 
         if (_tipChip == OverflowChip)
         {
-            Say($"{_chipsOverflowing} more field{(_chipsOverflowing == 1 ? "" : "s")} than there is room for.\nClick for the whole list.");
+            SayTip($"{_chipsOverflowing} more field{(_chipsOverflowing == 1 ? "" : "s")} than there is room for.\nClick for the whole list.");
             return;
         }
 
+        // Re-derived rather than taken as recorded: the view may have moved in the six hundred milliseconds
+        // the pointer was settling, and the tip belongs to whatever is under it now.
+        if (_tipRow >= 0) _tipRow = RowAtY(_tipPoint.Y);
         if (_tipRow < 0 || _tipRow >= _doc.RowCount) return;
         string text = BuildTip(_tipRow);
         if (text.Length == 0) return;
-        Say(text);
+        SayTip(text);
+    }
 
-        void Say(string words)
-        {
-            _tips.Show(words, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
-            _tipText = words;
-            _tipShowing = true;
-        }
+    private void SayTip(string words)
+    {
+        _tips.Show(words, this, _tipPoint.X + 16, _tipPoint.Y + 20, TipDurationMs);
+        _tipText = words;
+        _tipShowing = true;
     }
 
     /// <summary>What a chip's tip says, which is entirely about the state that chip is in - so it has to be

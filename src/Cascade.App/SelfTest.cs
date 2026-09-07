@@ -5251,6 +5251,65 @@ internal static class SelfTest
                         grid.TipTextForTesting(1));
             ok &= Check("a switched-off filter that matched is still named",
                         grid.TipTextForTesting(2).Contains("heartbeat (off)"), grid.TipTextForTesting(2));
+
+            // --- the tip follows the lines, and the mouse never moves ---
+            // A tip answers "what is under my pointer". Cropping, hiding the filtered-out lines and
+            // switching a filter all change what is under it without the pointer going anywhere, so
+            // nothing but this would ever put the words right.
+            grid.HoverRowForTesting(0);
+            grid.ShowTipNowForTesting();
+            Pump();
+            string resting = grid.ShownTipForTesting;
+            ok &= Check($"resting on a line puts up what matched it (\"{resting.Split('\n')[0]}\")",
+                        resting.Contains("Errors", StringComparison.Ordinal), resting);
+
+            // A crop is the cheapest of the three to drive and asks exactly the same question: the top row
+            // is a different line now.
+            doc.SetCrop(2, 3);
+            grid.RefreshView();
+            Pump();
+            ok &= Check($"cropping to another line rewrites the tip on the spot (\"{grid.ShownTipForTesting}\")",
+                        grid.ShownTipForTesting.Contains("heartbeat (off)", StringComparison.Ordinal),
+                        grid.ShownTipForTesting);
+
+            doc.ClearCrop();
+            grid.RefreshView();
+            Pump();
+            ok &= Check("and taking the crop away puts the first line's tip back",
+                        grid.ShownTipForTesting.Contains("Errors", StringComparison.Ordinal),
+                        grid.ShownTipForTesting);
+
+            // Re-describing a filter matches the same lines, so it never reaches RefreshView - and the tip
+            // quotes the description, so it goes stale by a different road.
+            doc.Filters.Roots[0].Description = "Failures";
+            grid.RefreshColors();
+            Pump();
+            ok &= Check($"re-describing a filter rewrites the tip too (\"{grid.ShownTipForTesting.Split('\n')[0]}\")",
+                        grid.ShownTipForTesting.Contains("Failures", StringComparison.Ordinal),
+                        grid.ShownTipForTesting);
+
+            doc.SetCrop(1, 2);   // "plain line", which nothing matches at all
+            grid.RefreshView();
+            Pump();
+            ok &= Check("a line with nothing to say about it takes the tip down",
+                        grid.ShownTipForTesting.Length == 0, grid.ShownTipForTesting);
+
+            doc.ClearCrop();
+            grid.RefreshView();
+            Pump();
+            ok &= Check("and the hover stays armed, so the words come back when there are any again",
+                        grid.ShownTipForTesting.Contains("Failures", StringComparison.Ordinal),
+                        grid.ShownTipForTesting);
+
+            // The pointer off the text is not a pointer resting on a line, and a change to the view must
+            // not conjure a tip for one it is not on.
+            grid.HideTipForTesting();
+            doc.SetCrop(2, 3);
+            grid.RefreshView();
+            Pump();
+            ok &= Check("nothing is put up for a pointer that is not on a line",
+                        grid.ShownTipForTesting.Length == 0, grid.ShownTipForTesting);
+            doc.ClearCrop();
             return ok;
         }
         finally
