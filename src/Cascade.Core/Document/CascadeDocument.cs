@@ -966,7 +966,9 @@ public sealed class CascadeDocument : IDisposable
     /// it. Only a filter this pass is actually working out - one added or edited, or one whose chain is not
     /// cacheable - has a count still climbing. Without the distinction a new filter would put every
     /// already-settled count in the list back to "still counting" for as long as it took to apply.</para>
-    /// <para>Unsettled is the safe answer, so where nothing is known (-1) this follows the pass.</para></summary>
+    /// <para>Unsettled is the safe answer, so where nothing is known (-1) this follows the pass.</para>
+    /// <para>Under a crop, finality is of the CROP and not of the file: once the sweep is past the crop's last
+    /// line every line it admits has been looked at, whatever is left of the file to read.</para></summary>
     public long MatchCountFor(Filter filter, out bool final)
     {
         var gen = _generation;
@@ -982,22 +984,39 @@ public sealed class CascadeDocument : IDisposable
             return Crop is { } crop ? known.CountInRange(crop.From, crop.ToExclusive) : known.Matches;
         }
 
-        // Cropped, with nothing remembered for this filter. The pass accumulates one number for the whole
-        // file and cannot say how much of it fell inside the crop, and a whole-file count shown against a
-        // cropped view would be a plain lie. "Still counting" is the honest answer, and it is the one already
-        // drawn for a number that has not settled.
+        // Cropped, with nothing remembered for this filter. The pass keeps one running total per filter for
+        // the whole file, which cannot say how much of it fell inside the crop, and a whole-file count shown
+        // against a cropped view would be a plain lie.
         //
-        // Usually that is a passing state: a set is stored the moment the pass covers the whole file, so the
-        // number arrives as soon as indexing and the pass are done. But it is not only that. A filter whose
-        // chain cannot be NAMED has no set stored for it ever, and so reads as still counting for as long as
-        // the crop is on - see FilterSnapshot.Cacheable. Two shapes reach it: a marker filter naming no valid
-        // marker, which a filter file can express and which matches nothing by design (and every filter
-        // beneath it, since Cacheable is inherited), and a chain whose marks have moved since the snapshot
-        // was built, which ChainMarksMoved refuses to answer from. Both are counts that will not settle
-        // rather than counts still being worked out; the ellipsis overstates how much is in flight, but it
-        // never overstates the count itself, which is what a crop must not do.
-        if (Crop is not null)
+        // The half-built set behind the same pass can say, because it records WHICH lines matched - so a
+        // cropped count climbs with the sweep like an uncropped one, and settles the moment the sweep clears
+        // the crop's end rather than the file's. For a crop near the start of a long file that is the
+        // difference between a number arriving at once and one arriving minutes later.
+        //
+        // Only for an enabled filter: the set is of deep matches, which do not depend on what is switched on,
+        // while a count of nothing is what a switched-off filter has always reported.
+        if (Crop is { } cropped)
         {
+            // "Complete" is read BEFORE the count it licenses: indexing seen finished first means the total
+            // read next is the file's final one and cannot grow under the comparison below. The other order
+            // could pair a total taken mid-index with a completion that arrived after it, and call a sweep
+            // finished at a line the file had since grown past.
+            bool indexed = IsIndexComplete;
+            long total = CompletedLineCount;
+
+            if (filter.Enabled && _filterService is not null
+                && _filterService.TryCountInRange(gen.Snapshot, filter, cropped.From, cropped.ToExclusive,
+                                                  out long inCrop, out long covered))
+            {
+                // Every line the crop admits has been looked at once the sweep is past its end - or past the
+                // end of a file that has none left to give.
+                final = covered >= cropped.ToExclusive || (indexed && covered >= total);
+                return inCrop;
+            }
+
+            // A chain that cannot be named has no set being built for it, so there is nothing positional to
+            // count and no honest number to show - see FilterSnapshot.Cacheable. "Still counting" is the
+            // safe answer, and for those filters it is one that never settles.
             final = false;
             return -1;
         }

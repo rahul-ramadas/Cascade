@@ -360,6 +360,57 @@ public sealed class FilterMatchCache
             }
             return found < 0 ? -1 : _sparse[found];
         }
+
+        /// <summary>How many of this filter's lines the pass has found in <c>[from, toExclusive)</c>, counting
+        /// only as far as it has swept.
+        /// <para>The pass keeps one running total per filter for the whole file, which cannot say how much of
+        /// it fell inside a crop. This can, because the half-built set records WHICH lines matched and not
+        /// merely how many - so a cropped count can climb with the sweep instead of waiting for the finished
+        /// set. Costs a pair of binary searches, or a popcount of the range's words once the set has gone
+        /// dense; never a walk of the lines.</para>
+        /// <para>As with <see cref="Next(long, long)"/>, only the caller knows how far the pass has reached,
+        /// so <paramref name="covered"/> is passed in - anything beyond it has not been looked at and must not
+        /// be counted as a miss.</para></summary>
+        public long CountInRange(long from, long toExclusive, long covered)
+        {
+            if (from < 0) from = 0;
+            if (toExclusive > covered) toExclusive = covered;
+            if (toExclusive <= from) return 0;
+
+            if (_dense is ulong[] dense)
+            {
+                long first = from >> 6;
+                if (first >= dense.LongLength) return 0;   // nothing has matched this far up yet
+
+                long wanted = (toExclusive - 1) >> 6;
+                long last = Math.Min(wanted, dense.LongLength - 1);
+                ulong head = ulong.MaxValue << (int)(from & 63);
+                // The end mask belongs to the word the range really ends in. When the range runs past what has
+                // been allocated the walk stops earlier, and that last word is whole rather than clipped.
+                int lastBit = (int)((toExclusive - 1) & 63);
+                ulong tail = last != wanted || lastBit == 63 ? ulong.MaxValue : (1UL << (lastBit + 1)) - 1;
+
+                if (first == last) return BitOperations.PopCount(dense[first] & head & tail);
+                long n = BitOperations.PopCount(dense[first] & head);
+                for (long w = first + 1; w < last; w++) n += BitOperations.PopCount(dense[w]);
+                return n + BitOperations.PopCount(dense[last] & tail);
+            }
+
+            return LowerBound(toExclusive) - LowerBound(from);
+        }
+
+        /// <summary>Index of the first recorded line at or after <paramref name="line"/>. The pass hands words
+        /// over in ascending order, so the sparse list ascends and can be searched rather than scanned.</summary>
+        private int LowerBound(long line)
+        {
+            int lo = 0, hi = _sparseCount;
+            while (lo < hi)
+            {
+                int mid = (lo + hi) >> 1;
+                if (_sparse[mid] < line) lo = mid + 1; else hi = mid;
+            }
+            return lo;
+        }
     }
 
     /// <summary>

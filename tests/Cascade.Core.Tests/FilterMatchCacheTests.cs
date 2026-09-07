@@ -979,6 +979,71 @@ public class FilterMatchCacheTests
         Assert.Equal(-1, builder.Previous(0, 0));
     }
 
+    [Theory]
+    [InlineData(3)]        // dense storage
+    [InlineData(5_000)]    // sparse storage
+    [InlineData(0)]        // nothing matches at all
+    public void Half_built_results_can_be_counted_over_a_range(int matchEvery)
+    {
+        // What a cropped count is read from while a pass runs: how many of this filter's lines lie in a
+        // stretch of the file, counting only as far as the sweep has reached. Checked against a brute-force
+        // walk, at both storage densities, over ranges that start and end mid-word and run past both the
+        // swept extent and the end of the file.
+        const long lines = 300_000;
+        var builder = new FilterMatchCache.SetBuilder(lines);
+        var expected = new List<long>();
+        for (long word = 0; word < (lines + 63) / 64; word++)
+        {
+            ulong bits = 0;
+            for (int b = 0; b < 64; b++)
+            {
+                long line = word * 64 + b;
+                if (line < lines && matchEvery > 0 && line % matchEvery == 0) { bits |= 1UL << b; expected.Add(line); }
+            }
+            builder.AddWord(word, bits);
+        }
+
+        long Walk(long from, long to, long covered)
+            => expected.Count(l => l >= from && l < to && l < covered);
+
+        var rng = new Random(20260906);
+        foreach (long covered in new long[] { 0, 1, 63, 64, 65, 4_096, 150_000, lines, lines + 500 })
+        {
+            // The obvious ends, then a spread of random ones - the masks differ for a range inside one word,
+            // one spanning exactly two, and one with whole words in the middle.
+            var ranges = new List<(long From, long To)>
+            {
+                (0, 0), (0, 1), (0, 64), (0, 65), (63, 65), (64, 128), (1, 63),
+                (0, lines), (0, lines + 1_000), (lines - 1, lines), (lines, lines + 10), (-50, 50),
+            };
+            for (int i = 0; i < 60; i++)
+            {
+                long from = rng.NextInt64(-100, lines + 100);
+                ranges.Add((from, from + rng.NextInt64(0, 5_000)));
+            }
+
+            foreach (var (from, to) in ranges)
+                Assert.Equal(Walk(from, to, covered), builder.CountInRange(from, to, covered));
+        }
+    }
+
+    [Fact]
+    public void A_range_past_what_the_pass_has_recorded_counts_only_what_is_there()
+    {
+        // A dense set is allocated from the lines indexed when the builder was made and grown as later words
+        // arrive, so a range can reach past the end of its storage. That is not a miss to be counted, nor a
+        // read to run off the end of the array.
+        var builder = new FilterMatchCache.SetBuilder(64);   // one word to begin with
+        for (long w = 0; w < 200; w++) builder.AddWord(w, ulong.MaxValue);   // dense; lines 0..12,799 all match
+
+        Assert.Equal(12_800, builder.CountInRange(0, 12_800, 12_800));
+        Assert.Equal(12_800, builder.CountInRange(0, 1_000_000, 1_000_000));   // past the storage entirely
+        Assert.Equal(64, builder.CountInRange(12_736, 1_000_000, 1_000_000));  // last recorded word, then past it
+        Assert.Equal(0, builder.CountInRange(12_800, 1_000_000, 1_000_000));   // starts past it
+        Assert.Equal(0, builder.CountInRange(0, 1_000_000, 0));                // nothing swept yet
+        Assert.Equal(100, builder.CountInRange(0, 12_800, 100));               // clamped to the sweep
+    }
+
     [Fact]
     public void Combine_applies_include_and_exclude_rules()
     {

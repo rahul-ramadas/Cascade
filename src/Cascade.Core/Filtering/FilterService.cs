@@ -244,6 +244,42 @@ public sealed class FilterService : IDisposable
         }
     }
 
+    /// <summary>How many of <paramref name="filter"/>'s lines the pass that is running now has found in
+    /// <c>[from, toExclusive)</c>, and how far it has swept.
+    ///
+    /// <para>The pass keeps one running total per filter for the whole file, which is the right answer only
+    /// while the whole file is on show: it cannot say how much of itself fell inside a crop, and offering a
+    /// whole-file number against a cropped view would overstate it. The half-built set behind the same pass
+    /// records WHICH lines matched, so the crop can be applied when the number is READ rather than while it is
+    /// being counted - which is what lets a cropped count climb with the sweep, and lets the crop move without
+    /// costing the pass a single re-read.</para>
+    ///
+    /// <para>False when this pass is not working the filter out: a chain that cannot be named has no set being
+    /// built for it, and there is nothing to count. The count is of deep matches, so the caller decides what a
+    /// switched-off filter should report.</para></summary>
+    public bool TryCountInRange(FilterSnapshot snapshot, Filter filter, long from, long toExclusive,
+        out long count, out long covered)
+    {
+        count = 0;
+        covered = 0;
+        if (!snapshot.TryGetIndex(filter, out int index)) return false;
+
+        lock (_lock)
+        {
+            var gen = _current;
+            if (gen is null || !ReferenceEquals(gen.Snapshot, snapshot)) return false;
+            var builders = gen.CacheBuild;
+            if (builders is null || index >= builders.Length || builders[index] is not { } builder) return false;
+
+            // Read under the same lock the worker hands its blocks over beneath, so the extent and the set it
+            // describes cannot disagree - and so a set switching from a sorted list to a bitmap, or growing
+            // one, is never read half-swapped.
+            covered = _processed;
+            count = builder.CountInRange(from, toExclusive, covered);
+            return true;
+        }
+    }
+
     /// <summary>Blocks until the current pass moves on, is replaced, or <paramref name="ct"/> is cancelled.
     /// The timeout is only a backstop - every change pulses.</summary>
     public void WaitForPassProgress(CancellationToken ct)
