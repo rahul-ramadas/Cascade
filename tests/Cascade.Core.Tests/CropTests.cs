@@ -254,6 +254,17 @@ public class CropTests
             long expected = Expected(doc, 2_000, 2_300, "ERROR").Count;
             Assert.Equal(expected, cropped!.Value.VisibleLines);
             Assert.True(cropped.Value.VisibleLines < whole!.Value.VisibleLines);
+
+            // Not merely uncounted - unmentioned. With no filters running there is nothing being kept from
+            // the reader at all, because inside a crop the crop is the file.
+            Assert.Equal(0, cropped.Value.HiddenLines);
+            Assert.Equal(cropped.Value.Occurrences, cropped.Value.VisibleOccurrences);
+            Assert.Equal(0, cropped.Value.HiddenOccurrences);
+            Assert.True(cropped.Value.Occurrences < whole.Value.Occurrences);
+
+            doc.ClearCrop();
+            Assert.Equal(whole.Value.VisibleLines, doc.FindTally(0)!.Value.VisibleLines);
+            Assert.Equal(whole.Value.Occurrences, doc.FindTally(0)!.Value.Occurrences);
         }
         finally { File.Delete(path); }
     }

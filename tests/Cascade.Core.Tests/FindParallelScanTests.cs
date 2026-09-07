@@ -75,7 +75,7 @@ public class FindParallelScanTests
             Assert.Equal(expected.Length, tally.Value.VisibleLines);
             Assert.Equal(0, tally.Value.HiddenLines);
             Assert.Equal(Enumerable.Range(0, Lines).Sum(Occurrences), tally.Value.Occurrences);
-            Assert.False(tally.Value.Approximate);
+            Assert.Equal(HitCount.Exact, tally.Value.Hits);
         }
         finally { File.Delete(path); }
     }

@@ -71,7 +71,7 @@ internal static class UiShots
                    outDir, "appearance");
 
         ShotFindBar(outDir, "find", "");
-        ShotFindBar(outDir, "find-tally", "Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits");
+        ShotFindBar(outDir, "find-tally", "Match 12 of 252 lines, 891 hits \u00b7 hidden: 96 lines, 313 hits");
         ShotFindBar(outDir, "find-badregex", "", badPattern: "charge(declined");
 
         // Set up as a real one would be, so the list in it shows the names that can be typed over rather

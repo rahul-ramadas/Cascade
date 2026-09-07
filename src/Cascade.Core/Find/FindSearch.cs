@@ -14,13 +14,34 @@ public delegate void FindRangeScanner(long from, long count, List<FindHit> hits,
 /// <paramref name="fromWord"/> * 64, one bit per line.</summary>
 public delegate void VisibleWordReader(long fromWord, Span<ulong> words);
 
-/// <summary>How much a term matches, split by what the view is currently showing.</summary>
+/// <summary>How far the hit counts in a <see cref="FindTally"/> can be trusted. Line counts are always
+/// exact; the only thing a capped record of multi-hit lines can cost is the hits, and how much it costs
+/// depends on what was asked for.</summary>
+public enum HitCount
+{
+    /// <summary>Every hit figure is exact.</summary>
+    Exact,
+
+    /// <summary>The total is exact, but splitting it between shown and hidden lines is a floor.</summary>
+    SplitUnknown,
+
+    /// <summary>Not even the total can be pinned down, so no hit figure is worth showing.</summary>
+    TotalUnknown,
+}
+
+/// <summary>How much a term matches, split by what the view is currently showing. Everything here is
+/// counted within the stretch of file the reader can see at all - as far as this is concerned a crop IS the
+/// file - so nothing outside it is counted, mentioned or implied.</summary>
 /// <param name="Position">Which visible match the caret is on, 1-based, or 0 when it is not on one.</param>
-/// <param name="Approximate"><see cref="VisibleOccurrences"/> is a floor. <see cref="Occurrences"/> is
-/// always exact - what a cap can cost is the record of WHICH lines matched more than once, and that is
-/// only needed to split the total between shown and hidden lines.</param>
+/// <param name="Hits">How far <see cref="VisibleOccurrences"/> and <see cref="Occurrences"/> can be
+/// trusted, which is the one thing a capped record of multi-hit lines can spoil.</param>
 public readonly record struct FindTally(long Position, long VisibleLines, long HiddenLines,
-                                        long VisibleOccurrences, long Occurrences, bool Complete, bool Approximate);
+                                        long VisibleOccurrences, long Occurrences, bool Complete, HitCount Hits)
+{
+    /// <summary>Hits on the matching lines the view is not showing - the number a reader would otherwise
+    /// have to work out by subtraction.</summary>
+    public long HiddenOccurrences => Math.Max(0, Occurrences - VisibleOccurrences);
+}
 
 /// <summary>Every line one search term matches, gathered once and kept until the term changes.
 ///
@@ -114,69 +135,142 @@ public sealed class FindSearch : IDisposable
 
     /// <summary>How much has been found, split by whether the view is currently showing it.
     ///
-    /// <paramref name="visible"/> reads the visibility of 64 lines per word, or is null when nothing is
-    /// hidden. Both are answered a machine word at a time: asking line by line meant twenty million
-    /// callbacks on a common term, which was 160 ms of frozen window every time the caret moved.</summary>
-    public FindTally Count(VisibleWordReader? visible, long currentLine)
+    /// <paramref name="shown"/> reads the FILTERS' verdict, 64 lines to a word, or is null when they are
+    /// hiding nothing. The crop is not theirs to report: it arrives as <paramref name="from"/> ..
+    /// <paramref name="toExclusive"/> and bounds the whole count, so a cropped view reads exactly as an
+    /// uncropped one does over a smaller file rather than announcing millions of lines the reader has
+    /// deliberately put out of sight.
+    ///
+    /// Both are answered a machine word at a time: asking line by line meant twenty million callbacks on a
+    /// common term, which was 160 ms of frozen window every time the caret moved.</summary>
+    public FindTally Count(VisibleWordReader? shown, long from, long toExclusive, long currentLine)
     {
         lock (_sync)
         {
             bool complete = _lo <= 0 && _hi >= _lines;
+            long lo = Math.Clamp(from, 0, _lines);
+            long hi = Math.Clamp(toExclusive, lo, _lines);
+            if (hi <= lo) return new FindTally(0, 0, 0, 0, 0, complete, HitCount.Exact);
 
-            // Nothing hidden: the totals are the ones already kept as the sweep runs, so the only thing left
-            // to work out is where the caret sits among them.
-            if (visible is null)
+            // Whole file and nothing hidden is the common case by far, and it is the one the running totals
+            // already answer outright.
+            bool whole = lo == 0 && hi == _lines;
+
+            if (shown is null)
             {
-                long at = _hits.Contains(currentLine) ? _hits.CountUpTo(currentLine) : 0;
-                return new FindTally(at, _found, 0, _occurrences, _occurrences, complete, false);
+                // The filters are keeping nothing back, so everything inside the crop can be reached and the
+                // only thing left to work out is where the caret sits among it.
+                long all = whole ? _found : _hits.CountInRange(lo, hi);
+                long hits = whole ? _occurrences : OccurrencesInRange(lo, hi);
+                long at = currentLine >= lo && currentLine < hi && _hits.Contains(currentLine)
+                    ? _hits.CountInRange(lo, currentLine + 1)
+                    : 0;
+                return new FindTally(at, all, 0, hits, hits, complete,
+                                     whole || !_extrasCapped ? HitCount.Exact : HitCount.TotalUnknown);
             }
 
             long visibleLines = 0, hiddenLines = 0, position = 0;
-            long caretWord = currentLine < 0 ? -1 : currentLine >> 6;
+            long caretWord = currentLine < lo || currentLine >= hi ? -1 : currentLine >> 6;
             bool onVisibleHit = false;
+            long firstWord = lo >> 6, lastWord = (hi - 1) >> 6;
             Span<ulong> shownWords = stackalloc ulong[VisibilityChunk];
 
-            for (long start = 0; start < _hits.WordCount; start += VisibilityChunk)
+            for (long start = firstWord; start <= lastWord; start += VisibilityChunk)
             {
-                int n = (int)Math.Min(VisibilityChunk, _hits.WordCount - start);
-                visible(start, shownWords[..n]);
+                int n = (int)Math.Min(VisibilityChunk, lastWord - start + 1);
+                shown(start, shownWords[..n]);
                 for (int i = 0; i < n; i++)
                 {
-                    ulong hit = _hits.Word(start + i);
-                    if (hit == 0) continue;
-                    ulong shown = hit & shownWords[i];
-                    visibleLines += BitOperations.PopCount(shown);
-                    hiddenLines += BitOperations.PopCount(hit & ~shown);
-
                     long w = start + i;
-                    if (w < caretWord) position += BitOperations.PopCount(shown);
+                    ulong hit = _hits.Word(w) & ScopeMask(w, lo, hi);
+                    if (hit == 0) continue;
+                    ulong vis = hit & shownWords[i];
+                    visibleLines += BitOperations.PopCount(vis);
+                    hiddenLines += BitOperations.PopCount(hit & ~vis);
+
+                    if (w < caretWord) position += BitOperations.PopCount(vis);
                     else if (w == caretWord)
                     {
                         int bit = (int)(currentLine & 63);
                         ulong upTo = bit == 63 ? ulong.MaxValue : (1UL << (bit + 1)) - 1;
-                        position += BitOperations.PopCount(shown & upTo);
-                        onVisibleHit = (shown & (1UL << bit)) != 0;
+                        position += BitOperations.PopCount(vis & upTo);
+                        onVisibleHit = (vis & (1UL << bit)) != 0;
                     }
                 }
             }
 
+            long total = whole ? _occurrences : OccurrencesInRange(lo, hi);
             return new FindTally(onVisibleHit ? position : 0, visibleLines, hiddenLines,
-                                 VisibleOccurrences(visible, visibleLines, hiddenLines), _occurrences,
-                                 // With nothing hidden every occurrence is shown, so the split is exact
-                                 // however little of the per-line record survived the cap.
-                                 complete, _extrasCapped && hiddenLines > 0);
+                                 VisibleOccurrences(shown, lo, hi, visibleLines, hiddenLines, total),
+                                 total, complete, Trust(whole, hiddenLines));
         }
     }
 
-    /// <summary>Occurrences on the lines the view is showing.
+    /// <summary>The same over the whole file, for callers with no crop to apply.</summary>
+    public FindTally Count(VisibleWordReader? shown, long currentLine) => Count(shown, 0, _lines, currentLine);
+
+    /// <summary>What the cap on the multi-hit record costs this particular question. With nothing hidden
+    /// every hit inside the crop is on a shown line, so the split is exact however little of the record
+    /// survived; and the running total is only exact for the whole file, since narrowing it to a crop means
+    /// adding the extras up line by line out of the very record the cap emptied.</summary>
+    private HitCount Trust(bool whole, long hiddenLines)
+        => !_extrasCapped ? HitCount.Exact
+         : !whole ? HitCount.TotalUnknown
+         : hiddenLines > 0 ? HitCount.SplitUnknown
+         : HitCount.Exact;
+
+    /// <summary>Which of a word's 64 lines fall inside <c>[lo, hi)</c>. Only ever asked about words the
+    /// range really touches, so neither shift can reach 64.</summary>
+    private static ulong ScopeMask(long word, long lo, long hi)
+    {
+        long first = word << 6;
+        ulong mask = ulong.MaxValue;
+        if (lo > first) mask &= ulong.MaxValue << (int)(lo - first);
+        if (hi < first + 64) mask &= ulong.MaxValue >> (int)(first + 64 - hi);
+        return mask;
+    }
+
+    /// <summary>Hits on the lines in <c>[lo, hi)</c>. The running total covers the whole file, so a crop has
+    /// to add the extras up for itself - walking whichever of the two is shorter, the words of the range or
+    /// the record of multi-hit lines, since either can be the small one.</summary>
+    private long OccurrencesInRange(long lo, long hi)
+    {
+        long lines = _hits.CountInRange(lo, hi);
+        if (_extras.Count == 0) return lines;      // one hit each, so lines and hits agree
+
+        long firstWord = lo >> 6, lastWord = (hi - 1) >> 6;
+        if (_extras.Count <= lastWord - firstWord + 1)
+        {
+            long sum = lines;
+            foreach (var (line, extra) in _extras)
+                if (line >= lo && line < hi) sum += extra;
+            return sum;
+        }
+
+        long counted = 0;
+        for (long w = firstWord; w <= lastWord; w++)
+        {
+            ulong walk = _hits.Word(w) & ScopeMask(w, lo, hi);
+            while (walk != 0)
+            {
+                long line = (w << 6) + BitOperations.TrailingZeroCount(walk);
+                if (_extras.TryGetValue(line, out int extra)) counted += extra;
+                walk &= walk - 1;
+            }
+        }
+        return lines + counted;
+    }
+
+    /// <summary>Occurrences on the lines the view is showing, within <c>[lo, hi)</c>.
     ///
     /// Three ways to the same number, and which is cheapest depends entirely on the shape of the data: the
     /// lines shown, the lines hidden, and the lines that matched more than once can each be the small one.
     /// Filtering a 33M-line trace down to a screenful leaves 60 shown against two million recorded, so
     /// reading the recorded list would be 20 ms of frozen window for an answer that 60 lookups give.</summary>
-    private long VisibleOccurrences(VisibleWordReader visible, long visibleLines, long hiddenLines)
+    private long VisibleOccurrences(VisibleWordReader shown, long lo, long hi,
+                                    long visibleLines, long hiddenLines, long total)
     {
-        if (hiddenLines == 0) return _occurrences;      // nothing kept back, so all of them are shown
+        if (hiddenLines == 0) return total;             // nothing kept back, so all of them are shown
         if (_extras.Count == 0) return visibleLines;    // one occurrence each, so lines and hits agree
 
         // Counting up from the shown lines is the only way that stays a floor once the record is capped;
@@ -187,36 +281,39 @@ public sealed class FindSearch : IDisposable
         {
             long counted = 0;
             Span<ulong> words = stackalloc ulong[VisibilityChunk];
-            for (long start = 0; start < _hits.WordCount; start += VisibilityChunk)
+            long firstWord = lo >> 6, lastWord = (hi - 1) >> 6;
+            for (long start = firstWord; start <= lastWord; start += VisibilityChunk)
             {
-                int n = (int)Math.Min(VisibilityChunk, _hits.WordCount - start);
-                visible(start, words[..n]);
+                int n = (int)Math.Min(VisibilityChunk, lastWord - start + 1);
+                shown(start, words[..n]);
                 for (int i = 0; i < n; i++)
                 {
-                    ulong hit = _hits.Word(start + i);
+                    long w = start + i;
+                    ulong hit = _hits.Word(w) & ScopeMask(w, lo, hi);
                     if (hit == 0) continue;
                     ulong walk = byShown ? hit & words[i] : hit & ~words[i];
                     while (walk != 0)
                     {
-                        long line = ((start + i) << 6) + BitOperations.TrailingZeroCount(walk);
+                        long line = (w << 6) + BitOperations.TrailingZeroCount(walk);
                         if (_extras.TryGetValue(line, out int extra)) counted += extra;
                         walk &= walk - 1;
                     }
                 }
             }
-            return byShown ? visibleLines + counted : _occurrences - hiddenLines - counted;
+            return byShown ? visibleLines + counted : total - hiddenLines - counted;
         }
 
-        long total = visibleLines;
+        long sum = visibleLines;
         Span<ulong> word = stackalloc ulong[1];
         long cached = -1;
         foreach (var (line, extra) in _extras)
         {
+            if (line < lo || line >= hi) continue;
             long w = line >> 6;
-            if (w != cached) { visible(w, word); cached = w; }
-            if ((word[0] & (1UL << (int)(line & 63))) != 0) total += extra;
+            if (w != cached) { shown(w, word); cached = w; }
+            if ((word[0] & (1UL << (int)(line & 63))) != 0) sum += extra;
         }
-        return total;
+        return sum;
     }
 
     public void Start()

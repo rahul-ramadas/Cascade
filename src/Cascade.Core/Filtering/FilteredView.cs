@@ -94,13 +94,13 @@ public sealed class FilteredView
     /// <summary>Reads visibility 64 lines to a word. Null when everything is visible, which lets a caller
     /// skip the intersection entirely rather than ask about lines that cannot be hidden.
     /// <para>A crop hides lines as surely as a filter does, so a cropped identity view has words to offer
-    /// where an uncropped one has none - which is what makes a find tally count only what the crop shows.</para></summary>
+    /// where an uncropped one has none.</para></summary>
     public VisibleWordReader? VisibleWords
     {
         get
         {
-            if (!IsCropped) return IsIdentity ? null : _set!.CopyVisibleWords;
-            VisibleWordReader? inner = IsIdentity ? null : _set!.CopyVisibleWords;
+            if (!IsCropped) return FilterVisibleWords;
+            VisibleWordReader? inner = FilterVisibleWords;
             return (fromWord, words) =>
             {
                 if (inner is null) words.Fill(ulong.MaxValue);
@@ -109,6 +109,12 @@ public sealed class FilteredView
             };
         }
     }
+
+    /// <summary>The filters' verdict alone, with the crop left out of it - null when they hide nothing.
+    /// <para>A crop is not a kind of hiding to anything that counts: everywhere else in the app the crop is
+    /// simply the file, so a caller that reports what is being kept from the reader wants the filters on
+    /// their own and the crop as a plain range to stay inside.</para></summary>
+    public VisibleWordReader? FilterVisibleWords => IsIdentity ? null : _set!.CopyVisibleWords;
 
     /// <summary>Which of a word's 64 lines the crop admits.</summary>
     private ulong CropMask(long word)

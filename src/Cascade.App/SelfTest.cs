@@ -5010,25 +5010,32 @@ internal static class SelfTest
         }
     }
 
-    /// <summary>What a search reports. The rules are all about saying no more than there is to say: no
-    /// occurrence count when every line matched once, no hidden count when nothing is hidden, and a "+" on
-    /// anything the sweep has not finished counting.</summary>
+    /// <summary>What a search reports. The rules are all about saying no more than there is to say: hit
+    /// counts only when a line matched more than once, a hidden half only when the filters are keeping
+    /// matches back, and a "+" on anything the sweep has not finished counting. One word per idea throughout
+    /// - a "line" is a line that matched, a "hit" is one occurrence, and "hidden" is the filters and nothing
+    /// else, a crop having been counted as the file long before the wording sees it.</summary>
     private static bool RunFindStatusChecks()
     {
         Line("-- find status wording --");
-        static FindTally T(long pos, long shown, long hidden, long shownOcc, long occ, bool complete = true, bool approx = false)
-            => new(pos, shown, hidden, shownOcc, occ, complete, approx);
+        static FindTally T(long pos, long shown, long hidden, long shownOcc, long occ, bool complete = true,
+                           HitCount hits = HitCount.Exact)
+            => new(pos, shown, hidden, shownOcc, occ, complete, hits);
 
         string plain = FindStatusText.Short(T(12, 348, 0, 348, 348));
-        bool ok = Check("the simple case says just where you are", plain == "Match 12 of 348", plain);
+        bool ok = Check("the simple case says just where you are", plain == "Match 12 of 348 lines", plain);
 
         string multi = FindStatusText.Short(T(12, 348, 0, 1204, 1204));
-        ok &= Check("occurrences appear only when a line matched more than once",
-                    multi == "Match 12 of 348 lines \u00b7 1,204 hits", multi);
+        ok &= Check("hits appear only when a line matched more than once",
+                    multi == "Match 12 of 348 lines, 1,204 hits", multi);
 
         string hiddenText = FindStatusText.Short(T(12, 252, 96, 891, 1204));
-        ok &= Check("hidden matches are reported apart from shown ones",
-                    hiddenText == "Match 12 of 252 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits", hiddenText);
+        ok &= Check("what is hidden is counted in lines AND in hits, so neither needs working out",
+                    hiddenText == "Match 12 of 252 lines, 891 hits \u00b7 hidden: 96 lines, 313 hits", hiddenText);
+
+        string hiddenPlain = FindStatusText.Short(T(12, 252, 96, 252, 348));
+        ok &= Check("with one hit per line there is nothing for the hits to add",
+                    hiddenPlain == "Match 12 of 252 lines \u00b7 hidden: 96 lines", hiddenPlain);
 
         string partial = FindStatusText.Short(T(12, 252, 96, 891, 1204, complete: false));
         ok &= Check("an unfinished sweep marks every count", partial.Count(c => c == '+') == 4, partial);
@@ -5040,36 +5047,57 @@ internal static class SelfTest
         ok &= Check("nothing found yet does not", searching == "Searching\u2026", searching);
 
         string offMatch = FindStatusText.Short(T(0, 348, 0, 348, 348));
-        ok &= Check("off a match the count says what it is a count of", offMatch == "348 matches", offMatch);
+        ok &= Check("off a match the count says what it is a count of", offMatch == "348 lines", offMatch);
 
         string offMatchDetailed = FindStatusText.Short(T(0, 252, 96, 891, 1204));
         ok &= Check("and still splits the shown from the hidden",
-                    offMatchDetailed == "252 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits", offMatchDetailed);
+                    offMatchDetailed == "252 lines, 891 hits \u00b7 hidden: 96 lines, 313 hits", offMatchDetailed);
 
-        ok &= Check("no bare number ever reaches the status bar",
+        // Everything the term found is being filtered away. Saying "0 lines" would read as a failed search
+        // next to a hidden count that plainly found something.
+        string allHidden = FindStatusText.Short(T(0, 0, 96, 0, 313));
+        ok &= Check("with every match filtered away the head says so rather than counting to zero",
+                    allHidden == "No matches shown \u00b7 hidden: 96 lines, 313 hits", allHidden);
+
+        ok &= Check("no bare number ever reaches the find bar",
                     !long.TryParse(offMatch.Replace(",", ""), out _) &&
                     !long.TryParse(plain.Replace(",", ""), out _), $"{offMatch} / {plain}");
 
-        // The record of which lines matched more than once is capped, and losing it costs only the split
-        // between shown and hidden - so the floor goes on the shown count, never on the file-wide total.
-        string approx = FindStatusText.Short(T(12, 252, 96, 891, 1204, approx: true));
-        ok &= Check("a floored occurrence count says it is a floor",
-                    approx == "Match 12 of 252 lines \u00b7 96 hidden \u00b7 \u2265891 of 1,204 hits", approx);
+        // The record of which lines matched more than once is capped. Losing it costs only the split between
+        // shown and hidden, so the total is still worth saying - and is said as a total, not as a fraction
+        // with a floor on it.
+        string split = FindStatusText.Short(T(12, 252, 96, 891, 1204, hits: HitCount.SplitUnknown));
+        ok &= Check("a split that cannot be counted falls back to the total, which can",
+                    split == "Match 12 of 252 lines \u00b7 hidden: 96 lines \u00b7 1,204 hits in all", split);
 
-        string approxLong = FindStatusText.Long(T(12, 252, 96, 891, 1204, approx: true), "disk");
-        ok &= Check("and says so in the long form too, about the shown count",
-                    approxLong.Contains("at least 891 occurrences shown of 1,204"), approxLong);
+        string splitLong = FindStatusText.Long(T(12, 252, 96, 891, 1204, hits: HitCount.SplitUnknown), "disk");
+        ok &= Check("and says why in the long form",
+                    splitLong.Contains("Too many lines matched more than once") && splitLong.Contains("1,204 hits"),
+                    splitLong);
 
-        // The reported bug: with nothing hidden every occurrence is on a shown line, so the count is exact
-        // whatever the cap did, and marking it as a floor was simply wrong.
-        string nothingHidden = FindStatusText.Short(T(12, 252, 0, 1204, 1204, approx: true));
-        ok &= Check("with nothing hidden the count is exact and is not marked as a floor",
-                    !nothingHidden.Contains('\u2265'), nothingHidden);
+        // Inside a crop the total is worked out from that same capped record, so nothing about the hits can
+        // be trusted and none of it is shown.
+        string unknown = FindStatusText.Short(T(12, 252, 96, 891, 1204, hits: HitCount.TotalUnknown));
+        ok &= Check("a total that cannot be counted is left out rather than guessed at",
+                    unknown == "Match 12 of 252 lines \u00b7 hidden: 96 lines", unknown);
+
+        // The reported bug: with nothing hidden every hit is on a shown line, so the count is exact whatever
+        // the cap did, and marking it as anything else was simply wrong.
+        string nothingHidden = FindStatusText.Short(T(12, 252, 0, 1204, 1204));
+        ok &= Check("with nothing hidden the count is exact and is shown in full",
+                    nothingHidden == "Match 12 of 252 lines, 1,204 hits", nothingHidden);
 
         string detail = FindStatusText.Long(T(12, 252, 96, 891, 1204), "disk");
-        ok &= Check("the long form names the term and holds every number",
-                    detail.Contains("disk") && detail.Contains("252") && detail.Contains("96") &&
-                    detail.Contains("891") && detail.Contains("1,204"), detail);
+        ok &= Check("the long form names the term and holds every number, totals included",
+                    detail.Contains("disk") && detail.Contains("348") && detail.Contains("252") &&
+                    detail.Contains("96") && detail.Contains("891") && detail.Contains("313") &&
+                    detail.Contains("1,204") && detail.Contains("You are on match 12"), detail);
+
+        // A crop is the file, so it can never reach the wording as something being hidden: with no filters
+        // running, a cropped tally reads exactly as an uncropped one over a file that short.
+        string cropped = FindStatusText.Short(T(3, 12, 0, 12, 12));
+        ok &= Check("a crop with no filters says nothing about hiding at all",
+                    cropped == "Match 3 of 12 lines" && !cropped.Contains("hidden"), cropped);
 
         return ok;
     }
@@ -7559,7 +7587,7 @@ internal static class SelfTest
         var findBar = new FindBar((_, _) => { }) { Visible = true };
         findHost.Controls.Add(findBar);
         ok &= NothingShifts("find bar", findHost,
-            () => findBar.SetMessage("Match 12 of 348 lines \u00b7 96 hidden \u00b7 891 of 1,204 hits"));
+            () => findBar.SetMessage("Match 12 of 252 lines, 891 hits \u00b7 hidden: 96 lines, 313 hits"));
 
         // The filter dialog's regex error line is the same shape of thing.
         var broken = new Filter { Match = { Text = "fine", Regex = true } };
@@ -7673,15 +7701,16 @@ internal static class SelfTest
                 return searched.Count - was;
             }
 
-            // When the counts get re-read. Two things move underneath them - the sweep gathering matches and
-            // the filters deciding which of them can be reached - and both have to be watched the same way.
+            // When the counts get re-read. Three things move underneath them - the sweep gathering matches,
+            // the filters deciding which of them can be reached, and the crop bounding what is counted at
+            // all - and all have to be watched the same way.
             var fresh = TimeSpan.Zero;
             var old = TimeSpan.FromSeconds(1);
             bool Stale(bool swept = true, bool wasSwept = true, bool settled = true, bool wasSettled = true,
                        bool sameLine = true, bool sameFilters = true, bool sameHiding = true,
-                       bool haveText = true, TimeSpan? age = null)
+                       bool sameCrop = true, bool haveText = true, TimeSpan? age = null)
                 => MainForm.TallyIsStale(swept, wasSwept, settled, wasSettled, sameLine, sameFilters,
-                                         sameHiding, haveText, age ?? fresh);
+                                         sameHiding, sameCrop, haveText, age ?? fresh);
 
             ok &= Check("a running sweep is re-read as it goes", Stale(swept: false, wasSwept: false, age: old));
             ok &= Check("but not faster than the eye", !Stale(swept: false, wasSwept: false, age: fresh));
@@ -7690,6 +7719,10 @@ internal static class SelfTest
             ok &= Check("moving the caret changes which match you are on", Stale(sameLine: false));
             ok &= Check("and a filter edit changes what is hidden", Stale(sameFilters: false));
             ok &= Check("so does hiding or showing the lines that did not match", Stale(sameHiding: false));
+            // Ctrl+] moves no caret and edits no filter, and every number in the tally is counted within the
+            // crop - so without this the counts stand until the next Enter happens to move the caret.
+            ok &= Check("cropping or uncropping changes what the counts are counted within",
+                        Stale(sameCrop: false));
             ok &= Check("a filter pass under way is re-read as it goes",
                         Stale(settled: false, wasSettled: false, age: old));
             ok &= Check("and once more when it settles", Stale(settled: true, wasSettled: false));
@@ -7954,6 +7987,44 @@ internal static class SelfTest
                         doc.RowForLine(1_050) == 50);
             ok &= Check("and one outside it is on no row at all", doc.RowForLine(50) < 0);
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+
+            // Every number the find bar shows is counted within the crop, so moving the crop has to re-read
+            // them there and then. Cropping moves no caret and edits no filter, and the fault was exactly
+            // that: nothing the counts watched had changed, so they stood at the whole file's until Enter
+            // happened to move the caret and refresh them for an unrelated reason. The search is left to
+            // finish first, which switches off the ordinary "re-read while it is still moving" timer and
+            // leaves the crop as the only thing that can put this right.
+            grid.GoToLine(1_001);          // line 1,000 - inside the crop, so the caret survives it
+            Pump();
+            var findBar = form.FindBarForTesting;
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            Pump();
+            findBar.SetTermForTesting("ERROR", 0, 0);
+            findBar.EnterForTesting();
+            for (int i = 0; i < 600 && (doc.IsFindRunning || !doc.FindComplete || !doc.IsFilterIdle); i++)
+            { Thread.Sleep(5); Pump(); }
+            Pump();
+
+            string whole = findBar.MessageForTesting();
+            ok &= Check($"a search counts the whole file while the whole file is on show (\"{whole}\")",
+                        whole == "Match 202 of 600 lines", $"{whole} at line {grid.CaretLine:N0}");
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            string inCrop = findBar.MessageForTesting();
+            ok &= Check($"and cropping re-counts it within the crop at once (\"{inCrop}\")",
+                        doc.Crop is { From: 1_000, ToExclusive: 1_300 } && grid.CaretLine == 1_005
+                        && inCrop == "Match 2 of 60 lines", $"{inCrop} at line {grid.CaretLine:N0}");
+            ok &= Check("saying nothing about the matches outside it, which are not hidden but absent",
+                        !inCrop.Contains("hidden", StringComparison.Ordinal), inCrop);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
+            Pump();
+            string lifted = findBar.MessageForTesting();
+            ok &= Check($"and lifting the crop puts the whole file's count back (\"{lifted}\")",
+                        lifted == whole, lifted);
+            form.PressCmdKeyForTesting(Keys.Escape);
             Pump();
             return ok;
         }
@@ -8697,7 +8768,7 @@ internal static class SelfTest
             // of it works whatever the caption says: every one starts with a capital or a digit, so the top
             // is the cap line, and a descender in one of them cannot skew it.
             findBar.SetTermForTesting("Sample 123", 0, 0);
-            findBar.SetMessage("Match 5 of 8");
+            findBar.SetMessage("Match 5 of 8 lines");
             Pump();
             var ink = TextInk(findBar);
             Line("   (ink: " + string.Join(", ", ink.Select(i => $"{i.What} {i.Top}..{i.Bottom} {i.Font}")) + ")");
@@ -8722,7 +8793,7 @@ internal static class SelfTest
 
             // A pattern that will not compile says so where the count goes. The two can never both apply,
             // which is why they share the space.
-            findBar.SetMessage("Match 5 of 8");
+            findBar.SetMessage("Match 5 of 8 lines");
             findBar.SetTermForTesting("foo[", 0, 0);
             findBar.SetRegexForTesting(true);
             Pump();
@@ -8736,7 +8807,7 @@ internal static class SelfTest
             findBar.SetTermForTesting("foo", 0, 0);
             Pump();
             ok &= Check("mending the pattern gives the count its place back",
-                        findBar.MessageForTesting() == "Match 5 of 8", findBar.MessageForTesting());
+                        findBar.MessageForTesting() == "Match 5 of 8 lines", findBar.MessageForTesting());
             findBar.SetRegexForTesting(false);
             return ok;
         }
@@ -8860,7 +8931,7 @@ internal static class SelfTest
             // Holding the key down never lets the message queue empty, and a paint only arrives when it
             // does - so the count has to be pushed out rather than waited for, or it sits at whatever it
             // read when the key went down until it is released. No Pump() here: that is the whole point.
-            bar.SetMessage("Match 99 of 348 lines", "On match 99 of 348");
+            bar.SetMessage("Match 99 of 348 lines", "\u201cdisk\u201d matches 348 lines. You are on match 99.");
             int pushed = bar.MessagePaintsForTesting;
             bar.PaintNow();
             ok &= Check("the count can be painted without waiting for an idle moment",

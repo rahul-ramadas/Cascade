@@ -1056,10 +1056,12 @@ public sealed class CascadeDocument : IDisposable
     public bool FindComplete => _search?.Complete ?? true;
 
     /// <summary>How much the current term matches, split by what the view is showing. Null when no term is
-    /// live. A crop hides lines as surely as a filter does, so it too has words to intersect with - which is
-    /// what stops a tally counting hits in a stretch the reader has put out of sight.</summary>
+    /// live. The crop bounds the count rather than being counted as hiding: within a crop the crop is the
+    /// file, so the tally reads exactly as it would over a file that short, and never reports lines the
+    /// reader has put out of sight. What is left is the filters, and they can then be named.</summary>
     public FindTally? FindTally(long currentLine)
-        => _search?.Count(DisplayView.VisibleWords, currentLine);
+        => _search?.Count(DisplayView.FilterVisibleWords, Crop?.From ?? 0,
+                          Crop?.ToExclusive ?? CompletedLineCount, currentLine);
 
     /// <summary>Lines the current find term has been found on so far, or 0 when nothing is being looked for.
     /// A summary of the whole file keys its cache on this, so that a sweep filling in matches behind it is

@@ -120,6 +120,7 @@ public sealed class MainForm : Form
     private DateTime _tallyAt;
     private long _tallyLine = -1;
     private int _tallyGeneration = -1;
+    private (long From, long ToExclusive)? _tallyCrop;
     private bool _tallyHiding, _tallySwept, _tallySettled;
     private int _activitySlot, _progressSlot, _baseActivitySlot;
     private int _elapsedSlot;
@@ -2747,7 +2748,7 @@ public sealed class MainForm : Form
     /// arriving at a line with nothing lit up reads as the search being broken unless it is explained.
     /// It is said beside the search box, which is the one place that survives the next status refresh.</summary>
     private void NoteIfMatchIsHidden(long line)
-        => _hiddenMatch = _grid.FindTermIsVisibleOn(line) ? "" : "match is in a hidden field";
+        => _hiddenMatch = _grid.FindTermIsVisibleOn(line) ? "" : "matched in a hidden field";
 
     private string _hiddenMatch = "";
 
@@ -2783,19 +2784,21 @@ public sealed class MainForm : Form
 
     /// <summary>Whether the counts need re-reading.
     ///
-    /// Two things move underneath them and both have to be watched the same way - while they run the numbers
+    /// Three things move underneath them and all have to be watched the same way - while they run the numbers
     /// climb, and when they stop the numbers have to be read one last time or they stand at whatever they
-    /// reached a moment before the end. The sweep is one; the filter pass is the other, since what is hidden
-    /// decides the shown/hidden split and which match the caret counts as. Hiding is listed apart from the
-    /// filters themselves because showing only the filtered lines changes no filter.</summary>
+    /// reached a moment before the end. The sweep is one; the filter pass is another, since what is hidden
+    /// decides the shown/hidden split and which match the caret counts as. The crop is the third: it is the
+    /// bounds the whole tally is counted within, so moving it changes every number even though no filter
+    /// changed and the caret never moved. Hiding is listed apart from the filters themselves because showing
+    /// only the filtered lines changes no filter.</summary>
     internal static bool TallyIsStale(bool swept, bool wasSwept, bool settled, bool wasSettled,
-                                      bool sameLine, bool sameFilters, bool sameHiding, bool haveText,
-                                      TimeSpan age)
-        => !haveText || !sameLine || !sameFilters || !sameHiding
+                                      bool sameLine, bool sameFilters, bool sameHiding, bool sameCrop,
+                                      bool haveText, TimeSpan age)
+        => !haveText || !sameLine || !sameFilters || !sameHiding || !sameCrop
            || swept != wasSwept || settled != wasSettled
            || ((!swept || !settled) && age > TallyMaxAge);
 
-    /// <summary>The "Match 12 of 348" text, re-read whenever <see cref="TallyIsStale"/> says so.</summary>
+    /// <summary>The "Match 12 of 348 lines" text, re-read whenever <see cref="TallyIsStale"/> says so.</summary>
     private string RefreshTally()
     {
         if (_lastQuery is not { } query) return "";
@@ -2804,12 +2807,13 @@ public sealed class MainForm : Form
         bool settled = _doc.IsFilterIdle;
         if (!TallyIsStale(swept, _tallySwept, settled, _tallySettled, caret == _tallyLine,
                           _tallyGeneration == _doc.FilterGeneration, _tallyHiding == _doc.FilteredMode,
-                          _tally.Length > 0, DateTime.UtcNow - _tallyAt))
+                          _tallyCrop == _doc.Crop, _tally.Length > 0, DateTime.UtcNow - _tallyAt))
             return _tally;
 
         _tallyLine = caret;
         _tallyGeneration = _doc.FilterGeneration;
         _tallyHiding = _doc.FilteredMode;
+        _tallyCrop = _doc.Crop;
         _tallySwept = swept;
         _tallySettled = settled;
         _tallyAt = DateTime.UtcNow;
@@ -3197,9 +3201,14 @@ public sealed class MainForm : Form
         // The count of what the term matched belongs beside the term, not at the far corner of the window.
         string tally = RefreshTally();
         if (_hiddenMatch.Length > 0)
+        {
+            // Added to the tally's own detail rather than put in its place: the counts are still the first
+            // thing hovering is for, and losing them to explain one line would be a poor trade.
+            const string why = "The hit is in a field you are not showing, so nothing on the line is lit up. "
+                               + "The search runs on the whole line, including the fields you have hidden.";
             _findBar.SetMessage(tally.Length > 0 ? $"{tally} \u2014 {_hiddenMatch}" : _hiddenMatch,
-                "The search runs on the whole line, including the fields you have hidden, so this line "
-                + "matches even though nothing on it is lit up.");
+                                _tallyDetail.Length > 0 ? $"{_tallyDetail} {why}" : why);
+        }
         else
             _findBar.SetMessage(tally, _tallyDetail);
 
