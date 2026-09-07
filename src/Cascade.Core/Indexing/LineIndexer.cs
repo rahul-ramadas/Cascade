@@ -135,16 +135,40 @@ public sealed class LineIndexer
     }
 
     /// <summary>Keeps the OS reading ahead of the scan, on its own thread, and the pages it has asked for
-    /// mapped into this process on a few more. Demand paging alone leaves one fault outstanding at a time,
-    /// so throughput is that fault's latency however idle the disk is. Issuing the read-ahead from the
-    /// scanning thread does not work - <c>PrefetchVirtualMemory</c> does not return until the reads are
-    /// under way, so it stalls the very scan it is meant to feed. MEASURED cold on a 19.3 GB log: 12.1 s
-    /// demand-paged, 7.6 s asked for inline, 5.0 s from here.
-    /// <para>Reading a file already in the file cache is a different problem with the same shape: nothing
-    /// waits on a disk, but the scan still faults every page in one at a time. MEASURED on a 2 GB log:
-    /// 554 ms scanning, 146 ms with eight threads faulting pages in ahead of it - and 142 ms if the scan
-    /// itself is split across eight threads, so this gets what parallelising the scan would while leaving
-    /// the index single-writer, in order, and streaming exactly as it was.</para>
+    /// mapped into this process on a few more. These are two different jobs, and the file needs both.
+    ///
+    /// <para>The scan takes ONE PAGE FAULT PER PAGE whatever is done here - MEASURED at 534,941 faults over
+    /// a 2 GB log with no read-ahead, 535,008 with it, and 535,107 with the touchers as well. Neither
+    /// mechanism removes a single fault. What they change is what a fault COSTS and how many can be
+    /// outstanding at once.</para>
+    ///
+    /// <para><c>PrefetchVirtualMemory</c> answers the first: it turns the disk behind those faults into a
+    /// few large sequential reads instead of one 4 KB read at a time. Issuing it from the scanning thread
+    /// does not work - it does not return until the reads are under way, so it stalls the very scan it is
+    /// meant to feed (MEASURED cold on a 19.3 GB log: 12.1 s demand-paged, 7.6 s asked for inline, 5.0 s
+    /// from a thread of its own).</para>
+    ///
+    /// <para>The touchers answer the second: a scan walking the mapping can only ever have one fault in
+    /// flight, because it stops at each one. Reading a byte per page on several threads takes the same
+    /// faults eight at a time. That is worth as much again as the read-ahead, and it is the whole of the
+    /// cost on a file already in the cache, where no fault waits on a disk at all.</para>
+    ///
+    /// <para>MEASURED on a 2 GB log, the four combinations - the reason both are here and the reason the
+    /// touchers are bounded:</para>
+    /// <list type="bullet">
+    /// <item>cold, neither: 1,046 ms</item>
+    /// <item>cold, read-ahead only: 569 ms</item>
+    /// <item>cold, read-ahead and touchers: 316 ms</item>
+    /// <item>cold, TOUCHERS WITHOUT THE READ-AHEAD: 1,155 ms - WORSE THAN DOING NOTHING</item>
+    /// <item>warm, read-ahead only: 537 ms; warm, both: 215 ms</item>
+    /// </list>
+    /// <para>That last cold figure is why <see cref="ReadAhead"/> holds the touchers behind the prefetch
+    /// frontier rather than merely behind the scan. Ahead of it they fault pages nobody has asked for, one
+    /// scattered small read each, and they undo the read-ahead entirely.</para>
+    ///
+    /// <para>Splitting the SCAN across eight threads instead measured the same (142 ms against 146 ms warm),
+    /// so this gets what that would while leaving the index single-writer, in order, and streaming exactly
+    /// as it was.</para>
     /// <para>Disposing joins every thread, so the read-ahead can never outlive the scan and therefore never
     /// outlives the mapping it reads through - the release waits on the indexing task.</para></summary>
     private ReadAhead? StartReadAhead(long length, CancellationToken ct)
@@ -158,7 +182,8 @@ public sealed class LineIndexer
         /// <summary>How far <see cref="MemoryMappedTextSource.Prefetch"/> has been asked to reach. The
         /// touchers stay behind it: in front of that line a page nobody has asked for is a fault that goes
         /// to the disk on its own, and several at once is exactly what collapses one 32 MB read into a
-        /// scatter of small ones - MEASURED at 8.05 s against 5.49 s when touching WAS the read-ahead.
+        /// scatter of small ones. MEASURED cold on a 2 GB log: 316 ms with this bound, and 1,155 ms with
+        /// the touchers let loose without a read-ahead at all - WORSE than the 1,046 ms of doing neither.
         /// Behind it the page is resident or already on its way, so the fault costs no extra I/O.</summary>
         private long _prefetchedThrough;
 
