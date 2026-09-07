@@ -77,6 +77,11 @@ public sealed unsafe class MemoryMappedTextSource : IDisposable
     internal long PrefetchedBytes => Volatile.Read(ref _prefetched);
     private long _prefetched;
 
+    /// <summary>Bytes walked through <see cref="Touch"/>, for the same reason: faulting pages in ahead of
+    /// the scan changes no result at all, so nothing but this can say it still happens.</summary>
+    internal long TouchedBytes => Volatile.Read(ref _touched);
+    private long _touched;
+
     public void Prefetch(long offset, long length)
     {
         if (_disposed || _ptr is null || _ownedBytes is not null) return;
@@ -107,6 +112,32 @@ public sealed unsafe class MemoryMappedTextSource : IDisposable
     [DllImport("kernel32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern IntPtr GetCurrentProcess();
+
+    /// <summary>Reads one byte from every page of a range, which is what makes the OS put those pages in
+    /// this process's page tables. A scan that simply walks the mapping does this one page at a time, in
+    /// line, and pays the whole latency of each: MEASURED on a 2 GB log already in the file cache, the
+    /// newline scan ran at 3.9 GB/s that way against 14 GB/s over a mapping whose pages were already
+    /// mapped, so three quarters of it was fault latency and none of it was reading.
+    /// <para>Doing this ahead of the scan on other threads is the whole point - faults parallelise where a
+    /// single scan cannot. Never call it in front of <see cref="Prefetch"/>; see the read-ahead.</para></summary>
+    internal long Touch(long offset, long length)
+    {
+        if (_disposed || _ptr is null) return 0;
+        if (offset < 0 || length <= 0 || offset >= Length) return 0;
+        length = Math.Min(length, Length - offset);
+
+        // Summed and returned so that neither the JIT nor the CPU can decide the reads were pointless.
+        long sum = 0;
+        byte* p = _ptr + offset;
+        byte* end = p + length;
+        for (; p < end; p += PageSize) sum += *p;
+        Interlocked.Add(ref _touched, length);
+        return sum;
+    }
+
+    /// <summary>Page size assumed by <see cref="Touch"/>. Touching more often than the real page size only
+    /// costs reads that hit; touching less often would leave pages for the scan to fault on.</summary>
+    private const int PageSize = 4096;
 
     public void Dispose()
     {

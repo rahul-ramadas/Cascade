@@ -67,6 +67,28 @@ public class IndexingTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Faulting pages in ahead of the scan is worth two thirds of the time a warm file takes, and
+    /// like the read-ahead it changes no answer at all - so this is the only thing that can notice it has
+    /// stopped happening. The second assertion is the safety half: a toucher must never get in front of what
+    /// the read-ahead has asked for, because a page nobody has asked for faults to the disk on its own.</summary>
+    [Fact]
+    public void The_scan_has_its_pages_faulted_in_ahead_of_it_and_never_past_the_read_ahead()
+    {
+        string path = Harness.TempFile(BigLog(out int expected));
+        try
+        {
+            using var src = new MemoryMappedTextSource(path);
+            var index = new LineIndex();
+            var indexer = new LineIndexer(src, index, 0, 1, false);
+            indexer.Run(null, CancellationToken.None);
+
+            Assert.Equal(expected, index.Count);
+            Assert.Equal(src.Length, src.TouchedBytes);
+            Assert.Equal(0, indexer.TouchedAheadOfReadAhead);
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void A_file_too_small_to_be_worth_it_is_not_read_ahead()
     {
