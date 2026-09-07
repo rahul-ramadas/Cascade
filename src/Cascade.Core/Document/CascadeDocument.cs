@@ -982,11 +982,20 @@ public sealed class CascadeDocument : IDisposable
             return Crop is { } crop ? known.CountInRange(crop.From, crop.ToExclusive) : known.Matches;
         }
 
-        // Cropped, with nothing remembered for this filter yet - which is only so while the file is still
-        // being indexed, since a set is stored the moment it covers the whole of it. The pass accumulates one
-        // number for the whole file and cannot say how much of it fell inside the crop, and a whole-file count
-        // shown against a cropped view would be a plain lie. "Still counting" is the honest answer, and it is
-        // the one already drawn for a number that has not settled.
+        // Cropped, with nothing remembered for this filter. The pass accumulates one number for the whole
+        // file and cannot say how much of it fell inside the crop, and a whole-file count shown against a
+        // cropped view would be a plain lie. "Still counting" is the honest answer, and it is the one already
+        // drawn for a number that has not settled.
+        //
+        // Usually that is a passing state: a set is stored the moment the pass covers the whole file, so the
+        // number arrives as soon as indexing and the pass are done. But it is not only that. A filter whose
+        // chain cannot be NAMED has no set stored for it ever, and so reads as still counting for as long as
+        // the crop is on - see FilterSnapshot.Cacheable. Two shapes reach it: a marker filter naming no valid
+        // marker, which a filter file can express and which matches nothing by design (and every filter
+        // beneath it, since Cacheable is inherited), and a chain whose marks have moved since the snapshot
+        // was built, which ChainMarksMoved refuses to answer from. Both are counts that will not settle
+        // rather than counts still being worked out; the ellipsis overstates how much is in flight, but it
+        // never overstates the count itself, which is what a crop must not do.
         if (Crop is not null)
         {
             final = false;
