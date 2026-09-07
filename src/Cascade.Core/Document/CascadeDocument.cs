@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Text;
 using Cascade.Core.Columns;
 using Cascade.Core.Filtering;
@@ -232,6 +233,36 @@ public sealed class CascadeDocument : IDisposable
     /// the whole file a band at a time costs the same as summarising one line.</summary>
     public long MatchedLinesInRange(long from, long toExclusive)
         => CroppedMatchView.CountInRange(from, toExclusive);
+
+    /// <summary>The marker to draw for the rows in <c>[fromRow, toRowExclusive)</c>, or -1 when none of them
+    /// is marked. The lowest marker index wins, which is already the rule for a line carrying several.
+    /// <para>Asked once per pixel by the map and the scrollbar, both of which stand a band of rows behind
+    /// each pixel. It is put this way round on purpose: the band's lines are two binary searches of the
+    /// marks, and whether a marked line is on show is one bit, so a repaint costs what the STRIP is tall.
+    /// Asked the other way round - every mark in turn which row it is on - a repaint costs what the MARKS
+    /// are many, each a rank lookup; after a select-all and Ctrl+1 that is every line of the file, and
+    /// holding an arrow key stalled half a second a line redrawing marks that had not moved.</para></summary>
+    public int MarkerForRows(long fromRow, long toRowExclusive)
+    {
+        if (!Markers.AnyInUse) return -1;
+        var view = DisplayView;
+        fromRow = Math.Max(0, fromRow);
+        toRowExclusive = Math.Min(toRowExclusive, view.Count);
+        if (toRowExclusive <= fromRow) return -1;
+
+        // Rows follow lines in order, so every row of the band lies between the line the band starts on and
+        // the line it ends on - and every marked line between those two that is ON SHOW is a row of it. The
+        // rest are marks the filters are hiding, which have no row and so no pixel.
+        int best = -1;
+        foreach (var (line, mask) in Markers.Between(view.LineAt(fromRow), view.LineAt(toRowExclusive - 1) + 1))
+        {
+            if (!view.IsVisible(line)) continue;
+            int index = BitOperations.TrailingZeroCount(mask);
+            if (best < 0 || index < best) best = index;
+            if (best == 0) break;   // marker 1 wins outright; nothing later in the band can beat it
+        }
+        return best;
+    }
 
     /// <summary>Reads which lines the filters match, 64 to a word, or null when every line does. A summary
     /// that has to know where the matches are wants this rather than a lookup a line at a time: one read

@@ -641,7 +641,6 @@ internal sealed class MiniMapControl : Control
     private void DrawMarks(Graphics g, CascadeDocument doc)
     {
         int edge = EdgeWidth, left = Divider;
-        long first = _rowAt[0], last = _rowAt[_slots - 1];
         _drawnSelection = _grid.SelectionVersion;
 
         // Selected rows and find hits share the map with the colours, so they take an edge each rather than
@@ -664,15 +663,16 @@ internal sealed class MiniMapControl : Control
             }
         }
 
-        foreach (var (line, mask) in doc.Markers.Snapshot())
+        for (int s = 0; s < _slots; s++)
         {
-            // Asked of the document in both modes. Dim mode used to take the line as the row outright, which
-            // is only true while the whole file is on show - a crop offsets one from the other, and reading a
-            // line as a row put every mark in the crop off the map and marks from outside it onto it.
-            long row = doc.RowForLine(line);
-            if (row < first || row > last) continue;
-            int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
-            g.FillRectangle(MarkerBrush(index), left, SlotOf(row) * _rowPixels, edge, Math.Max(2, _rowPixels));
+            // Asked of the document a pixel at a time, in both modes. Dim mode used to take the line as the
+            // row outright, which is only true while the whole file is on show - a crop offsets one from the
+            // other, and reading a line as a row put every mark in the crop off the map and marks from
+            // outside it onto it.
+            var (from, to) = RowsAt(s);
+            int index = doc.MarkerForRows(from, to);
+            if (index >= 0)
+                g.FillRectangle(MarkerBrush(index), left, s * _rowPixels, edge, Math.Max(2, _rowPixels));
         }
 
         if (doc.FindHitCount > 0)

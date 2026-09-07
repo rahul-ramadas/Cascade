@@ -60,7 +60,37 @@ public sealed class MarkerStore
     /// <para>It is held rather than rebuilt, so it COSTS 16 bytes a mark - MEASURED at 32 MB for two
     /// million, against the 64 MB a frame it was throwing away, and against the ~200 MB the dictionary and
     /// the sorted sets already spend on the same marks. At any ordinary number of marks it is kilobytes.</para></summary>
-    public IReadOnlyList<(long Line, byte Mask)> Snapshot()
+    public IReadOnlyList<(long Line, byte Mask)> Snapshot() => Ordered();
+
+    /// <summary>The marks on lines <c>[from, toExclusive)</c>, as a slice of <see cref="Snapshot"/>.
+    /// <para>Marks are drawn a band of the file at a time - one pixel of the map, one pixel of the scrollbar -
+    /// and a strip is a few hundred pixels tall however many marks there are. Two binary searches lets a band
+    /// ask only about the marks that could land in it, so a repaint costs what the STRIP is tall. Asking it
+    /// the other way round - every mark in turn which row it is on - costs what the MARKS are many, and after
+    /// a select-all and Ctrl+1 that is every line of the file: half a second a frame, which is what holding
+    /// an arrow key was paying.</para></summary>
+    public ReadOnlySpan<(long Line, byte Mask)> Between(long from, long toExclusive)
+    {
+        if (toExclusive <= from) return ReadOnlySpan<(long, byte)>.Empty;
+        var all = Ordered();
+        int start = LowerBound(all, from);
+        return all.AsSpan(start, LowerBound(all, toExclusive) - start);
+    }
+
+    /// <summary>Index of the first mark on a line at or after <paramref name="line"/>.</summary>
+    private static int LowerBound((long Line, byte Mask)[] all, long line)
+    {
+        int lo = 0, hi = all.Length;
+        while (lo < hi)
+        {
+            int mid = (int)(((uint)lo + (uint)hi) >> 1);
+            if (all[mid].Line < line) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+
+    private (long Line, byte Mask)[] Ordered()
     {
         lock (_lock)
         {

@@ -165,7 +165,7 @@ internal sealed class SlimScrollBar : Control
         g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.30)), ClientRectangle);
         g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, 0.07)), Track);
 
-        if (_vertical) DrawMarks(g);
+        if (_vertical) DrawMarks(g, e.ClipRectangle);
 
         double strength = !CanScroll ? 0.20 : _dragging ? 0.62 : _hot ? 0.50 : 0.38;
         g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength)), Thumb);
@@ -188,23 +188,34 @@ internal sealed class SlimScrollBar : Control
         base.Dispose(disposing);
     }
 
-    /// <summary>Every marked line in the file, at its place on the scrollbar's own scale.</summary>
-    private void DrawMarks(Graphics g)
+    /// <summary>Every marked line in the file, at its place on the scrollbar's own scale.
+    /// <para>Walked a pixel of the trough at a time rather than a mark at a time, so a repaint costs what
+    /// the strip is TALL and not how many marks the file has. Drawn per mark it was a rank lookup and a
+    /// rectangle apiece with nothing to stop two hundred thousand of them landing on the same pixel, and a
+    /// file whose lines had all been marked at once took half a second a frame to draw.</para></summary>
+    private void DrawMarks(Graphics g, Rectangle clip)
     {
-        if (_grid.Document is not { } doc || _total <= 0) return;
-        var marks = doc.Markers.Snapshot();
-        if (marks.Count == 0) return;
+        if (_grid.Document is not { } doc || _total <= 0 || !doc.Markers.AnyInUse) return;
 
         var track = Track;
-        foreach (var (line, mask) in marks)
+        int span = Math.Max(1, track.Height - MarkThickness);
+        // Only the pixels the repaint actually reaches: moving the thumb one notch invalidates the stretch
+        // it crossed and nothing else, and re-asking the whole file about marks that have not moved is the
+        // whole cost of the frame.
+        int from = Math.Max(0, clip.Top - track.Top - MarkThickness + 1);
+        int toExclusive = Math.Min(span, clip.Bottom - track.Top);
+        for (int y = from; y < toExclusive; y++)
         {
-            // The row the document says, in either mode: a crop offsets rows from lines, so taking the line
-            // as the row would drop every mark inside the crop and draw ones from outside it.
-            long row = doc.RowForLine(line);
-            if (row < 0 || row >= _total) continue;
-            int y = track.Top + (int)(row * (track.Height - MarkThickness) / _total);
-            int index = System.Numerics.BitOperations.TrailingZeroCount(mask);
-            g.FillRectangle(MiniMapControl.MarkerBrush(index), track.Left, y, track.Width, MarkThickness);
+            // The rows behind this pixel, on the same scale the marks were drawn at before: a mark on row r
+            // sits at r * span / _total, so the pixel at y stands for the rows that lands on.
+            long fromRow = ((long)y * _total + span - 1) / span;
+            long toRow = ((long)(y + 1) * _total + span - 1) / span;
+            // The row the document says, in either mode: a crop offsets rows from lines, so taking a line
+            // as a row would drop every mark inside the crop and draw ones from outside it.
+            int index = doc.MarkerForRows(fromRow, toRow);
+            if (index >= 0)
+                g.FillRectangle(MiniMapControl.MarkerBrush(index), track.Left, track.Top + y,
+                                track.Width, MarkThickness);
         }
     }
 
