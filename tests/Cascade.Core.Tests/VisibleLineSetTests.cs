@@ -202,6 +202,41 @@ public class VisibleLineSetTests
         Assert.Equal(3_000, set.RowAtOrAfterLine(5_000));
     }
 
+    /// <summary>Leaves the set as a running pass does between publishes: bits flipped in the block a reader
+    /// is about to ask about, with the published snapshot still predating them.</summary>
+    private static VisibleLineSet BetweenPublishes(int lines, int from, int toExclusive)
+    {
+        var set = new VisibleLineSet();
+        set.ApplyRange(0, new bool[lines]);         // every line hidden
+        set.Publish();                              // the snapshot readers are holding
+        var added = new bool[toExclusive - from];
+        Array.Fill(added, true);
+        set.ApplyRange(from, added);                // deliberately NOT published
+        return set;
+    }
+
+    /// <summary>A rank is the published cumulative plus a popcount of live bits, so two ranks are read a
+    /// moment apart and each can drift by up to a block - which is the documented price of reading without a
+    /// lock. Over a range holding hardly anything that drift is larger than the answer, and subtracting them
+    /// gave a NEGATIVE count. Whatever the drift, a count of lines cannot be less than none.</summary>
+    [Fact]
+    public void A_count_is_never_negative_while_the_writer_is_between_publishes()
+    {
+        const int lines = 40_000, lo = 10_000, hi = 30_000;
+        var set = BetweenPublishes(lines, 8_192, lo);   // lo's own block, up to lo itself
+
+        // The state under test really has been reached: the snapshot says nothing is visible, yet the live
+        // bits put the rank at lo above the rank at hi - so the two ends have drifted apart.
+        Assert.Equal(0, set.Count);
+        Assert.True(set.RowAtOrAfterLine(lo) > set.RowAtOrAfterLine(hi));
+
+        long reference = 0;
+        for (long line = lo; line < hi; line++) if (set.IsVisible(line)) reference++;
+        Assert.Equal(0, reference);                     // every bit set lies before the range
+
+        Assert.InRange(set.CountInRange(lo, hi), 0, hi - lo);
+    }
+
     [Fact]
     public void Grows_as_indexing_adds_lines()
     {

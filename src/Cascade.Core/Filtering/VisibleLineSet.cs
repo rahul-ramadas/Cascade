@@ -247,7 +247,10 @@ public sealed class VisibleLineSet
         if (toExclusive <= from) return 0;
         var idx = Volatile.Read(ref _index);
         long[][] pages = Volatile.Read(ref _pages);
-        return RankAt(idx, pages, toExclusive) - RankAt(idx, pages, from);
+        // A rank is the published cumulative plus a popcount of LIVE bits, so each end can drift by up to a
+        // block while the writer works. Over a range holding hardly anything that drift outweighs the true
+        // count and the subtraction comes out negative - and this is a count, so it cannot be.
+        return Math.Max(0, RankAt(idx, pages, toExclusive) - RankAt(idx, pages, from));
     }
 
     private static long RankAt(Index idx, long[][] pages, long line)
