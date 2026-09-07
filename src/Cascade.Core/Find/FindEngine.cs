@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Cascade.Core.Filtering;
 using Cascade.Core.IO;
 using Cascade.Core.Indexing;
 
@@ -70,11 +71,24 @@ public static class FindEngine
         private readonly Regex? _rx;
         private readonly string _text;
         private readonly StringComparison _cmp;
+        // "literal .+ literal", rewritten to plain substring searches. Exactly equivalent as a MATCH test,
+        // which is all a sweep asks of all but a handful of lines, and vectorized where the regex engine
+        // backtracks: MEASURED at 25 ns a line against 465 for the pattern the filter engine's own rewriter
+        // was built for. Positions still come from the real engine, so highlighting is untouched.
+        private readonly string[]? _parts;
 
-        internal FindMatcher(Regex? rx, string text, StringComparison cmp) { _rx = rx; _text = text; _cmp = cmp; }
+        internal FindMatcher(Regex? rx, string text, StringComparison cmp, string[]? parts = null)
+        { _rx = rx; _text = text; _cmp = cmp; _parts = parts; }
 
         public bool Matches(ReadOnlySpan<char> line)
-            => _rx is not null ? _rx.IsMatch(line) : line.Contains(_text, _cmp);
+            => _parts is not null ? RegexLiteralRewriter.Matches(line, _parts, _cmp)
+             : _rx is not null ? _rx.IsMatch(line)
+             : line.Contains(_text, _cmp);
+
+        /// <summary>How long a match is, when that is the same for every match. Null for a regular
+        /// expression, which can match any length - so a caller marking part of a line cannot tell how far
+        /// back of it a match might begin.</summary>
+        public int? LiteralLength => _rx is null ? _text.Length : null;
 
         /// <summary>The next occurrence at or after <paramref name="start"/>, for highlighting every hit on
         /// a line rather than just knowing there is one. A zero-length regex match would otherwise stand
@@ -108,19 +122,36 @@ public static class FindEngine
         }
 
         /// <summary>How many times this matches in a line. Occurrences, not lines: a line with three hits
-        /// counts three.</summary>
-        public int CountIn(ReadOnlySpan<char> line)
+        /// counts three. Stops at <paramref name="cap"/> and says so, because counting is the one part of a
+        /// search whose cost is not bounded by the length of the line: MEASURED on a 14 KB line matching a
+        /// term 6,001 times, counting them cost 11,001 ns against 48 ns to answer whether it matched at all.
+        /// No cheaper way of counting exists - Count, IndexOf and a hand-rolled walk are all within 15% of
+        /// one another - so the only thing that can bound it is to stop.</summary>
+        public int CountIn(ReadOnlySpan<char> line, int cap, out bool stopped)
         {
+            stopped = false;
+            // The cheap test first when there is one. Counting has to be done by the real engine, but only
+            // a line that matched is ever asked, and on a sweep almost none of them do.
+            if (_parts is not null && !RegexLiteralRewriter.Matches(line, _parts, _cmp)) return 0;
             int n = 0, from = 0;
-            while (NextMatch(line, from, out int at, out int len)) { n++; from = at + Math.Max(1, len); }
+            while (n < cap && NextMatch(line, from, out int at, out int len)) { n++; from = at + Math.Max(1, len); }
+            stopped = n >= cap;
             return n;
         }
+
+        /// <summary>How many times this matches in a line, however many that is.</summary>
+        public int CountIn(ReadOnlySpan<char> line) => CountIn(line, int.MaxValue, out _);
     }
 
     /// <summary>Compiles a query, or returns null when it can never match anything: an empty term, or a
     /// regular expression that will not parse. Both mean "not found" rather than an error.</summary>
     public static FindMatcher? CompileQuery(FindQuery query)
-        => Compile(query) is var (rx, cmp) ? new FindMatcher(rx, query.Text, cmp) : null;
+    {
+        if (Compile(query) is not var (rx, cmp)) return null;
+        string[]? parts = null;
+        if (query.Regex && RegexLiteralRewriter.TryRewrite(query.Text, out string[] rewritten)) parts = rewritten;
+        return new FindMatcher(rx, query.Text, cmp, parts);
+    }
 
     /// <summary>Builds the regex (if any) and comparison for a query, or returns null for an empty /
     /// invalid-regex query (which matches nothing).</summary>
@@ -130,7 +161,10 @@ public static class FindEngine
         Regex? rx = null;
         if (query.Regex)
         {
-            var opts = RegexOptions.CultureInvariant;
+            // Compiled, because a sweep runs the pattern against every line in the file. MEASURED on a
+            // 240-character line: it makes no difference to a pattern the engine can already prefilter to a
+            // literal, and it is 45x on a case-insensitive alternation (1,991 ns a line against 44).
+            var opts = RegexOptions.CultureInvariant | RegexOptions.Compiled;
             if (!query.CaseSensitive) opts |= RegexOptions.IgnoreCase;
             try { rx = new Regex(query.Text, opts); }
             catch (ArgumentException) { return null; }

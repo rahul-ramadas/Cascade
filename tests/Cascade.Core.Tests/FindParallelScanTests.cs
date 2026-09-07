@@ -80,9 +80,37 @@ public class FindParallelScanTests
         finally { File.Delete(path); }
     }
 
-    [Fact]
-    public async Task A_term_that_is_not_there_is_reported_as_absent_rather_than_missed()
+    /// <summary>The two sweeps hand back blocks of BITS, and the block the caret is in is the one word both
+    /// of them touch. Counting a line twice there would be invisible in the walk, which only asks where the
+    /// next match is - so the totals are asked for from a start that is deliberately not on a word
+    /// boundary.</summary>
+    [Theory]
+    [InlineData(100_001)]
+    [InlineData(100_037)]
+    [InlineData(99_999)]
+    public async Task A_line_is_counted_once_however_the_two_sweeps_meet(long start)
     {
+        string path = WriteFile();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var query = new FindQuery("NEEDLE", false, false);
+            await doc.FindNextAsync(query, start, forward: true, CancellationToken.None);
+            while (!doc.FindComplete) await Task.Delay(5);
+
+            var tally = doc.FindTally(-1)!.Value;
+            Assert.Equal(Enumerable.Range(0, Lines).Count(IsMatch), tally.VisibleLines);
+            Assert.Equal(Enumerable.Range(0, Lines).Sum(Occurrences), tally.Occurrences);
+            Assert.Equal(HitCount.Exact, tally.Hits);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task A_term_that_is_not_there_is_reported_as_absent_rather_than_missed()    {
         // The failure a parallel scan makes easy is "no more matches" arriving before the whole file has
         // been examined, so this asks for one that genuinely is not there.
         string path = WriteFile();

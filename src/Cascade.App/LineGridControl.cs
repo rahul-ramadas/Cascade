@@ -429,37 +429,109 @@ public sealed class LineGridControl : Control
     /// <summary>Every occurrence to mark on a line: the find term, and what is selected elsewhere. The line
     /// the caret is on gets the stronger colour, so which line the search landed on is obvious without the
     /// navigation having to work in occurrences. <paramref name="selected"/> is worked out once for the
-    /// frame - decoding the line it came from again per row would be a string apiece for nothing.</summary>
-    private void CollectHighlights(string text, bool caretRow, bool selectionLine, string? selected)
+    /// frame - decoding the line it came from again per row would be a string apiece for nothing.
+    ///
+    /// <para>Only the stretch <paramref name="from"/>..<paramref name="to"/> that can actually be drawn is
+    /// walked. A line is not bounded by the window it is read in: MEASURED on a screenful of megabyte-long
+    /// lines, marking every occurrence of a one-character term took 368 ms - per repaint. Nothing is lost by
+    /// stopping: a match beginning at or after the right-hand edge cannot be drawn, and a literal is its own
+    /// length, so starting that far back of the left-hand edge cannot miss one that reaches into view.</para>
+    /// </summary>
+    private void CollectHighlights(string text, bool caretRow, bool selectionLine, string? selected,
+                                   int from, int to)
     {
         _highlights.Clear();
         var matcher = _highlight;
         if (matcher is null && selected is null) return;
-
         Color colour = caretRow ? _settings.FindCurrent : _settings.FindHighlight;
         if (matcher is not null)
         {
-            int from = 0;
-            while (matcher.NextMatch(text, from, out int at, out int len))
+            // A regular expression can match any length, so its walk can only be stopped at the right-hand
+            // edge, never started short of the left one.
+            int at = matcher.LiteralLength is { } n ? Math.Max(0, from - n + 1) : 0;
+            while (_highlights.Count < MaxHighlightsPerRow && matcher.NextMatch(text, at, out int hit, out int len))
             {
-                _highlights.Add((at, len, colour));
-                from = at + Math.Max(1, len);
+                if (hit >= to) break;
+                if (hit + len > from) Mark(hit, len, colour);
+                at = hit + Math.Max(1, len);
             }
         }
         // Occurrences of what is selected, so picking a request id out of one line shows the rest at once.
         if (selected is { Length: > 1 })
         {
-            int from = 0;
-            while (from < text.Length)
+            int at = Math.Max(0, from - selected.Length + 1);
+            while (at < to && _highlights.Count < MaxHighlightsPerRow)
             {
-                int at = text.AsSpan(from).IndexOf(selected, StringComparison.Ordinal);
-                if (at < 0) break;
-                if (!selectionLine || from + at != Math.Min(_charAnchor, _charFocus))
-                    _highlights.Add((from + at, selected.Length, _settings.FindHighlight));
-                from += at + selected.Length;
+                int hit = text.AsSpan(at, Math.Min(text.Length, to + selected.Length) - at)
+                              .IndexOf(selected, StringComparison.Ordinal);
+                if (hit < 0) break;
+                hit += at;
+                if (hit >= to) break;
+                if (!selectionLine || hit != Math.Min(_charAnchor, _charFocus))
+                    Mark(hit, selected.Length, _settings.FindHighlight);
+                at = hit + selected.Length;
             }
         }
+
+        // Runs that touch are one mark. Each of them is a fill and a redraw of the text over it, so a term
+        // that matches every few characters costs a GDI call per character otherwise - and the picture is
+        // identical, because the fills are contiguous and the text over them is the same in the same colour.
+        void Mark(int at, int len, Color colour)
+        {
+            if (_mergeMarks && _highlights.Count > 0)
+            {
+                var (lastAt, lastLen, lastColour) = _highlights[^1];
+                if (lastColour == colour && at <= lastAt + lastLen)
+                {
+                    _highlights[^1] = (lastAt, Math.Max(lastLen, at + len - lastAt), lastColour);
+                    return;
+                }
+            }
+            _highlights.Add((at, len, colour));
+            MarksMadeForTesting++;
+        }
     }
+
+    /// <summary>Test seam: mark each occurrence on its own, as this used to, so a check can prove that
+    /// joining the ones that touch draws the same picture.</summary>
+    [System.ComponentModel.DefaultValue(true)]
+    internal bool MergeMarksForTesting
+    {
+        get => _mergeMarks;
+        set { _mergeMarks = value; Invalidate(); }
+    }
+
+    private bool _mergeMarks = true;
+
+    /// <summary>How many marks the frame worked out, so a check can show that only the part of a line that
+    /// can be drawn is being walked.</summary>
+    internal int MarksMadeForTesting;
+
+    /// <summary>Test seam: mark the whole of every line, as this used to, so a check can prove that marking
+    /// only the part that shows marks the same picture.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool MarkWholeLinesForTesting
+    {
+        get => _markWholeLines;
+        set { _markWholeLines = value; Invalidate(); }
+    }
+
+    private bool _markWholeLines;
+
+    /// <summary>A backstop for the one case the window above cannot bound: while wrapping, every character
+    /// of a line really is on screen somewhere. Far more than a row can distinguish, so nothing legible is
+    /// given up.</summary>
+    private const int MaxHighlightsPerRow = 8192;
+
+    /// <summary>Which characters of a row can be drawn, for deciding how much of it is worth marking. Only
+    /// answerable by arithmetic - the same condition <see cref="DrawSegment"/> uses for the same reason -
+    /// so a proportional face or a line with non-ASCII in it settles for the whole line.</summary>
+    private (int From, int To) MarkableRange(string shown, int gutter, int charWidth)
+        => _markWholeLines || Wrapping || charWidth <= 0
+           || shown.AsSpan().IndexOfAnyExceptInRange(' ', '~') >= 0
+            ? (0, shown.Length)
+            : OnScreenPart(shown.Length, gutter - _hScroll, charWidth);
+
 
     /// <summary>Marks every occurrence on show and re-draws the text over it in the ordinary text colour.
     /// Without the second part a hit on a selected row would be white on orange - and the row the search
@@ -1483,6 +1555,7 @@ public sealed class LineGridControl : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         _paints++;
+        MarksMadeForTesting = 0;
         var g = e.Graphics;
         if (_doc is null) { g.Clear(_settings.Background); DrawFocusBar(g); return; }
 
@@ -1589,7 +1662,8 @@ public sealed class LineGridControl : Control
                 }
                 else
                 {
-                    CollectHighlights(shown, row == _caretRow, charSel, selected);
+                    var mark = MarkableRange(shown, gutter, charWidth);
+                    CollectHighlights(shown, row == _caretRow, charSel, selected, mark.From, mark.To);
                     for (int s = 0; s < segments; s++)
                     {
                         int from = _segments[s];
@@ -1940,7 +2014,7 @@ public sealed class LineGridControl : Control
     {
         var template = _doc!.Columns.Compiled;
         var font = _fonts[fontIndex];
-        CollectHighlights(text, row == _caretRow, charSel, selected);
+        CollectHighlights(text, row == _caretRow, charSel, selected, 0, text.Length);
 
         // A line the template does not fit is shown whole, across the row. Columns can shorten a line;
         // they can never hide one, and a screenful of empty cells says nothing about why.

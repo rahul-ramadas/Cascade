@@ -1161,9 +1161,20 @@ public sealed class CascadeDocument : IDisposable
     private const int ScanGroupLines = 64;
     private const long ParallelScanThreshold = 16 * 1024;
 
-    /// <summary>Threads per sweep direction. Both directions run at once, so giving each of them every core
-    /// would have the two fighting for the same ones.</summary>
-    private static readonly int FindParallelism = Math.Max(1, Environment.ProcessorCount / 2);
+    /// <summary>A block worth handing to more than one thread, in bytes. Lines alone cannot say: 2,000
+    /// lines is far below the line threshold and 2 GB of work if each of them is a megabyte long.</summary>
+    private const long ParallelScanBytes = 1L << 20;
+
+    /// <summary>Work per group. Groups are counted in lines, but what one costs is its bytes, so a file of
+    /// very long lines gets fewer lines to a group rather than 64 MB of work in one.</summary>
+    private const long ScanGroupBytes = 16 * 1024;
+
+    /// <summary>The most occurrences counted on any one line. See <see cref="FindEngine.FindMatcher.CountIn"/>:
+    /// past this the count says nothing a reader wants and costs everything.</summary>
+    private const int MaxOccurrencesPerLine = 256;
+
+    /// <summary>Threads for the sweep. It is one sweep alternating direction, so it gets the machine.</summary>
+    private static readonly int FindParallelism = Math.Max(1, Environment.ProcessorCount);
 
     /// <summary>The search for a term, started if this is the first time it has been asked for. Replacing the
     /// term throws the old one away, which is what keeps one file's worth of results in memory at most.</summary>
@@ -1182,52 +1193,85 @@ public sealed class CascadeDocument : IDisposable
         var matchers = new ThreadLocal<FindEngine.FindMatcher>(() => FindEngine.CompileQuery(query)!);
         var readers = new ThreadLocal<LineReader>(() => new LineReader(src, encoding));
 
-        void ScanRange(long from, long count, List<FindHit> hits, CancellationToken ct)
+        void ScanRange(long from, long count, FindHits hits, CancellationToken ct)
         {
             FindCheckpointForTesting?.Invoke(from);
 
             // Below this a pass is over before threads could be handed out, and the first block of a sweep
             // is deliberately small so the first result lands at once - that latency must not be traded away
-            // for throughput that only matters much later.
-            if (count < ParallelScanThreshold) { ScanSequential(from, count, hits, ct); return; }
+            // for throughput that only matters much later. Bytes decide it as well as lines, because a
+            // handful of very long lines is a great deal of work however few of them there are.
+            long blockBytes = BytesOf(from, count);
+            if (count < ParallelScanThreshold && blockBytes < ParallelScanBytes)
+            { ScanSequential(from, count, hits, null, ct); return; }
 
             // Groups of 64 lines, as the filter pass uses: enough work per group to be worth a thread, small
-            // enough that a cancelled search stops promptly.
-            int groups = (int)((count + ScanGroupLines - 1) / ScanGroupLines);
-            var perThread = new List<List<FindHit>>();
-            var options = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = FindParallelism };
+            // enough that a cancelled search stops promptly - but sized down when the lines are long, or one
+            // group is tens of megabytes and most of the machine has nothing to do.
+            long perLine = Math.Max(1, blockBytes / Math.Max(1, count));
+            int groupLines = (int)Math.Clamp(ScanGroupBytes / perLine, 1, ScanGroupLines);
+            int groups = (int)((count + groupLines - 1) / groupLines);
+            var options = new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = Math.Min(FindParallelism, hits.Threads) };
+            // Partitioner.Create rather than Parallel.For over the groups: the same lesson as the filter
+            // pass, where it was worth 1.26x. Parallel.For hands out ranges that grow as it goes, so the
+            // thread that takes the last one decides when the block is over.
             Parallel.For(0, groups, options,
-                () => new List<FindHit>(),
-                (g, _, local) =>
+                () => new List<(long, int)>(),
+                (g, _, extras) =>
                 {
-                    long start = from + (long)g * ScanGroupLines;
-                    ScanSequential(start, Math.Min(ScanGroupLines, from + count - start), local, ct);
-                    return local;
+                    long start = from + (long)g * groupLines;
+                    ScanSequential(start, Math.Min(groupLines, from + count - start), hits, extras, ct);
+                    return extras;
                 },
-                local => { lock (perThread) perThread.Add(local); });
+                extras => hits.AddCounts(0, false, extras));
 
-            // Order does not matter: these go into a bitset, and coverage only advances once the whole
-            // block is done, so nothing can observe a half-finished range.
-            foreach (var list in perThread) hits.AddRange(list);
+            long BytesOf(long start, long lines)
+            {
+                if (lines <= 0) return 0;
+                index.GetRange(start, length, out long a, out _);
+                index.GetRange(start + lines - 1, length, out _, out long b);
+                return Math.Max(0, b - a);
+            }
 
-            void ScanSequential(long start, long lines, List<FindHit> into, CancellationToken token)
+            // One thread's share. It builds whole WORDS of the block's bitmap rather than a list of matches:
+            // what it hands back then costs the number of lines it looked at, not the number that matched.
+            void ScanSequential(long start, long lines, FindHits into, List<(long, int)>? extras, CancellationToken token)
             {
                 var matcher = matchers.Value!;
                 var reader = readers.Value!;
                 long end = start + lines;
+                long word = -1;
+                ulong bits = 0;
+                long occurrences = 0;
+                bool capped = false;
                 for (long line = start; line < end; line++)
                 {
-                    if ((line & 0x3FFF) == 0) token.ThrowIfCancellationRequested();
+                    if ((line & 0x3FF) == 0) token.ThrowIfCancellationRequested();
                     index.GetRange(line, length, out long s, out long e);
-                    int occurrences = matcher.CountIn(reader.GetChars(s, e));
-                    if (occurrences > 0) into.Add(new FindHit(line, occurrences));
+                    int n = matcher.CountIn(reader.GetChars(s, e), MaxOccurrencesPerLine, out bool stopped);
+                    if (n == 0) continue;
+
+                    long w = line >> 6;
+                    if (w != word) { if (bits != 0) into.AddWord(word, bits); word = w; bits = 0; }
+                    bits |= 1UL << (int)(line & 63);
+                    occurrences += n;
+                    capped |= stopped;
+                    if (n > 1 && into.WantExtras)
+                    {
+                        if (extras is not null) extras.Add((line, n - 1));
+                        else into.AddCounts(0, false, [(line, n - 1)]);
+                    }
                 }
+                if (bits != 0) into.AddWord(word, bits);
+                into.AddCounts(occurrences, capped, null);
             }
         }
 
         _searchMatchers = matchers;
         _searchReaders = readers;
-        _search = new FindSearch(query, CompletedLineCount, startLine, ScanRange);
+        long lineCount = CompletedLineCount;
+        _search = new FindSearch(query, lineCount, startLine, ScanRange,
+                                 lineCount > 0 ? length / lineCount : 0);
         _search.Start();
         return _search;
     }

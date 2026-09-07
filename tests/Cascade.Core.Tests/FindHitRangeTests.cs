@@ -17,7 +17,7 @@ public class FindHitRangeTests
             for (long i = from; i < from + count; i++)
             {
                 ct.ThrowIfCancellationRequested();
-                if (matches(i)) hits.Add(new FindHit(i, 1));
+                if (matches(i)) hits.Add(i);
             }
         });
         s.Start();

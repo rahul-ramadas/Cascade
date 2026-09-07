@@ -326,6 +326,45 @@ internal static class SelfTest
             grid.RefreshView();
             Pump();
 
+            // Marking a term is bounded to the stretch of a line that can be drawn. A line is not bounded
+            // by the window it is read in - a term matching every few characters of a very long one used to
+            // cost a mark per character, per row, per repaint - so what has to be shown is that stopping
+            // early stops nothing appearing.
+            int wholeMarks = 0, windowedMarks = 0;
+            foreach (int scrolledTo in (int[])[0, 300, 900])
+            {
+                grid.ScrollHorizontallyTo(scrolledTo);
+                grid.RefreshView();
+                grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("e", Regex: false, CaseSensitive: false)));
+                grid.MarkWholeLinesForTesting = true;
+                Pump();
+                using var whole = Capture(host);
+                wholeMarks += grid.MarksMadeForTesting;
+                grid.MarkWholeLinesForTesting = false;
+                Pump();
+                using var windowed = Capture(host);
+                windowedMarks += grid.MarksMadeForTesting;
+                var markDiff = FirstDifference(whole, windowed, new Rectangle(0, 0, whole.Width, whole.Height));
+                ok &= Check("marking only the part of a line that shows marks what marking all of it does, " +
+                            $"scrolled to {scrolledTo}" +
+                            (markDiff is null ? "" : $" [first differs at x={markDiff.Value.X},y={markDiff.Value.Y}]"),
+                            markDiff is null);
+
+                // ...and the pictures agreeing says nothing unless marks are being drawn at all.
+                grid.SetFindHighlight(null);
+                Pump();
+                using var unmarked = Capture(host);
+                bool anyInk = FirstDifference(windowed, unmarked, new Rectangle(0, 0, whole.Width, whole.Height)) is not null;
+                ok &= Check($"and there really are marks on screen to compare, scrolled to {scrolledTo}",
+                            anyInk || scrolledTo == 0);   // at the far left this fixture has no "e" in view
+            }
+            ok &= Check($"and far fewer of them are worked out ({wholeMarks} -> {windowedMarks})",
+                        windowedMarks > 0 && windowedMarks * 2 < wholeMarks);
+            grid.SetFindHighlight(null);
+            grid.ScrollHorizontallyTo(260);
+            grid.RefreshView();
+            Pump();
+
             // A face where the characters are not all one width cannot have its glyphs placed by
             // multiplication - asked of the SHAPES of every one of the eight faces, because a family may be
             // cut fixed-pitch in one and proportionally in another. Asked of the same measurement that lays
@@ -343,6 +382,25 @@ internal static class SelfTest
             bool[] variable = Enumerable.Range(0, 8).Select(i => grid.WidthWasArithmeticForTesting(sample, i)).ToArray();
             ok &= Check($"and a proportional one refuses it in every style [{string.Join(",", variable.Select(b => b ? '1' : '0'))}]",
                         variable.All(b => !b), $"font {proportional.FontFamily}");
+
+            // Marks that touch are drawn as one, which is a great deal cheaper when a term matches every few
+            // characters. Asked in a PROPORTIONAL face, because that is where drawing a run in one piece
+            // could place its glyphs differently from drawing it in several.
+            grid.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("e", Regex: false, CaseSensitive: false)));
+            grid.MergeMarksForTesting = false;
+            Pump();
+            using (var apiece = Capture(host))
+            {
+                grid.MergeMarksForTesting = true;
+                Pump();
+                using var joined = Capture(host);
+                var joinDiff = FirstDifference(apiece, joined, new Rectangle(0, 0, apiece.Width, apiece.Height));
+                ok &= Check("joining marks that touch draws what marking each on its own does" +
+                            (joinDiff is null ? "" : $" [first differs at x={joinDiff.Value.X},y={joinDiff.Value.Y}]"),
+                            joinDiff is null);
+            }
+            grid.SetFindHighlight(null);
+            Pump();
             // ...and still draws, through the layout that has always drawn it.
             grid.ScrollHorizontallyTo(0);
             grid.RefreshView();

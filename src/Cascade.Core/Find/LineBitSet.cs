@@ -29,6 +29,27 @@ internal sealed class LineBitSet
 
     public ulong Word(long index) => _words[index];
 
+    /// <summary>Folds a block's worth of bits in, and answers how many lines that newly set. Merging a
+    /// whole block a word at a time rather than a line at a time is what keeps a common term affordable:
+    /// the work is then the size of the FILE, not the number of matches in it.</summary>
+    public long Or(long firstWord, ReadOnlySpan<ulong> words)
+    {
+        long added = 0;
+        for (int i = 0; i < words.Length; i++)
+        {
+            ulong bits = words[i];
+            if (bits == 0) continue;
+            long w = firstWord + i;
+            if (w < 0 || w >= _words.LongLength) continue;
+            ulong was = _words[w];
+            ulong now = was | bits;
+            if (now == was) continue;
+            _words[w] = now;
+            added += BitOperations.PopCount(now) - BitOperations.PopCount(was);
+        }
+        return added;
+    }
+
     /// <summary>How many lines in <c>[from, toExclusive)</c> are set. Only the words in the range are
     /// touched, so summarising the file band by band costs one pass over the bitmap in total rather than one
     /// pass per band.</summary>

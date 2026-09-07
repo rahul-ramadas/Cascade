@@ -45,7 +45,8 @@ internal static class FindStatusText
 
         // The total survives a capped record even when the split does not, and saying it plainly beats
         // implying a precision the record cannot back.
-        if (countHits && !perSide) text += $" \u00b7 {t.Occurrences:N0}{more} hits in all";
+        if (countHits && !perSide)
+            text += $" \u00b7 {(t.Hits == HitCount.AtLeast ? "\u2265" : "")}{t.Occurrences:N0}{more} hits in all";
         return text;
 
         string Lines(long n) => $"{n:N0}{more} lines";
@@ -62,7 +63,9 @@ internal static class FindStatusText
         long lines = t.VisibleLines + t.HiddenLines;
         bool manyHits = t.Occurrences > lines;
         var s = new StringBuilder($"\u201c{term}\u201d matches {lines:N0} lines");
-        if (manyHits && t.Hits != HitCount.TotalUnknown) s.Append($" with {t.Occurrences:N0} hits");
+        if (manyHits && t.Hits != HitCount.TotalUnknown)
+            s.Append(t.Hits == HitCount.AtLeast ? $" with at least {t.Occurrences:N0} hits"
+                                                : $" with {t.Occurrences:N0} hits");
         s.Append('.');
 
         if (t.HiddenLines > 0)
@@ -73,6 +76,8 @@ internal static class FindStatusText
 
         if (t.Hits == HitCount.SplitUnknown)
             s.Append(" Too many lines matched more than once to say how many of those hits are shown.");
+        else if (t.Hits == HitCount.AtLeast)
+            s.Append(" A line matched more times than were counted, so the hit figures are a floor.");
         else if (t.Hits == HitCount.TotalUnknown)
             s.Append(" Too many lines matched more than once for the hits to be counted.");
 

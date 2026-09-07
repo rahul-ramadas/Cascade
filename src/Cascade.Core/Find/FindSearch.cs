@@ -2,13 +2,14 @@ using System.Numerics;
 
 namespace Cascade.Core.Find;
 
-/// <summary>A line that matched, and how many times it did.</summary>
-public readonly record struct FindHit(long Line, int Occurrences);
-
+/// <summary>A line that matched, and how many times it did. <paramref name="Capped"/> says the count
+/// stopped short: counting occurrences is the only part of a search whose cost a single line can run away
+/// with, so a scanner is allowed to give up on one and say so.</summary>
+public readonly record struct FindHit(long Line, int Occurrences, bool Capped = false);
 /// <summary>Examines lines <paramref name="from"/> to <paramref name="from"/> + <paramref name="count"/> and
-/// appends every one that matches to <paramref name="hits"/>. Whether that reads a file, and whether it uses
+/// records every one that matches in <paramref name="hits"/>. Whether that reads a file, and whether it uses
 /// one thread or all of them, is the caller's business - a search only cares about the answers.</summary>
-public delegate void FindRangeScanner(long from, long count, List<FindHit> hits, CancellationToken ct);
+public delegate void FindRangeScanner(long from, long count, FindHits hits, CancellationToken ct);
 
 /// <summary>Fills <paramref name="words"/> with the visibility of the lines starting at
 /// <paramref name="fromWord"/> * 64, one bit per line.</summary>
@@ -24,6 +25,9 @@ public enum HitCount
 
     /// <summary>The total is exact, but splitting it between shown and hidden lines is a floor.</summary>
     SplitUnknown,
+
+    /// <summary>Every hit figure is a floor: some line matched more times than were counted.</summary>
+    AtLeast,
 
     /// <summary>Not even the total can be pinned down, so no hit figure is worth showing.</summary>
     TotalUnknown,
@@ -57,11 +61,20 @@ public sealed class FindSearch : IDisposable
     private const long FirstBlockLines = 8 * 1024;      // small, so the first result lands almost at once
     private const long MaxBlockLines = 256 * 1024;
 
+    /// <summary>Blocks are bounded in BYTES as well as lines, because a line is not a unit of work: a log
+    /// of megabyte-long lines has so few of them that a block counted in lines is the whole file. MEASURED
+    /// on 2,000 lines of 1 MB each, the first block covered every one of them, so the first result took as
+    /// long as the whole sweep - 194 ms - even when it was on the first line.</summary>
+    private const long FirstBlockBytes = 4L << 20;
+    private const long MaxBlockBytes = 128L << 20;
+
     private readonly object _sync = new();
     private readonly LineBitSet _hits;
     private readonly FindRangeScanner _scanner;
     private readonly long _lines;
     private readonly long _start;
+    private readonly long _firstBlock;
+    private readonly long _maxBlock;
     private readonly CancellationTokenSource _cts = new();
 
     private long _lo, _hi;              // lines [_lo, _hi) have been examined
@@ -71,12 +84,13 @@ public sealed class FindSearch : IDisposable
     // stays tiny in practice, and the cap keeps a pathological term ("e" in prose) from eating memory.
     private readonly Dictionary<long, int> _extras = new();
     private bool _extrasCapped;
+    private bool _occurrencesCapped;
     private bool _stopped;
     private Exception? _failure;
     private Task[] _sweeps = Array.Empty<Task>();
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public FindSearch(FindQuery query, long lines, long startLine, FindRangeScanner scanner)
+    public FindSearch(FindQuery query, long lines, long startLine, FindRangeScanner scanner, long bytesPerLine = 0)
     {
         Query = query;
         _lines = Math.Max(0, lines);
@@ -84,6 +98,9 @@ public sealed class FindSearch : IDisposable
         _scanner = scanner;
         _hits = new LineBitSet(_lines);
         _lo = _hi = _start;
+        long bpl = Math.Max(1, bytesPerLine);
+        _firstBlock = Math.Clamp(FirstBlockBytes / bpl, 1, FirstBlockLines);
+        _maxBlock = Math.Clamp(MaxBlockBytes / bpl, 1, MaxBlockLines);
     }
 
     public FindQuery Query { get; }
@@ -127,7 +144,12 @@ public sealed class FindSearch : IDisposable
         lock (_sync) return _hits.CountInRange(from, toExclusive);
     }
 
-    private const int MaxExtraLines = 2_000_000;
+    /// <summary>How many lines that matched more than once are remembered. Only these lines are, because
+    /// almost every matching line matches exactly once - but a term as ordinary as a single letter puts
+    /// every line in here, so it needs a bound. MEASURED at two million entries: 81 MB of heap, for a
+    /// refinement of a refinement (which of a line's hits the filters are showing). A quarter of that is
+    /// still more multi-hit lines than any answer distinguishes.</summary>
+    private const int MaxExtraLines = 250_000;
 
     /// <summary>Words of visibility to read at a time. Big enough that the call is amortised away, small
     /// enough to sit on the stack.</summary>
@@ -160,13 +182,17 @@ public sealed class FindSearch : IDisposable
             {
                 // The filters are keeping nothing back, so everything inside the crop can be reached and the
                 // only thing left to work out is where the caret sits among it.
+                var trust = Trust(whole, 0);
                 long all = whole ? _found : _hits.CountInRange(lo, hi);
-                long hits = whole ? _occurrences : OccurrencesInRange(lo, hi);
+                // Work the hits out only when they are going to be shown. Adding them up over a crop walks
+                // every match there is; MEASURED on a 15.8 GB log cropped to its middle half, with a term on
+                // 36 M lines, that was 129 ms of frozen window on every caret move - for a number the tally
+                // then threw away because the record it came from had been capped.
+                long hits = trust == HitCount.TotalUnknown ? 0 : whole ? _occurrences : OccurrencesInRange(lo, hi);
                 long at = currentLine >= lo && currentLine < hi && _hits.Contains(currentLine)
                     ? _hits.CountInRange(lo, currentLine + 1)
                     : 0;
-                return new FindTally(at, all, 0, hits, hits, complete,
-                                     whole || !_extrasCapped ? HitCount.Exact : HitCount.TotalUnknown);
+                return new FindTally(at, all, 0, hits, hits, complete, trust);
             }
 
             long visibleLines = 0, hiddenLines = 0, position = 0;
@@ -199,10 +225,15 @@ public sealed class FindSearch : IDisposable
                 }
             }
 
-            long total = whole ? _occurrences : OccurrencesInRange(lo, hi);
+            // Work the hits out only when they are going to be shown - see the note on the unfiltered path.
+            var how = Trust(whole, hiddenLines);
+            long total = how == HitCount.TotalUnknown ? 0
+                       : whole ? _occurrences
+                       : OccurrencesInRange(lo, hi);
             return new FindTally(onVisibleHit ? position : 0, visibleLines, hiddenLines,
-                                 VisibleOccurrences(shown, lo, hi, visibleLines, hiddenLines, total),
-                                 total, complete, Trust(whole, hiddenLines));
+                                 how == HitCount.TotalUnknown ? 0
+                                     : VisibleOccurrences(shown, lo, hi, visibleLines, hiddenLines, total),
+                                 total, complete, how);
         }
     }
 
@@ -212,12 +243,17 @@ public sealed class FindSearch : IDisposable
     /// <summary>What the cap on the multi-hit record costs this particular question. With nothing hidden
     /// every hit inside the crop is on a shown line, so the split is exact however little of the record
     /// survived; and the running total is only exact for the whole file, since narrowing it to a crop means
-    /// adding the extras up line by line out of the very record the cap emptied.</summary>
+    /// adding the extras up line by line out of the very record the cap emptied.
+    /// <para>A line whose own count was given up on makes every figure a floor - but a floor is still worth
+    /// showing, so it only softens an answer, never removes one.</para></summary>
     private HitCount Trust(bool whole, long hiddenLines)
-        => !_extrasCapped ? HitCount.Exact
-         : !whole ? HitCount.TotalUnknown
-         : hiddenLines > 0 ? HitCount.SplitUnknown
-         : HitCount.Exact;
+    {
+        var how = !_extrasCapped ? HitCount.Exact
+                : !whole ? HitCount.TotalUnknown
+                : hiddenLines > 0 ? HitCount.SplitUnknown
+                : HitCount.Exact;
+        return _occurrencesCapped && how != HitCount.TotalUnknown ? HitCount.AtLeast : how;
+    }
 
     /// <summary>Which of a word's 64 lines fall inside <c>[lo, hi)</c>. Only ever asked about words the
     /// range really touches, so neither shift can reach 64.</summary>
@@ -388,11 +424,17 @@ public sealed class FindSearch : IDisposable
         return _lo <= 0;
     }
 
+    /// <summary>Grows the examined range outwards from the caret in one direction, one block at a time.
+    /// The two directions are separate tasks on purpose: a scan that stalls - the far end of a file nobody
+    /// has read yet, on a machine where something inspects every read - must not hold up the direction the
+    /// reader is actually going. Each of them is allowed the whole machine, because the common case is a
+    /// caret near one end of the file, where the other direction has nothing to do and rationing cores to
+    /// it leaves them idle.</summary>
     private void Sweep(bool forward, CancellationToken ct)
     {
-        var hits = new List<FindHit>();
+        var hits = new FindHits();
         long edge = _start;
-        long block = FirstBlockLines;
+        long block = _firstBlock;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -411,30 +453,39 @@ public sealed class FindSearch : IDisposable
                     from = edge - count;
                 }
 
-                hits.Clear();
+                bool wantExtras;
+                int threads;
+                lock (_sync)
+                {
+                    wantExtras = _extras.Count < MaxExtraLines;
+                    // Half the machine while the other direction still has file to get through, all of it
+                    // once it has not. A caret near either end of the file is the common case, and that is
+                    // exactly when rationing cores to the sweep doing the work leaves them idle.
+                    bool otherHasWork = forward ? _lo > 0 : _hi < _lines;
+                    threads = otherHasWork ? Math.Max(1, Environment.ProcessorCount / 2) : Environment.ProcessorCount;
+                }
+                hits.Reset(from, count, wantExtras, threads);
                 _scanner(from, count, hits, ct);
 
                 lock (_sync)
                 {
-                    foreach (var h in hits)
+                    _found += _hits.Or(hits.FirstWord, hits.Words);
+                    _occurrences += hits.Occurrences;
+                    if (hits.Capped) _occurrencesCapped = true;
+                    foreach (var (line, extra) in hits.ExtraLines)
                     {
-                        if (_hits.Contains(h.Line)) continue;
-                        _hits.Add(h.Line);
-                        _found++;
-                        int occ = Math.Max(1, h.Occurrences);
-                        _occurrences += occ;
-                        if (occ > 1)
-                        {
-                            if (_extras.Count < MaxExtraLines) _extras[h.Line] = occ - 1;
-                            else _extrasCapped = true;
-                        }
+                        if (_extras.Count >= MaxExtraLines) break;
+                        _extras[line] = extra;
                     }
+                    // Full is as good as overflowed: from here on multi-hit lines are not being recorded at
+                    // all, so the split between shown and hidden hits can only be a floor.
+                    if (_extras.Count >= MaxExtraLines) _extrasCapped = true;
                     if (forward) _hi = from + count; else _lo = from;
                     Pulse();
                 }
 
                 edge = forward ? from + count : from;
-                block = Math.Min(MaxBlockLines, block * 2);
+                block = Math.Min(_maxBlock, block * 2);
             }
         }
         catch (OperationCanceledException) { /* the term moved on, or the file closed */ }

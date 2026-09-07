@@ -342,7 +342,7 @@ public class ResourceLifetimeTests
         var gate = new SemaphoreSlim(0);
         int reached = 0;
         var search = new FindSearch(new FindQuery("x", false, false), 100_000, 50_000,
-            (long from, long count, List<FindHit> hits, CancellationToken ct) =>
+            (long from, long count, FindHits hits, CancellationToken ct) =>
             {
                 if (Interlocked.Exchange(ref reached, 1) == 0) gate.Wait(TimeSpan.FromSeconds(30), CancellationToken.None);
             });

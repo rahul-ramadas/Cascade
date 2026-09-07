@@ -19,7 +19,7 @@ public class FindTallyTests
             {
                 ct.ThrowIfCancellationRequested();
                 int n = occurrences(i);
-                if (n > 0) hits.Add(new FindHit(i, n));
+                if (n > 0) hits.Add(i, n);
             }
         });
         s.Start();
@@ -100,7 +100,7 @@ public class FindTallyTests
         var search = new FindSearch(Q, 100_000, 50_000, (from, count, hits, ct) =>
         {
             if (from < 40_000) gate.Wait(ct);   // the backward sweep stalls part way
-            for (long i = from; i < from + count; i++) if (i % 100 == 0) hits.Add(new FindHit(i, 1));
+            for (long i = from; i < from + count; i++) if (i % 100 == 0) hits.Add(i);
         });
         search.Start();
 
