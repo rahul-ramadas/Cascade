@@ -126,11 +126,56 @@ public class DocumentTimeTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>A window drawn from one snapshot of the view is measured against that window, not against
+    /// whatever the view says a moment later.
+    ///
+    /// <para>A frame resolves all its rows at once and then draws them one by one. Working the previous
+    /// shown line out from the view per row means a filter change landing in between is answered for by the
+    /// NEW view, where the lines being drawn may have no row at all - and every one of them then has no gap
+    /// to show. MEASURED on an 18 GB log: 50 of the 53 figures on screen went blank for a frame.</para></summary>
+    [Fact]
+    public void A_gap_is_measured_from_the_rows_the_frame_is_drawing()
+    {
+        string path = WriteLog(600, line: i =>
+        {
+            var at = Start.AddSeconds(i);
+            return $"[{at.ToString("yyyy-MM-ddTHH:mm:ss.fff", CultureInfo.InvariantCulture)}]" +
+                   $"[{(i % 10 == 0 ? "payment-svc" : "api-gateway")}] request {i}";
+        });
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            Wait(doc);
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var only = new Filter { Match = new FilterMatch { Text = "payment-svc" }, Enabled = true };
+            filters.Add(only);
+            doc.SetFilters(filters);
+            Wait(doc);
+
+            long[] frame = [doc.RowToLine(0), doc.RowToLine(1), doc.RowToLine(2)];
+            Assert.Equal([0L, 10L, 20L], frame);
+            Assert.True(doc.TryElapsedBefore(frame[2], null, frame.AsSpan(0, 2), out long shown));
+            Assert.Equal(TimeSpan.FromSeconds(10).Ticks, shown);
+
+            // The frame is still on screen, but the view has moved on and no longer shows any of it.
+            only.Match.Text = "nothing matches this";
+            doc.ApplyFilters();
+            Wait(doc);
+            Assert.Equal(0, doc.RowCount);
+
+            Assert.True(doc.TryElapsedBefore(frame[2], null, frame.AsSpan(0, 2), out long after));
+            Assert.Equal(shown, after);
+            Assert.False(doc.TryElapsedBefore(frame[2], out _), "asking the view is what emptied the column");
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>A stack trace carries no time. The line after it is measured from the last line that did,
     /// so a wrapped exception does not leave a hole in the column.</summary>
     [Fact]
-    public void Lines_carrying_no_time_are_stepped_over()
-    {
+    public void Lines_carrying_no_time_are_stepped_over()    {
         var sb = new StringBuilder();
         for (int i = 0; i < 600; i++)
         {

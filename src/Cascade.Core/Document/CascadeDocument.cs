@@ -579,17 +579,34 @@ public sealed class CascadeDocument : IDisposable
     /// <param name="text">The line's text where the caller already has it - the paint decodes every row it
     /// draws, and reading it a second time would double what a frame costs.</param>
     public bool TryElapsedBefore(long line, string? text, out long elapsed)
+        => TryElapsedBefore(line, text, default, out elapsed);
+
+    /// <summary><inheritdoc cref="TryElapsedBefore(long, out long)"/></summary>
+    /// <param name="shownBefore">The lines on show above this one, nearest last, where the caller already
+    /// knows them. A frame resolves its whole window against one snapshot of the view; re-deriving the row
+    /// from the view here instead reads a later one, and a filter change landing mid-frame then leaves every
+    /// line it hides with no row, no gap, and an empty column.</param>
+    public bool TryElapsedBefore(long line, string? text, ReadOnlySpan<long> shownBefore, out long elapsed)
     {
         elapsed = 0;
         var clock = Clock;
         if (clock is null) return false;
         if (TimeOf(line, text) is not { } now) return false;
 
-        long row = RowForLine(line);
-        if (row <= 0) return false;
-        for (int back = 1; back <= WalkBack && row - back >= 0; back++)
+        int back = 1;
+        for (; back <= WalkBack && back <= shownBefore.Length; back++)
         {
-            if (TimeOf(RowToLine(row - back)) is not { } then) continue;
+            if (TimeOf(shownBefore[^back]) is not { } then) continue;
+            elapsed = ClockMath.Elapsed(then, now, clock.Format.WrapsAtMidnight);
+            return true;
+        }
+
+        // Above what the caller had - the top of the screen. One lookup, and only for that row.
+        long row = RowForLine(shownBefore.IsEmpty ? line : shownBefore[0]);
+        if (row <= 0) return false;
+        for (; back <= WalkBack && row - 1 >= 0; back++, row--)
+        {
+            if (TimeOf(RowToLine(row - 1)) is not { } then) continue;
             elapsed = ClockMath.Elapsed(then, now, clock.Format.WrapsAtMidnight);
             return true;
         }
@@ -673,8 +690,15 @@ public sealed class CascadeDocument : IDisposable
     /// <summary><inheritdoc cref="TryElapsedFrom(long, ElapsedOrigin, out long)"/></summary>
     /// <param name="text">The line's text where the caller already has it.</param>
     public bool TryElapsedFrom(long line, ElapsedOrigin origin, string? text, out long elapsed)
+        => TryElapsedFrom(line, origin, text, default, out elapsed);
+
+    /// <summary><inheritdoc cref="TryElapsedFrom(long, ElapsedOrigin, out long)"/></summary>
+    /// <param name="text">The line's text where the caller already has it.</param>
+    /// <param name="shownBefore"><inheritdoc cref="TryElapsedBefore(long, string?, ReadOnlySpan{long}, out long)" path="/param[@name='shownBefore']"/></param>
+    public bool TryElapsedFrom(long line, ElapsedOrigin origin, string? text, ReadOnlySpan<long> shownBefore,
+                               out long elapsed)
     {
-        if (origin == ElapsedOrigin.PreviousShown) return TryElapsedBefore(line, text, out elapsed);
+        if (origin == ElapsedOrigin.PreviousShown) return TryElapsedBefore(line, text, shownBefore, out elapsed);
 
         elapsed = 0;
         var clock = Clock;

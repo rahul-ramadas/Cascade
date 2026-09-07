@@ -104,6 +104,7 @@ public sealed class LineGridControl : Control
     private int _anchorOffset;
     private long _anchorCaretLine = -1;
     private long[] _window = new long[64];   // file lines resolved for the current frame
+    private readonly long[] _above = new long[1];   // and the one above them, or -1 at the top of the view
 
     // Where each row was actually painted this frame. With word wrap a row is as tall as the number of
     // segments it broke into, so hit-testing, page keys and the accessible bounds all have to read the
@@ -1590,6 +1591,11 @@ public sealed class LineGridControl : Control
         }
         else windowCount = _doc.LinesForRows(_firstRow, window);
 
+        // The row above the window, from the same snapshot: the top row's gap is measured from a line off
+        // the top of the screen, and asking the view for it later would be the very lookup the rest of the
+        // frame is avoiding.
+        _above[0] = _firstRow > 0 ? _doc.RowToLine(_firstRow - 1) : -1;
+
         // The rows are settled and nothing has been drawn yet: a check hooks in here to make the world move
         // exactly where it used to be able to move under a frame.
         AfterWindowForTesting?.Invoke();
@@ -1651,7 +1657,8 @@ public sealed class LineGridControl : Control
                 int rowHeight = segments * _rowHeight;
                 _layout.Add((row, y, rowHeight, segments));
 
-                DrawGutters(ink, line, y, rowHeight, selectedRow, elapsedRoom > 0 ? Elapsed(line, text) : null);
+                DrawGutters(ink, line, y, rowHeight, selectedRow,
+                            elapsedRoom > 0 ? Elapsed(ShownBefore(i), line, text) : null);
 
                 var contentRect = new Rectangle(gutter, y, contentW, rowHeight);
                 if (columns)
@@ -3184,10 +3191,21 @@ public sealed class LineGridControl : Control
 
     /// <summary>How long after whatever the column measures from this line was written, as the margin shows
     /// it. Empty for a line carrying no time, and for a line with nothing to be measured from.</summary>
-    private string Elapsed(long line, string text)
+    private string Elapsed(long line, string text) => Elapsed(default, line, text);
+
+    /// <summary>The rows of this frame that lie above row <paramref name="i"/>, nearest last - what its gap
+    /// is measured against. The top row's is the line above the window, which the frame resolved with it.</summary>
+    private ReadOnlySpan<long> ShownBefore(int i)
+        => i > 0 ? _window.AsSpan(0, i) : _above[0] >= 0 ? _above : default;
+
+    /// <summary><inheritdoc cref="Elapsed(long, string)"/></summary>
+    /// <param name="shownBefore">The rows this frame has already resolved above this one - the gap is
+    /// measured against those rather than against whatever the view says a moment later.</param>
+    private string Elapsed(ReadOnlySpan<long> shownBefore, long line, string text)
     {
         if (_doc?.Clock is not { } clock) return "";
-        return _doc.TryElapsedFrom(line, _doc.Resolve(_settings.ElapsedMeasuredFrom), text, out long ticks)
+        return _doc.TryElapsedFrom(line, _doc.Resolve(_settings.ElapsedMeasuredFrom), text, shownBefore,
+                                   out long ticks)
             ? ElapsedText.Gutter(ticks, clock.FractionDigits, _doc.WidestElapsedSeconds())
             : "";
     }

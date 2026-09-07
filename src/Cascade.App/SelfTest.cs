@@ -9396,6 +9396,7 @@ internal static class SelfTest
 
             ok &= CheckWhereTheColumnMeasuresFrom();
             ok &= CheckNamingTheTimeField();
+            ok &= CheckTheColumnHoldsWhileTheViewMoves();
             return ok;
         }
         finally
@@ -9409,11 +9410,75 @@ internal static class SelfTest
     private static int PathRoomOf(string layout) => Figure(layout, "pathroom=");
     private static int SlotOf(string layout) => Figure(layout, "elapsed=");
 
+    /// <summary>A frame resolves all its rows at once and then draws them one by one. Working the previous
+    /// line on show out from the VIEW per row means a filter change landing in between is answered by the
+    /// NEW view, where the rows being drawn may have no place at all - and every figure on screen goes blank
+    /// for a frame. Read off the pixels of a real window, because that is the only place the symptom exists.
+    /// MEASURED on an 18 GB log before the fix: 50 of the 53 figures went blank.</summary>
+    private static bool CheckTheColumnHoldsWhileTheViewMoves()
+    {
+        string log = Path.Combine(Path.GetTempPath(), "cascade_gap_" + Guid.NewGuid().ToString("N") + ".log");
+        var start = new DateTime(2026, 8, 5, 9, 0, 0, DateTimeKind.Utc);
+        File.WriteAllLines(log, Enumerable.Range(0, 4_000).Select(i =>
+            $"[{start.AddSeconds(i):yyyy-MM-ddTHH:mm:ss.fff}][{(i % 3 == 0 ? "payment-svc" : "api-gateway")}] request {i}"));
+
+        MainForm? form = null;
+        try
+        {
+            form = new MainForm(new AppSettings(), new MachineState(), [log])
+            {
+                NoSavePrompt = true, Opacity = 0, StartPosition = FormStartPosition.Manual,
+                Location = new Point(0, 0), Size = new Size(1100, 700),
+            };
+            form.Show();
+            Pump();
+            var doc = form.DocForTesting;
+            for (int i = 0; i < 200 && doc.CompletedLineCount < 4_000; i++) { Thread.Sleep(10); Pump(); }
+            var grid = form.GridForTesting;
+
+            var payments = new Filter { Enabled = true, Match = { Text = "payment-svc" } };
+            var showing = new FilterCollection { ShowOnlyFilteredLines = true };
+            showing.Add(payments);
+            doc.SetFilters(showing);
+            for (int i = 0; i < 400 && doc.IsBusy; i++) { Thread.Sleep(5); Pump(); }
+            grid.GoToLine(1_500);
+            Pump();
+
+            using var onShow = new Bitmap(Math.Max(1, grid.Width), Math.Max(1, grid.Height));
+            grid.DrawToBitmap(onShow, new Rectangle(0, 0, onShow.Width, onShow.Height));
+            string settled = ElapsedFigures(onShow, grid);
+            bool ok = Check($"a filtered view carries a figure beside its rows ({settled.Count(c => c == '#')} of them)",
+                            settled.Count(c => c == '#') >= 5, settled);
+
+            // The frame the report is about: its rows are resolved, and THEN the filters stop showing them.
+            grid.AfterWindowForTesting = () =>
+            {
+                payments.Match.Text = "nothing in this log matches";
+                doc.ApplyFilters();
+                for (int i = 0; i < 5_000 && doc.IsBusy; i++) Thread.Sleep(1);
+            };
+            using var moved = new Bitmap(Math.Max(1, grid.Width), Math.Max(1, grid.Height));
+            grid.DrawToBitmap(moved, new Rectangle(0, 0, moved.Width, moved.Height));
+            grid.AfterWindowForTesting = null;
+            ok &= Check("the view really did empty inside that frame", doc.RowCount == 0);
+            string during = ElapsedFigures(moved, grid);
+            ok &= Check("and every figure the frame had already worked out is still drawn",
+                        during == settled, $"{settled} -> {during}");
+            return ok;
+        }
+        finally
+        {
+            try { if (form is not null) form.GridForTesting.AfterWindowForTesting = null; } catch { /* ignore */ }
+            try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
+            Pump();
+            try { File.Delete(log); } catch { /* ignore */ }
+        }
+    }
+
     /// <summary>The column measures from one of three places, and which one it is has to be sayable from the
     /// margin, from the status bar's wording and from the menu at once - three displays of one fact, which
     /// is exactly where they can drift apart. Driven through the real keys and the real menu.</summary>
-    private static bool CheckWhereTheColumnMeasuresFrom()
-    {
+    private static bool CheckWhereTheColumnMeasuresFrom()    {
         string dir = Path.Combine(Path.GetTempPath(), "cascade_origin_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         string log = Path.Combine(dir, "timed.log");
@@ -9599,6 +9664,30 @@ internal static class SelfTest
             Pump();
             try { Directory.Delete(dir, true); } catch { /* ignore */ }
         }
+    }
+
+    /// <summary>Which rows of the elapsed column carry a figure, off a render of the grid, as one character
+    /// per row. Read per row rather than as a pixel total: the claim is that each row still says how long it
+    /// was, and a total would move with whichever digits happen to be on screen.</summary>
+    private static string ElapsedFigures(Bitmap shot, LineGridControl grid)
+    {
+        var area = grid.GutterAreaForTesting;
+        int from = grid.ElapsedGutterLeftForTesting, width = grid.ElapsedGutterWidthForTesting;
+        if (width <= 0 || area.Height <= 0) return "";
+        var rows = new StringBuilder();
+        int pitch = Math.Max(1, grid.RowPitch);
+        for (int top = area.Top; top + pitch <= area.Bottom && top + pitch <= shot.Height; top += pitch)
+        {
+            bool inked = false;
+            for (int y = top; y < top + pitch && !inked; y++)
+                for (int x = from; x < from + width && x < shot.Width; x++)
+                {
+                    var c = shot.GetPixel(x, y);
+                    if ((c.R + c.G + c.B) / 3 < 200) { inked = true; break; }
+                }
+            rows.Append(inked ? '#' : '.');
+        }
+        return rows.ToString();
     }
 
     /// <summary>How far the widest line number's ink sits from each end of the box it is drawn in, read off
