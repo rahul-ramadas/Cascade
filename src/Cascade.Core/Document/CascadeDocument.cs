@@ -291,6 +291,9 @@ public sealed class CascadeDocument : IDisposable
     /// filter's matches out for itself adds to this, so it says whether one is duplicating a running pass.</summary>
     public long FilterLinesScanned => _filterService?.LinesScanned ?? 0;
 
+    /// <summary><inheritdoc cref="FilterService.ViewSeeds"/></summary>
+    internal long ViewSeeds => _filterService?.ViewSeeds ?? 0;
+
     /// <summary>Test seam: runs on the filter worker after each block, so a test can hold a pass at a known
     /// frontier and exercise what happens while one is still in flight. Public because the app's own
     /// self-test holds a pass to check what the view draws while one is running. Survives <see cref="Open"/>.</summary>

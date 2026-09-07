@@ -192,6 +192,12 @@ public sealed class FilterService : IDisposable
     /// has to work results out for itself adds to this, so it says whether one is duplicating a pass.</summary>
     public long LinesScanned => Interlocked.Read(ref _linesScanned);
 
+    /// <summary>How many passes had to mark every line in the file visible before they could start. Nothing
+    /// reads it but a test: seeding leaves no trace in the answer, so a change that reintroduced it on the
+    /// path that needs no seed would cost a big file a whole-file write per filter change and show up only
+    /// as a frame drawn from a set nothing was going to show.</summary>
+    internal long ViewSeeds { get; private set; }
+
     /// <summary>Test seam: runs on the filter worker after each block, so a test can hold a pass at a known
     /// frontier and exercise what happens while one is still in flight.</summary>
     internal Action<long>? AfterBlockForTesting;
@@ -400,14 +406,15 @@ public sealed class FilterService : IDisposable
         if (!gen.Seeded)
         {
             gen.Seeded = true;
-            // Start from what the user is currently looking at so the view morphs in place instead of
-            // blanking: every line when no filters were active, otherwise the previous pass's results
-            // (already held in the shared set).
-            if (gen.SeedAllVisible) _visible.FillVisible(_completedCount());
-            _visible.Publish();
 
             // If every participating filter's results are already cached for the whole file, the new visible
             // set is just a bitwise combine of them - no reading, decoding or matching at all.
+            //
+            // Asked BEFORE the seed below, because a change that can be answered outright has nothing to
+            // stream and so nothing to seed. Seeding first marked every line in the file visible, published
+            // that, and overwrote it a few milliseconds later with the real answer - and a frame drawn in
+            // between was drawn from a set nothing was ever going to show, which threw the viewport clear
+            // across the file for one frame before it settled.
             if (TryApplyFromCache(gen))
             {
                 lock (_lock)
@@ -419,6 +426,12 @@ public sealed class FilterService : IDisposable
                 Progress?.Invoke(gen);
                 return;
             }
+
+            // Start from what the user is currently looking at so the view morphs in place instead of
+            // blanking: every line when no filters were active, otherwise the previous pass's results
+            // (already held in the shared set).
+            if (gen.SeedAllVisible) { _visible.FillVisible(_completedCount()); ViewSeeds++; }
+            _visible.Publish();
         }
 
         while (!ct.IsCancellationRequested)

@@ -1392,12 +1392,47 @@ public class FilterMatchCacheTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>A change the cache can answer outright must not mark every line in the file visible on the
+    /// way to it.
+    ///
+    /// <para>Switching the last filter off leaves the view showing the whole file, so switching one back on
+    /// used to seed the shared set with every line first - and only then ask whether the answer was already
+    /// known, which for a filter that has been on before it always is. A frame drawn in that window was drawn
+    /// from a set nothing was ever going to show: measured on a 66 M line log, the top line on screen went
+    /// from 33,181,094 to 66,351,109 and back within about thirty milliseconds.</para></summary>
+    [Fact]
+    public void Switching_a_filter_back_on_from_the_cache_never_makes_every_line_visible()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = Warmed(path, out _, out var flat);
+            var before = Capture(doc, flat);
+            long seeds = doc.ViewSeeds;
+            long hits = doc.FilterCacheHits;
+            Assert.True(seeds > 0, "the first pass had nothing cached, so it really did have to seed");
+
+            foreach (var f in flat) f.Enabled = false;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.Equal(doc.CompletedLineCount, doc.RowCount);   // nothing filtering: the whole file
+
+            foreach (var f in flat) f.Enabled = true;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+
+            Assert.True(doc.FilterCacheHits > hits, "the change should have been answered from the cache");
+            Assert.Equal(seeds, doc.ViewSeeds);
+            Assert.Equal(before.Visible, Capture(doc, flat).Visible);
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>Removing every filter at once - the Remove All command - is the change that makes the most
     /// cached results dead, and it is the one that used to keep them: with nothing enabled there is no pass
     /// to start, and the pruning lived inside starting one.</summary>
     [Fact]
-    public void Removing_every_filter_frees_everything_cached_for_them()
-    {
+    public void Removing_every_filter_frees_everything_cached_for_them()    {
         string path = WriteLog();
         try
         {
