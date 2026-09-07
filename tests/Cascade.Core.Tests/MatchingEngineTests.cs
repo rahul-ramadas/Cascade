@@ -496,6 +496,45 @@ public class MatchingEngineTests
         static int WordCount(FilterSnapshot.MatchContext ctx) => ctx.HitWords;
     }
 
+    /// <summary>The same optimization one step further out: a root with nothing enabled at or below it is not
+    /// walked at all. It answered correctly before - the walk turned round on its first line - but it had to
+    /// be entered to do so, once per root per line, and a long filter list with a handful switched on is how
+    /// these files are read. A root that is itself switched OFF but has something switched ON below it still
+    /// constrains that descendant, so it must keep being walked; that is the case this would get wrong.</summary>
+    [Fact]
+    public void Roots_with_nothing_enabled_below_them_are_not_walked()
+    {
+        var filters = new FilterCollection();
+        Filter Add(string text, bool enabled, Filter? parent = null)
+        {
+            var f = new Filter { Enabled = enabled, Match = { Type = FilterMatchType.Text, Text = text } };
+            filters.Add(f, parent);
+            return f;
+        }
+
+        var on = Add("keep", enabled: true);
+        for (int i = 0; i < 50; i++) Add($"off_{i}_", enabled: false);
+        var offParent = Add("outer", enabled: false);
+        Add("inner", enabled: true, parent: offParent);
+
+        var snapshot = FilterSnapshot.Build(filters);
+
+        // 52 roots, of which two matter: the enabled one and the switched-off parent of an enabled child.
+        Assert.Equal(52, filters.Roots.Count);
+        Assert.Equal(2, snapshot.EvaluatedRootCountForTesting);
+
+        // And the answers are what they were.
+        Assert.True(snapshot.Evaluate("keep this", 0, null).Shown);
+        Assert.False(snapshot.Evaluate("off_7_ here", 0, null).Shown);
+        Assert.False(snapshot.Evaluate("inner only", 0, null).Shown);
+        Assert.True(snapshot.Evaluate("outer and inner", 0, null).Shown);
+        Assert.Equal(on, snapshot.Evaluate("keep this", 0, null).ColorFilter);
+
+        // Switching everything on leaves nothing to prune, and the array is then shared rather than copied.
+        foreach (var f in filters.EnumerateDepthFirst()) f.Enabled = true;
+        Assert.Equal(52, FilterSnapshot.Build(filters).EvaluatedRootCountForTesting);
+    }
+
     [Fact]
     public void Invalid_regex_never_matches()
     {

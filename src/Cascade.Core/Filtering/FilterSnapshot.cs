@@ -105,6 +105,12 @@ public sealed class FilterSnapshot
     }
 
     private readonly Node[] _roots;
+    /// <summary>The roots evaluation actually has to walk: those with something enabled at or below them.
+    /// <see cref="Dfs"/> turns straight round on any other, but it has to be CALLED to do so, and with a
+    /// long filter list mostly switched off - which is how these files are read - that was a call per
+    /// switched-off root per line, thirteen hundred million of them on a big log. The full set is still
+    /// kept for <see cref="MatchingFilters"/>, which is asked about switched-off filters on purpose.</summary>
+    private readonly Node[] _evalRoots;
     /// <summary>Each root's automaton bit (or -1). Testing these first keeps the per-line scan inside two tiny
     /// arrays instead of dereferencing every root object — with ~175 filters almost all of them do not match,
     /// and chasing their pointers cost more than the matching itself.</summary>
@@ -134,14 +140,23 @@ public sealed class FilterSnapshot
     public bool HasMarkerFilter { get; }
     public int FilterCount { get; }
 
+    /// <summary>How many roots evaluation walks, as against how many the filter set has. Walking a root with
+    /// nothing enabled below it gives the same answer as skipping it, so no test would fail if the pruning
+    /// stopped - it would just quietly cost a long, mostly switched-off filter list a call per root per line.
+    /// This is what lets a test say it is still happening.</summary>
+    internal int EvaluatedRootCountForTesting => _evalRoots.Length;
+
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
         bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter,
         bool hasOverruledExclude, LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton,
         int[]? markerVersions)
     {
         _roots = roots;
-        _rootBits = new int[roots.Length];
-        for (int i = 0; i < roots.Length; i++) _rootBits[i] = roots[i].LiteralBit;
+        var live = new List<Node>(roots.Length);
+        foreach (var root in roots) if (root.SubtreeHasEnabled) live.Add(root);
+        _evalRoots = live.Count == roots.Length ? roots : live.ToArray();
+        _rootBits = new int[_evalRoots.Length];
+        for (int i = 0; i < _evalRoots.Length; i++) _rootBits[i] = _evalRoots[i].LiteralBit;
         _index = index;
         _nodesByIndex = nodesByIndex;
         FilterCount = filterCount;
@@ -587,12 +602,12 @@ public sealed class FilterSnapshot
         bool excluded = false;
         bool anyIncludeMatched = false;
 
-        for (int i = 0; i < _roots.Length; i++)
+        for (int i = 0; i < _evalRoots.Length; i++)
         {
             // A literal root that the automaton did not hit cannot match, and neither can its subtree.
             int bit = _rootBits[i];
             if (bit >= 0 && (hits[bit >> 6] & (1UL << (bit & 63))) == 0) continue;
-            Dfs(_roots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
+            Dfs(_evalRoots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
         }
         bool included = HasEnabledInclude ? anyIncludeMatched : true;
         bool shown = included && !excluded;
