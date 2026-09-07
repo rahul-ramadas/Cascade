@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 
 namespace Cascade.Core.Filtering;
@@ -15,14 +18,41 @@ namespace Cascade.Core.Filtering;
 internal sealed class LiteralAutomaton
 {
     private readonly byte[] _alpha;   // char -> symbol (0 = occurs in no pattern)
-    private readonly int[] _trans;    // node * _alphabetSize + symbol -> node
-    private readonly ushort[]? _trans16; // same table narrowed to 16 bits; halves the traffic of the hot loop
+    private readonly int[]? _trans;   // (node << _shift) + symbol -> node, when there are too many nodes for 16 bits
+    private readonly ushort[]? _trans16; // the same table narrowed; halves the traffic of the hot loop
     private readonly ulong[] _mask;   // node * _words -> bitset of patterns matched at this node
     private readonly bool[] _hasOut;  // most nodes end no pattern; skip the mask merge for those
-    private readonly int _alphabetSize;
+    /// <summary>Log2 of the row stride. A row is padded to a power of two so that finding it is a shift
+    /// rather than a multiply — and that shift sits on the loop's dependency chain, because the next node
+    /// cannot be looked up until this one is known. MEASURED over 237 M characters of real trace on 32
+    /// threads: 1.22x with 166 patterns, 1.30x with 48. The padding costs at most twice the table (307 KB
+    /// -> 457 KB for 166 patterns), which is nothing beside a line index of hundreds of megabytes.</summary>
+    private readonly int _shift;
+
+    /// <summary>Every character that moves the walk off the root, or null when there are too many of them to
+    /// be worth searching for. While the walk is at the root a character with no root transition leaves it
+    /// there and can end no pattern, so a whole run of them can be skipped with one vectorized search
+    /// instead of one table lookup each. MEASURED: 3.07x with 5 filters (2 such characters), 1.40x with 16
+    /// (6 characters) — and a LOSS from 10 characters up, where the search stops being a few SIMD compares.
+    /// Ordinary filter sets sit at the fast end: a handful of filters is what people usually have on.</summary>
+    private readonly SearchValues<char>? _rootMovers;
+
+    /// <summary>How many distinct root-entering characters are still worth a vectorized search. Above this
+    /// <see cref="SearchValues{T}"/> falls back to a bitmap probe and the skip costs more than it saves;
+    /// measured crossover is between 6 and 10, so the boundary is put where both sides were measured.</summary>
+    private const int RootSkipLimit = 8;
 
     /// <summary>Number of 64-bit words a hit bitset needs.</summary>
     public int Words { get; }
+
+    /// <summary>Whether the vectorized root skip is in force. Both walks answer the same, so no test would
+    /// fail if the skip silently stopped being taken - it would just quietly cost the common filter sets
+    /// their speed. This is what lets a test say which one it exercised.</summary>
+    internal bool SkipsAtRootForTesting => _rootMovers is not null;
+
+    /// <summary>Entries in the transition table, padding included. Lets a test hold the padding to the
+    /// size it is meant to be rather than trusting the arithmetic.</summary>
+    internal int TableEntriesForTesting => _trans16?.Length ?? _trans!.Length;
 
     /// <summary>Canonical form of each character under <see cref="StringComparison.OrdinalIgnoreCase"/>, built
     /// by asking .NET itself rather than assuming <see cref="char.ToUpperInvariant(char)"/>: ordinal casing
@@ -45,20 +75,24 @@ internal sealed class LiteralAutomaton
         return map;
     }
 
-    private LiteralAutomaton(byte[] alpha, int[] trans, ulong[] mask, bool[] hasOut, int alphabetSize, int words, int nodes)
+    private LiteralAutomaton(byte[] alpha, int[] trans, ulong[] mask, bool[] hasOut, int shift, int words,
+                             int nodes, SearchValues<char>? rootMovers)
     {
         _alpha = alpha;
-        _trans = trans;
         _mask = mask;
         _hasOut = hasOut;
-        _alphabetSize = alphabetSize;
+        _shift = shift;
         Words = words;
+        _rootMovers = rootMovers;
         // The transition table is walked randomly for every character, so its size drives cache behaviour.
+        // Only one width is kept: holding both cost half a megabyte of the larger one for nothing.
         if (nodes <= ushort.MaxValue)
         {
-            _trans16 = new ushort[trans.Length];
-            for (int i = 0; i < trans.Length; i++) _trans16[i] = (ushort)trans[i];
+            var narrow = new ushort[trans.Length];
+            for (int i = 0; i < trans.Length; i++) narrow[i] = (ushort)trans[i];
+            _trans16 = narrow;
         }
+        else _trans = trans;
     }
 
     /// <summary>Builds an automaton for <paramref name="patterns"/>, or returns null when they use more than
@@ -113,8 +147,15 @@ internal sealed class LiteralAutomaton
 
         // Breadth-first pass: turn the trie into a full automaton (goto for every symbol) and fold each
         // node's output with its failure link's, so a match needs no failure-chain walk.
+        //
+        // Rows are padded to a power of two. Nothing is stored in the padding; it exists so that the row of
+        // a node is (node << shift), which the hot loop can do with a shift on its dependency chain instead
+        // of a multiply. Column 0 is never written, which is what lets the loop read it unconditionally: a
+        // character in no pattern lands there and reads back the root, exactly as failing all the way would.
         int n = children.Count;
-        var trans = new int[n * alphabetSize];
+        int shift = BitOperations.Log2((uint)Math.Max(1, alphabetSize - 1)) + 1;
+        int stride = 1 << shift;
+        var trans = new int[n * stride];
         var mask = new ulong[n * words];
         var hasOut = new bool[n];
         var fail = new int[n];
@@ -140,42 +181,76 @@ internal sealed class LiteralAutomaton
                 int t = children[node][sym];
                 if (t != 0)
                 {
-                    fail[t] = trans[fail[node] * alphabetSize + sym];
-                    trans[node * alphabetSize + sym] = t;
+                    fail[t] = trans[(fail[node] << shift) + sym];
+                    trans[(node << shift) + sym] = t;
                     queue.Enqueue(t);
                 }
-                else trans[node * alphabetSize + sym] = trans[fail[node] * alphabetSize + sym];
+                else trans[(node << shift) + sym] = trans[(fail[node] << shift) + sym];
             }
         }
-        return new LiteralAutomaton(alpha, trans, mask, hasOut, alphabetSize, words, n);
+
+        // Characters the root has a transition on. Any other character leaves the walk where it is when that
+        // is the root, so runs of them are skipped rather than stepped through - but only while there are
+        // few enough of them for the search to stay a couple of SIMD compares.
+        SearchValues<char>? rootMovers = null;
+        var movers = new List<char>();
+        for (int c = 0; c <= char.MaxValue; c++)
+        {
+            int sym = alpha[c];
+            if (sym != 0 && trans[sym] != 0)
+            {
+                movers.Add((char)c);
+                if (movers.Count > RootSkipLimit) break;
+            }
+        }
+        if (movers.Count <= RootSkipLimit) rootMovers = SearchValues.Create(CollectionsMarshal.AsSpan(movers));
+
+        return new LiteralAutomaton(alpha, trans, mask, hasOut, shift, words, n, rootMovers);
     }
 
     /// <summary>ORs into <paramref name="hits"/> the bit of every pattern occurring in <paramref name="line"/>.</summary>
     public void Match(ReadOnlySpan<char> line, Span<ulong> hits)
     {
+        if (_trans16 is ushort[] trans16) Walk(trans16, line, hits);
+        else Walk(_trans!, line, hits);
+    }
+
+    /// <summary>The walk, written once over whichever width the table is. This is the hottest loop in the
+    /// program - it runs once per character of the file, so on a 15 GB log that is fifteen thousand million
+    /// times - and it is bound by the latency of its own dependency chain: the next node cannot be looked
+    /// up until this one is known. Everything here is about keeping that chain short.</summary>
+    private void Walk<T>(T[] trans, ReadOnlySpan<char> line, Span<ulong> hits) where T : IBinaryInteger<T>
+    {
         byte[] alpha = _alpha;
         ulong[] mask = _mask;
         bool[] hasOut = _hasOut;
-        int a = _alphabetSize, w = Words;
-        int node = 0;
+        int sh = _shift, w = Words;
+        int node = 0, i = 0, len = line.Length;
 
-        if (_trans16 is ushort[] trans16)
+        if (_rootMovers is SearchValues<char> movers)
         {
-            for (int i = 0; i < line.Length; i++)
+            while (i < len)
             {
-                int sym = alpha[line[i]];
-                node = sym == 0 ? 0 : trans16[node * a + sym];
+                // At the root, and only there, a character the root has no transition on cannot start
+                // anything: it leaves the walk at the root and ends no pattern. So look for the next
+                // character that can, rather than reading the table for each one that cannot.
+                if (node == 0)
+                {
+                    int skip = line[i..].IndexOfAny(movers);
+                    if (skip < 0) return;
+                    i += skip;
+                }
+                node = int.CreateTruncating(trans[(node << sh) + alpha[line[i]]]);
                 if (hasOut[node])
                     for (int k = 0; k < w; k++) hits[k] |= mask[node * w + k];
+                i++;
             }
             return;
         }
 
-        int[] trans = _trans;
-        for (int i = 0; i < line.Length; i++)
+        for (; i < len; i++)
         {
-            int sym = alpha[line[i]];
-            node = sym == 0 ? 0 : trans[node * a + sym];
+            node = int.CreateTruncating(trans[(node << sh) + alpha[line[i]]]);
             if (hasOut[node])
                 for (int k = 0; k < w; k++) hits[k] |= mask[node * w + k];
         }

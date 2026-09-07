@@ -109,6 +109,88 @@ public class MatchingEngineTests
         }
     }
 
+    /// <summary>The walk has two shapes and picks between them on how many characters can start a pattern:
+    /// with few, it looks for the next such character instead of stepping over the ones that cannot. Both
+    /// must answer identically, and the interesting cases sit either side of that boundary - so this drives
+    /// pattern sets whose <i>first characters</i> are counted deliberately, which the random test above
+    /// never does (forty random patterns always spread over the whole alphabet and never take the skip).
+    /// Checked against Contains, so it keeps testing the thing however the walk is rewritten again.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]     // the last width that still skips
+    [InlineData(9)]     // the first that does not
+    [InlineData(20)]
+    public void Both_walks_agree_with_Contains_however_many_characters_can_start_a_pattern(int distinctFirst)
+    {
+        const string firsts = "abcdefghijklmnopqrst";
+        const string rest = "xyz01_-[]";
+        var rnd = new Random(20260907 + distinctFirst);
+        var patterns = new List<string>();
+        for (int i = 0; i < 24; i++)
+        {
+            var sb = new StringBuilder();
+            sb.Append(firsts[i % distinctFirst]);
+            int len = 1 + rnd.Next(5);
+            for (int k = 0; k < len; k++) sb.Append(rest[rnd.Next(rest.Length)]);
+            patterns.Add(sb.ToString());
+        }
+
+        var automaton = LiteralAutomaton.TryBuild(patterns, ignoreCase: false)!;
+        // Case-sensitive, so one letter is one root character: the boundary is where it is meant to be.
+        Assert.Equal(distinctFirst <= 8, automaton.SkipsAtRootForTesting);
+
+        // Rows are padded to a power of two, and nothing is stored in the padding.
+        int entries = automaton.TableEntriesForTesting;
+        Assert.Equal(0, entries % (entries & -entries));
+
+        string alphabet = firsts[..distinctFirst] + rest + "ABC ";
+        var hits = new ulong[automaton.Words];
+        for (int line = 0; line < 300; line++)
+        {
+            var sb = new StringBuilder();
+            int len = rnd.Next(60);
+            for (int k = 0; k < len; k++) sb.Append(alphabet[rnd.Next(alphabet.Length)]);
+            string text = sb.ToString();
+
+            Array.Clear(hits);
+            automaton.Match(text, hits);
+            for (int p = 0; p < patterns.Count; p++)
+                Assert.True(text.Contains(patterns[p], StringComparison.Ordinal)
+                            == ((hits[p >> 6] & (1UL << (p & 63))) != 0),
+                    $"pattern '{patterns[p]}' in '{text}' (distinctFirst={distinctFirst})");
+        }
+    }
+
+    /// <summary>A match that begins on the very first character, and one that begins on the very last
+    /// character a line has, are exactly the places a skip that lands one short or one long gets wrong -
+    /// and random text almost never produces either.</summary>
+    [Fact]
+    public void The_root_skip_finds_a_match_at_each_end_of_a_line()
+    {
+        var automaton = LiteralAutomaton.TryBuild(new[] { "zed", "z" }, ignoreCase: false)!;
+        Assert.True(automaton.SkipsAtRootForTesting);
+        var hits = new ulong[automaton.Words];
+
+        foreach ((string text, bool zed, bool z) in new[]
+        {
+            ("zed at the start", true, true),
+            ("at the end zed", true, true),
+            ("ends on a z", false, true),
+            ("z", false, true),
+            ("zed", true, true),
+            ("nothing here at all", false, false),
+            ("", false, false),
+        })
+        {
+            Array.Clear(hits);
+            automaton.Match(text, hits);
+            Assert.True(zed == ((hits[0] & 1UL) != 0), $"'zed' in '{text}'");
+            Assert.True(z == ((hits[0] & 2UL) != 0), $"'z' in '{text}'");
+        }
+    }
+
     // ---- regex rewriting ----
 
     [Theory]
