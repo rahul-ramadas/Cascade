@@ -150,15 +150,140 @@ public class LineIndexTests
         Assert.Equal(total, index.Count);
     }
 
+    /// <summary>The same contract, but with offsets that make pages fall back to 32-bit distances WHILE the
+    /// readers are working. That is when the narrow arrays are released out from under them, so it is the
+    /// one moment a reader could be left holding an array that is being taken away - or find one half of
+    /// the pair gone and the other still there.</summary>
+    [Fact]
+    public void A_reader_keeps_reading_while_pages_fall_back_under_it()
+    {
+        const int total = 400_000;
+        var expected = new long[total];
+        long at = 0;
+        for (int i = 0; i < total; i++)
+        {
+            expected[i] = at;
+            // A 200 KB line every so often, which overflows its block and widens the page it lands on.
+            at += (i % 9_973 == 5_000) ? 200_000 : 60;
+        }
+
+        var index = new LineIndex();
+        Exception? failure = null;
+        var readers = new Thread[4];
+        var stop = new ManualResetEventSlim(false);
+        for (int r = 0; r < readers.Length; r++)
+        {
+            readers[r] = new Thread(() =>
+            {
+                try
+                {
+                    while (!stop.IsSet)
+                    {
+                        long known = index.Count;
+                        for (long i = 0; i < known; i += 389)
+                        {
+                            Assert.Equal(expected[i], index.Get(i));
+                            index.GetRange(i, long.MaxValue, out long s, out _);
+                            Assert.Equal(expected[i], s);
+                        }
+                        if (known > 0) Assert.Equal(expected[known - 1], index.Get(known - 1));
+                    }
+                }
+                catch (Exception ex) { Interlocked.CompareExchange(ref failure, ex, null); }
+            });
+            readers[r].Start();
+        }
+
+        for (int i = 0; i < total; i++) index.Add(expected[i]);
+        stop.Set();
+        foreach (var t in readers) t.Join();
+
+        Assert.Null(failure);
+        Assert.Equal(total, index.Count);
+        Assert.True(index.WidePageCountForTesting > 0, "the run was meant to widen pages and did not");
+        for (int i = 0; i < total; i++) Assert.Equal(expected[i], index.Get(i));
+    }
+
+    /// <summary>Line lengths drawn at random over four orders of magnitude, including ones far past what a
+    /// 16-bit distance can hold, checked against a plain list. A generic log is not an ETW trace: this is
+    /// the case where blocks overflow at every position within a block, pages widen at every position
+    /// within a page, and both fallbacks interleave.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void Wildly_uneven_line_lengths_read_back_exactly(int seed)
+    {
+        var rnd = new Random(seed);
+        var offsets = new List<long>();
+        var index = new LineIndex();
+        long at = 0;
+        for (int i = 0; i < 250_000; i++)
+        {
+            offsets.Add(at);
+            index.Add(at);
+            at += rnd.Next(100) switch
+            {
+                < 70 => rnd.Next(1, 200),          // ordinary
+                < 90 => rnd.Next(200, 4_000),      // a fat JSON payload
+                < 99 => rnd.Next(4_000, 100_000),  // a stack trace or a dump
+                _ => rnd.Next(100_000, 3_000_000), // something a program should never have logged
+            };
+        }
+
+        long fileLength = at + 1;
+        for (int i = 0; i < offsets.Count; i++)
+        {
+            Assert.Equal(offsets[i], index.Get(i));
+            index.GetRange(i, fileLength, out long s, out long e);
+            Assert.Equal(offsets[i], s);
+            Assert.Equal(i + 1 < offsets.Count ? offsets[i + 1] : fileLength, e);
+        }
+        // Whatever mixture of shapes it ended up in, it must never cost more than the shape it replaced.
+        Assert.True(index.BytesPerLineForTesting <= 4.05,
+            $"{index.BytesPerLineForTesting:F3} bytes a line with {index.WidePageCountForTesting} pages widened");
+    }
+
+    /// <summary>A block overflows on whichever line happens to be long, and the line that starts a block can
+    /// never overflow it - the base is set from that very line. Both ends of a block, and the line that
+    /// begins the next one, are where an off-by-one in the block arithmetic would show.</summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(14)]
+    [InlineData(15)]
+    [InlineData(16)]
+    public void A_huge_line_anywhere_in_a_block_reads_back_exactly(int positionInBlock)
+    {
+        var offsets = new List<long>();
+        var index = new LineIndex();
+        long at = 0;
+        for (int i = 0; i < 5_000; i++)
+        {
+            offsets.Add(at);
+            index.Add(at);
+            at += (i % LineIndex.BlockLinesForTesting) == positionInBlock ? 500_000 : 80;
+        }
+
+        long fileLength = at + 1;
+        for (int i = 0; i < offsets.Count; i++)
+        {
+            Assert.Equal(offsets[i], index.Get(i));
+            index.GetRange(i, fileLength, out long s, out long e);
+            Assert.Equal(offsets[i], s);
+            Assert.Equal(i + 1 < offsets.Count ? offsets[i + 1] : fileLength, e);
+        }
+    }
+
     /// <summary>The whole point of the shape. Nothing else can notice it quietly going back to four bytes
     /// a line: every answer would still be right, and only a heap dump would show the difference - which on
     /// a 15.8 GB log is 265 MB against 141 MB, the largest single thing the process holds.</summary>
     [Fact]
-    public void An_ordinary_log_costs_two_and_an_eighth_bytes_a_line()
+    public void An_ordinary_log_costs_a_little_over_two_bytes_a_line()
     {
         var (index, _) = Build(200_000);
         Assert.Equal(0, index.WidePageCountForTesting);
-        Assert.Equal(2.125, index.BytesPerLineForTesting, 3);
+        Assert.Equal(LineIndex.NarrowBytesPerLineForTesting, index.BytesPerLineForTesting, 3);
     }
 
     /// <summary>A block of 32 lines that spans 64 KB or more cannot be written as 16-bit distances. Real
@@ -192,6 +317,41 @@ public class LineIndexTests
 
         // Two of the three pages are still narrow, so the cost is nearer 2 than 4 bytes a line.
         Assert.InRange(index.BytesPerLineForTesting, 2.7, 3.5);
+    }
+
+    /// <summary>The fallback has to be a REPLACEMENT, not an addition. A block of 32 lines overflows once
+    /// the lines average 2 KB - which is not pathological at all, it is any log whose messages carry JSON -
+    /// so a file like that widens every page it has. If the narrow arrays were merely abandoned rather than
+    /// released, such a file would hold 2 + 4 bytes a line and this whole change would have made the common
+    /// heavy case 50% WORSE than the four bytes it replaced.</summary>
+    [Fact]
+    public void A_file_that_widens_every_page_costs_no_more_than_the_shape_it_replaced()
+    {
+        var index = new LineIndex();
+        var offsets = new List<long>();
+        long at = 0;
+        // 5 KB a line: every block spans well past 64 KB, so every block overflows.
+        for (int i = 0; i < 3 * 65_536; i++)
+        {
+            offsets.Add(at);
+            index.Add(at);
+            at += 5_000;
+        }
+
+        Assert.Equal(3, index.WidePageCountForTesting);
+        Assert.True(index.BytesPerLineForTesting <= 4.05,
+            $"a fully widened index costs {index.BytesPerLineForTesting:F3} bytes a line, " +
+            "which is more than the 4 it fell back from");
+
+        for (int i = 0; i < offsets.Count; i++)
+            Assert.Equal(offsets[i], index.Get(i));
+        long fileLength = offsets[^1] + 5_000;
+        for (int i = 0; i < offsets.Count; i++)
+        {
+            index.GetRange(i, fileLength, out long s, out long e);
+            Assert.Equal(offsets[i], s);
+            Assert.Equal(i + 1 < offsets.Count ? offsets[i + 1] : fileLength, e);
+        }
     }
 
     /// <summary>The two fallbacks one after the other: a page that has already dropped to 32-bit distances
@@ -230,7 +390,7 @@ public class LineIndexTests
     {
         var (index, offsets) = Build(1_000);
         long fileLength = offsets[^1] + 13;
-        for (int i = 31; i + 1 < offsets.Count; i += 32)
+        for (int i = LineIndex.BlockLinesForTesting - 1; i + 1 < offsets.Count; i += LineIndex.BlockLinesForTesting)
         {
             index.GetRange(i, fileLength, out long s, out long e);
             Assert.Equal(offsets[i], s);
