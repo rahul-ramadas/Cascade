@@ -15,8 +15,10 @@ namespace Cascade.Core.Filtering;
 /// </para>
 /// <para>
 /// Single writer (the filter worker thread), many lock-free readers (the UI). Readers take one immutable
-/// index snapshot and stay self-consistent within it; bits the writer flips afterwards can only shift a row
-/// by less than one 4,096-line block, which the next <see cref="Publish"/> corrects.
+/// index snapshot - the counts <b>and the bits they were taken from</b> - and stay self-consistent within it.
+/// A pass updating the set in place flips bits the snapshot has already counted, which can shift a row by
+/// less than one 4,096-line block until the next <see cref="Publish"/> corrects it; a whole-set replacement
+/// cannot be seen at all until it is published, because it is written onto pages no snapshot names.
 /// </para>
 /// </summary>
 public sealed class VisibleLineSet
@@ -26,16 +28,19 @@ public sealed class VisibleLineSet
     private const int BlockLines = BlockWords * WordBits;
     private const int PageWords = 1 << 16;              // 512 KB page = 4,194,304 lines
 
-    /// <summary>Immutable rank index published for readers: visible-line counts before each block.</summary>
+    /// <summary>Immutable snapshot published for readers: the bits, and the visible-line counts before each
+    /// block taken from exactly those bits. One reference, so a reader can never pair one with the other's.</summary>
     private sealed class Index
     {
-        public static readonly Index Empty = new(new long[1], 0, 0);
+        public static readonly Index Empty = new([], new long[1], 0, 0);
+        public readonly long[][] Pages;
         public readonly long[] Cumulative; // Cumulative[b] = visible lines before block b; last entry = Total
         public readonly long Total;
         public readonly long Lines;
 
-        public Index(long[] cumulative, long total, long lines)
+        public Index(long[][] pages, long[] cumulative, long total, long lines)
         {
+            Pages = pages;
             Cumulative = cumulative;
             Total = total;
             Lines = lines;
@@ -140,6 +145,7 @@ public sealed class VisibleLineSet
     public void FillVisible(long lines)
     {
         EnsureLines(lines);
+        TakeFreshPages();
         long full = lines / WordBits;
         int tail = (int)(lines % WordBits);
         long totalWords = (_lines + WordBits - 1) / WordBits;
@@ -156,6 +162,7 @@ public sealed class VisibleLineSet
     public void ReplaceAll(ReadOnlySpan<ulong> words, long lines)
     {
         EnsureLines(lines);
+        TakeFreshPages();
         long totalWords = (_lines + WordBits - 1) / WordBits;
         long n = Math.Min(words.Length, totalWords);
         for (long w = 0; w < n; w++) SetWord(w, (long)words[(int)w]);
@@ -163,12 +170,24 @@ public sealed class VisibleLineSet
         RecountAll();
     }
 
-    /// <summary>Publishes an immutable snapshot of the rank index for lock-free readers.</summary>
+    /// <summary>Moves the writer onto pages no published snapshot names, so a rewrite of the whole set is
+    /// invisible until <see cref="Publish"/> hands out the bits and the counts together. Rewriting in place
+    /// would leave readers ranking the new bits against the old counts, and the error is then not the block
+    /// the in-place pass is bounded by but every line the change added or dropped before it - which threw the
+    /// viewport clear across the file for a frame. Both callers write every word, so nothing is copied.</summary>
+    private void TakeFreshPages()
+    {
+        var fresh = new long[_pages.Length][];
+        for (int p = 0; p < _pageCount; p++) fresh[p] = new long[PageWords];
+        _pages = fresh;
+    }
+
+    /// <summary>Publishes an immutable snapshot of the bits and the rank index for lock-free readers.</summary>
     public void Publish()
     {
         var cum = new long[_blocks + 1];
         Array.Copy(_cum, cum, _blocks + 1);
-        Volatile.Write(ref _index, new Index(cum, _cum[_blocks], _lines));
+        Volatile.Write(ref _index, new Index(_pages, cum, _cum[_blocks], _lines));
     }
 
     private void SetWord(long word, long value) => _pages[(int)(word / PageWords)][(int)(word % PageWords)] = value;
@@ -209,7 +228,7 @@ public sealed class VisibleLineSet
     {
         var idx = Volatile.Read(ref _index);
         if (line < 0 || line >= idx.Lines) return -1;
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         long word = line / WordBits;
         if ((GetWord(pages, word) & (1L << (int)(line % WordBits))) == 0) return -1;
         return RankBefore(idx, pages, line);
@@ -221,7 +240,7 @@ public sealed class VisibleLineSet
     {
         var idx = Volatile.Read(ref _index);
         if (line < 0 || line >= idx.Lines) return false;
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         return (GetWord(pages, line / WordBits) & (1L << (int)(line % WordBits))) != 0;
     }
 
@@ -230,7 +249,7 @@ public sealed class VisibleLineSet
     public void CopyVisibleWords(long fromWord, Span<ulong> words)
     {
         var idx = Volatile.Read(ref _index);
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         long have = (idx.Lines + WordBits - 1) / WordBits;
         for (int i = 0; i < words.Length; i++)
         {
@@ -246,7 +265,7 @@ public sealed class VisibleLineSet
     {
         if (toExclusive <= from) return 0;
         var idx = Volatile.Read(ref _index);
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         // A rank is the published cumulative plus a popcount of LIVE bits, so each end can drift by up to a
         // block while the writer works. Over a range holding hardly anything that drift outweighs the true
         // count and the subtraction comes out negative - and this is a count, so it cannot be.
@@ -266,7 +285,7 @@ public sealed class VisibleLineSet
         var idx = Volatile.Read(ref _index);
         if (line <= 0) return 0;
         if (line >= idx.Lines) return idx.Total;
-        return RankBefore(idx, Volatile.Read(ref _pages), line);
+        return RankBefore(idx, idx.Pages, line);
     }
 
     /// <summary>File line shown at <paramref name="row"/> (clamped into the current set).</summary>
@@ -274,7 +293,7 @@ public sealed class VisibleLineSet
     {
         var idx = Volatile.Read(ref _index);
         if (idx.Total <= 0) return 0;
-        return SelectLine(idx, Volatile.Read(ref _pages), Math.Clamp(row, 0, idx.Total - 1));
+        return SelectLine(idx, idx.Pages, Math.Clamp(row, 0, idx.Total - 1));
     }
 
     /// <summary>Resolves one whole screen against a <b>single</b> index snapshot: puts <paramref name="anchorLine"/>
@@ -295,7 +314,7 @@ public sealed class VisibleLineSet
                               long lo, long hiExclusive)
     {
         var idx = Volatile.Read(ref _index);
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         long rowLo = RankAt(idx, pages, lo);
         long rows = RankAt(idx, pages, hiExclusive) - rowLo;
 
@@ -308,13 +327,16 @@ public sealed class VisibleLineSet
     /// <summary>Fills <paramref name="lines"/> with the file lines shown at rows starting at
     /// <paramref name="firstRow"/>, all resolved against a single snapshot. Returns how many were filled.</summary>
     public int LinesForRows(long firstRow, Span<long> lines)
-        => Fill(Volatile.Read(ref _index), Volatile.Read(ref _pages), firstRow, lines, long.MaxValue);
+    {
+        var idx = Volatile.Read(ref _index);
+        return Fill(idx, idx.Pages, firstRow, lines, long.MaxValue);
+    }
 
     /// <summary>The same, in the row space of the crop <c>[lo, hiExclusive)</c>.</summary>
     public int LinesForRows(long firstRow, Span<long> lines, long lo, long hiExclusive)
     {
         var idx = Volatile.Read(ref _index);
-        long[][] pages = Volatile.Read(ref _pages);
+        long[][] pages = idx.Pages;
         long rowLo = RankAt(idx, pages, lo);
         long rows = RankAt(idx, pages, hiExclusive) - rowLo;
         firstRow = Math.Max(0, firstRow);

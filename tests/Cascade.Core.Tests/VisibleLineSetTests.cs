@@ -202,10 +202,56 @@ public class VisibleLineSetTests
         Assert.Equal(3_000, set.RowAtOrAfterLine(5_000));
     }
 
+    /// <summary>A pass updating the set in place is bounded: a reader ranks live bits against published
+    /// counts, and between two publishes only one block's worth of them can have moved. Replacing the WHOLE
+    /// set has no such bound - every line the change adds or drops before the row being asked about is error
+    /// - so a replacement must not be visible at all until its counts are published with it.
+    ///
+    /// <para>Without that, a frame drawn in the few milliseconds a cached filter change takes was ranked
+    /// against the set it was replacing. Measured on a 66 M line log: the top line on screen went from
+    /// 33,181,094 to 66,351,109 and back.</para></summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_whole_set_replacement_is_invisible_until_it_is_published(bool byReplaceAll)
+    {
+        const int lines = 300_000;
+        var before = new bool[lines];
+        for (int i = 0; i < lines; i++) before[i] = i % 1_000 == 0;   // sparse, spread over the file
+        var set = Build(before);
+
+        long anchor = lines / 2;
+        var seen = new long[20];
+        long firstRow = set.ResolveWindow(anchor, 0, seen, out int count);
+        long total = set.Count;
+        long rowOfAnchor = set.RowAtOrAfterLine(anchor);
+
+        if (byReplaceAll)
+        {
+            var words = new ulong[(lines + 63) / 64];
+            for (int i = 0; i < lines; i++) if (i % 3 == 0) words[i / 64] |= 1UL << (i % 64);
+            set.ReplaceAll(words, lines);              // deliberately NOT published
+        }
+        else
+        {
+            set.FillVisible(lines);                    // deliberately NOT published
+        }
+
+        var again = new long[seen.Length];
+        Assert.Equal(firstRow, set.ResolveWindow(anchor, 0, again, out int countAgain));
+        Assert.Equal(count, countAgain);
+        Assert.Equal(seen, again);
+        Assert.Equal(total, set.Count);
+        Assert.Equal(rowOfAnchor, set.RowAtOrAfterLine(anchor));
+
+        // And the moment it IS published, the new set is what everyone sees.
+        set.Publish();
+        Assert.NotEqual(total, set.Count);
+    }
+
     /// <summary>Leaves the set as a running pass does between publishes: bits flipped in the block a reader
     /// is about to ask about, with the published snapshot still predating them.</summary>
-    private static VisibleLineSet BetweenPublishes(int lines, int from, int toExclusive)
-    {
+    private static VisibleLineSet BetweenPublishes(int lines, int from, int toExclusive)    {
         var set = new VisibleLineSet();
         set.ApplyRange(0, new bool[lines]);         // every line hidden
         set.Publish();                              // the snapshot readers are holding
