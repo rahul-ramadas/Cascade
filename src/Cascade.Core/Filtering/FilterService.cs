@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Text;
 using Cascade.Core.Indexing;
 using Cascade.Core.IO;
@@ -54,6 +55,13 @@ public sealed class FilterService : IDisposable
     }
 
     private const int Block = 1 << 15; // 32,768 lines per ordered block
+
+    /// <summary>How many 64-line groups one parallel step takes. Groups are the unit of ownership - each one
+    /// owns whole words of the deep-match bitmap, which is what lets them be written without locking - so a
+    /// step can be any whole number of them. MEASURED on 2 GB / 9,003,248 lines with 159 filters: one and two
+    /// groups a step were equal at 274 ms, four cost 282 ms, and sixteen 330 ms, so two is taken as the point
+    /// where a step is still small enough to balance and the scheduler is asked half as often.</summary>
+    private const int GroupsPerRange = 2;
 
     /// <summary>What the pass that is running now can say about a filter's next match.</summary>
     public enum PassAnswer
@@ -671,7 +679,14 @@ public sealed class FilterService : IDisposable
                 MaxDegreeOfParallelism = Environment.ProcessorCount
             };
 
-            Parallel.For(0, groups, options,
+            // A parallel step is a RANGE of 64-line groups, handed out by a range partitioner rather than by
+            // Parallel.For's own dynamic chunking. Same work, same ownership, same order; MEASURED on 2 GB /
+            // 9,003,248 lines with 159 filters, alternating builds, 345 -> 274 ms (1.26x). Parallel.For's
+            // replicas spend that difference deciding what to run next - CheckTimeoutReached alone was 5.6%
+            // of the process in a sampled profile.
+            var ranges = Partitioner.Create(0, groups, GroupsPerRange);
+
+            Parallel.ForEach(ranges, options,
                 () => new Worker
                 {
                     Reader = new LineReader(_src, _encoding),
@@ -679,37 +694,40 @@ public sealed class FilterService : IDisposable
                     Context = snapshot.GetThreadContext(),
                     Deep = deepWords == 0 ? Array.Empty<ulong>() : new ulong[deepWords]
                 },
-                (g, _, w) =>
+                (range, _, w) =>
                 {
-                    int from = g * 64, until = Math.Min(from + 64, len);
-                    for (int k = from; k < until; k++)
+                    for (int g = range.Item1; g < range.Item2; g++)
                     {
-                        long line = start + k;
-                        _index.GetRange(line, _fileLength, out long s, out long e);
-                        var span = w.Reader.GetChars(s, e);
-
-                        if (deepBits is null)
+                        int from = g * 64, until = Math.Min(from + 64, len);
+                        for (int k = from; k < until; k++)
                         {
-                            bool hit = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
-                            if (shown is not null) shown[k] = hit;
-                            continue;
-                        }
+                            long line = start + k;
+                            _index.GetRange(line, _fileLength, out long s, out long e);
+                            var span = w.Reader.GetChars(s, e);
 
-                        Array.Clear(w.Deep);
-                        bool visible = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context, w.Deep).Shown;
-                        if (shown is not null) shown[k] = visible;
-
-                        // Transpose this line's deep matches into per-filter words. Only set bits are visited,
-                        // and a line matches very few filters, so this stays cheap.
-                        int bitInGroup = k - from;
-                        for (int word = 0; word < deepWords; word++)
-                        {
-                            ulong bits = w.Deep[word];
-                            while (bits != 0)
+                            if (deepBits is null)
                             {
-                                int filter = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
-                                deepBits[filter * groups + g] |= 1UL << bitInGroup;
-                                bits &= bits - 1;
+                                bool hit = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context).Shown;
+                                if (shown is not null) shown[k] = hit;
+                                continue;
+                            }
+
+                            Array.Clear(w.Deep);
+                            bool visible = snapshot.Evaluate(span, line, _markers, w.Counts, w.Context, w.Deep).Shown;
+                            if (shown is not null) shown[k] = visible;
+
+                            // Transpose this line's deep matches into per-filter words. Only set bits are visited,
+                            // and a line matches very few filters, so this stays cheap.
+                            int bitInGroup = k - from;
+                            for (int word = 0; word < deepWords; word++)
+                            {
+                                ulong bits = w.Deep[word];
+                                while (bits != 0)
+                                {
+                                    int filter = (word << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                                    deepBits[filter * groups + g] |= 1UL << bitInGroup;
+                                    bits &= bits - 1;
+                                }
                             }
                         }
                     }
