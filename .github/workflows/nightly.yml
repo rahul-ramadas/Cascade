@@ -145,7 +145,16 @@ jobs:
 
       # Burners alongside, because a quiet machine is not the condition these fail under. The engine suite
       # is the one worth loading up: it is where the concurrency lives, and it is cheap enough to repeat.
+      #
+      # The script caps the burners at half the machine, and it has to: this asked for 8 on a runner with
+      # four cores, which is two per core, and the suite - ten seconds unloaded - had not finished ONE of
+      # its ten repeats when the job hit its two-hour limit. The steps below were skipped, so a load figure
+      # chosen on a 32-thread desktop cost the whole nightly, every night, silently.
+      #
+      # Every step here is capped as well, for the same reason: one that will not finish must lose its own
+      # time and not the rest of the job's.
       - name: Repeat the engine suite under CPU load
+        timeout-minutes: 30
         run: >
           pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
           -Suite core -Runs $env:REPEATS -Load 8

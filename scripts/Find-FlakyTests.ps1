@@ -12,6 +12,13 @@
     actually in, and it is what turns "fails one run in fifty here" into "fails one run in eight" - which
     is the difference between a bug you can chase and one you cannot.
 
+    IT IS CAPPED AT HALF THE MACHINE, and that cap is not a nicety. A number chosen on a 32-thread
+    developer box means something else entirely on a 4-core runner: the nightly asked for 8 burners there,
+    which is two per core, and the engine suite - ten seconds unloaded - did not finish ONE repeat in the
+    two hours before the job timed out. Reproduced here at the same ratio, 64 burners on 32 processors:
+    also unfinished after 300s. Past the point where the suite still gets a share of the machine you are
+    not testing it under load, you are just not testing it.
+
 .PARAMETER Suite
     core, app, ui, or all.
 
@@ -19,7 +26,7 @@
     How many times to run it. Default 5.
 
 .PARAMETER Load
-    Background CPU burners to run alongside. Default 0.
+    Background CPU burners to run alongside, capped at half the logical processors. Default 0.
 
 .PARAMETER Coverage
     Collect coverage too, which slows execution and is itself a way to shake out timing assumptions.
@@ -70,8 +77,13 @@ if ($Coverage -and -not (Test-Path $coverageTool)) {
 
 $burners = @()
 if ($Load -gt 0) {
+    $room = [Math]::Max(1, [int]([Environment]::ProcessorCount / 2))
+    if ($Load -gt $room) {
+        Write-Host "Asked for $Load burners; this machine has $([Environment]::ProcessorCount) processors, so using $room." -ForegroundColor Yellow
+        $Load = $room
+    }
     Write-Host "Starting $Load background burners." -ForegroundColor Yellow
-    $burners = 1..$Load | ForEach-Object { Start-Job { $end = (Get-Date).AddMinutes(90); while ((Get-Date) -lt $end) { $null = 1 } } }
+    $burners = 1..$Load | ForEach-Object { Start-Job { $sw = [Diagnostics.Stopwatch]::StartNew(); while ($sw.Elapsed.TotalMinutes -lt 90) { } } }
 }
 
 try {
