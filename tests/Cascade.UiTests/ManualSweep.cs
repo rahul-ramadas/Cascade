@@ -43,6 +43,18 @@ public class ManualSweep : IDisposable
     private void Say(string s) => _log.Add(s);
 
     /// <summary>
+    /// Every wait in this rig, in one place, so the idling can be counted and so there is a single seam to
+    /// replace a flat wait with a real one.
+    /// </summary>
+    private static void Wait(int ms)
+    {
+        System.Threading.Thread.Sleep(ms);
+        Interlocked.Add(ref _slept, ms);
+    }
+
+    private static long _slept;
+
+    /// <summary>
     /// The size every stage starts from: maximised, unless CASCADE_MANUAL_SIZE names one.
     ///
     /// <para>Maximised means something different on every desktop, and a hosted runner's is 1024x768 - far
@@ -94,7 +106,7 @@ public class ManualSweep : IDisposable
         _app = CascadeApp.LaunchExisting(BigFixture.Log(), Filters, CascadeApp.NewSettingsDir(),
                                          ownsFiles: false, ownsSettingsDir: true);
         FitWindow();
-        Thread.Sleep(1500);
+        Wait(1500);
         _app.Activate();
         WaitIndexed();
         Say($"launched: {Status()}");
@@ -104,6 +116,8 @@ public class ManualSweep : IDisposable
         void Stage(string name, Action run)
         {
             if (wanted.Length > 0 && name != "content" && !wanted.Any(w => name.Contains(w, StringComparison.OrdinalIgnoreCase))) return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            long sleptBefore = Interlocked.Read(ref _slept);
             Say($"===== {name} =====");
             try { run(); }
             catch (Exception ex) { Check($"{name} ran to the end", false, ex.Message); }
@@ -119,11 +133,14 @@ public class ManualSweep : IDisposable
                     ParkPointer();
                     DismissDialogs();
                     FitWindow();
-                    Thread.Sleep(700);
+                    Wait(700);
                     _app.Activate();
-                    Thread.Sleep(300);
+                    Wait(300);
                 }
                 catch { /* best effort */ }
+
+                long slept = Interlocked.Read(ref _slept) - sleptBefore;
+                Say($"----- {name}: {clock.ElapsedMilliseconds:N0} ms, {slept:N0} of it waiting -----");
             }
         }
 
@@ -148,6 +165,7 @@ public class ManualSweep : IDisposable
         Stage("goto", GoToAndZoom);
 
         Say($"bugs found: {_bugs.Count}");
+        Say($"total waiting: {Interlocked.Read(ref _slept):N0} ms");
 
         // It used to end `Assert.True(true)`: every finding went to bugs.txt and the run reported PASSED
         // whatever it had seen. So a rig that had quietly rotted looked exactly like a rig that had found
@@ -166,14 +184,14 @@ public class ManualSweep : IDisposable
     private void MarkersAndMap()
     {
         ClickRow(0.5);
-        Thread.Sleep(400);
+        Wait(400);
         var map = MapElement();
         Check("the map is there to draw on", map is not null);
         if (map is null) return;
 
         int before = MapPixels(map, Color.FromArgb(200, 40, 40));
         Chord(VirtualKeyShort.KEY_1);
-        Thread.Sleep(1200);
+        Wait(1200);
         int after = MapPixels(map, Color.FromArgb(200, 40, 40));
         Say($"marker pixels on the map: {before} -> {after}");
         Check("setting a marker shows up on the map", after > before, $"{before} -> {after}");
@@ -181,16 +199,16 @@ public class ManualSweep : IDisposable
 
         // ...and walking to it must work.
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         Chord(VirtualKeyShort.HOME);
-        Thread.Sleep(600);
+        Wait(600);
         string at = $"line {_app.CaretLine()}";
         Keyboard.Type(VirtualKeyShort.KEY_1);
-        Thread.Sleep(900);
+        Wait(900);
         Check("pressing 1 walks to the marked line", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         Chord(VirtualKeyShort.KEY_1);   // clear it again
-        Thread.Sleep(800);
+        Wait(800);
     }
 
     private int MapPixels(AutomationElement map, Color want)
@@ -215,14 +233,14 @@ public class ManualSweep : IDisposable
     private void GoToAndZoom()
     {
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
 
         void OpenGoTo()
         {
             Keyboard.Pressing(VirtualKeyShort.CONTROL);
             Keyboard.Type(VirtualKeyShort.KEY_G);
             Keyboard.Release(VirtualKeyShort.CONTROL);
-            Thread.Sleep(900);
+            Wait(900);
         }
 
         long Go(string typed)
@@ -237,9 +255,9 @@ public class ManualSweep : IDisposable
             Keyboard.Type(VirtualKeyShort.KEY_A);
             Keyboard.Release(VirtualKeyShort.CONTROL);
             Keyboard.Type(typed);
-            Thread.Sleep(200);
+            Wait(200);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(1500);
+            Wait(1500);
             return CaretLine();
         }
 
@@ -266,11 +284,11 @@ public class ManualSweep : IDisposable
         // With only matching lines on show, a hidden number cannot be gone to - it lands on the nearest
         // line that is shown, which for line 1 is whatever the top of the file has become.
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Pressing(VirtualKeyShort.CONTROL);
         Keyboard.Type(VirtualKeyShort.HOME);
         Keyboard.Release(VirtualKeyShort.CONTROL);
-        Thread.Sleep(1200);
+        Wait(1200);
         long top = CaretLine();
         long firstShown = Go("1");
         Say($"Go To 1 landed on {firstShown}; the first shown line is {top}");
@@ -280,15 +298,15 @@ public class ManualSweep : IDisposable
         // Zoom: the text changes size, the status says so, and it comes back.
         string zoom = _app.StatusText("Zoom:");
         _app.ClickMenuOrThrow("View", "Zoom In");
-        Thread.Sleep(600);
+        Wait(600);
         _app.ClickMenuOrThrow("View", "Zoom In");
-        Thread.Sleep(600);
+        Wait(600);
         string bigger = _app.StatusText("Zoom:");
         Say($"zoom {zoom} -> {bigger}");
         Check("zooming in says so in the status bar", bigger != zoom, $"{zoom} -> {bigger}");
         int rows = _app.Rows().Length;
         _app.ClickMenuOrThrow("View", "Reset Zoom");
-        Thread.Sleep(800);
+        Wait(800);
         Check("and resetting puts it back", _app.StatusText("Zoom:") == zoom,
               $"{_app.StatusText("Zoom:")}, was {zoom}");
         Check("and fewer lines fitted while it was bigger", rows < _app.Rows().Length,
@@ -306,9 +324,9 @@ public class ManualSweep : IDisposable
         if (names.Length == 0)
         {
             _app.ClickMenuOrThrow("Filters", "Presets");
-            Thread.Sleep(400);
+            Wait(400);
             Keyboard.Type(VirtualKeyShort.ESCAPE);
-            Thread.Sleep(300);
+            Wait(300);
             // Make one from the pane instead.
             var hint = _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))
                            .FirstOrDefault(t => (t.Name ?? "").StartsWith("No presets yet", StringComparison.Ordinal));
@@ -316,22 +334,22 @@ public class ManualSweep : IDisposable
             var hr = hint.BoundingRectangle;
             Mouse.MoveTo(new Point(hr.Left + hr.Width / 2, hr.Top + 40));
             Mouse.Click(MouseButton.Right);
-            Thread.Sleep(800);
+            Wait(800);
             Keyboard.Type(VirtualKeyShort.DOWN);
-            Thread.Sleep(200);
+            Wait(200);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(1200);
+            Wait(1200);
             Keyboard.Type("round trip");
-            Thread.Sleep(300);
+            Wait(300);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(1200);
+            Wait(1200);
         }
         names = SafePresetNames();
         Check("there is a preset to save", names.Length > 0, string.Join("|", names));
         if (names.Length == 0) return;
 
         Chord(VirtualKeyShort.KEY_S);
-        Thread.Sleep(2500);
+        Wait(2500);
         string saved = File.ReadAllText(Filters);
         Say($"filter file now {saved.Length} bytes, presets section: {saved.Contains("presets")}");
         Check("the preset is written to the filter file", saved.Contains("presets") && saved.Contains(names[0].Split(' ')[0]),
@@ -349,9 +367,9 @@ public class ManualSweep : IDisposable
         if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
         var edit = _app.FindInput();
         _app.SetText(edit, "");
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Type(BigFixture.EveryLineTerm);   // typed, as a user would
-        Thread.Sleep(1500);
+        Wait(1500);
         int typed = MarkedPixels();
         Say($"marks while the bar is open: {typed}");
 
@@ -359,7 +377,7 @@ public class ManualSweep : IDisposable
         // thing that would make "do the marks survive wrapping" unanswerable.
         Check("the marks are there before wrapping", typed > 200, $"{typed} marked pixels");
         _app.ClickMenuOrThrow("View", "Word Wrap");
-        Thread.Sleep(1800);
+        Wait(1800);
         int wrapped = MarkedPixels();
         Say($"marked pixels flat {typed} -> wrapped {wrapped}");
         Check("the marks survive wrapping", wrapped > 200, $"{typed} -> {wrapped}");
@@ -374,9 +392,9 @@ public class ManualSweep : IDisposable
             Mouse.MoveTo(new Point(tr.Left + 200, y));
             Mouse.Down(MouseButton.Left);
             Mouse.MoveTo(new Point(tr.Left + 330, y));
-            Thread.Sleep(150);
+            Wait(150);
             Mouse.Up(MouseButton.Left);
-            Thread.Sleep(500);
+            Wait(500);
             string picked = CopyToClipboard();
             Say($"selected on a wrapped segment: '{Trim(picked)}'");
             Check("text can be picked out of a wrapped segment", picked.Length > 0 && !picked.Contains('\n'),
@@ -389,45 +407,45 @@ public class ManualSweep : IDisposable
         }
 
         _app.ClickMenuOrThrow("View", "Word Wrap");
-        Thread.Sleep(1200);
+        Wait(1200);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(600);
+        Wait(600);
     }
 
     /// <summary>Takes the window down to a size where the lines really do have to wrap.</summary>
     private void Narrow(int w, int h)
     {
         _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Normal);
-        Thread.Sleep(700);
+        Wait(700);
         var t = _app.Window.Patterns.Transform.PatternOrDefault;
         t?.Move(80, 60);
         t?.Resize(w, h);
-        Thread.Sleep(600);
+        Wait(600);
         _app.Activate();
-        Thread.Sleep(800);
+        Wait(800);
         Say($"narrowed to {_app.Window.BoundingRectangle.Width}x{_app.Window.BoundingRectangle.Height}");
     }
 
     private void TooltipCanBeTurnedOff()
     {
         _app.ClickMenuOrThrow("View", "Show Matching Filters on Hover");
-        Thread.Sleep(500);
+        Wait(500);
         var rows = _app.Rows();
         if (rows.Length < 4) { Check("rows to hover", false); return; }
         var r = rows[3].BoundingRectangle;
         Mouse.MoveTo(new Point(r.Left + 400, r.Top + r.Height / 2));
-        Thread.Sleep(1600);
+        Wait(1600);
         Check("turned off, hovering says nothing", TooltipWindow() is null, DescribeTopLevel());
 
         _app.ClickMenuOrThrow("View", "Show Matching Filters on Hover");
-        Thread.Sleep(500);
+        Wait(500);
         Mouse.MoveTo(new Point(r.Left + 200, r.Top + r.Height / 2));
-        Thread.Sleep(1600);
+        Wait(1600);
         Check("and turned back on it speaks again", TooltipWindow() is not null, DescribeTopLevel());
         Mouse.MoveTo(new Point(r.Left + 200, r.Top - 250));
-        Thread.Sleep(600);
+        Wait(600);
     }
 
     private void UndoMenuWording()
@@ -435,23 +453,23 @@ public class ManualSweep : IDisposable
         var node = _app.FilterNode(BigFixture.MidFilter) ?? _app.FilterNode(BigFixture.HugeFilter);
         if (node is null) { Check("a filter to edit", false); return; }
         if (!ClickFilterRow(BigFixture.MidFilter) && !ClickFilterRow(BigFixture.HugeFilter)) { Check("the filter is reachable", false); return; }
-        Thread.Sleep(500);
+        Wait(500);
         Chord(VirtualKeyShort.KEY_D);
-        Thread.Sleep(2000);
+        Wait(2000);
 
         var edit = OpenMenu("Edit");
         string undo = edit?.FirstOrDefault(m => (m.Name ?? "").StartsWith("Undo", StringComparison.Ordinal))?.Name ?? "";
         Say($"Edit menu undo item: '{undo}'");
         Check("the undo item names what it will take back", undo.Length > "Undo".Length, undo);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(400);
+        Wait(400);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(400);
+        Wait(400);
 
         if (!ClickFilterRow(BigFixture.MidFilter)) ClickFilterRow(BigFixture.HugeFilter);
-        Thread.Sleep(400);
+        Wait(400);
         Chord(VirtualKeyShort.KEY_Z);
-        Thread.Sleep(2000);
+        Wait(2000);
     }
 
     /// <summary>Puts a filter row on screen and clicks it, so the list has focus and that row is selected.
@@ -462,11 +480,11 @@ public class ManualSweep : IDisposable
         var node = _app.FilterNode(contains);
         if (node is null) return false;
         try { node.AsTreeItem().Select(); } catch { /* selecting is only to scroll it into view */ }
-        Thread.Sleep(400);
+        Wait(400);
         var nr = (_app.FilterNode(contains) ?? node).BoundingRectangle;
         if (nr.Width <= 0 || nr.Height <= 0) { Say($"  ({contains} is still not on screen)"); return false; }
         Mouse.Click(new Point(nr.Left + 40, nr.Top + nr.Height / 2));
-        Thread.Sleep(400);
+        Wait(400);
         return true;
     }
 
@@ -483,7 +501,7 @@ public class ManualSweep : IDisposable
         if (_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)))
         {
             _app.UntickPreset(names[0]);
-            Thread.Sleep(3000);
+            Wait(3000);
         }
         Check("the preset starts out of effect",
               !_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)),
@@ -493,31 +511,31 @@ public class ManualSweep : IDisposable
         var r = item.BoundingRectangle;
         var onLabel = new Point(r.Left + r.Height + 30, r.Top + r.Height / 2);
         Mouse.Click(onLabel);
-        Thread.Sleep(500);
+        Wait(500);
         Check("clicking a preset's name does not put it in effect",
               !_app.ActivePresets().Any(n => n.StartsWith(names[0].Split(' ')[0], StringComparison.Ordinal)),
               _app.DescribePresets());
 
         // F2 renames.
         Keyboard.Type(VirtualKeyShort.F2);
-        Thread.Sleep(1200);
+        Wait(1200);
         ShotScreen("preset-rename");
         Keyboard.Pressing(VirtualKeyShort.CONTROL);
         Keyboard.Type(VirtualKeyShort.KEY_A);
         Keyboard.Release(VirtualKeyShort.CONTROL);
         Keyboard.Type("renamed one");
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(1200);
+        Wait(1200);
         Say($"after rename: {string.Join(" | ", SafePresetNames())}");
         Check("F2 renames a preset", SafePresetNames().Any(n => n.Contains("renamed one")),
               string.Join("|", SafePresetNames()));
 
         // Delete removes it.
         Mouse.Click(onLabel);
-        Thread.Sleep(400);
+        Wait(400);
         Keyboard.Type(VirtualKeyShort.DELETE);
-        Thread.Sleep(1200);
+        Wait(1200);
         Say($"after delete: {string.Join(" | ", SafePresetNames())}");
         Check("Delete removes it", !SafePresetNames().Any(n => n.Contains("renamed one")),
               string.Join("|", SafePresetNames()));
@@ -537,15 +555,15 @@ public class ManualSweep : IDisposable
         Mouse.MoveTo(new Point(r.Left + 300, y));
         Mouse.Down(MouseButton.Left);
         Mouse.MoveTo(new Point(r.Left + 420, y));
-        Thread.Sleep(150);
+        Wait(150);
         Mouse.Up(MouseButton.Left);
-        Thread.Sleep(500);
+        Wait(500);
         string picked = CopyToClipboard();
         Say($"selected text for the filter: '{Trim(picked)}'");
         Check("there is a selection to carry", picked.Length > 0, $"'{Trim(picked)}'");
 
         Chord(VirtualKeyShort.KEY_N);
-        Thread.Sleep(1800);
+        Wait(1800);
         ShotScreen("newfilter");
         Say($"after Ctrl+N: {DescribeTopLevel()}");
         var box = FilterTextBox();
@@ -566,27 +584,27 @@ public class ManualSweep : IDisposable
         // the enabled filter shows gateway ones - so in filtered mode find correctly refuses to move, and
         // the stage would be measuring that instead of what it came to measure.
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
-        Thread.Sleep(3000);
+        Wait(3000);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         CtrlF();
         if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
         var edit = _app.FindInput();
 
         _app.SetText(edit, BigFixture.SparseTerm);
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(3000);
+        Wait(3000);
         string first = $"line {_app.CaretLine()}";
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(1500);
+        Wait(1500);
         string second = $"line {_app.CaretLine()}";
         Check("Enter goes forwards", second != first, $"{first} -> {second}");
 
         Keyboard.Pressing(VirtualKeyShort.SHIFT);
         Keyboard.Type(VirtualKeyShort.RETURN);
         Keyboard.Release(VirtualKeyShort.SHIFT);
-        Thread.Sleep(1500);
+        Wait(1500);
         Check("Shift+Enter goes back", $"line {_app.CaretLine()}" == first,
               $"{second} -> {$"line {_app.CaretLine()}"} (wanted {first})");
 
@@ -596,28 +614,28 @@ public class ManualSweep : IDisposable
         {
             regex.IsChecked = true;
             _app.SetText(edit, BigFixture.RegexTerm);
-            Thread.Sleep(400);
+            Wait(400);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(4000);
+            Wait(4000);
             Say($"regex search: {Tally()}");
             Check("a regex search finds something", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
 
             // ...and one that cannot match must say so, or the regex is not really being used.
             _app.SetText(edit, BigFixture.ImpossibleRegexTerm);
-            Thread.Sleep(400);
+            Wait(400);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(6000);
+            Wait(6000);
             Say($"impossible regex: {Tally()}");
             Check("and one that cannot match says so", Tally() == "No matches", Tally());
             regex.IsChecked = false;
         }
         Shot("backwards");
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(600);
+        Wait(600);
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");   // back as the stage found it
-        Thread.Sleep(3000);
+        Wait(3000);
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
     }
 
     /// <summary>The marks themselves, counted off the screen - nothing else can tell whether the term is
@@ -625,7 +643,7 @@ public class ManualSweep : IDisposable
     private void FindHighlighting()
     {
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         int plain = MarkedPixels();
         Check("nothing is marked to begin with", plain < 200, $"{plain} marked pixels");
 
@@ -633,16 +651,16 @@ public class ManualSweep : IDisposable
         if (_app.FindBar() is null) { Check("the bar opened", false, DescribePanes()); return; }
         var edit = _app.FindInput();
         _app.SetText(edit, "");
-        Thread.Sleep(200);
+        Wait(200);
         Keyboard.Type(BigFixture.EveryLineTerm);
-        Thread.Sleep(1500);
+        Wait(1500);
         int typed = MarkedPixels();
         Say($"marked pixels: {plain} -> {typed} on typing alone");
         Check("typing alone marks what is on screen", typed > plain + 500, $"{plain} -> {typed}");
         Shot("highlight-typed");
 
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(2500);
+        Wait(2500);
         int found = MarkedPixels(current: true);
         Check("the line the search landed on is marked more strongly", found > 30, $"{found} strong pixels");
         Shot("highlight-found");
@@ -654,7 +672,7 @@ public class ManualSweep : IDisposable
         var map = MapElement();
         using var withHits = map is null ? null : Grab(map);
         Keyboard.Type(VirtualKeyShort.ESCAPE);   // closes the bar and drops the term in one gesture
-        Thread.Sleep(800);
+        Wait(800);
         int cleared = MarkedPixels();
         Check("Esc takes the marks away with the bar", cleared < 200, $"{cleared} marked pixels");
 
@@ -677,9 +695,9 @@ public class ManualSweep : IDisposable
         Check("Word Wrap is offered", wrap is not null, string.Join("|", view?.Select(m => m.Name) ?? Array.Empty<string>()));
         Check("and is available while there are no columns", wrap?.IsEnabled ?? false);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(400);
+        Wait(400);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(400);
+        Wait(400);
     }
 
     private AutomationElement[]? OpenMenu(string name)
@@ -690,7 +708,7 @@ public class ManualSweep : IDisposable
         if (top is null) return null;
         var r = top.BoundingRectangle;
         Mouse.Click(new Point(r.Left + r.Width / 2, r.Top + r.Height / 2));
-        Thread.Sleep(700);
+        Wait(700);
         return _app.Window.FindAllDescendants(cf => cf.ByControlType(ControlType.MenuItem));
     }
 
@@ -723,7 +741,7 @@ public class ManualSweep : IDisposable
         if (node is null) return;
 
         node.AsTreeItem().Select();
-        Thread.Sleep(300);
+        Wait(300);
         _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);   // the subtree, so plenty matches
         WaitFiltered();
         Say($"after enabling {BigFixture.HugeFilter}: {Status()}");
@@ -739,7 +757,7 @@ public class ManualSweep : IDisposable
 
         var r = rows[3].BoundingRectangle;
         Mouse.MoveTo(new Point(r.Left + 250, r.Top + r.Height / 2));
-        Thread.Sleep(1500);
+        Wait(1500);
         var tip = TooltipWindow();
         Check("hovering a line raises a tip", tip is not null, DescribeTopLevel());
         if (tip is not null)
@@ -751,7 +769,7 @@ public class ManualSweep : IDisposable
         ShotScreen("tooltip");
 
         Mouse.MoveTo(new Point(r.Left + 250, r.Top - 250));
-        Thread.Sleep(1000);
+        Wait(1000);
         Check("moving off the line takes the tip away", TooltipWindow() is null, DescribeTopLevel());
     }
 
@@ -765,9 +783,9 @@ public class ManualSweep : IDisposable
         Mouse.MoveTo(new Point(r.Left + 200, y));
         Mouse.Down(MouseButton.Left);
         Mouse.MoveTo(new Point(r.Left + 330, y));
-        Thread.Sleep(150);
+        Wait(150);
         Mouse.Up(MouseButton.Left);
-        Thread.Sleep(500);
+        Wait(500);
         Shot("selection-drag");
 
         string dragged = CopyToClipboard();
@@ -779,9 +797,9 @@ public class ManualSweep : IDisposable
         // a filter for the line, carrying whatever was picked out. Leaving the dialog it opens standing is
         // what used to wreck every stage after this one, so it is put away before anything else happens.
         Mouse.MoveTo(new Point(r.Left + 260, y));
-        Thread.Sleep(400);
+        Wait(400);
         Mouse.DoubleClick(MouseButton.Left);
-        Thread.Sleep(1500);
+        Wait(1500);
         ShotScreen("selection-double");
         var carried = FilterTextBox();
         Say($"double-click opened the editor with: '{Trim(carried is null ? "" : _app.TextOf(carried))}'");
@@ -793,7 +811,7 @@ public class ManualSweep : IDisposable
 
         // A plain click takes the whole line, which is the only way to select one now.
         Mouse.Click(new Point(r.Left + 260, y));
-        Thread.Sleep(600);
+        Wait(600);
         Shot("selection-line");
         string line = CopyToClipboard();
         Say($"click copy: {line.Length} chars '{Trim(line)}'");
@@ -813,7 +831,7 @@ public class ManualSweep : IDisposable
         Shot("wrap-off");
 
         _app.ClickMenuOrThrow("View", "Word Wrap");
-        Thread.Sleep(1500);
+        Wait(1500);
         var after = _app.Rows();
         int tallest = after.Length > 0 ? after.Max(x => x.BoundingRectangle.Height) : 0;
         Say($"rows {beforeCount}@{beforeHeight}px -> {after.Length}, tallest {tallest}px, hbar {hadHBar} -> {_app.HasHorizontalScrollBar()}");
@@ -826,9 +844,9 @@ public class ManualSweep : IDisposable
         Shot("wrap-on");
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         string at = $"line {_app.CaretLine()}";
-        for (int i = 0; i < 3; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Thread.Sleep(150); }
+        for (int i = 0; i < 3; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Wait(150); }
         Check("the caret still moves while wrapped", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         // Clicking the lower half of a wrapped row must land on that row, not the one below.
@@ -839,14 +857,14 @@ public class ManualSweep : IDisposable
             string want = tall.Patterns.LegacyIAccessible.Pattern.Value.ValueOrDefault;
             var tr = tall.BoundingRectangle;
             Mouse.Click(new Point(tr.Left + 200, tr.Bottom - 6));
-            Thread.Sleep(500);
+            Wait(500);
             Check("clicking low in a wrapped line selects that line",
                   _app.CaretLine().ToString(System.Globalization.CultureInfo.InvariantCulture) == want,
                   $"wanted {want}, got line {_app.CaretLine()}");
         }
 
         _app.ClickMenuOrThrow("View", "Word Wrap");
-        Thread.Sleep(1200);
+        Wait(1200);
         Check("turning it off puts the rows back",
               _app.Rows() is { Length: > 0 } back && back[0].BoundingRectangle.Height == beforeHeight,
               $"{(_app.Rows() is { Length: > 0 } b2 ? b2[0].BoundingRectangle.Height : -1)} vs {beforeHeight}");
@@ -870,14 +888,14 @@ public class ManualSweep : IDisposable
             // Nothing is coloured on the map that a filter is not colouring in the text. Switching them all
             // off is the sharpest form of that: the map has to go blank.
             _app.ScrollVerticalTo(150_000);
-            Thread.Sleep(900);
+            Wait(900);
             var coloured = MapColours(map);
             Say($"colours with the filters on: {string.Join(" ", coloured)}");
             Check("the map is coloured while filters are on", coloured.Count > 0, string.Join(" ", coloured));
 
             _app.ClickMenuOrThrow("Filters", "Disable All");
             WaitFiltered();
-            Thread.Sleep(1500);
+            Wait(1500);
             var bare = MapColours(map);
             Say($"colours with every filter off: {string.Join(" ", bare)}");
             Check("and blank once none of them are", bare.Count == 0, string.Join(" ", bare));
@@ -888,7 +906,7 @@ public class ManualSweep : IDisposable
                 _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
                 WaitFiltered();
                 _app.ScrollVerticalTo(150_000);
-                Thread.Sleep(1500);
+                Wait(1500);
                 Check("and coloured again when one is turned back on", MapColours(map).Count > 0,
                       string.Join(" ", MapColours(map)));
                 Shot("map-two-filters");
@@ -920,13 +938,13 @@ public class ManualSweep : IDisposable
                 WaitFiltered();
             }
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
-            Thread.Sleep(3000);
+            Wait(3000);
             _app.ScrollVerticalTo(Row(0.15));
-            Thread.Sleep(900);
+            Wait(900);
             long highLine = _app.FirstVisibleLine();
             using var atHigh = Grab(map);
             _app.ScrollVerticalTo(Row(0.85));
-            Thread.Sleep(900);
+            Wait(900);
             long lowLine = _app.FirstVisibleLine();
             using var atLow = Grab(map);
             Say($"map across a jump from 15% to 85% of the file ({highLine} -> {lowLine}): " +
@@ -934,7 +952,7 @@ public class ManualSweep : IDisposable
             Check("the map shows somewhere else entirely after a long scroll", PictureDiff(atHigh, atLow) > 0.10,
                   $"{PictureDiff(atHigh, atLow):P0} of the pixels changed, view {highLine} -> {lowLine}");
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
-            Thread.Sleep(3000);
+            Wait(3000);
             // Put the second filter back off: the stages after this one share the window.
             if (ClickFilterRow(BigFixture.BusyFilter))
             {
@@ -945,11 +963,11 @@ public class ManualSweep : IDisposable
             // Clicking the map moves the view without the scrollbar going anywhere much: it is the fine
             // adjustment, and the file is far too long for a window of it to register on the whole scale.
             _app.ScrollVerticalTo(Row(0.5));
-            Thread.Sleep(1200);
+            Wait(1200);
             var r = map.BoundingRectangle;
             long viewBefore = _app.FirstVisibleLine();
             Mouse.Click(new Point(r.Left + r.Width / 2, r.Top + r.Height / 6));
-            Thread.Sleep(1200);
+            Wait(1200);
             Say($"clicking high on the map: {viewBefore} -> {_app.FirstVisibleLine()}");
             Check("clicking the map moves the view", _app.FirstVisibleLine() != viewBefore,
                   $"{viewBefore} -> {_app.FirstVisibleLine()}");
@@ -963,7 +981,7 @@ public class ManualSweep : IDisposable
                 // rather than paging.
                 var br = bar.BoundingRectangle;
                 _app.ScrollVerticalTo(Row(0.5));
-                Thread.Sleep(1200);
+                Wait(1200);
                 DragIsLive("the scrollbar", bar, br.Left + br.Width / 2, br.Top + br.Height / 2,
                            br.Top + br.Height * 3 / 4);
             }
@@ -971,7 +989,7 @@ public class ManualSweep : IDisposable
             // ...and the whole picture is a different one when the view mode changes under it.
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
-            Thread.Sleep(2000);
+            Wait(2000);
             Check("switching to filtered lines redraws the map", MapColours(map).Count > 0,
                   string.Join(" ", MapColours(map)));
             Shot("map-filtered");
@@ -980,11 +998,11 @@ public class ManualSweep : IDisposable
             // run out there, because the fill only ever walked forwards. It has to fill from the bottom up.
             // Ctrl+End rather than a row number: only the app knows exactly where the end is.
             _app.ClickMenuOrThrow("View", "Focus Text Area");
-            Thread.Sleep(300);
+            Wait(300);
             Keyboard.Pressing(VirtualKeyShort.CONTROL);
             Keyboard.Type(VirtualKeyShort.END);
             Keyboard.Release(VirtualKeyShort.CONTROL);
-            Thread.Sleep(2500);
+            Wait(2500);
             using (var atEnd = Grab(map))
             {
                 Say($"at the end of the file, view {_app.FirstVisibleLine()}");
@@ -1001,19 +1019,19 @@ public class ManualSweep : IDisposable
             Keyboard.Pressing(VirtualKeyShort.CONTROL);
             Keyboard.Type(VirtualKeyShort.HOME);
             Keyboard.Release(VirtualKeyShort.CONTROL);
-            Thread.Sleep(1500);
+            Wait(1500);
 
             _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
             WaitFiltered();
-            Thread.Sleep(1500);
+            Wait(1500);
         }
 
         _app.ClickMenuOrThrow("View", "Show Match Map");
-        Thread.Sleep(800);
+        Wait(800);
         Check("turning it off leaves the scrollbar behind", MapElement() is null && _app.VerticalScrollerName().Length > 0,
               _app.VerticalScrollerName());
         _app.ClickMenuOrThrow("View", "Show Match Map");
-        Thread.Sleep(800);
+        Wait(800);
         Check("and back on returns the map", MapElement() is not null);
     }
 
@@ -1027,7 +1045,7 @@ public class ManualSweep : IDisposable
         var node = _app.FilterNode(contains);
         if (node is null) return null;
         try { node.AsTreeItem().Select(); } catch { /* only to bring it into view */ }
-        Thread.Sleep(400);
+        Wait(400);
         var r = (_app.FilterNode(contains) ?? node).BoundingRectangle;
         if (r.Width <= 20 || r.Height <= 0) return null;
         using var strip = new Bitmap(r.Width, 1, PixelFormat.Format32bppArgb);
@@ -1151,7 +1169,7 @@ public class ManualSweep : IDisposable
     private void FindEverything()
     {
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
+        Wait(300);
         CtrlF();
         var bar = _app.FindBar();
         Check("Ctrl+F opens the bar", bar is not null, DescribePanes());
@@ -1161,33 +1179,33 @@ public class ManualSweep : IDisposable
 
         long top = _app.FirstVisibleLine();
         _app.SetText(edit, "");
-        Thread.Sleep(200);
+        Wait(200);
         Keyboard.Type(BigFixture.EveryLineTerm);
-        Thread.Sleep(1500);
+        Wait(1500);
         Check("typing does not move the view", _app.FirstVisibleLine() == top, $"{top} -> {_app.FirstVisibleLine()}");
         Shot("find-typing");
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(300);
+        Wait(300);
         while ((Tally().Length == 0 || Tally().Contains('+') || Tally() == "Searching\u2026") && sw.ElapsedMilliseconds < 30000)
-            Thread.Sleep(100);
+            Wait(100);
         Say($"first search + full sweep: {sw.ElapsedMilliseconds} ms -> {Tally()}");
         Check("the counts settle without a plus", !Tally().Contains('+'), Tally());
         Check("and say where we are", Tally().StartsWith("Match ", StringComparison.Ordinal), Tally());
         Shot("find-found");
 
         string at = $"line {_app.CaretLine()}";
-        for (int i = 0; i < 10; i++) { Keyboard.Type(VirtualKeyShort.RETURN); Thread.Sleep(70); }
-        Thread.Sleep(1000);
+        for (int i = 0; i < 10; i++) { Keyboard.Type(VirtualKeyShort.RETURN); Wait(70); }
+        Wait(1000);
         Say($"after ten repeats: {$"line {_app.CaretLine()}"} (was {at}), {Tally()}");
         Check("ten repeats moved the caret on", $"line {_app.CaretLine()}" != at, $"{at} -> {$"line {_app.CaretLine()}"}");
 
         // Ctrl+F while the box already has the keyboard: typing must replace the term.
         CtrlF();
-        Thread.Sleep(300);
+        Wait(300);
         Keyboard.Type(BigFixture.SparseTerm);
-        Thread.Sleep(500);
+        Wait(500);
         Check("Ctrl+F selects the term so a new one types straight over it", _app.TextOf(edit) == BigFixture.SparseTerm, _app.TextOf(edit));
 
         // Click the log, then Ctrl+F must come back to the box. Well down the view: the find bar is hosted
@@ -1196,55 +1214,55 @@ public class ManualSweep : IDisposable
         ShotScreen("find-after-log-click");
         Check("clicking the log takes the keyboard out of the box", !Focused(edit), FocusedName());
         CtrlF();
-        Thread.Sleep(400);
+        Wait(400);
         Check("Ctrl+F brings it back", Focused(edit), FocusedName());
         Keyboard.Type("x");
-        Thread.Sleep(300);
+        Wait(300);
         Check("and had the whole term selected", _app.TextOf(edit) == "x", _app.TextOf(edit));
 
         // History.
         _app.SetText(edit, "");
-        Thread.Sleep(200);
+        Wait(200);
         Keyboard.Type(VirtualKeyShort.DOWN);
-        Thread.Sleep(800);
+        Wait(800);
         Say($"after Down in an empty box: '{_app.TextOf(edit)}'");
         Check("Down recalls the most recent term", _app.TextOf(edit).Length > 0, _app.TextOf(edit));
         ShotScreen("find-history");
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(400);
+        Wait(400);
 
         // Esc is one gesture on purpose: the bar goes, and the term, marks and counts go with it. A search
         // still running with nothing on screen to say so is the state the bar exists to remove.
         _app.SetText(edit, BigFixture.SparseTerm);
-        Thread.Sleep(200);
+        Wait(200);
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(3000);
+        Wait(3000);
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(600);
+        Wait(600);
         Check("Esc closes the bar", _app.FindBar() is null or { IsOffscreen: true });
         Check("and takes the counts with it", Tally().Length == 0, Tally());
 
         _app.ClickMenuOrThrow("View", "Focus Text Area");
-        Thread.Sleep(300);
-        for (int i = 0; i < 4; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Thread.Sleep(250); }
+        Wait(300);
+        for (int i = 0; i < 4; i++) { Keyboard.Type(VirtualKeyShort.DOWN); Wait(250); }
 
         // Hiding and showing must move the split. The date is on every line, so half the hits are on lines
         // the enabled filter is not showing.
         CtrlF();
-        Thread.Sleep(400);
+        Wait(400);
         var box = _app.FindBar() is null ? null : _app.FindInput();
         if (box is not null)
         {
             _app.SetText(box, BigFixture.EveryLineDate);
-            Thread.Sleep(300);
+            Wait(300);
             Keyboard.Type(VirtualKeyShort.RETURN);
-            Thread.Sleep(6000);
+            Wait(6000);
         }
         string dim = Tally();
         Check("the counts never read as a bare number",
               dim.Length > 0 && !long.TryParse(dim.Replace(",", ""), out _), dim);
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
-        Thread.Sleep(4000);
+        Wait(4000);
         string hidden = Tally();
         Say($"counts one way '{dim}' -> the other '{hidden}'");
         Check("hiding the rest changes what the counts say", hidden != dim, $"{dim} -> {hidden}");
@@ -1252,11 +1270,11 @@ public class ManualSweep : IDisposable
               dim.Contains("hidden") != hidden.Contains("hidden"), $"{dim} / {hidden}");
         Shot("find-filtered-counts");
         _app.ClickMenuOrThrow("View", "Show Only Filtered Lines");
-        Thread.Sleep(4000);
+        Wait(4000);
         Check("and showing them again changes it back", Tally() != hidden, $"{hidden} -> {Tally()}");
 
         Keyboard.Type(VirtualKeyShort.ESCAPE);
-        Thread.Sleep(800);
+        Wait(800);
         Check("Esc puts the term away", Tally().Length == 0, Tally());
         Shot("find-cleared");
     }
@@ -1264,28 +1282,28 @@ public class ManualSweep : IDisposable
     private void UndoRedo()
     {
         if (!ClickFilterRow(BigFixture.HugeFilter)) { Check("a filter to work on", false); return; }
-        Thread.Sleep(600);
+        Wait(600);
         int before = _app.RootFilterNames().Length;
         Say($"roots before: {before}");
 
         Chord(VirtualKeyShort.KEY_D);
-        Thread.Sleep(2500);
+        Wait(2500);
         int after = _app.RootFilterNames().Length;
         Check("Ctrl+D duplicates the filter", after == before + 1, $"{before} -> {after}");
         Shot("undo-duplicated");
 
         Chord(VirtualKeyShort.KEY_Z);
-        Thread.Sleep(2500);
+        Wait(2500);
         Check("Ctrl+Z takes it back", _app.RootFilterNames().Length == before,
               $"{_app.RootFilterNames().Length} vs {before}");
 
         Chord(VirtualKeyShort.KEY_Y);
-        Thread.Sleep(2500);
+        Wait(2500);
         Check("Ctrl+Y puts it back", _app.RootFilterNames().Length == after,
               $"{_app.RootFilterNames().Length} vs {after}");
 
         Chord(VirtualKeyShort.KEY_Z);
-        Thread.Sleep(2500);
+        Wait(2500);
         Check("and undo again leaves the list as it started", _app.RootFilterNames().Length == before,
               $"{_app.RootFilterNames().Length} vs {before}");
         Shot("undo");
@@ -1303,9 +1321,9 @@ public class ManualSweep : IDisposable
 
         var r = pane.BoundingRectangle;
         Mouse.MoveTo(new Point(r.Left + r.Width / 2, r.Top + Math.Min(60, r.Height / 2)));
-        Thread.Sleep(300);
+        Wait(300);
         Mouse.Click(MouseButton.Right);
-        Thread.Sleep(900);
+        Wait(900);
         ShotScreen("presets-menu");
 
         var save = _app.DesktopChildren()
@@ -1316,14 +1334,14 @@ public class ManualSweep : IDisposable
 
         // Chosen with the keyboard: it opens a modal dialog, and a UIA Invoke that does that never returns.
         Keyboard.Type(VirtualKeyShort.DOWN);
-        Thread.Sleep(200);
+        Wait(200);
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(1500);
+        Wait(1500);
         ShotScreen("presets-naming");
         Keyboard.Type(PresetName);
-        Thread.Sleep(400);
+        Wait(400);
         Keyboard.Type(VirtualKeyShort.RETURN);
-        Thread.Sleep(1800);
+        Wait(1800);
         Say($"presets now: {string.Join(" | ", SafePresetNames())}");
         Check("the preset appears in the list", SafePresetNames().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
               string.Join("|", SafePresetNames()));
@@ -1333,14 +1351,14 @@ public class ManualSweep : IDisposable
         if (ClickFilterRow(BigFixture.HugeFilter))
         {
             _app.ShiftKey(_app.Tree(), VirtualKeyShort.SPACE);
-            Thread.Sleep(4000);
+            Wait(4000);
             Say($"after switching {BigFixture.HugeFilter} off: {Status()}");
             Say($"still ticked: {string.Join(" | ", TickedFilters())}");
             Check("switching its filters off drops the preset out of effect",
                   !_app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)), _app.DescribePresets());
 
             _app.TickPreset(PresetName);
-            Thread.Sleep(5000);
+            Wait(5000);
             Check("ticking it turns them back on", _app.ActivePresets().Any(n => n.Contains(PresetName, StringComparison.Ordinal)),
                   _app.DescribePresets());
             Check("and the view fills again", _app.Rows().Length > 0, $"{_app.Rows().Length} rows");
@@ -1403,15 +1421,15 @@ public class ManualSweep : IDisposable
     private void WaitIndexed()
     {
         var until = DateTime.UtcNow.AddSeconds(90);
-        while (DateTime.UtcNow < until && !Status().Contains(BigFixture.TotalStatus)) Thread.Sleep(500);
-        Thread.Sleep(1500);
+        while (DateTime.UtcNow < until && !Status().Contains(BigFixture.TotalStatus)) Wait(500);
+        Wait(1500);
     }
 
     private void WaitFiltered()
     {
         var until = DateTime.UtcNow.AddSeconds(90);
-        while (DateTime.UtcNow < until && _app.Rows().Length == 0) Thread.Sleep(500);
-        Thread.Sleep(3000);
+        while (DateTime.UtcNow < until && _app.Rows().Length == 0) Wait(500);
+        Wait(3000);
     }
 
     /// <summary>
@@ -1437,13 +1455,13 @@ public class ManualSweep : IDisposable
         Say($"ClickRow({downTheView:P0}) = row {index} of {rows.Length} at {at.X},{at.Y} " +
             $"(row {r.Left},{r.Top} {r.Width}x{r.Height})");
         Mouse.Click(at);
-        Thread.Sleep(600);
+        Wait(600);
     }
 
     private static void DoubleClick()
     {
         Mouse.Click(MouseButton.Left);
-        Thread.Sleep(50);
+        Wait(50);
         Mouse.Click(MouseButton.Left);
     }
 
@@ -1452,7 +1470,7 @@ public class ManualSweep : IDisposable
         Keyboard.Pressing(VirtualKeyShort.CONTROL);
         Keyboard.Type(VirtualKeyShort.KEY_F);
         Keyboard.Release(VirtualKeyShort.CONTROL);
-        Thread.Sleep(700);
+        Wait(700);
     }
 
     /// <summary>The filter editor's pattern box, wherever the dialog is.</summary>
@@ -1466,7 +1484,7 @@ public class ManualSweep : IDisposable
     {
         var w = _app.Window.BoundingRectangle;
         Mouse.Position = new Point(w.Left + 4, w.Top + 4);
-        Thread.Sleep(400);
+        Wait(400);
     }
 
     /// <summary>
@@ -1483,7 +1501,7 @@ public class ManualSweep : IDisposable
             if (FilterTextBox() is null && _app.FindDialog("Add Filter") is null && _app.FindDialog("Edit Filter") is null)
                 return;
             Keyboard.Type(VirtualKeyShort.ESCAPE);
-            Thread.Sleep(700);
+            Wait(700);
         }
         Check("no dialog was left standing over the window", false, DescribeTopLevel());
     }
@@ -1504,7 +1522,7 @@ public class ManualSweep : IDisposable
         Keyboard.Pressing(VirtualKeyShort.CONTROL);
         Keyboard.Type(VirtualKeyShort.KEY_C);
         Keyboard.Release(VirtualKeyShort.CONTROL);
-        Thread.Sleep(600);
+        Wait(600);
 
         string text = "";
         RunSta(() =>
@@ -1558,20 +1576,20 @@ public class ManualSweep : IDisposable
     {
         Mouse.MovePixelsPerMillisecond = 100;
         Mouse.Position = new Point(x, fromY);
-        Thread.Sleep(200);
+        Wait(200);
         Mouse.Down(MouseButton.Left);
-        Thread.Sleep(150);
+        Wait(150);
         long start = _app.FirstVisibleLine();
         var seen = new List<long>();
         int steps = 6;
         for (int i = 1; i <= steps; i++)
         {
             Mouse.Position = new Point(x, fromY + (toY - fromY) * i / steps);
-            Thread.Sleep(120);
+            Wait(120);
             seen.Add(_app.FirstVisibleLine());   // still held
         }
         Mouse.Up(MouseButton.Left);
-        Thread.Sleep(600);
+        Wait(600);
         long end = _app.FirstVisibleLine();
         Say($"dragging {what}: start {start}, during [{string.Join(", ", seen)}], after release {end}");
         Check($"dragging {what} moves the view while the button is still down",
