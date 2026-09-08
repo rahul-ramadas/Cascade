@@ -639,7 +639,7 @@ internal static partial class Checks
 
     private static bool Check(string name, bool condition)
     {
-        Line((condition ? "[PASS] " : "[FAIL] ") + name);
+        Line((condition ? PassMarker : FailMarker) + name);
         return condition;
     }
 
@@ -647,7 +647,7 @@ internal static partial class Checks
     /// failure you can act on and one you have to reproduce first.</summary>
     private static bool Check(string name, bool condition, string detail)
     {
-        Line((condition ? "[PASS] " : "[FAIL] ") + name + (condition ? "" : $" [{detail}]"));
+        Line((condition ? PassMarker : FailMarker) + name + (condition ? "" : $" [{detail}]"));
         return condition;
     }
 

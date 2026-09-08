@@ -45,6 +45,9 @@ public class RealFileTests(ITestOutputHelper output) : AppCheckFixture(output)
                     $"CASCADE_BIG_FILTERS names {filters}, which is not there.");
 
         Report($"Running against {log} ({new FileInfo(log!).Length:N0} bytes).");
-        Verify(() => Checks.RunFileChecks(log!, string.IsNullOrWhiteSpace(filters) ? null : filters));
+
+        // Eight without a filter file, nine with one. The lower figure, because naming one is optional.
+        Verify(() => Checks.RunFileChecks(log!, string.IsNullOrWhiteSpace(filters) ? null : filters),
+               atLeast: 8);
     }
 }

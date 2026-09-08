@@ -28,6 +28,9 @@ namespace Cascade.AppTests;
 /// </summary>
 internal static partial class Checks
 {
+    // What a recorded check starts with. Verify counts these to tell a group that passed from one that
+    // never looked, so the markers cannot be spelled out anywhere else.
+    internal const string PassMarker = "[PASS] ";
     internal const string FailMarker = "[FAIL] ";
 
     /// <summary>Where <see cref="Line"/> writes. Set for the duration of one group by
