@@ -60,6 +60,29 @@ internal static class Sta
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
     }
 
+    // THESE CHECKS STILL TAKE THE KEYBOARD, and it is worth writing down what was tried, because the
+    // remedies all look obvious and none of them works.
+    //
+    // MEASURED with a probe sampling GetForegroundWindow every 50ms alongside a run: the foreground
+    // belonged to this process for 90% of a 56-second run - about a hundred windows, every one of them
+    // invisible, each taking the keystrokes meant for whatever the developer was actually doing. Showing a
+    // window activates it; zero opacity does not change that, and neither does parking it past the last
+    // monitor (Hidden.Show does both anyway, so nothing is ever SEEN).
+    //
+    //   * SetThreadDesktop onto a desktop of our own: fails with ERROR_BUSY (170) on a .NET STA thread even
+    //     as its first act. Starting a thread as STA initialises the apartment, which creates the hidden
+    //     OLE window - and a window is exactly what that API refuses to move a thread away from. Confirmed
+    //     on a bare probe with nothing else on the thread.
+    //   * Starting the whole test host on such a desktop (STARTUPINFO.lpDesktop, which is the technique
+    //     that does work for a child process): the run began normally and then aborted part way in.
+    //   * WS_EX_NOACTIVATE on every window, applied through a CBT hook at HCBT_CREATEWND: no measurable
+    //     difference (88% against 90%), and it broke a check. WinForms sets its own extended styles from
+    //     CreateParams and shows with SW_SHOW regardless.
+    //
+    // So it is left alone deliberately, rather than half-fixed. What is worth trying next is the one thing
+    // not tried: giving the product's DialogBase and MainForm a ShowWithoutActivation of their own, gated
+    // on a test-only switch - the supported way to say this, and the only one the framework honours.
+
     /// <summary>Runs <paramref name="job"/> on the STA thread and waits for it. An exception it throws is
     /// rethrown here with its original stack trace, so xUnit reports the failure where it happened.</summary>
     public static void Run(Action job)

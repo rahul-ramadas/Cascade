@@ -32,15 +32,27 @@ public static class GitCredentialToken
     {
         string? own = null;
         try { own = Path.GetDirectoryName(Environment.ProcessPath ?? ""); } catch { /* keep looking */ }
+        return ResolveGit(own, Environment.CurrentDirectory, SearchDirectories());
+    }
 
-        foreach (string dir in SearchDirectories())
+    /// <summary>
+    /// The rule itself, with the three things it depends on passed in.
+    ///
+    /// <para>Separated so it can be held to account without a process to be the image of, a working
+    /// directory to be in, or a PATH to disturb - all three of which are process-wide, and a test that sets
+    /// them changes what every other test running at that moment sees. What it decides is a security
+    /// boundary, so it is worth being able to ask about it cheaply and exactly.</para>
+    /// </summary>
+    internal static string? ResolveGit(string? ownDirectory, string? currentDirectory,
+                                       IEnumerable<string> searchDirectories)
+    {
+        foreach (string dir in searchDirectories)
         {
             if (string.IsNullOrWhiteSpace(dir)) continue;
             try
             {
                 string full = Path.GetFullPath(dir.Trim().Trim('"'));
-                if (own is { Length: > 0 } && string.Equals(full, own, StringComparison.OrdinalIgnoreCase)) continue;
-                if (string.Equals(full, Environment.CurrentDirectory, StringComparison.OrdinalIgnoreCase)) continue;
+                if (Same(full, ownDirectory) || Same(full, currentDirectory)) continue;
 
                 string candidate = Path.Combine(full, "git.exe");
                 if (File.Exists(candidate)) return candidate;
@@ -50,7 +62,15 @@ public static class GitCredentialToken
         return null;
     }
 
-    private static IEnumerable<string> SearchDirectories()
+    /// <summary>Compares two directories as Windows does. Trailing separators are trimmed first: "C:\x" and
+    /// "C:\x\" are the same place, and a refusal that did not see that would be no refusal at all.</summary>
+    private static bool Same(string full, string? other)
+        => other is { Length: > 0 }
+           && string.Equals(full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                            Path.GetFullPath(other).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                            StringComparison.OrdinalIgnoreCase);
+
+    internal static IEnumerable<string> SearchDirectories()
     {
         foreach (string dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
             yield return dir;

@@ -106,7 +106,15 @@ public sealed class PreferencesDialog : DialogBase
     private void LoadSettings()
     {
         _font.SelectedItem = _s.FontFamily;
-        if (_font.SelectedIndex < 0) _font.Text = _s.FontFamily;
+        // A settings file carried from another machine can name a font this one does not have. The list only
+        // offers what is installed, and it is a DropDownList - which cannot show text that is not an item -
+        // so without this the font box comes up EMPTY and the reader is told nothing about what they are
+        // using. Offering it keeps the box honest, and choosing something else still replaces it.
+        if (_font.SelectedIndex < 0 && !string.IsNullOrWhiteSpace(_s.FontFamily))
+        {
+            _font.Items.Insert(0, _s.FontFamily);
+            _font.SelectedIndex = 0;
+        }
         _size.Value = (decimal)Math.Clamp(_s.FontSize, 6f, 48f);
         _tab.Value = Math.Clamp(_s.TabSize, 1, 16);
         _lineSpacing.Value = Math.Clamp(_s.ExtraLineSpacing, 0, 12);

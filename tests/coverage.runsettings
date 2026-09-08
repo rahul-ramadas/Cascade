@@ -12,6 +12,10 @@
   ModulePaths names the two product assemblies explicitly. Left to itself a collector reports on whatever
   it finds beside the test assembly, which pads the figure with the tests' own lines - and a coverage
   number that includes the test code measures nothing.
+
+  Naming this file on the command line is all that is needed: a data collector declared here is enabled by
+  it. Passing a separate collect switch as well would be a second place saying what to measure, and two of
+  those disagree eventually.
 -->
 <RunSettings>
   <DataCollectionRunSettings>

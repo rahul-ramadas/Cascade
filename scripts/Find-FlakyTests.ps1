@@ -78,7 +78,7 @@ try {
                 '--logger', "trx;LogFileName=$name-$run.trx"
                 '--results-directory', $ResultsDirectory
             )
-            if ($Coverage) { $args += @('--settings', (Join-Path $repo 'tests/coverage.runsettings'), '--collect', 'Code Coverage') }
+            if ($Coverage) { $args += @('--settings', (Join-Path $repo 'tests/coverage.runsettings')) }
 
             $started = Get-Date
             & dotnet @args | Out-Null

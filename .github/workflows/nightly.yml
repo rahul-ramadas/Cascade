@@ -1,0 +1,214 @@
+name: Nightly
+
+# What a push cannot afford: the same tests run until they mean something.
+#
+# Everything here is chosen because it has a real chance of catching something the push build cannot,
+# and nothing is here to look thorough. Three kinds of thing:
+#
+#   * REPEATS. A test that asserts on a wall clock, or races a worker against the thread watching it, sits
+#     green for weeks and then fails on a busy runner. The way to find one is to run the suite until it
+#     shows, under the CPU load a hosted runner is actually under. That is how the one flake this repo had
+#     was found, and it had been green in every summary for months.
+#   * SCALE. Whole mechanisms only exist above a certain size: the line index pages at 65,536 lines, a
+#     filter pass over four thousand lines finishes before anything can watch it stream, and the match
+#     cache's word alignment only matters when indexing has not finished before filtering starts. Each of
+#     those has carried a real bug that no second-long test could have reached.
+#   * FUZZ WITH ROOM. The differential tests compare three independent implementations - an automaton, a
+#     rewriter and a plain walk - and with a fixed seed they explore exactly the same ground every time.
+#     Scaled up, and seeded differently, they spend real time looking somewhere new.
+#
+# A failure here is worth a look but does not block anybody: nothing has been pushed, and the point is to
+# learn something before a user does.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'      # 07:00 UTC, i.e. overnight for the author
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: How many times to run each suite when hunting flakes
+        default: '10'
+      soakLines:
+        description: Lines in the generated log the engine soak runs over
+        default: '8000000'
+      fuzzScale:
+        description: Multiplier for the random tests
+        default: '25'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  REPEATS: ${{ inputs.repeats || '10' }}
+  SOAK_LINES: ${{ inputs.soakLines || '8000000' }}
+  FUZZ_SCALE: ${{ inputs.fuzzScale || '25' }}
+
+jobs:
+  soak:
+    name: Scale and fuzz
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check whether global.json SDK is already available
+        id: sdk
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $null = & dotnet --version 2>&1
+          $found = ($LASTEXITCODE -eq 0)
+          "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit 0
+
+      - uses: actions/setup-dotnet@v6
+        if: steps.sdk.outputs.found != 'True'
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Cascade.slnx -c Release
+
+      # The engine over a log big enough to page the index, stream a filter pass, and make the match cache
+      # be built from partial information. Answers are compared against the generator's own arithmetic, so
+      # nothing here is a snapshot of what the engine happened to say last time.
+      - name: Engine soak on a generated multi-hundred-megabyte log
+        env:
+          CASCADE_SOAK: '1'
+          CASCADE_SOAK_LINES: ${{ env.SOAK_LINES }}
+        run: >
+          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          -c Release --no-build --filter "FullyQualifiedName~SoakTests"
+          --logger "trx;LogFileName=soak.trx" --results-directory artifacts/nightly
+
+      # The same differential tests the push build runs, given room to explore. The seed moves with the
+      # scale, so this is new ground rather than a longer walk down the same road; a failure prints the
+      # seed, and setting CASCADE_FUZZ_SCALE to the same value reproduces it exactly.
+      - name: Fuzz the engine harder
+        env:
+          CASCADE_FUZZ_SCALE: ${{ env.FUZZ_SCALE }}
+        run: >
+          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          -c Release --no-build
+          --logger "trx;LogFileName=fuzz.trx" --results-directory artifacts/nightly
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-soak
+          path: artifacts/nightly/*.trx
+          if-no-files-found: ignore
+
+  flakes:
+    name: Repeat the suites under load
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check whether global.json SDK is already available
+        id: sdk
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $null = & dotnet --version 2>&1
+          $found = ($LASTEXITCODE -eq 0)
+          "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit 0
+
+      - uses: actions/setup-dotnet@v6
+        if: steps.sdk.outputs.found != 'True'
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Cascade.slnx -c Release
+
+      - name: Publish
+        run: >
+          dotnet publish src/Cascade.App/Cascade.App.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true -p:DebugType=embedded
+          -o artifacts/publish
+
+      # Burners alongside, because a quiet machine is not the condition these fail under. The engine suite
+      # is the one worth loading up: it is where the concurrency lives, and it is cheap enough to repeat.
+      - name: Repeat the engine suite under CPU load
+        run: >
+          pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
+          -Suite core -Runs $env:REPEATS -Load 8
+          -ResultsDirectory artifacts/nightly-core
+
+      - name: Repeat the app checks
+        timeout-minutes: 45
+        run: >
+          pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
+          -Suite app -Runs $env:REPEATS
+          -ResultsDirectory artifacts/nightly-app
+
+      # Fewer repeats: every one of these launches the real executable, and the desktop is shared, so this
+      # is the slowest thing here by a wide margin. Three runs is still three chances to catch a wait that
+      # is one tick too short.
+      #
+      # The hang watchdog is armed at a second, which turns this into a soak of its own: a stall of more
+      # than a second anywhere in the app - a repaint, a filter change, closing a dialog - leaves a dump
+      # and a report behind, and the step after this refuses to pass if any were written. MEASURED at two
+      # seconds over a whole suite run: 53 watchdogs armed, 0 hangs, 39 of 39 green.
+      - name: Repeat the UI suite, watching for stalls
+        timeout-minutes: 60
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
+          CASCADE_HANG_WATCHDOG: '1'
+          CASCADE_HANG_SECONDS: '2'
+          CASCADE_HANG_DIR: ${{ github.workspace }}\artifacts\hangs
+        run: >
+          pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
+          -Suite ui -Runs 3
+          -ResultsDirectory artifacts/nightly-ui
+
+      - name: Report any stall the watchdog recorded
+        if: always()
+        run: |
+          $dir = Join-Path $env:GITHUB_WORKSPACE 'artifacts\hangs'
+          $reports = @(Get-ChildItem -Path $dir -Filter '*.txt' -ErrorAction SilentlyContinue)
+          if ($reports.Count -eq 0) {
+            Write-Host 'No stall was recorded: the window answered within a second throughout.'
+            exit 0
+          }
+
+          foreach ($report in $reports) {
+            Write-Host "=== $($report.Name) ==="
+            Get-Content -LiteralPath $report.FullName | Select-Object -First 60 | ForEach-Object { Write-Host $_ }
+          }
+          throw "$($reports.Count) stall(s) of over a second were recorded. The dumps are in the nightly-hangs artifact."
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-repeats
+          path: |
+            artifacts/nightly-core/*.trx
+            artifacts/nightly-app/*.trx
+            artifacts/nightly-ui/*.trx
+          if-no-files-found: ignore
+
+      - name: Upload any hang dumps
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-hangs
+          path: artifacts/hangs/*
+          if-no-files-found: ignore

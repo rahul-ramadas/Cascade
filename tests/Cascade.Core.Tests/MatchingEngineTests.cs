@@ -21,7 +21,7 @@ public class MatchingEngineTests
     [InlineData(false)]
     public void Automaton_agrees_with_Contains_on_random_text(bool ignoreCase)
     {
-        var rnd = new Random(20260726 + (ignoreCase ? 1 : 0));
+        var rnd = new Random(Fuzz.Seed(20260726 + (ignoreCase ? 1 : 0)));
         const string alphabet = "abcABC[]:_ 0123\u00e4\u00c4\u0131I";
         var patterns = new List<string>();
         for (int i = 0; i < 40; i++)
@@ -37,7 +37,7 @@ public class MatchingEngineTests
         var cmp = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var hits = new ulong[automaton!.Words];
 
-        for (int line = 0; line < 400; line++)
+        for (int line = 0; line < Fuzz.Cases(400); line++)
         {
             int len = rnd.Next(40);
             var sb = new StringBuilder();

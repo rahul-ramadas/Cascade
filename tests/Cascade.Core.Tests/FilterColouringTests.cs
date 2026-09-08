@@ -633,10 +633,11 @@ public class FilterColouringTests
         // The engine decides the winner with pre-order index arithmetic. This reference does it the way the
         // rule is written - walk the list from the top, first match claims, only its descendants may take
         // over - so agreement is a real cross-check and not the same code twice.
-        var rnd = new Random(90210);
+        int seed = Fuzz.Seed(90210);
+        var rnd = new Random(seed);
         string[] tokens = { "alpha", "beta", "gamma", "delta", "eps", "zeta", "Abc", "q1z", "[x]m[y]" };
 
-        for (int trial = 0; trial < 400; trial++)
+        for (int trial = 0; trial < Fuzz.Cases(400); trial++)
         {
             var c = new FilterCollection();
             var all = new List<Filter>();
@@ -662,7 +663,8 @@ public class FilterColouringTests
                 string line = string.Join(' ', Enumerable.Range(0, rnd.Next(1, 6)).Select(_ => tokens[rnd.Next(tokens.Length)]));
                 var eval = snapshot.Evaluate(line.AsSpan(), 0, null);
 
-                Assert.Equal(ReferenceShown(c, line), eval.Shown);
+                Assert.True(ReferenceShown(c, line) == eval.Shown,
+                            $"seed {seed}, trial {trial}: shown disagrees for \"{line}\"");
                 Assert.Same(eval.Shown ? ReferenceWinner(c, line) : null, eval.ColorFilter);
             }
         }

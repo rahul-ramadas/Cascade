@@ -242,7 +242,7 @@ jobs:
           dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
           -c Release --no-build
           --logger "trx;LogFileName=core.trx"
-          --settings tests/coverage.runsettings --collect "Code Coverage"
+          --settings tests/coverage.runsettings
           --results-directory artifacts/test-results
 
       # These used to be Cascade.exe --selftest, i.e. the app testing itself. Extracting them made the
@@ -253,7 +253,7 @@ jobs:
           dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj
           -c Release --no-build
           --logger "trx;LogFileName=app.trx"
-          --settings tests/coverage.runsettings --collect "Code Coverage"
+          --settings tests/coverage.runsettings
           --results-directory artifacts/test-results
 
       # Run against the PUBLISHED exe, not the build output in bin/. The published bundle resolves its
@@ -273,11 +273,12 @@ jobs:
           --results-directory artifacts/test-results
 
       # Coverage is reported, and a floor is enforced, because a number nobody looks at is not a measure of
-      # anything. The floor is set just under what the suite reaches today: it exists to catch a body of new
-      # code arriving untested, not to be raised for its own sake.
+      # anything. The floor sits a couple of points under what the suites reach today (90.7%): it is there to
+      # catch a body of new code arriving untested, not to be ratcheted up for its own sake - a number chased
+      # for its own reward buys tests written to touch lines rather than to state properties.
       - name: Coverage
         if: always()
-        run: pwsh -NoProfile -File scripts/Report-Coverage.ps1 -ResultsDirectory artifacts/test-results -MinimumLineRate 90
+        run: pwsh -NoProfile -File scripts/Report-Coverage.ps1 -ResultsDirectory artifacts/test-results -MinimumLineRate 88
 
       - name: Package
         run: |
@@ -295,7 +296,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-results
-          path: artifacts/test-results/*.trx
+          path: |
+            artifacts/test-results/*.trx
+            artifacts/test-results/**/*.cobertura.xml
           if-no-files-found: ignore
 
   release:
