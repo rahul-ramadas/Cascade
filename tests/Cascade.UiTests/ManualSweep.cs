@@ -42,6 +42,40 @@ public class ManualSweep : IDisposable
 
     private void Say(string s) => _log.Add(s);
 
+    /// <summary>
+    /// The size every stage starts from: maximised, unless CASCADE_MANUAL_SIZE names one.
+    ///
+    /// <para>Maximised means something different on every desktop, and a hosted runner's is 1024x768 - far
+    /// less room than the screen this rig was written on. A stage that quietly assumes a paneful of rows
+    /// is where that goes wrong first, and it goes wrong as "menu item not found" three stages later.
+    /// Naming a size is how the runner's geometry is rehearsed before a nightly run is trusted; ask for
+    /// device pixels, so on a 150% display 1536x1152 is the runner's 1024x768 worth of room.</para>
+    /// </summary>
+    private void FitWindow()
+    {
+        var parts = (Environment.GetEnvironmentVariable("CASCADE_MANUAL_SIZE") ?? "")
+            .Split('x', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length != 2 || !int.TryParse(parts[0], out int w) || !int.TryParse(parts[1], out int h))
+        {
+            _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
+            return;
+        }
+
+        // Compared against what the last resize ACHIEVED, not against what was asked for: MainForm has a
+        // minimum size, so a request under it settles higher, and ResizeTo refuses a resize that changes
+        // nothing - which is every call after the first.
+        if (_app.Window.BoundingRectangle.Size == _fitted)
+        {
+            _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Normal);
+            return;
+        }
+
+        _fitted = _app.ResizeTo(w, h);
+        Say($"window {_fitted.Width}x{_fitted.Height} (asked for {w}x{h})");
+    }
+
+    private Size _fitted;
+
     private void Check(string what, bool ok, string detail = "")
     {
         _log.Add($"{(ok ? "ok  " : "BAD ")} {what}{(detail.Length > 0 ? "  [" + detail + "]" : "")}");
@@ -59,7 +93,7 @@ public class ManualSweep : IDisposable
 
         _app = CascadeApp.LaunchExisting(BigFixture.Log(), Filters, CascadeApp.NewSettingsDir(),
                                          ownsFiles: false, ownsSettingsDir: true);
-        _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
+        FitWindow();
         Thread.Sleep(1500);
         _app.Activate();
         WaitIndexed();
@@ -84,7 +118,7 @@ public class ManualSweep : IDisposable
                     ReleaseKeys();
                     ParkPointer();
                     DismissDialogs();
-                    _app.Window.Patterns.Window.Pattern.SetWindowVisualState(WindowVisualState.Maximized);
+                    FitWindow();
                     Thread.Sleep(700);
                     _app.Activate();
                     Thread.Sleep(300);
@@ -131,7 +165,7 @@ public class ManualSweep : IDisposable
     /// the scrollbar's trough, which is the only place a mark outside the map's window can appear.</summary>
     private void MarkersAndMap()
     {
-        ClickRow(20);
+        ClickRow(0.5);
         Thread.Sleep(400);
         var map = MapElement();
         Check("the map is there to draw on", map is not null);
@@ -1156,9 +1190,9 @@ public class ManualSweep : IDisposable
         Thread.Sleep(500);
         Check("Ctrl+F selects the term so a new one types straight over it", _app.TextOf(edit) == BigFixture.SparseTerm, _app.TextOf(edit));
 
-        // Click the log, then Ctrl+F must come back to the box. Well down the view: the find bar is modeless
-        // and sits over the top-left of it.
-        ClickRow(30);
+        // Click the log, then Ctrl+F must come back to the box. Well down the view: the find bar is hosted
+        // at the top of it, so a click near the top lands on the bar rather than on a line.
+        ClickRow(0.75);
         ShotScreen("find-after-log-click");
         Check("clicking the log takes the keyboard out of the box", !Focused(edit), FocusedName());
         CtrlF();
@@ -1380,13 +1414,28 @@ public class ManualSweep : IDisposable
         Thread.Sleep(3000);
     }
 
-    private void ClickRow(int index)
+    /// <summary>
+    /// Clicks a row, counted as a fraction of however many the viewport is showing.
+    ///
+    /// <para>Never a row number: a maximised window on the screen this rig was written on holds 55 rows and
+    /// a hosted runner's holds 27, so "row 30" is a click on one desktop and nothing at all on another. It
+    /// used to say so and carry on, which is worse than clicking the wrong thing - the checks after it went
+    /// on asserting about a click that never happened, and reported the app was at fault. The click has to
+    /// land or this has to fail.</para>
+    /// </summary>
+    private void ClickRow(double downTheView)
     {
         var rows = _app.Rows();
-        if (rows.Length <= index) { Say($"ClickRow({index}): only {rows.Length} rows"); return; }
+        int index = Math.Clamp((int)(rows.Length * downTheView), 0, rows.Length - 1);
+        if (rows.Length == 0)
+        {
+            Check($"the view has rows to click {downTheView:P0} of the way down it", false, "no rows at all");
+            return;
+        }
         var r = rows[index].BoundingRectangle;
         var at = new Point(r.Left + 200, r.Top + r.Height / 2);
-        Say($"ClickRow({index}) at {at.X},{at.Y} (row {r.Left},{r.Top} {r.Width}x{r.Height})");
+        Say($"ClickRow({downTheView:P0}) = row {index} of {rows.Length} at {at.X},{at.Y} " +
+            $"(row {r.Left},{r.Top} {r.Width}x{r.Height})");
         Mouse.Click(at);
         Thread.Sleep(600);
     }

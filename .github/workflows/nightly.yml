@@ -3,7 +3,7 @@ name: Nightly
 # What a push cannot afford: the same tests run until they mean something.
 #
 # Everything here is chosen because it has a real chance of catching something the push build cannot,
-# and nothing is here to look thorough. Three kinds of thing:
+# and nothing is here to look thorough. Five kinds of thing:
 #
 #   * REPEATS. A test that asserts on a wall clock, or races a worker against the thread watching it, sits
 #     green for weeks and then fails on a busy runner. The way to find one is to run the suite until it
@@ -19,6 +19,9 @@ name: Nightly
 #   * DATA NOBODY CHOSE. Every fixture in this repository was written to be tested, which means every one
 #     of them agrees with whatever the author assumed a log looks like. A runner keeps real Windows logs
 #     on it; running the engine over one holds it against data with no such agreement.
+#   * A REAL MOUSE AND KEYBOARD. Every other suite drives the app through UI Automation or by posting
+#     messages, deliberately, so that a developer can keep working while they run. That means none of them
+#     is a person using the application, and the sweep that is has found four faults they all missed.
 #
 # A failure here is worth a look but does not block anybody: nothing has been pushed, and the point is to
 # learn something before a user does.
@@ -284,4 +287,110 @@ jobs:
         with:
           name: nightly-hangs
           path: artifacts/hangs/*
+          if-no-files-found: ignore
+
+  sweep:
+    name: Drive the app by hand
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    # Its own job rather than a step on the end of another. It wants the desktop to itself - a real pointer
+    # and real keystrokes go wherever the foreground is - and putting it last in a job means it is the thing
+    # that gets skipped when everything before it has eaten the budget, which is how the whole nightly was
+    # lost once already.
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check whether global.json SDK is already available
+        id: sdk
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $null = & dotnet --version 2>&1
+          $found = ($LASTEXITCODE -eq 0)
+          "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          exit 0
+
+      - uses: actions/setup-dotnet@v6
+        if: steps.sdk.outputs.found != 'True'
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build Cascade.slnx -c Release
+
+      - name: Publish
+        run: >
+          dotnet publish src/Cascade.App/Cascade.App.csproj
+          -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true -p:DebugType=embedded
+          -o artifacts/publish
+
+      # Nineteen stages over a generated 4M-line log, driving the real pointer and real keys, and the only
+      # thing anywhere that uses the application the way a person does. It found four faults the automated
+      # suites missed, and its failure mode is ROT rather than flake: it drifted to seventeen findings on a
+      # clean tree over forty-four commits with nobody the wiser, because nothing ran it. Running it is the
+      # cure for that, and a runner is a BETTER place for it than a desk - the stray click that poisons a
+      # stage, and every stage after it, cannot happen where nobody is sitting.
+      #
+      # CASCADE_TEST_OFFSCREEN is deliberately not set: a real pointer cannot reach a window parked past the
+      # last monitor. That is also why this cannot join the UI repeats above, which do set it.
+      #
+      # Maximised on a runner is 1024x768, less than half the room the rig was written on. Rehearsed at that
+      # geometry before this was wired up (CASCADE_MANUAL_SIZE takes device pixels, so 1536x1152 is the same
+      # room on a 150% display): 100 checks pass and one finding stands, which is the minimap not answering
+      # a drag at that size. Expect this job to report that until it is settled.
+      - name: Sweep the app with a real mouse and keyboard
+        timeout-minutes: 25
+        env:
+          CASCADE_MANUAL: '1'
+          CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
+          CASCADE_MANUAL_OUT: ${{ github.workspace }}\artifacts\sweep
+        run: >
+          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
+          -c Release --no-build --filter "FullyQualifiedName~ManualSweep"
+          --logger "trx;LogFileName=sweep.trx" --results-directory artifacts/sweep
+
+      # The findings are the product, so they have to be readable without downloading anything - and the
+      # SHAPE of them is half the diagnosis. Findings bunched in the last few stages mean one of them left a
+      # dialog standing and everything after it did nothing, which is a different thing from findings spread
+      # about.
+      - name: Report what the sweep found
+        if: always()
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE 'artifacts\sweep\log.txt'
+          if (-not (Test-Path -LiteralPath $log)) {
+            Write-Host 'The sweep wrote no log; it did not get as far as running.'
+            exit 0
+          }
+
+          $lines = Get-Content -LiteralPath $log
+          $ok = @($lines | Where-Object { $_ -like 'ok  *' }).Count
+          $bad = @($lines | Where-Object { $_ -like 'BAD *' }).Count
+
+          $summary = @(
+            '### Sweeping the app by hand'
+            ''
+            "**$ok** checks passed, **$bad** did not."
+            ''
+          )
+
+          if ($bad -gt 0) {
+            $summary += @('| Stage | Finding |', '| --- | --- |')
+            $stage = '(before any stage)'
+            foreach ($line in $lines) {
+              if ($line -match '^=====\s*(.+?)\s*=====$') { $stage = $Matches[1] }
+              elseif ($line -like 'BAD *') { $summary += "| $stage | $($line.Substring(4).Trim()) |" }
+            }
+            $summary += @('', 'Screenshots of every stage are in the nightly-sweep artifact.')
+          }
+
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $summary | ForEach-Object { Write-Host $_ }
+
+      - name: Upload the sweep's log and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-sweep
+          path: artifacts/sweep/*
           if-no-files-found: ignore
