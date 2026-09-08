@@ -15,6 +15,10 @@ namespace Cascade.App;
 /// dialog with <c>DrawToBitmap</c> and captures the main window from the screen, so the UI can be
 /// reviewed at the current DPI without manual interaction.
 /// </summary>
+// A picture-taking harness for a person to look at, not behaviour anybody relies on, so it is not part of
+// what the coverage figure is measuring. It is exercised end to end all the same: Cascade.UiTests runs
+// --screens against the published single-file exe and requires it to finish and produce its shots.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class UiShots
 {
     public static int Run(string[] args)

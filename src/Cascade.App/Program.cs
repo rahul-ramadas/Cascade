@@ -39,14 +39,6 @@ internal static class Program
             return 0;
         }
 
-        if (args.Length > 0 && args[0].Equals("--selftest", StringComparison.OrdinalIgnoreCase))
-        {
-            AttachConsole(-1); // attach to the launching console so output is visible
-            InitialiseUi(); // the render checks build real controls
-            FailFastOnUiException();
-            return SelfTest.Run(args.Skip(1).ToArray());
-        }
-
         if (args.Length > 0 && args[0].Equals("--rendershots", StringComparison.OrdinalIgnoreCase))
         {
             AttachConsole(-1);
@@ -158,10 +150,6 @@ internal static class Program
 
           --help, -h, /?    Show this text.
           --version         Print the version and exit.
-          --selftest [file] [/Filters:<path>] [--only=<text>]
-                            Run headless engine, settings and rendering checks.
-                            --only runs just the check groups whose name contains <text>.
-                            Log: %TEMP%\cascade_selftest.log. Exit 0 pass, 1 fail, 2 error.
           --screens [outDir] [file] [file.tat]
                             Render every dialog and the main window to PNGs.
                             Create outDir first; otherwise %TEMP%\cascade_shots is used.

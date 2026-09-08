@@ -309,6 +309,21 @@ public sealed class CascadeDocument : IDisposable
 
     private Action<long>? _filterCheckpoint;
 
+    /// <summary>Test seam: runs after each block of the scan a per-filter find does for itself, so a test can
+    /// hold one at a known point and prove the file is not let go while it is still reading. The sibling of
+    /// <see cref="FindCheckpointForTesting"/> for the per-filter path. Survives <see cref="Open"/>.</summary>
+    public Action<long>? FilterFindCheckpointForTesting
+    {
+        get => _filterFindCheckpoint;
+        set
+        {
+            _filterFindCheckpoint = value;
+            if (_filterService is not null) _filterService.AfterPrimeBlockForTesting = value;
+        }
+    }
+
+    private Action<long>? _filterFindCheckpoint;
+
     /// <summary>Test seam: <inheritdoc cref="FilterService.SkipCacheForTesting"/> Survives <see cref="Open"/>.</summary>
     public bool SkipFilterCacheForTesting
     {
@@ -371,6 +386,7 @@ public sealed class CascadeDocument : IDisposable
             () => CompletedLinesOf(index, indexer), () => indexer.IsComplete);
         _filterService.Progress += _ => Updated?.Invoke();
         _filterService.AfterBlockForTesting = _filterCheckpoint;
+        _filterService.AfterPrimeBlockForTesting = _filterFindCheckpoint;
         _filterService.SkipCacheForTesting = _skipFilterCache;
 
         ApplyFilters();

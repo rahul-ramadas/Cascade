@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    In-process tests for the WinForms half of Cascade: real controls, real dialogs, a real MainForm, all
+    built and driven on a hidden STA thread. They sit between the two suites that already existed - the
+    engine tests, which never touch a window, and Cascade.UiTests, which drives the shipped executable
+    through UI Automation and so pays a process launch per test.
+
+    These checks used to live inside the product, as src/Cascade.App/SelfTest.cs behind a "selftest"
+    switch. That made the app carry its own test harness: 12,261 lines, about a third of the managed
+    payload of every release. It also reported as ONE test, so a failure named the whole suite rather than
+    the thing that broke, could not be filtered, and could not be measured for coverage.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <IsPackable>false</IsPackable>
+    <!-- The checks build real windows; none of them may ever be visible on the developer's desktop. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Cascade.App\Cascade.App.csproj" />
+  </ItemGroup>
+
+</Project>

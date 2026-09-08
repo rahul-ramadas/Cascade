@@ -4,6 +4,13 @@
     <ProjectReference Include="..\Cascade.Core\Cascade.Core.csproj" />
   </ItemGroup>
 
+  <!-- The checks that drive real controls, dialogs and windows live in this project's test assembly.
+       They used to live in the app itself, behind a "selftest" switch, and were about a third of the
+       managed payload of every release. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Cascade.AppTests" />
+  </ItemGroup>
+
   <ItemGroup>
     <EmbeddedResource Include="Assets\cascade.ico" />
   </ItemGroup>

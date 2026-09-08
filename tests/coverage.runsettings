@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One place that decides what "covered" means, shared by every suite, so two of them can never measure
+  different things and then be compared anyway.
+
+  This uses the collector that ships with Microsoft.NET.Test.Sdk rather than coverlet, for a measured
+  reason: coverlet.collector silently reports nothing at all for Cascade.dll - the app assembly, and the
+  half these WinForms checks exist to cover - while happily reporting Cascade.Core. It logs no warning
+  about it, so the figure simply comes out missing its largest component and still looks like a coverage
+  number. The Microsoft collector reports both.
+
+  ModulePaths names the two product assemblies explicitly. Left to itself a collector reports on whatever
+  it finds beside the test assembly, which pads the figure with the tests' own lines - and a coverage
+  number that includes the test code measures nothing.
+-->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="Code Coverage" uri="datacollector://Microsoft/CodeCoverage/2.0"
+                     assemblyQualifiedName="Microsoft.VisualStudio.Coverage.DynamicCoverageDataCollector, Microsoft.VisualStudio.TraceCollector, Version=11.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+        <Configuration>
+          <Format>cobertura</Format>
+          <CodeCoverage>
+            <ModulePaths>
+              <Include>
+                <ModulePath>.*\\Cascade\.dll$</ModulePath>
+                <ModulePath>.*\\Cascade\.Core\.dll$</ModulePath>
+              </Include>
+            </ModulePaths>
+
+            <!-- Written by the compiler rather than by anybody, so a line of it going unreached says
+                 nothing about the tests. -->
+            <Attributes>
+              <Exclude>
+                <Attribute>^System\.Diagnostics\.DebuggerHiddenAttribute$</Attribute>
+                <Attribute>^System\.Diagnostics\.CodeAnalysis\.ExcludeFromCodeCoverageAttribute$</Attribute>
+                <Attribute>^System\.Runtime\.CompilerServices\.CompilerGeneratedAttribute$</Attribute>
+              </Exclude>
+            </Attributes>
+
+            <CollectFromChildProcesses>false</CollectFromChildProcesses>
+          </CodeCoverage>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

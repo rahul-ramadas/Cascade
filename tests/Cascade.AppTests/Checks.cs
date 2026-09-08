@@ -2,152 +2,37 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
 using System.Text;
+using Cascade.App;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
 
-namespace Cascade.App;
+namespace Cascade.AppTests;
 
 /// <summary>
-/// Headless end-to-end verification run via <c>Cascade.exe --selftest [file] [/Filters:x.tat]</c>.
-/// Exercises open → stream-index → import/apply filters → row mapping and prints timings. Writes a
-/// log file (and to the attached console) and returns a non-zero exit code on failure.
+/// Every check the WinForms half of Cascade is held to: real controls, real dialogs and a real MainForm,
+/// built on the STA thread <see cref="Sta"/> owns and never shown on screen.
+///
+/// <para>A group returns whether all of its checks passed, having reported each one, rather than stopping
+/// at the first failure. That is deliberate: one run then names everything a change broke, which is what
+/// makes a shared piece of layout cheap to fix. <see cref="AppCheckFixture.Verify"/> turns a group into an
+/// xUnit result.</para>
+///
+/// <para>The individual groups are grouped into test classes by subject - see RenderTests, FilterListTests,
+/// FindTests and their neighbours - and this file holds what they are built from.</para>
 /// </summary>
-internal static class SelfTest
+internal static partial class Checks
 {
-    private static readonly string LogPath = Path.Combine(Path.GetTempPath(), "cascade_selftest.log");
-    private static StreamWriter _log = null!;
-    private static string? _only;
-    private static int _skipped;
+    internal const string FailMarker = "[FAIL] ";
 
-    /// <summary>Runs a group of checks and records how long it took, so a self-test that starts dragging
-    /// says where the time went rather than leaving it to be guessed at. Groups whose name does not contain
-    /// <c>--only</c>'s text are skipped, which is how you iterate on one of them without paying for the
-    /// drag checks every time.</summary>
-    private static bool Timed(string name, Func<bool> checks)
-    {
-        if (_only is not null && !name.Contains(_only, StringComparison.OrdinalIgnoreCase)) { _skipped++; return true; }
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        bool ok = checks();
-        clock.Stop();
-        Line($"   ({name}: {clock.ElapsedMilliseconds:N0} ms)");
-        return ok;
-    }
+    /// <summary>Where <see cref="Line"/> writes. Set for the duration of one group by
+    /// <see cref="AppCheckFixture.Verify"/>, on the same thread the group runs on, so there is no sharing
+    /// to get wrong - the checks are serial by construction.</summary>
+    private static List<string>? _captured;
 
-    public static int Run(string[] args)
-    {
-        _log = new StreamWriter(LogPath, false) { AutoFlush = true };
-        // Several groups below build a real window, and a window writes preferences and the recent-file
-        // lists - on its refresh timer as well as on the way out. Pointed at the developer's own directory
-        // it would save the empty state it was constructed with, which wipes their recent files outright.
-        string configDir = Path.Combine(Path.GetTempPath(), "cascade_selftest_cfg_" + Guid.NewGuid().ToString("N"));
-        string? previousConfig = Environment.GetEnvironmentVariable("CASCADE_SETTINGS_DIR");
-        Directory.CreateDirectory(configDir);
-        Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", configDir);
-        try
-        {
-            Line("=== Cascade self-test ===");
-            Line("Log: " + LogPath);
-            Line("Settings: " + configDir + " (throwaway)");
-
-            string? file = args.FirstOrDefault(a => !a.StartsWith('/') && !a.StartsWith("--", StringComparison.Ordinal));
-            string? tat = args.FirstOrDefault(a => a.StartsWith("/Filters:", StringComparison.OrdinalIgnoreCase))?["/Filters:".Length..].Trim('"');
-            _only = args.FirstOrDefault(a => a.StartsWith("--only=", StringComparison.OrdinalIgnoreCase))?["--only=".Length..].Trim('"');
-            _skipped = 0;
-            if (_only is not null) Line($"(only groups matching \"{_only}\")");
-
-            bool ok = Timed("engine", RunEngineChecks);
-            ok &= Timed("settings", RunSettingsChecks);
-            ok &= Timed("machine state", RunMachineStateChecks);
-            ok &= Timed("render", RunRenderChecks);
-            ok &= Timed("scrolling sideways", RunHorizontalScrollChecks);
-            ok &= Timed("editing keys", RunEditingKeyChecks);
-            ok &= Timed("columns", RunColumnChecks);
-            ok &= Timed("field settings", RunFieldSettingsChecks);
-            ok &= Timed("column mode", RunColumnModeChecks);
-            ok &= Timed("navigation", RunNavigationChecks);
-            ok &= Timed("filter list", RunFilterListChecks);
-            ok &= Timed("filter search", RunFilterSearchRevealChecks);
-            ok &= Timed("filter presets", RunFilterPresetChecks);
-            ok &= Timed("match map", RunMatchMapChecks);
-            ok &= Timed("text selection", RunTextSelectionChecks);
-            ok &= Timed("cell selection", RunColumnSelectionChecks);
-            ok &= Timed("selection follows the text", RunSelectionFollowsTextChecks);
-            ok &= Timed("underline", RunUnderlineChecks);
-            ok &= Timed("restyling", RunRestyleChecks);
-            ok &= Timed("colour while filtering", RunColourWhileFilteringChecks);
-            ok &= Timed("hang watchdog", RunHangWatchdogChecks);
-            ok &= Timed("automation", RunAutomationChecks);
-            ok &= Timed("letting go of the filters", RunCloseFiltersChecks);
-            ok &= Timed("find highlighting", RunFindHighlightChecks);
-            ok &= Timed("find status wording", RunFindStatusChecks);
-            ok &= Timed("word wrap", RunWordWrapChecks);
-            ok &= Timed("text width", RunTextWidthChecks);
-            ok &= Timed("filter tips", RunFilterTipChecks);
-            ok &= Timed("find bar", RunFindBarChecks);
-            ok &= Timed("find bar layout", RunFindBarLayoutChecks);
-            ok &= Timed("find bar repaint", RunFindBarRepaintChecks);
-            ok &= Timed("filter dialog repaint", RunFilterDialogRepaintChecks);
-            ok &= Timed("find seed", RunFindSeedChecks);
-            ok &= Timed("find bar room", RunFindBarRoomChecks);
-            ok &= Timed("status bar", RunStatusBarChecks);
-            ok &= Timed("elapsed times", RunElapsedChecks);
-            ok &= Timed("encoding menu", RunEncodingMenuChecks);
-            ok &= Timed("line spacing", RunLineSpacingChecks);
-            ok &= Timed("drop placement", RunDropPlacementChecks);
-            ok &= Timed("filter drag", RunFilterDragChecks);
-            ok &= Timed("filter expand", RunFilterExpandChecks);
-            ok &= Timed("drag nesting", RunDragNestingChecks);
-            ok &= Timed("filter enable", RunFilterEnableChecks);
-            ok &= Timed("filter selection", RunFilterSelectionChecks);
-            ok &= Timed("appearance", RunAppearanceChecks);
-            ok &= Timed("lucky colours", RunLuckyColorChecks);
-            ok &= Timed("colour preview", RunColorPreviewChecks);
-            ok &= Timed("style boxes", RunStyleBoxChecks);
-            ok &= Timed("about box", RunAboutBoxChecks);
-            ok &= Timed("update credential", RunUpdateCredentialChecks);
-            ok &= Timed("filter list sync", RunFilterSyncChecks);
-            ok &= Timed("new filter", RunNewFilterChecks);
-            ok &= Timed("new filter place", RunFilterPlacementChecks);
-            ok &= Timed("filter search bar", RunFilterSearchBarChecks);
-            ok &= Timed("tab stops", RunTabStopChecks);
-            ok &= Timed("dialog keyboard", RunDialogKeyboardChecks);
-            ok &= Timed("menu keyboard", RunMenuMnemonicChecks);
-            ok &= Timed("divider", RunSplitterChecks);
-            ok &= Timed("filter pane memory", RunFilterPaneMemoryChecks);
-            ok &= Timed("window snapping", RunWindowSnapChecks);
-            ok &= Timed("closing", RunClosingChecks);
-            ok &= Timed("file drop", RunFileDropChecks);
-            ok &= Timed("the menus", RunMenuActionChecks);
-            ok &= Timed("resources", RunResourceChecks);
-            ok &= Timed("progress paint", RunProgressPaintChecks);
-            ok &= Timed("new filter from line", RunNewFilterFromLineChecks);
-            ok &= Timed("copying", RunCopyBudgetChecks);
-            ok &= Timed("cropping", RunCropChecks);
-            ok &= Timed("selection stability", RunSelectionStabilityChecks);
-            ok &= Timed("viewport stability", RunViewportStabilityChecks);
-            ok &= Timed("crop selection", RunCropSelectionChecks);
-            if (file is not null && File.Exists(file)) ok &= RunFileChecks(file, tat);
-            else Line("(no real file supplied; skipped large-file checks)");
-
-            // Says so plainly, so a filtered run can never be mistaken for a clean full one.
-            Line((ok ? "RESULT: PASSED" : "RESULT: FAILED") + (_skipped > 0 ? $" ({_skipped} groups skipped by --only)" : ""));
-            return ok ? 0 : 1;
-        }
-        catch (Exception ex)
-        {
-            Line("EXCEPTION: " + ex);
-            return 2;
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", previousConfig);
-            try { Directory.Delete(configDir, true); } catch { /* best-effort */ }
-            _log.Dispose();
-        }
-    }
+    internal static void CaptureInto(List<string>? lines) => _captured = lines;
 
     /// <summary>
     /// Scrolling right must never paint line text over the marker or line-number margin.
@@ -157,7 +42,7 @@ internal static class SelfTest
     /// TextRenderer draws through GDI and silently ignores the GDI+ clip region unless asked not to, so the
     /// SetClip guarding the text looked sufficient and was not.
     /// </summary>
-    private static bool RunRenderChecks()
+    internal static bool RunRenderChecks()
     {
         Line("-- rendering --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_render_" + Guid.NewGuid().ToString("N") + ".log");
@@ -548,7 +433,7 @@ internal static class SelfTest
     /// the old offset: a blank screen. And Home then did nothing at all, because the offset it sets was
     /// already the one stored - it was only the pixels that were somewhere else.</para>
     /// </summary>
-    private static bool RunHorizontalScrollChecks()
+    internal static bool RunHorizontalScrollChecks()
     {
         Line("-- scrolling sideways --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_hscroll_" + Guid.NewGuid().ToString("N") + ".log");
@@ -661,7 +546,7 @@ internal static class SelfTest
     /// of typing one. Driven through the form's own shortcut handling, which is the path a real keystroke
     /// takes.</para>
     /// </summary>
-    private static bool RunEditingKeyChecks()
+    internal static bool RunEditingKeyChecks()
     {
         Line("-- the editing keys go to the box being typed in --");
 
@@ -795,7 +680,7 @@ internal static class SelfTest
     /// it is driven here against a real control, because none of it can be driven through UI Automation -
     /// a drag needs a real mouse, and these gestures have no automation pattern to invoke.
     /// </summary>
-    private static bool RunColumnChecks()
+    internal static bool RunColumnChecks()
     {
         Line("-- columns --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_columns_" + Guid.NewGuid().ToString("N") + ".log");
@@ -1401,7 +1286,7 @@ internal static class SelfTest
     /// does the sample stay inside its box when it is scrolled, do the columns in the result line up, and
     /// does a field carried elsewhere take the space in front of it along.
     /// </summary>
-    private static bool RunFieldSettingsChecks()
+    internal static bool RunFieldSettingsChecks()
     {
         Line("-- the field settings dialog, and the chips --");
 
@@ -1945,7 +1830,7 @@ internal static class SelfTest
 
     /// <summary>Turning the column view on and off - from the keyboard, which is what it is here for, and
     /// without the log appearing to slide when the header takes a row off the top of it.</summary>
-    private static bool RunColumnModeChecks()
+    internal static bool RunColumnModeChecks()
     {
         Line("-- turning columns on and off --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_colmode_" + Guid.NewGuid().ToString("N") + ".log");
@@ -2129,7 +2014,7 @@ internal static class SelfTest
     /// <summary>The filter list draws three columns into one owner-drawn row, and TextRenderer goes through
     /// GDI, which ignores the GDI+ clip the columns rely on unless told not to. The symptom was a long
     /// pattern painting straight across the description and the count.</summary>
-    private static bool RunFilterListChecks()
+    internal static bool RunFilterListChecks()
     {
         Line("-- filter list columns --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_filters_" + Guid.NewGuid().ToString("N") + ".log");
@@ -2379,7 +2264,7 @@ internal static class SelfTest
     /// every other filter alone. Its SELECTION is only the user's aim, and must survive anything the model
     /// does - while the two were one thing, aiming at a preset switched its filters back on and it could
     /// never be updated to drop one.</summary>
-    private static bool RunFilterPresetChecks()
+    internal static bool RunFilterPresetChecks()
     {
         Line("-- filter presets --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_presets_" + Guid.NewGuid().ToString("N") + ".log");
@@ -2636,7 +2521,7 @@ internal static class SelfTest
     /// that a pixel stands for the right row in the right colour - and that the window it shows follows the
     /// view without chasing it. The summary is checked directly, and separately that it is painted, that it
     /// repaints when it must, and that it stays cheap.</summary>
-    private static bool RunMatchMapChecks()
+    internal static bool RunMatchMapChecks()
     {
         Line("-- minimap --");
         const int lines = 40_000;
@@ -3320,7 +3205,7 @@ internal static class SelfTest
     /// <summary>A file small enough for the map to hold is shown whole: compressed only as much as it takes
     /// to fit, anchored at the top, and never a window - so the map and the scrollbar agree about where you
     /// are, and scrolling the log never moves the map at all.</summary>
-    private static bool RunMapWholeFileChecks()    {
+    internal static bool RunMapWholeFileChecks()    {
         const int lines = 3_000;
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_mapfit_" + Guid.NewGuid().ToString("N") + ".log");
         var sb = new StringBuilder();
@@ -3485,7 +3370,7 @@ internal static class SelfTest
     /// <summary>Selecting part of a line. There is no caret and none is drawn, so every rule here is about
     /// what the mouse does: a click takes the whole line, a drag within one line takes a range, a drag off
     /// it goes back to whole lines, and moving away drops the range.</summary>
-    private static bool RunTextSelectionChecks()
+    internal static bool RunTextSelectionChecks()
     {
         Line("-- text selection --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_sel_" + Guid.NewGuid().ToString("N") + ".log");
@@ -3608,7 +3493,7 @@ internal static class SelfTest
     /// <summary>What is picked out belongs to the TEXT, not to the place on screen it happened to be when
     /// it was picked. Turning a filter on drops lines out from above the selection, so every row below moves
     /// - and a highlight remembered by row would be left over whatever slid into its place.</summary>
-    private static bool RunSelectionFollowsTextChecks()
+    internal static bool RunSelectionFollowsTextChecks()
     {
         Line("-- selection follows the text --");
         const int Lines = 60, Noise = 5, Pad = 7;
@@ -3904,7 +3789,7 @@ internal static class SelfTest
     /// <summary>Anything that throws away the filter file on screen has to ask first: closing them, closing
     /// the window, and loading another set over the top - which is the same loss on one menu click, with no
     /// undo behind it.</summary>
-    private static bool RunCloseFiltersChecks()
+    internal static bool RunCloseFiltersChecks()
     {
         Line("-- letting go of the filters --");
 
@@ -4075,7 +3960,7 @@ internal static class SelfTest
     /// a long unbroken run of the filter's own colour across a scanline - glyphs never draw one, so the
     /// same measurement over a line coloured but NOT underlined is the control that makes it mean
     /// something.</summary>
-    private static bool RunUnderlineChecks()
+    internal static bool RunUnderlineChecks()
     {
         Line("-- underline --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_under_" + Guid.NewGuid().ToString("N") + ".log");
@@ -4169,7 +4054,7 @@ internal static class SelfTest
     ///
     /// The half of this that earns its keep is the other one: an edit to what a filter MATCHES still has to
     /// go the whole way round, and a shortcut that swallowed those would be far worse than the cost it saves.</summary>
-    private static bool RunRestyleChecks()
+    internal static bool RunRestyleChecks()
     {
         Line("-- restyling a filter --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_restyle_" + Guid.NewGuid().ToString("N") + ".log");
@@ -4312,7 +4197,7 @@ internal static class SelfTest
     /// frame. Driven through a real window, and read off the pixels, because that is the only place the
     /// symptom exists.
     /// </summary>
-    private static bool RunColourWhileFilteringChecks()
+    internal static bool RunColourWhileFilteringChecks()
     {
         Line("-- colour while a pass finishes --");
         string stem = Guid.NewGuid().ToString("N");
@@ -4483,7 +4368,7 @@ internal static class SelfTest
     /// It is driven through a real <see cref="MainForm"/> rather than the class alone, because the half most
     /// likely to be broken is the wiring: a heartbeat that is never sent looks exactly like a hang, and would
     /// dump the process every few seconds of ordinary use.</summary>
-    private static bool RunHangWatchdogChecks()
+    internal static bool RunHangWatchdogChecks()
     {
         Line("-- hang watchdog --");
         string dir = Path.Combine(Path.GetTempPath(), "cascade_st_hang_" + Guid.NewGuid().ToString("N"));
@@ -4664,7 +4549,7 @@ internal static class SelfTest
     /// client sends, to the real windows the app builds: the mechanism is a window message, so nothing above
     /// it could tell the difference, and a window that still answers would still arm the teardown that
     /// freezes the app for seconds on a machine that inspects thread creation.</summary>
-    private static bool RunAutomationChecks()
+    internal static bool RunAutomationChecks()
     {
         Line("-- automation --");
         string? old = Environment.GetEnvironmentVariable(Automation.Variable);
@@ -4763,7 +4648,7 @@ internal static class SelfTest
     /// row, a drag takes what it covered, the same text is marked wherever else it shows, and a double-click
     /// carries the part picked out into a new filter. What it must not do is run out of the cell it began
     /// in - the text between two cells is not on screen, so a selection across them could not be honest.</summary>
-    private static bool RunColumnSelectionChecks()
+    internal static bool RunColumnSelectionChecks()
     {
         Line("-- selecting text inside a cell --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_colsel_" + Guid.NewGuid().ToString("N") + ".log");
@@ -4986,7 +4871,7 @@ internal static class SelfTest
     /// <summary>Every occurrence of the find term is marked on every visible line, and the line the search
     /// landed on is marked more strongly - which is how navigation can stay line-by-line without leaving you
     /// wondering which line it meant.</summary>
-    private static bool RunFindHighlightChecks()
+    internal static bool RunFindHighlightChecks()
     {
         Line("-- find highlighting --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_hl_" + Guid.NewGuid().ToString("N") + ".log");
@@ -5073,7 +4958,7 @@ internal static class SelfTest
     /// matches back, and a "+" on anything the sweep has not finished counting. One word per idea throughout
     /// - a "line" is a line that matched, a "hit" is one occurrence, and "hidden" is the filters and nothing
     /// else, a crop having been counted as the file long before the wording sees it.</summary>
-    private static bool RunFindStatusChecks()
+    internal static bool RunFindStatusChecks()
     {
         Line("-- find status wording --");
         static FindTally T(long pos, long shown, long hidden, long shownOcc, long occ, bool complete = true,
@@ -5164,7 +5049,7 @@ internal static class SelfTest
     /// colour?". It has to name every filter that matched - including switched-off ones, which are the whole
     /// point of asking - and spell out patterns in full, since a friendly description is exactly what stops
     /// being enough at that moment.</summary>
-    private static bool RunFilterTipChecks()
+    internal static bool RunFilterTipChecks()
     {
         Line("-- filter tips --");
         var filters = new FilterCollection();
@@ -5327,7 +5212,7 @@ internal static class SelfTest
     /// - a fixed-pitch face, plain ASCII - so what has to hold is that the shortcut and the measurement
     /// never disagree, in either face, on either kind of text.
     /// </summary>
-    private static bool RunTextWidthChecks()
+    internal static bool RunTextWidthChecks()
     {
         Line("-- text width --");
         bool ok = true;
@@ -5393,7 +5278,7 @@ internal static class SelfTest
     /// <summary>Word wrap breaks the "one row, one line of pixels" rule the whole view is built on, so what
     /// matters is that everything downstream reads where a row was actually painted: hit-testing, how many
     /// rows fit, and the accessible bounds.</summary>
-    private static bool RunWordWrapChecks()
+    internal static bool RunWordWrapChecks()
     {
         Line("-- word wrap --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_wrap_" + Guid.NewGuid().ToString("N") + ".log");
@@ -5629,7 +5514,7 @@ internal static class SelfTest
 
     /// <summary>Where a dragged filter lands is decided by the pointer alone: vertical position picks the
     /// gap, horizontal picks the nesting. Every rule here is a judgement about how the list should feel.</summary>
-    private static bool RunDropPlacementChecks()
+    internal static bool RunDropPlacementChecks()
     {
         Line("-- drag placement --");
         const int h = 20, indent = 16;
@@ -5682,7 +5567,7 @@ internal static class SelfTest
     /// that nests into a folded filter moves the list out from under the pointer. See BufferedTreeView.
     /// The fixture deliberately gives the parent more children than there is room for below it, or the
     /// tree would have had no reason to scroll and the checks would pass by themselves.</summary>
-    private static bool RunFilterExpandChecks()
+    internal static bool RunFilterExpandChecks()
     {
         Line("-- expanding a filter --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_expand_" + Guid.NewGuid().ToString("N") + ".log");
@@ -5783,7 +5668,7 @@ internal static class SelfTest
     /// straight back out on the next row of travel - which is what "it jumps somewhere I did not mean it
     /// to go" looks like. The walk below is measured in display rows, so one row of pointer travel has to
     /// be exactly one row of movement whatever level the filter is at.</summary>
-    private static bool RunDragNestingChecks()
+    internal static bool RunDragNestingChecks()
     {
         Line("-- dragging into and out of a subtree --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_nest_" + Guid.NewGuid().ToString("N") + ".log");
@@ -5915,7 +5800,7 @@ internal static class SelfTest
     /// easy to break: re-homing the node scrolls the list, and a subtree at full height fills the pane it
     /// is being dragged through. Either one slides the rows out from under a pointer that has not moved,
     /// so the filter leaps several places at once instead of walking. These checks pin the walk.</summary>
-    private static bool RunFilterDragChecks()
+    internal static bool RunFilterDragChecks()
     {
         Line("-- dragging a filter --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_drag_" + Guid.NewGuid().ToString("N") + ".log");
@@ -6272,7 +6157,7 @@ internal static class SelfTest
     /// cannot be seen in a screenshot, so it is measured here instead, as rows built and repaints taken.</summary>
     /// <summary>Making a new filter: where it lands, that it can always be asked for, and that it is on
     /// screen and selected the moment it exists.</summary>
-    private static bool RunNewFilterChecks()
+    internal static bool RunNewFilterChecks()
     {
         Line("-- adding a filter --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_newfilter_" + Guid.NewGuid().ToString("N") + ".log");
@@ -6472,7 +6357,7 @@ internal static class SelfTest
     /// picks it while the dialog is open - the way a mind is changed after Ctrl+N has already opened it - and
     /// that pressing one leaves the keyboard, the caret and the selection in the pattern box, since the
     /// pattern is usually half typed at that moment.</para></summary>
-    private static bool RunFilterPlacementChecks()
+    internal static bool RunFilterPlacementChecks()
     {
         Line("-- where a new filter goes --");
 
@@ -6629,7 +6514,7 @@ internal static class SelfTest
             .GetMethod("ProcessMnemonic", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(form, new object[] { ch })!;
 
-    private static bool RunFilterSyncChecks()
+    internal static bool RunFilterSyncChecks()
     {        Line("-- keeping the filter list still --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_sync_" + Guid.NewGuid().ToString("N") + ".log");
         File.WriteAllText(path, string.Concat(Enumerable.Range(0, 200).Select(i => $"line {i}\n")), new UTF8Encoding(false));
@@ -6774,7 +6659,7 @@ internal static class SelfTest
     /// <summary>The suggested colours have one job each: to be readable, and to not be a colour some other
     /// filter is already wearing. A near-miss is worse than a repeat - two filters you cannot tell apart are
     /// two you will confuse without noticing.</summary>
-    private static bool RunLuckyColorChecks()
+    internal static bool RunLuckyColorChecks()
     {
         Line("-- suggested filter colours --");
 
@@ -6952,7 +6837,7 @@ internal static class SelfTest
         return ok;
     }
 
-    private static bool RunFilterEnableChecks()
+    internal static bool RunFilterEnableChecks()
     {
         Line("-- enabling a filter and its subtree --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_enable_" + Guid.NewGuid().ToString("N") + ".log");
@@ -7119,7 +7004,7 @@ internal static class SelfTest
     /// The fixture keeps one filter's children folded away on purpose: a range between two clicks has to
     /// mean the rows you can see, and a list flattened without regard to that would quietly take filters
     /// nobody pointed at.</summary>
-    private static bool RunFilterSelectionChecks()
+    internal static bool RunFilterSelectionChecks()
     {
         Line("-- selecting several filters --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_sel_" + Guid.NewGuid().ToString("N") + ".log");
@@ -7363,7 +7248,7 @@ internal static class SelfTest
     /// <summary>Changing the appearance of several filters at once. The claim that matters most is the
     /// negative one: pressing OK must not write a pattern, a description or a kind onto anything, since one
     /// box cannot stand for what several filters match.</summary>
-    private static bool RunAppearanceChecks()
+    internal static bool RunAppearanceChecks()
     {
         Line("-- appearance of several filters --");
         var red = new RgbColor(255, 0, 0);
@@ -7441,7 +7326,7 @@ internal static class SelfTest
     /// <summary>Every option in a dialog should be reachable with Alt+letter, and no two may claim the same
     /// letter - a duplicate silently makes one of them unreachable, which is invisible on screen because
     /// Windows only underlines the letters while Alt is held.</summary>
-    private static bool RunDialogKeyboardChecks()
+    internal static bool RunDialogKeyboardChecks()
     {
         Line("-- dialog keyboard access --");
 
@@ -7456,7 +7341,7 @@ internal static class SelfTest
 
         // The same call WinForms makes for Alt+letter, so this exercises the real dispatch rather than
         // just looking for an ampersand in the caption.
-        static char? MnemonicOf(string text) => SelfTest.MnemonicOf(text);
+        static char? MnemonicOf(string text) => Checks.MnemonicOf(text);
 
         bool ok = true;
 
@@ -7715,7 +7600,7 @@ internal static class SelfTest
 
     /// <summary>The find bar as a text box: pressing Enter is a request to search, not a reason to disturb
     /// what has been typed. Repeating a search must also cost nothing - it is held down.</summary>
-    private static bool RunFindBarChecks()
+    internal static bool RunFindBarChecks()
     {
         Line("-- the find bar --");
         var searched = new List<(FindQuery Query, bool Forward)>();
@@ -7861,7 +7746,7 @@ internal static class SelfTest
     ///
     /// The status bar's is now the only progress bar in the app, the find bar having taken its own to the
     /// status bar's when it stopped being a dialog.</summary>
-    private static bool RunProgressPaintChecks()
+    internal static bool RunProgressPaintChecks()
     {
         Line("-- progress bars paint what they are told --");
 
@@ -7899,7 +7784,7 @@ internal static class SelfTest
 
     /// <summary>A filter started from a log line has to arrive holding that line. It used to keep only the
     /// first 200 characters, and the lines worth filtering on are exactly the long ones.</summary>
-    private static bool RunCopyBudgetChecks()
+    internal static bool RunCopyBudgetChecks()
     {
         Line("-- copying --");
         // Long lines on purpose: the cost of a copy follows CHARACTERS, and a cap counted in lines says
@@ -7962,7 +7847,7 @@ internal static class SelfTest
         }
     }
 
-    private static bool RunCropChecks()
+    internal static bool RunCropChecks()
     {
         Line("-- cropping to a stretch of the log --");
         const int lines = 3_000;
@@ -8158,7 +8043,7 @@ internal static class SelfTest
     /// each one is a chance to quietly redefine what is chosen. What may change is where the choice is DRAWN:
     /// with every chosen line hidden the view stands a neighbour in for it, so the reader keeps their place.
     /// Put the lines back and the original must return, untouched.</summary>
-    private static bool RunSelectionStabilityChecks()
+    internal static bool RunSelectionStabilityChecks()
     {
         Line("-- the selection survives the view changing under it --");
         const int lines = 4_000;
@@ -8317,7 +8202,7 @@ internal static class SelfTest
     /// <summary>Toggling what is shown and toggling it back must land the reader exactly where they were.
     /// The selection surviving is not enough on its own: a selection restored off-screen is a selection the
     /// reader has to go looking for.</summary>
-    private static bool RunViewportStabilityChecks()
+    internal static bool RunViewportStabilityChecks()
     {
         Line("-- the viewport comes back to where it was --");
         const int lines = 4_000;
@@ -8471,7 +8356,7 @@ internal static class SelfTest
     /// bare as a freshly opened file. Lifting the crop hands them back exactly. The arrangement lasts only as
     /// long as the reader leaves it alone: any choice of their own ends it, and from then on the crop does
     /// not touch what is chosen at all.</summary>
-    private static bool RunCropSelectionChecks()
+    internal static bool RunCropSelectionChecks()
     {
         Line("-- a crop borrows the selection, and gives it back --");
         const int lines = 3_000;
@@ -8562,7 +8447,7 @@ internal static class SelfTest
         }
     }
 
-    private static bool RunNewFilterFromLineChecks()
+    internal static bool RunNewFilterFromLineChecks()
     {
         Line("-- a filter made from a log line --");
 
@@ -8629,7 +8514,7 @@ internal static class SelfTest
     /// the middle half of the view, so it arrives with context above and below instead of hard against an
     /// edge with nothing to read around it. Stepping about with the arrow keys keeps the old behaviour of
     /// scrolling as little as possible, which is why the two paths are separate.</summary>
-    private static bool RunNavigationChecks()
+    internal static bool RunNavigationChecks()
     {
         Line("-- jumping to a line --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_nav_" + Guid.NewGuid().ToString("N") + ".log");
@@ -8728,7 +8613,7 @@ internal static class SelfTest
 
     /// <summary>Searching the filter list has the same problem as jumping to a log line: a match pinned to
     /// the bottom edge hides the siblings that give it its meaning.</summary>
-    private static bool RunFilterSearchRevealChecks()
+    internal static bool RunFilterSearchRevealChecks()
     {
         Line("-- finding a filter in the list --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_fsearch_" + Guid.NewGuid().ToString("N") + ".log");
@@ -8807,7 +8692,7 @@ internal static class SelfTest
     /// <summary>Where the find bar sits in the window. Opening it has to come out of the text area and
     /// nothing else: the filter pane keeps the size the user gave it, and the lines left in the log stay
     /// whole - which only works if the bar itself is a whole number of them.</summary>
-    private static bool RunFindBarLayoutChecks()
+    internal static bool RunFindBarLayoutChecks()
     {
         Line("-- the find bar's place in the window --");
 
@@ -8941,7 +8826,7 @@ internal static class SelfTest
     /// the options and the buttons and put them straight back, which is what a flicker is.</summary>
     /// <summary>The hint under the fields is rewritten on every keystroke of a half-written regex, because
     /// .NET puts the pattern into its own complaint. It must redraw itself and leave the dialog alone.</summary>
-    private static bool RunFilterDialogRepaintChecks()
+    internal static bool RunFilterDialogRepaintChecks()
     {
         Line("-- the regex complaint changing does not disturb the filter dialog --");
 
@@ -8998,7 +8883,7 @@ internal static class SelfTest
         return ok;
     }
 
-    private static bool RunFindBarRepaintChecks()
+    internal static bool RunFindBarRepaintChecks()
     {
         Line("-- the count changing does not disturb the bar --");
 
@@ -9084,7 +8969,7 @@ internal static class SelfTest
     /// <summary>A log line is as tall as the typeface says a line is, and no taller unless the reader asks.
     /// Two pixels used to be added to every row unasked, which on Consolas is a line in every eleven off the
     /// screen - the difference that made another viewer look like it fitted more in at the same size.</summary>
-    private static bool RunLineSpacingChecks()
+    internal static bool RunLineSpacingChecks()
     {
         Line("-- how tall a line is --");
 
@@ -9140,7 +9025,7 @@ internal static class SelfTest
     /// already gives the first and the field beside it the second, and neither means much with several lines
     /// selected - so the space says which lines are being shown instead, which nothing else on screen does.
     /// </summary>
-    private static bool RunStatusBarChecks()
+    internal static bool RunStatusBarChecks()
     {
         Line("-- what the status bar says --");
 
@@ -9216,7 +9101,7 @@ internal static class SelfTest
     /// fixed: it is what the text to its right is placed by, so a column that resized as it scrolled would
     /// slide the whole log sideways.</para>
     /// </summary>
-    private static bool RunElapsedChecks()
+    internal static bool RunElapsedChecks()
     {
         Line("-- elapsed times --");
 
@@ -9891,7 +9776,7 @@ internal static class SelfTest
     /// were written - a code page, or UTF-16 with no mark - so what matters is that choosing an entry really
     /// re-reads the file, that the menu says which one is in effect, and that the choice survives a reload.
     /// </summary>
-    private static bool RunEncodingMenuChecks()    {
+    internal static bool RunEncodingMenuChecks()    {
         Line("-- the encoding menu --");
 
         string dir = Path.Combine(Path.GetTempPath(), "cascade_enc_" + Guid.NewGuid().ToString("N"));
@@ -9992,7 +9877,7 @@ internal static class SelfTest
     /// scrolled on by as much as the bar takes, which leaves every line still showing exactly where it was
     /// on screen. Keeping the top row instead slides the whole log down and drops its last lines, which
     /// reads as the text moving rather than as the bar covering it.</summary>
-    private static bool RunFindBarRoomChecks()
+    internal static bool RunFindBarRoomChecks()
     {
         Line("-- the bar takes its room off the top of the log --");
 
@@ -10137,7 +10022,7 @@ internal static class SelfTest
 
     /// <summary>Asking to find something with part of a line picked out means "find that". Whole lines do
     /// not: selecting them is how you copy or mark them, and a line's worth of log is no kind of term.</summary>
-    private static bool RunFindSeedChecks()
+    internal static bool RunFindSeedChecks()
     {
         Line("-- the find box takes what is picked out --");
 
@@ -10210,7 +10095,7 @@ internal static class SelfTest
     /// <summary>Drawing handles have to be given back at a moment we choose, not whenever a collection
     /// happens to run. A font handed to a control is not disposed with it, and a finalizer will get there
     /// eventually - so counting handles proves nothing, and these ask the objects themselves instead.</summary>
-    private static bool RunResourceChecks()
+    internal static bool RunResourceChecks()
     {
         Line("-- drawing handles are given back --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_gdi_" + Guid.NewGuid().ToString("N") + ".log");
@@ -10309,7 +10194,7 @@ internal static class SelfTest
     /// everything else here builds a control directly; this is the only thing that exercises the wiring
     /// between the menu, the settings and the three panes - which is where a command that quietly stopped
     /// doing anything would hide.</summary>
-    private static bool RunMenuActionChecks()
+    internal static bool RunMenuActionChecks()
     {
         Line("-- the menus --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_menus_" + Guid.NewGuid().ToString("N") + ".log");
@@ -10562,7 +10447,7 @@ internal static class SelfTest
     /// <summary>The divider between the log and the filter list has to land where the log holds a whole
     /// number of lines. Anywhere else leaves a strip of dead space under the last one, which reads as a line
     /// that failed to draw rather than as a gap.</summary>
-    private static bool RunSplitterChecks()
+    internal static bool RunSplitterChecks()
     {
         Line("-- the divider snaps to whole lines --");
 
@@ -10654,7 +10539,7 @@ internal static class SelfTest
     /// <para>Checked on a form that is actually shown, because the layout is restored in OnLoad: the panes
     /// are worked out from the window's size, and asked any earlier they would measure the wrong one.</para>
     /// </summary>
-    private static bool RunFilterPaneMemoryChecks()
+    internal static bool RunFilterPaneMemoryChecks()
     {
         Line("-- the filter list comes back where it was left --");
 
@@ -10762,7 +10647,7 @@ internal static class SelfTest
     /// window is therefore built exactly as a user gets it and not adjusted afterwards. What the snap does
     /// to it is done here in one operation, which is the single WM_WINDOWPOSCHANGED the bug rode in on;
     /// driving the real hotkey would need the foreground and would snap whatever the reader was in.</para></summary>
-    private static bool RunWindowSnapChecks()
+    internal static bool RunWindowSnapChecks()
     {
         Line("-- Win+Left snaps the window to half the screen --");
 
@@ -10847,7 +10732,7 @@ internal static class SelfTest
     /// every resident page of the mapping - and it happens on the thread that draws. So the window has to be
     /// down BEFORE that starts, or the reader sits looking at an app that will not close. WinForms disposes
     /// a top-level form while its window is still up, which is why closing hides it first.</summary>
-    private static bool RunClosingChecks()
+    internal static bool RunClosingChecks()
     {
         Line("-- the window goes before the file is let go --");
 
@@ -10896,7 +10781,7 @@ internal static class SelfTest
     /// set, several files to try it against. A drop target is registered per window and a child that has not
     /// asked for drops refuses them rather than passing them up, so which controls opt in is part of the
     /// behaviour and is checked here too.</summary>
-    private static bool RunFileDropChecks()
+    internal static bool RunFileDropChecks()
     {
         Line("-- dropping files on the window --");
 
@@ -11014,7 +10899,7 @@ internal static class SelfTest
     /// Enter - and nothing complains, which is how five of these had quietly accumulated.</summary>
     /// <summary>The pattern box is drawn in the colours a matching line would take. That is the only place
     /// the effect of leaving a box unticked - inherit - can be seen, so it is worth pinning down.</summary>
-    private static bool RunColorPreviewChecks()
+    internal static bool RunColorPreviewChecks()
     {
         Line("-- the filter dialog's colours --");
 
@@ -11234,7 +11119,7 @@ internal static class SelfTest
     /// <summary>Bold, italic and underline rest on "don't care", so the press that follows has to be the one
     /// being asked for. Windows' own three-state cycle offers "cleared" first, which from "don't care" is
     /// nobody's intention - it takes three presses to turn something on and land back where you started.</summary>
-    private static bool RunStyleBoxChecks()
+    internal static bool RunStyleBoxChecks()
     {
         Line("-- bold, italic and underline --");
 
@@ -11306,7 +11191,7 @@ internal static class SelfTest
     /// caption in the cell and a text box draws its own at the top of its box, so the two drifted apart -
     /// which is only visible in the pixels, never in the layout. It also has to be able to say something
     /// long, because the reason an update check failed is exactly what a bug report needs.</summary>
-    private static bool RunAboutBoxChecks()
+    internal static bool RunAboutBoxChecks()
     {
         Line("-- the about box --");
 
@@ -11447,7 +11332,7 @@ internal static class SelfTest
     /// <summary>The credential the updater borrows is the user's own git token, carrying the scopes of their
     /// git rather than of this app. CASCADE_UPDATE_API decides where the updater talks, so it decides where
     /// that token would be sent - which makes this rule the whole of its protection.</summary>
-    private static bool RunUpdateCredentialChecks()
+    internal static bool RunUpdateCredentialChecks()
     {
         Line("-- the git credential only leaves for github, over https --");
 
@@ -11479,7 +11364,7 @@ internal static class SelfTest
 
     /// <summary>The filter search bar: a thing you open on Ctrl+E, use, and dismiss - not a permanent box
     /// taking a line off the top of the list for ever.</summary>
-    private static bool RunFilterSearchBarChecks()
+    internal static bool RunFilterSearchBarChecks()
     {
         Line("-- the filter search bar --");
 
@@ -11657,7 +11542,7 @@ internal static class SelfTest
     /// The "never leaves" checks here run through a seam that calls ProcessCmdKey with an empty message,
     /// so they cannot tell a real escape from a no-op. UiFeatureTests.Tab_has_two_stops_and_never_walks_
     /// out_of_an_open_bar posts real Tab keys and is what actually holds that line.</summary>
-    private static bool RunTabStopChecks()
+    internal static bool RunTabStopChecks()
     {
         Line("-- what Tab does --");
 
@@ -11725,7 +11610,7 @@ internal static class SelfTest
     }
 
 
-    private static bool RunMenuMnemonicChecks()
+    internal static bool RunMenuMnemonicChecks()
     {
         Line("-- menu keyboard access --");
 
@@ -12033,7 +11918,7 @@ internal static class SelfTest
     /// loses whichever preference was forgotten. Every persisted property is compared, so a newly added one
     /// is covered automatically. The export must also stay free of anything machine-specific, or importing
     /// it elsewhere plants paths that do not exist there.</summary>
-    private static bool RunSettingsChecks()
+    internal static bool RunSettingsChecks()
     {
         Line("-- settings export/import --");
         string dir = Path.Combine(Path.GetTempPath(), "cascade_st_cfg_" + Guid.NewGuid().ToString("N"));
@@ -12095,7 +11980,7 @@ internal static class SelfTest
 
     /// <summary>Per-machine state lives in its own file and survives a save/load round trip. Importing
     /// someone else's preferences must leave it untouched.</summary>
-    private static bool RunMachineStateChecks()
+    internal static bool RunMachineStateChecks()
     {
         Line("-- machine state --");
         string dir = Path.Combine(Path.GetTempPath(), "cascade_st_state_" + Guid.NewGuid().ToString("N"));
@@ -12148,7 +12033,7 @@ internal static class SelfTest
         }
     }
 
-    private static bool RunEngineChecks()
+    internal static bool RunEngineChecks()
     {
         Line("-- engine checks (temp file) --");
         string path = Path.Combine(Path.GetTempPath(), "cascade_st_" + Guid.NewGuid().ToString("N") + ".log");
@@ -12180,7 +12065,7 @@ internal static class SelfTest
         finally { try { File.Delete(path); } catch { } }
     }
 
-    private static bool RunFileChecks(string file, string? tat)
+    internal static bool RunFileChecks(string file, string? tat)
     {
         Line($"-- file checks: {file} --");
         var total = Stopwatch.StartNew();
@@ -12253,9 +12138,7 @@ internal static class SelfTest
 
     private static string Truncate(string s, int n) => s.Length <= n ? s : s[..n] + "…";
 
-    private static void Line(string text)
-    {
-        _log.WriteLine(text);
-        try { Console.WriteLine(text); } catch { /* no console attached */ }
-    }
+    /// <summary>Records what a check saw. Everything a group writes is kept and handed to xUnit, so a
+    /// failure carries the whole story of the group rather than one assertion out of context.</summary>
+    private static void Line(string text) => _captured?.Add(text);
 }

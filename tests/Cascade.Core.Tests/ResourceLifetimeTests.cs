@@ -246,9 +246,15 @@ public class ResourceLifetimeTests
     public async Task Reopening_waits_for_a_find_that_a_newer_one_took_over_from()
     {
         // Same shape for per-filter find: starting another one supersedes the first, which goes on reading.
-        // Wider and more of them than the search case: the filter engine compiles its patterns, so the same
-        // line costs it less.
+        //
+        // Held at a checkpoint rather than given work that ought to take a while. The first version leant on
+        // "^(a+)+$" being slow to fail over a dozen short lines, and on a 50 ms pause being enough for the
+        // find to have started - two wall-clock bets in one test. MEASURED: it failed 2 runs in 6 with the
+        // coverage collector attached, which is only the same machine made slower. A gate is the same
+        // scenario with the timing taken out of it, and it fails for the reason it names or not at all.
         string a = WriteSlowToScanLog(lines: 12, width: 24), b = WriteLog();
+        var gate = new SemaphoreSlim(0);
+        int reached = 0;
         var doc = new CascadeDocument();
         try
         {
@@ -260,17 +266,35 @@ public class ResourceLifetimeTests
             doc.Open(a);
             doc.WaitForIndex();
 
+            // Neither filter is switched on, so no pass is working either of them out and both finds scan
+            // for themselves - which is the path this holds.
+            doc.FilterFindCheckpointForTesting = _ =>
+            {
+                if (Interlocked.Exchange(ref reached, 1) == 0) gate.Wait(TimeSpan.FromSeconds(30));
+            };
+
             _ = doc.FindLineMatchingFilterAsync(slow, 0, true);
-            await Task.Delay(50);
+            WaitFor(() => Volatile.Read(ref reached) == 1, "the find never reached its first block");
+
+            doc.FilterFindCheckpointForTesting = null;    // the one that supersedes it must run freely
             _ = doc.FindLineMatchingFilterAsync(filters.Roots[1], 0, true);
 
             doc.Open(b);
             Assert.False(await Finishes(doc.ReleasePending, 400),
                          "the mapping was released while a superseded find was still reading it");
 
+            gate.Release(1000);
             await doc.ReleasePending.WaitAsync(TimeSpan.FromSeconds(60));
         }
-        finally { doc.Dispose(); File.Delete(a); File.Delete(b); }
+        finally
+        {
+            gate.Release(1000);
+            doc.FilterFindCheckpointForTesting = null;
+            doc.Dispose();
+            gate.Dispose();
+            File.Delete(a);
+            File.Delete(b);
+        }
     }
 
     [Fact]

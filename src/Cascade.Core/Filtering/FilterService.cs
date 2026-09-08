@@ -202,6 +202,12 @@ public sealed class FilterService : IDisposable
     /// frontier and exercise what happens while one is still in flight.</summary>
     internal Action<long>? AfterBlockForTesting;
 
+    /// <summary>The same for <see cref="PrimeCache"/>, which is the scan a per-filter find runs when no pass
+    /// is working the filter out already. Kept separate from <see cref="AfterBlockForTesting"/> on purpose:
+    /// several tests hold a filter PASS at a checkpoint, and if priming answered to the same hook one of
+    /// them would hold a find it never meant to and wait for ever.</summary>
+    internal Action<long>? AfterPrimeBlockForTesting;
+
     /// <summary>The lines <paramref name="filter"/> matched during the last full pass, when those results
     /// still cover the whole file. Answering "where is the next match" from this is a bit scan rather than a
     /// re-read of the file. False when nothing usable is cached for it.</summary>
@@ -811,6 +817,7 @@ public sealed class FilterService : IDisposable
             int len = (int)Math.Min(Block, lines - start);
             ScanBlock(snapshot, start, len, null, builders, filters, shareBuilders: false, ct);
             onProgress?.Invoke((start + len) / (double)lines);
+            AfterPrimeBlockForTesting?.Invoke(start + len);
         }
 
         foreach (var f in filters)

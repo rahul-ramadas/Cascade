@@ -23,6 +23,9 @@ namespace Cascade.App;
 /// coalesces mouse moves - a program that is slow to answer simply sees fewer of them - and it means one
 /// iteration here is one whole frame, deferred repaints and all.</para>
 /// </summary>
+// A benchmark. Its output is a number to read, not a promise to keep, so it is not part of the coverage
+// figure.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class ScrollBench
 {
     private const int WmMouseMove = 0x0200;

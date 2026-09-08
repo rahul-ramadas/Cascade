@@ -3,9 +3,9 @@ using System.Diagnostics;
 namespace Cascade.UiTests;
 
 /// <summary>
-/// The app's headless entry points: the screenshot harness, the self-test, and the command line it
-/// advertises. The screenshot harness (<c>Cascade.exe --screens</c>) builds a real MainForm, so any modal
-/// prompt raised while it runs blocks it forever with nobody to answer. That happened for real: it loaded the
+/// The app's headless entry points: the screenshot harness and the command line it advertises. The
+/// screenshot harness (<c>Cascade.exe --screens</c>) builds a real MainForm, so any modal prompt raised
+/// while it runs blocks it forever with nobody to answer. That happened for real: it loaded the
 /// developer's actual settings, auto-loaded their last filter file, dirtied it via <c>/demo</c>, and then hung
 /// on "Save changes to filters?" when closing the window. This guards that it always runs to completion.
 /// </summary>
@@ -46,31 +46,6 @@ public class ScreenshotHarnessTests
     }
 
     /// <summary>
-    /// <c>Cascade.exe --selftest</c> checks the engine end to end and round-trips every persisted setting
-    /// through an export and import. Running it here keeps those checks honest: they live in the app rather
-    /// than in this project, which cannot reference it.
-    /// </summary>
-    [Fact]
-    public void Self_test_passes()
-    {
-        var psi = new ProcessStartInfo(TestData.AppExe(), "--selftest") { UseShellExecute = false };
-        string cfg = ThrowawayConfig(psi);
-        using var app = Process.Start(psi) ?? throw new InvalidOperationException("Could not start Cascade.exe.");
-        try
-        {
-            Assert.True(app.WaitForExit(120_000), "--selftest never finished");
-            string log = Path.Combine(Path.GetTempPath(), "cascade_selftest.log");
-            string detail = File.Exists(log) ? "\n\n" + File.ReadAllText(log) : "";
-            Assert.True(app.ExitCode == 0, $"--selftest failed (exit {app.ExitCode}){detail}");
-        }
-        finally
-        {
-            try { if (!app.HasExited) app.Kill(entireProcessTree: true); } catch { /* ignore */ }
-            try { Directory.Delete(cfg, recursive: true); } catch { /* ignore */ }
-        }
-    }
-
-    /// <summary>
     /// The help text is the only description of the command line a user gets, so it has to match what the
     /// parser really does. It once claimed switches that were never implemented, which is a worse failure
     /// than having no help at all - hence the negative assertions.
@@ -87,14 +62,15 @@ public class ScreenshotHarnessTests
         foreach (string expected in new[]
                  {
                      "/Filters:", "/demo",
-                     "--version", "--selftest", "--screens", "--cleanup",
+                     "--version", "--screens", "--cleanup",
                      "CASCADE_SETTINGS_DIR", "CASCADE_UPDATE"
                  })
             Assert.Contains(expected, output);
 
-        // Parity arguments from the original tool that Cascade does not implement. Advertising one would
-        // send a user hunting for a feature that is not there.
-        foreach (string absent in new[] { "/Config:", "/Line:", "/Clipboard" })
+        // Parity arguments from the original tool that Cascade does not implement, and one switch that was
+        // withdrawn when the app stopped carrying its own test harness. Advertising any of them would send a
+        // user hunting for a feature that is not there.
+        foreach (string absent in new[] { "/Config:", "/Line:", "/Clipboard", "--selftest" })
             Assert.DoesNotContain(absent, output);
     }
 

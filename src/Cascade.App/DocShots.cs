@@ -23,6 +23,9 @@ namespace Cascade.App;
 /// <c>scripts/Build-DocImages.ps1</c> to hand to ffmpeg, because the thing worth showing about nesting or
 /// about <c>Ctrl+N</c> is the change, and a still cannot carry it.
 /// </summary>
+// Renders the README's pictures. An operator tool driven by scripts/Build-DocImages.ps1, judged by
+// looking at what comes out, so counting its lines would only dilute the figure for the product.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class DocShots
 {
     /// <summary>Big enough that the match map has to compress, and that the counts in the filter list are

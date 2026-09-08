@@ -229,11 +229,31 @@ jobs:
             "| Timestamped | ``yes`` |"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
+      # Three suites, deliberately in this order: cheapest and most specific first, so a failure names its
+      # own cause. The engine never touches a window; the app checks build real controls on a hidden STA
+      # thread in-process; the UI suite drives the shipped executable through UI Automation.
+      #
+      # Run one after another rather than at once. The last two are latency-sensitive - they wait on
+      # repaints, timers and UI Automation transactions - and a runner busy with 800 engine tests is
+      # exactly the condition under which those waits time out. Not being flaky is worth more here than
+      # the half-minute overlapping them would save.
       - name: Core tests
         run: >
           dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
           -c Release --no-build
           --logger "trx;LogFileName=core.trx"
+          --settings tests/coverage.runsettings --collect "Code Coverage"
+          --results-directory artifacts/test-results
+
+      # These used to be Cascade.exe --selftest, i.e. the app testing itself. Extracting them made the
+      # released executable 31% smaller and turned one opaque result into one per subject.
+      - name: App tests
+        timeout-minutes: 15
+        run: >
+          dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj
+          -c Release --no-build
+          --logger "trx;LogFileName=app.trx"
+          --settings tests/coverage.runsettings --collect "Code Coverage"
           --results-directory artifacts/test-results
 
       # Run against the PUBLISHED exe, not the build output in bin/. The published bundle resolves its
@@ -251,6 +271,13 @@ jobs:
           -c Release --no-build
           --logger "trx;LogFileName=ui.trx"
           --results-directory artifacts/test-results
+
+      # Coverage is reported, and a floor is enforced, because a number nobody looks at is not a measure of
+      # anything. The floor is set just under what the suite reaches today: it exists to catch a body of new
+      # code arriving untested, not to be raised for its own sake.
+      - name: Coverage
+        if: always()
+        run: pwsh -NoProfile -File scripts/Report-Coverage.ps1 -ResultsDirectory artifacts/test-results -MinimumLineRate 90
 
       - name: Package
         run: |

@@ -22,6 +22,9 @@ namespace Cascade.App;
 /// <para>It uses nothing but the view's ordinary public surface, so the same file compiles against a build
 /// from before any of this work and cannot itself change what is drawn.</para>
 /// </summary>
+// Renders the log view in fixed states with a fingerprint each, so two builds can be compared pixel for
+// pixel. A measuring instrument, not behaviour: excluded from the coverage figure for that reason.
+[System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverage]
 internal static class RenderShots
 {
     private const int Width = 900;

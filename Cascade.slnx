@@ -4,6 +4,7 @@
     <Project Path="src/Cascade.Core/Cascade.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Cascade.AppTests/Cascade.AppTests.csproj" />
     <Project Path="tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj" />
     <Project Path="tests/Cascade.UiTests/Cascade.UiTests.csproj" />
   </Folder>
