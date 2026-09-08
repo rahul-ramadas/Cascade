@@ -15,8 +15,9 @@
     appears over what you are doing and a stray click cannot reach them.
 
     THEY DO STILL TAKE THE KEYBOARD, though - showing a window activates it - so typing during a run will
-    lose keystrokes. tests/Cascade.AppTests/Infrastructure/Sta.cs records the three ways that were measured
-    and what each of them came to.
+    lose keystrokes. MEASURED with scripts/Measure-Focus.ps1: core 0%, app 86%, ui 82% of the run.
+    tests/Cascade.AppTests/Infrastructure/Sta.cs records the three ways that were tried and what each of
+    them came to.
 
 .PARAMETER Suite
     core, app, ui, or all. Default all.

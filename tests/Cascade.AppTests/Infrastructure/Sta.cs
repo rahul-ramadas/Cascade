@@ -63,11 +63,13 @@ internal static class Sta
     // THESE CHECKS STILL TAKE THE KEYBOARD, and it is worth writing down what was tried, because the
     // remedies all look obvious and none of them works.
     //
-    // MEASURED with a probe sampling GetForegroundWindow every 50ms alongside a run: the foreground
-    // belonged to this process for 90% of a 56-second run - about a hundred windows, every one of them
+    // MEASURED with scripts/Measure-Focus.ps1, which samples GetForegroundWindow alongside a run: the
+    // foreground belongs to this process for 86% of one - about a hundred windows, every one of them
     // invisible, each taking the keystrokes meant for whatever the developer was actually doing. Showing a
     // window activates it; zero opacity does not change that, and neither does parking it past the last
-    // monitor (Hidden.Show does both anyway, so nothing is ever SEEN).
+    // monitor (Hidden.Show does both anyway, so nothing is ever SEEN, and no stray click can land on one).
+    // The UI suite is the same at 82%, for the same reason one level up - it launches the real executable.
+    // On CI it costs nothing, because nobody is typing there.
     //
     //   * SetThreadDesktop onto a desktop of our own: fails with ERROR_BUSY (170) on a .NET STA thread even
     //     as its first act. Starting a thread as STA initialises the apartment, which creates the hidden
