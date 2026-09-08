@@ -33,7 +33,10 @@ public class LogViewTests(ITestOutputHelper output) : AppCheckFixture(output)
 /// that names the fields.</summary>
 public class ColumnTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void Columns_are_laid_out_from_the_header() => Verify(Checks.RunColumnChecks, atLeast: 92);
+    // 91 rather than the 92 this machine makes. The field-settings dialog is checked one way when the
+    // screen has room for it and another when it has to scroll, and a runner's 1024x768 takes the second
+    // branch - which is exactly the case that group was taught about. A floor from one display is not one.
+    [Fact] public void Columns_are_laid_out_from_the_header() => Verify(Checks.RunColumnChecks, atLeast: 91);
     [Fact] public void The_field_settings_dialog_says_what_it_will_do() => Verify(Checks.RunFieldSettingsChecks, atLeast: 77);
     [Fact] public void Turning_column_mode_on_holds_the_text_still() => Verify(Checks.RunColumnModeChecks, atLeast: 28);
 }
