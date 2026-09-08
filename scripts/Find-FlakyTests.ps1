@@ -66,9 +66,6 @@ $chosen = if ($Suite -eq 'all') { $projects.Keys } else { @($Suite) }
 if (Test-Path $ResultsDirectory) { Remove-Item $ResultsDirectory -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
 
-# The UI suite drives a real window; keep it off the developer's desktop exactly as Run-UiTests.ps1 does.
-$env:CASCADE_TEST_OFFSCREEN = '1'
-
 $coverageTool = Join-Path $env:USERPROFILE '.dotnet\tools\dotnet-coverage.exe'
 if ($Coverage -and -not (Test-Path $coverageTool)) {
     if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) { $coverageTool = 'dotnet-coverage' }
@@ -88,6 +85,13 @@ if ($Load -gt 0) {
 
 try {
     foreach ($name in $chosen) {
+        # Only the UI suite: it drives a real window, and this keeps it off the developer's desktop exactly
+        # as Run-UiTests.ps1 does. Setting it for the others repeats them in a configuration nothing else
+        # runs - the app checks read it too, and it makes their window 1600px wide whatever size a check
+        # asked for, which is how a check that assumed maximising widens the window failed here and nowhere
+        # else. A flake hunt has to repeat what CI runs, or the flakes it finds are its own.
+        $env:CASCADE_TEST_OFFSCREEN = if ($name -eq 'ui') { '1' } else { $null }
+
         for ($run = 1; $run -le $Runs; $run++) {
             $log = Join-Path $ResultsDirectory "$name-$run.trx"
             $args = @(

@@ -93,12 +93,14 @@ internal static partial class Checks
             Pump();
             form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets);
             Pump();
-            // Wider than, or at least as wide as, the bar just measured. Not wider than some absolute number:
-            // a build machine's screen is nothing like a reader's, and a window does not always come up the
-            // size it was asked for. The centring itself is the check; this only says which bar it was made in.
+            // What stops this being a repeat of the check above is that the window really maximised - NOT
+            // that the bar got wider. A window can maximise into a SMALLER bar: CASCADE_TEST_OFFSCREEN asks
+            // for a 1600px window and a CI runner's desktop is 1024 wide, so the bar went 1028 -> 1024 and
+            // an assertion that it grew failed three runs out of three on a screen no developer has.
+            ok &= Check($"the window really maximised ({form.WindowState})",
+                        form.WindowState == FormWindowState.Maximized);
             ok &= Check($"and centred on a maximised window too ({form.CropLabelCentringForTesting}, was {narrowBar})",
-                        Math.Abs(form.CropLabelCentringForTesting.Offset) <= 2
-                        && form.CropLabelCentringForTesting.BarWidth >= narrowBar);
+                        Math.Abs(form.CropLabelCentringForTesting.Offset) <= 2);
             form.WindowState = FormWindowState.Normal;
             Pump();
             ok &= Check($"Total counts the crop ({form.StatusForTesting})",
