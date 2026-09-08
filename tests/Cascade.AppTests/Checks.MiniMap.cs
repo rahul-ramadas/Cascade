@@ -182,6 +182,94 @@ internal static partial class Checks
                 ok &= Check("and where the hand stopped is what ends up on the screen",
                             grid.FirstPaintedRowForTesting == grid.FirstRowForTesting,
                             $"drawn from row {grid.FirstPaintedRowForTesting}, view at {grid.FirstRowForTesting}");
+
+                // ---- the thumb goes to the screen before the view is told where to go ----
+                // The hand is watching the thumb, so it must not queue behind a repaint of the text. Asked
+                // of the ORDER rather than of a duration: a stopwatch here would be measuring this machine,
+                // where the same question over a remote desktop is worth a whole frame's round trip.
+                //
+                // Only the guarantee is checked, not its opposite. Drawing the thumb last did not reliably
+                // leave it undrawn - updating the view flushes whatever paint the strip beside it is owed
+                // often enough that a check on that would report the weather. What changed is that it is now
+                // certain rather than incidental, and that is what this pins.
+                grid.ScrollToRow(0);
+                Pump();
+                int paintedWhenTold = -1;
+                Action<long> noteThumb = _ => paintedWhenTold = bar.PaintsForTesting;
+                bar.Scrolled += noteThumb;
+                try
+                {
+                    bar.GrabForTesting();
+                    int thumbPaints = bar.PaintsForTesting;
+                    bar.DragToForTesting(track.Top + thumb.Height / 2 + track.Height / 3);
+                    bar.DropForTesting();
+                    Pump();
+                    ok &= Check("the thumb is on the screen before the view is told to move",
+                                paintedWhenTold > thumbPaints,
+                                $"{thumbPaints} paints before the report, {paintedWhenTold} when the view was told");
+                }
+                finally { bar.Scrolled -= noteThumb; }
+
+                // A file of millions of lines moves the thumb by a fraction of a pixel per row, so most
+                // reports of a slow drag would repaint it in exactly the place it is already in. Over a wire
+                // that is a whole update sent to say nothing.
+                grid.ScrollToRow(0);
+                bar.Value = 0;
+                Pump();
+                var resting = bar.ThumbForTesting;
+                int quiet = bar.PaintsForTesting;
+                int stayedPut = 0;
+                for (long row = 1; row <= 4; row++)
+                {
+                    bar.Value = row;
+                    if (bar.ThumbForTesting == resting) stayedPut++;
+                    Pump();
+                }
+                ok &= Check("and a value that does not move the thumb a whole pixel does not repaint it",
+                            stayedPut == 4 && bar.PaintsForTesting == quiet,
+                            $"{stayedPut} of 4 left it in place, {bar.PaintsForTesting - quiet} paints");
+
+                // ---- the marks down the trough are worked out once, not once a frame ----
+                // Which marker a pixel of the trough stands for depends on the marks and on which line each
+                // row is; a drag changes neither. MEASURED on a 25-million-line log with five thousand marks,
+                // re-deriving it per report cost 1.77 ms a report against 0.93.
+                for (int i = 0; i < 400; i++) doc.Markers.Set(i * (lines / 400L), i % 8, true);
+                grid.ScrollToRow(0);
+                Pump();
+                bar.RederiveMarksForTesting = true;
+                bar.Invalidate();
+                Pump();
+                using (var everyFrame = CaptureControl(bar))
+                {
+                    bar.RederiveMarksForTesting = false;
+                    bar.Invalidate();
+                    Pump();
+                    using var kept = CaptureControl(bar);
+                    var markDiff = FirstDifference(everyFrame, kept, new Rectangle(0, 0, bar.Width, bar.Height));
+                    ok &= Check("keeping the mark scale draws the marks working it out every frame drew" +
+                                (markDiff is null ? "" : $" [first differs at x={markDiff.Value.X},y={markDiff.Value.Y}]"),
+                                markDiff is null);
+                }
+
+                int builds = bar.MarkScaleBuildsForTesting;
+                bar.GrabForTesting();
+                for (int i = 0; i < 30; i++)
+                    bar.DragToForTesting(track.Top + thumb.Height / 2 + i * (track.Height / 60));
+                bar.DropForTesting();
+                Pump();
+                ok &= Check("and a drag does not work it out again",
+                            bar.MarkScaleBuildsForTesting == builds,
+                            $"{bar.MarkScaleBuildsForTesting - builds} rebuilds across 30 reports");
+
+                // ...but marking another line must still show up, or the scale would be a stale picture.
+                doc.Markers.Set(lines / 2 + 1, 0, true);
+                bar.Invalidate();
+                Pump();
+                ok &= Check("while a new mark does make it work the scale out again",
+                            bar.MarkScaleBuildsForTesting > builds);
+                doc.Markers.Clear();
+                bar.Invalidate();
+                Pump();
             }
 
             // The sideways scrollbar is the same control, so the two edges of the window match.

@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
+using Cascade.Core.Document;
 
 namespace Cascade.App;
 
@@ -91,13 +92,19 @@ internal sealed class SlimScrollBar : Control
     /// <summary>Repaints the stretch the thumb has moved across, rather than the whole strip. A drag reports
     /// as fast as the mouse does and the thumb has to follow every one of those - a few hundred a second -
     /// so what it costs to move it one notch is worth this much care. Everything else the bar draws is in
-    /// the same place as it was.</summary>
-    private void InvalidateThumb(Rectangle was)
+    /// the same place as it was.
+    /// <para>Says whether it asked for anything. A thumb that has not moved a whole pixel would be drawn in
+    /// exactly the place it is already in, and on a file of millions of lines most reports of a slow drag
+    /// move it by a fraction of one. Skipping those costs nothing to look at and saves a repaint - and,
+    /// where the screen is at the far end of a wire, a whole update sent down it.</para></summary>
+    private bool InvalidateThumb(Rectangle was)
     {
         var now = Thumb;
+        if (now == was) return false;
         var moved = Rectangle.Union(was, now);
         moved.Inflate(2, 2);
         Invalidate(Rectangle.Intersect(moved, ClientRectangle));
+        return true;
     }
 
     // ---- geometry ----
@@ -169,7 +176,20 @@ internal sealed class SlimScrollBar : Control
 
         double strength = !CanScroll ? 0.20 : _dragging ? 0.62 : _hot ? 0.50 : 0.38;
         g.FillRectangle(Ink(MiniMapControl.Blend(settings.Foreground, settings.GutterBack, strength)), Thumb);
+
+        _paints++;
+        _paintedAt = System.Diagnostics.Stopwatch.GetTimestamp();
     }
+
+    private int _paints;
+    private long _paintedAt;
+
+    /// <summary>How many times the strip has really painted, and when the last one finished. A drag is
+    /// answered by moving the thumb, so how long after the mouse report that is measures the lag the hand
+    /// can see - which is what a scrollbar is judged on and what a throughput figure cannot show.</summary>
+    internal int PaintsForTesting => _paints;
+
+    internal long PaintedAtForTesting => _paintedAt;
 
     /// <summary>A brush for a colour, kept rather than made. A drag repaints this a few hundred times a
     /// second and there are five colours in the whole strip.</summary>
@@ -192,19 +212,53 @@ internal sealed class SlimScrollBar : Control
     /// <para>Walked a pixel of the trough at a time rather than a mark at a time, so a repaint costs what
     /// the strip is TALL and not how many marks the file has. Drawn per mark it was a rank lookup and a
     /// rectangle apiece with nothing to stop two hundred thousand of them landing on the same pixel, and a
-    /// file whose lines had all been marked at once took half a second a frame to draw.</para></summary>
+    /// file whose lines had all been marked at once took half a second a frame to draw.</para>
+    /// <para>And worked out once rather than per frame: which marker a pixel stands for depends on the marks
+    /// and on how rows map to lines, and a drag changes neither. MEASURED on a 25-million-line log with five
+    /// thousand marks, a drag cost 1.47 ms a mouse report against 0.55 unmarked - almost all of it this,
+    /// re-deriving the same scale for every report the hand made.</para></summary>
     private void DrawMarks(Graphics g, Rectangle clip)
     {
         if (_grid.Document is not { } doc || _total <= 0 || !doc.Markers.AnyInUse) return;
 
         var track = Track;
         int span = Math.Max(1, track.Height - MarkThickness);
+        var scale = MarkScale(doc, span);
         // Only the pixels the repaint actually reaches: moving the thumb one notch invalidates the stretch
-        // it crossed and nothing else, and re-asking the whole file about marks that have not moved is the
-        // whole cost of the frame.
+        // it crossed and nothing else, and re-drawing marks that have not moved is the whole cost of the
+        // frame.
         int from = Math.Max(0, clip.Top - track.Top - MarkThickness + 1);
         int toExclusive = Math.Min(span, clip.Bottom - track.Top);
         for (int y = from; y < toExclusive; y++)
+        {
+            int index = scale[y];
+            if (index >= 0)
+                g.FillRectangle(MiniMapControl.MarkerBrush(index), track.Left, track.Top + y,
+                                track.Width, MarkThickness);
+        }
+    }
+
+    private sbyte[] _marks = [];
+    private int _marksSpan = -1;
+    private int _marksVersion = -1;
+    private int _marksGeneration = -1;
+    private long _marksTotal = -1;
+    private long _marksFirstLine = -1;
+    private bool _marksFilteredMode;
+
+    /// <summary>The marker each pixel of the trough stands for, or -1 for none. Kept until something that
+    /// could change it does: the marks themselves, the height it is drawn in, how many rows there are, or
+    /// which lines those rows are - a filter pass or a crop moves every mark to a different pixel.</summary>
+    private ReadOnlySpan<sbyte> MarkScale(CascadeDocument doc, int span)
+    {
+        long firstLine = doc.FirstDisplayLine;
+        if (!_rederiveMarks && _marksSpan == span && _marksVersion == doc.Markers.Version && _marksTotal == _total &&
+            _marksGeneration == doc.FilterGeneration && _marksFirstLine == firstLine &&
+            _marksFilteredMode == doc.FilteredMode)
+            return _marks.AsSpan(0, span);
+
+        if (_marks.Length < span) _marks = new sbyte[span];
+        for (int y = 0; y < span; y++)
         {
             // The rows behind this pixel, on the same scale the marks were drawn at before: a mark on row r
             // sits at r * span / _total, so the pixel at y stands for the rows that lands on.
@@ -212,12 +266,30 @@ internal sealed class SlimScrollBar : Control
             long toRow = ((long)(y + 1) * _total + span - 1) / span;
             // The row the document says, in either mode: a crop offsets rows from lines, so taking a line
             // as a row would drop every mark inside the crop and draw ones from outside it.
-            int index = doc.MarkerForRows(fromRow, toRow);
-            if (index >= 0)
-                g.FillRectangle(MiniMapControl.MarkerBrush(index), track.Left, track.Top + y,
-                                track.Width, MarkThickness);
+            _marks[y] = (sbyte)doc.MarkerForRows(fromRow, toRow);
         }
+
+        _marksSpan = span;
+        _marksVersion = doc.Markers.Version;
+        _marksTotal = _total;
+        _marksGeneration = doc.FilterGeneration;
+        _marksFirstLine = firstLine;
+        _marksFilteredMode = doc.FilteredMode;
+        _markScaleBuilds++;
+        return _marks.AsSpan(0, span);
     }
+
+    /// <summary>How many pixels of the trough the mark scale was last worked out for, so a check can prove
+    /// that a drag reuses it rather than deriving it again on every report.</summary>
+    internal int MarkScaleBuildsForTesting => _markScaleBuilds;
+
+    private int _markScaleBuilds;
+    private bool _rederiveMarks;
+
+    /// <summary>Test seam: work the scale out again on every paint, as this did, so a check can prove that
+    /// keeping it draws the same marks.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool RederiveMarksForTesting { get => _rederiveMarks; set => _rederiveMarks = value; }
 
     // ---- interaction ----
 
@@ -277,14 +349,30 @@ internal sealed class SlimScrollBar : Control
         if (v == _value) return;
         var was = Thumb;
         _value = v;
-        InvalidateThumb(was);
+        if (_thumbLast)
+        {
+            InvalidateThumb(was);
+            Scrolled?.Invoke(v);
+            Update();
+            return;
+        }
+        // The thumb reaches the screen BEFORE the view is told where to go, and this is the whole reason
+        // the two lines are in this order. A held drag never lets the message queue empty, so WM_PAINT only
+        // arrives when something asks for it - and telling the view first put a full repaint of the text
+        // between the hand moving and the thumb following it. That is milliseconds on a local screen and a
+        // frame's round trip over a remote desktop, and it is exactly what reads as the pointer running away
+        // from the bar it is dragging. Drawn first, the thumb lands under the pointer at once and the text
+        // catches up behind it; nothing about what finally appears is different.
+        if (InvalidateThumb(was)) Update();
         Scrolled?.Invoke(v);
-        // A held drag never lets the message queue empty, and WM_PAINT only arrives when it does - so
-        // without this the thumb would not move until the mouse stopped. The view answers for itself: it
-        // redraws no faster than the screen can show it, which this must not do - the thumb has to stay
-        // under the pointer, and it costs a tenth of a millisecond to draw.
-        Update();
     }
+
+    private bool _thumbLast;
+
+    /// <summary>Test seam: put the thumb on screen after the view rather than before, as this did, so a
+    /// check can hold the two orders against each other.</summary>
+    [System.ComponentModel.DefaultValue(false)]
+    internal bool DrawThumbAfterTextForTesting { get => _thumbLast; set => _thumbLast = value; }
 
     /// <summary>Test seam: what a drag to this offset along the bar would scroll to.</summary>
     internal long ValueAtForTesting(int along)

@@ -57,6 +57,11 @@ internal static class ScrollBench
         // Every piece of text through the general layout, as it went before the direct path existed. The
         // before half of a before-and-after.
         bool longWay = args.Any(a => a.Equals("--longway", StringComparison.OrdinalIgnoreCase));
+        // Both ways round the scrollbar can answer a drag, in one process. A run of this bench on an 8.8 GB
+        // log varies by a quarter between one minute and the next - the file is paged in by the operating
+        // system and the machine has other work - so two builds measured apart cannot be told apart. Measured
+        // back to back against the same warm caches, in the same process, a difference of a few percent can.
+        bool ways = args.Any(a => a.Equals("--ways", StringComparison.OrdinalIgnoreCase));
         // A log of the reader's own, and the filter set they actually keep. The generated fixture is a tidy
         // 120 characters with four filters over it; a real one is ten times the line length and a couple of
         // hundred filters, and the two do not measure the same program. Given both, this is the same
@@ -163,6 +168,7 @@ internal static class ScrollBench
                     if (run.CpuPerFrameMs < best.CpuPerFrameMs) best = run;
                 }
                 Console.WriteLine($"  {name,-22} BEST {best}");
+                if (ways) BothWays(form, steps, jump, rate, repeats);
                 if (parts) Parts(form, steps);
                 Console.WriteLine();
             }
@@ -623,6 +629,10 @@ internal static class ScrollBench
         int paints0 = grid.PaintsForTesting;
         int mapPaints0 = map?.PaintsForTesting ?? 0;
         int resolved0 = map?.ColoursResolvedForTesting ?? 0;
+        // How long after a report the thumb, and the text, are actually on the screen. Summed over the
+        // reports that moved each of them, because a report that draws neither has no lag to report.
+        long thumbLag = 0, textLag = 0;
+        int thumbFrames = 0, textFrames = 0;
         var clock = Stopwatch.StartNew();
 
         for (int i = 0; i < steps; i++)
@@ -634,6 +644,9 @@ internal static class ScrollBench
             // a program only ever has one report waiting for it. Posting rather than sending also keeps the
             // window's own message handling on the path it takes in life, rather than nested inside a
             // send from this loop.
+            long sentAt = Stopwatch.GetTimestamp();
+            long thumbWas = bar.PaintedAtForTesting;
+            long textWas = grid.ShownAtForTesting;
             if (rate > 0)
             {
                 if (!PeekMessage(out _, bar.Handle, WmMouseMove, WmMouseMove, PmNoRemove))
@@ -645,6 +658,8 @@ internal static class ScrollBench
                 Send(bar, WmMouseMove, x, at);
                 Pump();
             }
+            if (bar.PaintedAtForTesting != thumbWas) { thumbLag += bar.PaintedAtForTesting - sentAt; thumbFrames++; }
+            if (grid.ShownAtForTesting != textWas) { textLag += grid.ShownAtForTesting - sentAt; textFrames++; }
         }
 
         clock.Stop();
@@ -656,11 +671,51 @@ internal static class ScrollBench
             Bytes: GC.GetTotalAllocatedBytes(precise: true) - alloc0,
             GridPaints: grid.PaintsForTesting - paints0,
             MapPaints: (map?.PaintsForTesting ?? 0) - mapPaints0,
-            RowsColoured: (map?.ColoursResolvedForTesting ?? 0) - resolved0);
+            RowsColoured: (map?.ColoursResolvedForTesting ?? 0) - resolved0,
+            ThumbLagMs: Ms(thumbLag, thumbFrames),
+            TextLagMs: Ms(textLag, textFrames));
 
         Send(bar, WmLButtonUp, x, at);
         Pump();
         return result;
+
+        static double Ms(long ticks, int frames)
+            => frames == 0 ? 0 : ticks * 1000.0 / Stopwatch.Frequency / frames;
+    }
+
+    /// <summary>The same drag with each of the scrollbar's before-and-after seams put back, interleaved with
+    /// the way it works now. Interleaved rather than run in blocks because whatever drifts over a minute -
+    /// the file's pages, the machine's other work, the clock the processor is running at - then drifts
+    /// through both equally. MEASURED: two builds of this run a minute apart disagree by a quarter, which is
+    /// larger than most of what is worth changing.</summary>
+    private static void BothWays(MainForm form, int steps, int jump, int rate, int repeats)
+    {
+        var bar = form.GridForTesting.ScrollBarForTesting;
+        (string Label, Action<bool> Set)[] seams =
+        [
+            ("thumb after text", on => bar.DrawThumbAfterTextForTesting = on),
+            ("marks re-derived", on => bar.RederiveMarksForTesting = on),
+        ];
+
+        foreach (var (label, set) in seams)
+        {
+            var was = Measurement.Worst;
+            var now = Measurement.Worst;
+            for (int i = 0; i < Math.Max(2, repeats); i++)
+            {
+                set(true);
+                var before = Drag(form, steps, jump, rate);
+                if (before.CpuPerFrameMs < was.CpuPerFrameMs) was = before;
+                set(false);
+                var after = Drag(form, steps, jump, rate);
+                if (after.CpuPerFrameMs < now.CpuPerFrameMs) now = after;
+            }
+            set(false);
+            Console.WriteLine($"      {label,-18} was {was.WallMs / was.Steps,6:F2} ms/move, " +
+                              $"{was.ThumbLagMs,6:F2} ms to the thumb, {was.TextLagMs,6:F2} to the text");
+            Console.WriteLine($"      {"",-18} now {now.WallMs / now.Steps,6:F2} ms/move, " +
+                              $"{now.ThumbLagMs,6:F2} ms to the thumb, {now.TextLagMs,6:F2} to the text");
+        }
     }
 
     /// <summary>Where the time in a frame actually goes. Each window is asked to repaint on its own, at the
@@ -713,9 +768,9 @@ internal static class ScrollBench
     }
 
     private readonly record struct Measurement(int Steps, double WallMs, double CpuMs, double UiCpuMs, long Bytes,
-        int GridPaints, int MapPaints, int RowsColoured)
+        int GridPaints, int MapPaints, int RowsColoured, double ThumbLagMs, double TextLagMs)
     {
-        public static Measurement Worst => new(1, double.MaxValue, double.MaxValue, 0, 0, 0, 0, 0);
+        public static Measurement Worst => new(1, double.MaxValue, double.MaxValue, 0, 0, 0, 0, 0, 0, 0);
 
         public double CpuPerFrameMs => CpuMs / Math.Max(1, Steps);
 
@@ -726,7 +781,8 @@ internal static class ScrollBench
                $"{100 * CpuMs / WallMs,5:F0}% of a core | " +
                $"{1000 * Steps / WallMs,5:F0} moves, {1000 * GridPaints / WallMs,5:F0} text and " +
                $"{1000 * MapPaints / WallMs,5:F0} map frames a second | " +
-               $"{RowsColoured / (double)Steps,6:F0} rows coloured/move";
+               $"{RowsColoured / (double)Steps,6:F0} rows coloured/move | " +
+               $"lag {ThumbLagMs,5:F2} thumb, {TextLagMs,5:F2} text (ms)";
     }
 
     /// <summary>Processor time this thread alone has had, so the work the UI thread does can be told apart

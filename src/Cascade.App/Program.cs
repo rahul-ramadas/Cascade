@@ -162,7 +162,7 @@ internal static class Program
                             fingerprint for each, so two builds can be compared pixel for pixel.
           --scrollbench [--lines=N] [--payload=N] [--width=N] [--height=N] [--steps=N]
                         [--jump=N] [--rate=N] [--repeat=N] [--only=<text>] [--parts]
-                        [--micro] [--cold] [--longway] [--seconds=N]
+                        [--micro] [--cold] [--longway] [--seconds=N] [--ways]
                         [--file=<path>] [--filters=<path>] [--settle=N]
                             Drag the scrollbar of a generated log and report what one mouse
                             report costs in wall time, processor time and bytes. --rate gives
@@ -171,6 +171,10 @@ internal static class Program
                             --micro times the ways a screenful can be drawn; --cold forgets the
                             minimap's colours first; --longway puts the text back through the
                             general layout; --seconds drags on for a profiler to watch.
+                            --ways drags each scenario both with and without the scrollbar's
+                            paint order and mark-scale changes, interleaved in one process,
+                            because two builds measured apart on a real log disagree by more
+                            than the change being looked for.
                             --file drags through a log of your own instead of the generated
                             one and --filters loads a .cascade file, switching every filter in
                             it on; --settle is how many seconds to let indexing and the first
