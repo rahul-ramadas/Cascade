@@ -62,6 +62,12 @@ New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
 # The UI suite drives a real window; keep it off the developer's desktop exactly as Run-UiTests.ps1 does.
 $env:CASCADE_TEST_OFFSCREEN = '1'
 
+$coverageTool = Join-Path $env:USERPROFILE '.dotnet\tools\dotnet-coverage.exe'
+if ($Coverage -and -not (Test-Path $coverageTool)) {
+    if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) { $coverageTool = 'dotnet-coverage' }
+    else { throw 'dotnet-coverage is not installed. Run: dotnet tool install --global dotnet-coverage' }
+}
+
 $burners = @()
 if ($Load -gt 0) {
     Write-Host "Starting $Load background burners." -ForegroundColor Yellow
@@ -78,10 +84,18 @@ try {
                 '--logger', "trx;LogFileName=$name-$run.trx"
                 '--results-directory', $ResultsDirectory
             )
-            if ($Coverage) { $args += @('--settings', (Join-Path $repo 'tests/coverage.runsettings')) }
-
             $started = Get-Date
-            & dotnet @args | Out-Null
+            if ($Coverage) {
+                # Not for the figure - nothing reads it. Instrumentation slows every suite by roughly a
+                # third, which is the cheapest way to make this machine behave like a loaded CI runner,
+                # and that is where the timing-sensitive checks give way first.
+                & $coverageTool collect --settings (Join-Path $repo 'tests/coverage.runsettings') `
+                    --output (Join-Path $ResultsDirectory "$name-$run.cobertura.xml") `
+                    --output-format cobertura ('dotnet ' + ($args -join ' ')) | Out-Null
+            }
+            else {
+                & dotnet @args | Out-Null
+            }
             $seconds = ((Get-Date) - $started).TotalSeconds
             $verdict = if ($LASTEXITCODE -eq 0) { 'green' } else { 'RED' }
             Write-Host ("{0,-5} run {1,2}: {2,-5} {3,6:N1}s" -f $name, $run, $verdict, $seconds)

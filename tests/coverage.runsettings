@@ -1,48 +1,52 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   One place that decides what "covered" means, shared by every suite, so two of them can never measure
-  different things and then be compared anyway.
+  different things and then be compared anyway. Read by dotnet-coverage, which scripts/Run-Tests.ps1 wraps
+  each suite in.
 
-  This uses the collector that ships with Microsoft.NET.Test.Sdk rather than coverlet, for a measured
-  reason: coverlet.collector silently reports nothing at all for Cascade.dll - the app assembly, and the
-  half these WinForms checks exist to cover - while happily reporting Cascade.Core. It logs no warning
-  about it, so the figure simply comes out missing its largest component and still looks like a coverage
-  number. The Microsoft collector reports both.
+  **THERE IS DELIBERATELY NO <Attributes> BLOCK, AND THE REASON IS CompilerGeneratedAttribute.** Excluding
+  it sounds like housekeeping - skip what the compiler wrote rather than what anybody typed - and it is
+  nothing of the sort. An async method's body compiles into MoveNext on a [CompilerGenerated] state
+  machine, and a lambda into a [CompilerGenerated] closure, so excluding the attribute DELETES THE BODY OF
+  EVERY ASYNC METHOD AND EVERY LAMBDA from the report. MEASURED on one run of the engine suite, lines
+  counted in Cascade.Core: 4,613 with no exclusions, 4,232 excluding CompilerGenerated, 4,613 excluding
+  DebuggerHidden. That is 381 lines, 8% of the assembly, and it is not spread evenly - it falls on the
+  async-heavy code, which is the update and network path. GitHubReleaseSource.cs read 12 of 12 lines, a
+  perfect score, where the truth is 70 of 77; GitCredentialToken.cs read 13 of 17 where the truth is 25 of
+  64. The error flatters exactly the files with the least testing, which is the one thing the figure exists
+  to find.
+
+  Nothing is lost by having no block: [ExcludeFromCodeCoverage] is honoured anyway (verified - UiShots,
+  DocShots, RenderShots and ScrollBench are all absent from the report), and excluding DebuggerHidden was
+  measured to change nothing at all.
+
+  THE TOOL IS dotnet-coverage RATHER THAN THE ONE IN THE TEST SDK for a different reason: the UI suite
+  launches the app as its own process, this file used to say CollectFromChildProcesses=false, and the SDK's
+  collector will not follow a child anyway. That is why a third of the app's code read as untested for as
+  long as there has been a coverage number here.
 
   ModulePaths names the two product assemblies explicitly. Left to itself a collector reports on whatever
   it finds beside the test assembly, which pads the figure with the tests' own lines - and a coverage
   number that includes the test code measures nothing.
 
-  Naming this file on the command line is all that is needed: a data collector declared here is enabled by
-  it. Passing a separate collect switch as well would be a second place saying what to measure, and two of
-  those disagree eventually.
+  **THE MODULE PATTERNS MUST BE LOWERCASE.** The path is lowercased before it is matched, so the obvious
+  `.*\\Cascade\.dll$` matches NOTHING and the whole filter silently does nothing at all - which is how this
+  file sat here excluding neither assembly. Report-Coverage.ps1 drops anything named `*Tests` as well, so a
+  filter that stops matching again cannot quietly put the test code back into the figure.
 -->
 <RunSettings>
   <DataCollectionRunSettings>
     <DataCollectors>
-      <DataCollector friendlyName="Code Coverage" uri="datacollector://Microsoft/CodeCoverage/2.0"
-                     assemblyQualifiedName="Microsoft.VisualStudio.Coverage.DynamicCoverageDataCollector, Microsoft.VisualStudio.TraceCollector, Version=11.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a">
+      <DataCollector friendlyName="Code Coverage">
         <Configuration>
           <Format>cobertura</Format>
           <CodeCoverage>
             <ModulePaths>
               <Include>
-                <ModulePath>.*\\Cascade\.dll$</ModulePath>
-                <ModulePath>.*\\Cascade\.Core\.dll$</ModulePath>
+                <ModulePath>.*\\cascade\.dll$</ModulePath>
+                <ModulePath>.*\\cascade\.core\.dll$</ModulePath>
               </Include>
             </ModulePaths>
-
-            <!-- Written by the compiler rather than by anybody, so a line of it going unreached says
-                 nothing about the tests. -->
-            <Attributes>
-              <Exclude>
-                <Attribute>^System\.Diagnostics\.DebuggerHiddenAttribute$</Attribute>
-                <Attribute>^System\.Diagnostics\.CodeAnalysis\.ExcludeFromCodeCoverageAttribute$</Attribute>
-                <Attribute>^System\.Runtime\.CompilerServices\.CompilerGeneratedAttribute$</Attribute>
-              </Exclude>
-            </Attributes>
-
-            <CollectFromChildProcesses>false</CollectFromChildProcesses>
           </CodeCoverage>
         </Configuration>
       </DataCollector>

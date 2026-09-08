@@ -59,7 +59,11 @@ public class MapLook : IDisposable
         Scene("d-many", BigFixture.HugeFilter, BigFixture.RareFilter, BigFixture.BusyFilter,
                         BigFixture.ExtraFilterA, BigFixture.ExtraFilterB, BigFixture.ExtraFilterC);
 
-        Assert.True(true);
+        // This rig makes no claim about the map - a human decides whether it reads - so the only thing to
+        // assert is that there is something to look at. It ended `Assert.True(true)`, which reported PASSED
+        // for a run that had photographed nothing at all.
+        var shots = Directory.GetFiles(Out, "*.png");
+        Assert.True(shots.Length >= 12, $"expected map, wide and window for each of the four scenes in {Out}, found {shots.Length}");
     }
 
     private void Scene(string name, params string[] filters)

@@ -3,13 +3,19 @@
     Merges every Cobertura report under a results directory and reports what the suites cover.
 
 .DESCRIPTION
-    Two suites instrument the same assemblies - the engine tests and the app checks both execute
-    Cascade.Core - so the reports have to be merged by (file, line) before anything is added up. Summing
-    the per-report totals instead would count shared lines twice and quietly inflate the figure, which is
-    the one failure mode a coverage gate must not have.
+    Every suite instruments the same assemblies - the engine tests, the app checks and the UI suite all
+    execute Cascade.Core - so the reports have to be merged by (file, line) before anything is added up.
+    Summing the per-report totals instead would count shared lines twice and quietly inflate the figure,
+    which is the one failure mode a coverage gate must not have.
+
+    THE REPORTS MUST ALL COME FROM THE SAME COLLECTOR AND THE SAME SETTINGS, or the union of their line
+    sets is neither one's answer. tests/coverage.runsettings is that one place; scripts/Run-Tests.ps1 wraps
+    every suite in dotnet-coverage so the UI suite - which drives the app as a separate process - is
+    measured too.
 
     Prints a per-assembly and a worst-covered-files table, writes both to the GitHub step summary when
-    running under Actions, and fails when the merged line rate is under -MinimumLineRate.
+    running under Actions, and fails when the merged line rate is under -MinimumLineRate or fewer than
+    -MinimumLines were measured at all.
 
     The floor exists to catch a body of new code arriving with no tests, not to be ratcheted up for its own
     sake: a number chased for its own reward buys tests written to touch lines rather than to state
@@ -22,6 +28,7 @@
 param(
     [string] $ResultsDirectory = 'artifacts/test-results',
     [double] $MinimumLineRate = 0,
+    [int] $MinimumLines = 0,
     [int] $WorstFiles = 12
 )
 
@@ -42,6 +49,9 @@ foreach ($report in $reports) {
     [xml] $xml = Get-Content -LiteralPath $report.FullName
     foreach ($package in @($xml.coverage.packages.package)) {
         if (-not $package) { continue }
+        # A coverage number that counts the test code measures nothing. Named by the suffix rather than by
+        # listing the product assemblies, so a new one of those is reported rather than silently dropped.
+        if ($package.name -like '*Tests') { continue }
         foreach ($class in @($package.classes.class)) {
             if (-not $class) { continue }
             $key = "$($package.name)|$($class.filename)"
@@ -116,6 +126,14 @@ if ($env:GITHUB_STEP_SUMMARY) {
     $summary += $worst | ForEach-Object { '| `{0}` | {1:P0} | {2:N0} |' -f (Split-Path -Leaf $_.File), $_.Rate, $_.Total }
     $summary += '</details>'
     $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+}
+
+# A rate floor only catches the figure getting WORSE. The failure mode this guards against makes it LOOK
+# BETTER: excluding compiler-generated code takes the body of every async method and lambda out of the
+# denominator, so the percentage climbs while less is measured. It shows as the line count collapsing -
+# 13,616 to 13,026 when it happened - and nothing else would say a word about it.
+if ($MinimumLines -gt 0 -and $grandTotal -lt $MinimumLines) {
+    throw ('Only {0:N0} lines were measured, under the {1:N0} expected. Coverage is probably no longer being collected the way tests/coverage.runsettings describes - check that before touching this number.' -f $grandTotal, $MinimumLines)
 }
 
 if ($MinimumLineRate -gt 0 -and ($grandRate * 100) -lt $MinimumLineRate) {

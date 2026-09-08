@@ -1031,7 +1031,8 @@ public class UiFeatureTests
     }
 
     [Fact]
-    public void Ctrl_shift_c_splits_the_log_into_columns_and_back()    {
+    public void Ctrl_shift_c_splits_the_log_into_columns_and_back()
+    {
         // A bracketed log, so turning columns on finds fields to split by and never has to ask.
         string log = TestData.WriteBracketedLogFile();
         string tat = TestData.WriteFilterFile();

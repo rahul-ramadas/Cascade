@@ -10,6 +10,9 @@
       app   the WinForms half: real controls, dialogs and windows, built on a hidden STA thread in process.
       ui    the shipped executable, driven through UI Automation. One process launch per test.
 
+    With -Coverage a fourth line appears, `exe`: the handful of UI checks that open the published bundle,
+    which the measured UI run cannot (see below).
+
     The last two build real windows. They are kept off the visible desktop (CASCADE_TEST_OFFSCREEN parks the
     app beyond the last monitor, and the app checks show theirs at zero opacity out there too), so nothing
     appears over what you are doing and a stray click cannot reach them.
@@ -28,7 +31,8 @@
     the previously published exe is reused, which is a good way to test a change that is not there.
 
 .PARAMETER Coverage
-    Collect coverage from the two suites that can be instrumented, and print the merged figure.
+    Collect coverage from every suite - including the UI one - and print the merged figure. Needs
+    dotnet-coverage (dotnet tool install --global dotnet-coverage).
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/Run-Tests.ps1 -Publish
@@ -79,34 +83,59 @@ if (Test-Path $published) {
 }
 $env:CASCADE_TEST_OFFSCREEN = '1'
 
+# The UI suite launches the app as a separate process, so it can only be measured by a collector that
+# follows children - and the published exe is a SINGLE-FILE bundle, whose assemblies are loaded from the
+# bundle rather than from files and cannot be instrumented at all (measured: the run reports the test
+# assembly and nothing else). Under -Coverage it therefore drives the ordinary build output, which is the
+# same IL differently packaged. What that gives up is the bundle itself, so -Coverage runs the handful of
+# checks that exercise the bundle against the published exe afterwards.
+$binExe = Join-Path $repo "src\Cascade.App\bin\$Configuration\net10.0-windows\Cascade.exe"
+$bundleChecks = 'FullyQualifiedName~ScreenshotHarnessTests|FullyQualifiedName~FixtureSmoke|FullyQualifiedName~AutomationTests'
+
+$coverageTool = Join-Path $env:USERPROFILE '.dotnet\tools\dotnet-coverage.exe'
+if ($Coverage -and -not (Test-Path $coverageTool)) {
+    if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) { $coverageTool = 'dotnet-coverage' }
+    else { throw 'dotnet-coverage is not installed. Run: dotnet tool install --global dotnet-coverage' }
+}
+
 $results = Join-Path $repo 'artifacts/test-results'
 if (Test-Path $results) { Remove-Item $results -Recurse -Force }
+
+# Runs one command, kills it if it wedges, and reports how long it took.
+function Invoke-Timed($exe, $arguments) {
+    $started = Get-Date
+    $run = Start-Process $exe -WorkingDirectory $repo -ArgumentList $arguments -NoNewWindow -PassThru
+    if (-not $run.WaitForExit($TimeoutMinutes * 60 * 1000)) { $run.Kill($true); throw 'A suite timed out.' }
+    [pscustomobject]@{ Code = $run.ExitCode; Seconds = ((Get-Date) - $started).TotalSeconds }
+}
 
 $failed = @()
 foreach ($name in $chosen) {
     # A quiet run says only that a suite went red, and a suite here is a hundred checks. The trx carries the
     # message of every failed one, which is the difference between diagnosing a rare failure and re-running
     # until it happens again.
-    $arguments = @('test', $projects[$name], '-c', $Configuration, '--no-build', '--nologo', '-v', 'q',
-                   '--logger', "trx;LogFileName=$name.trx",
-                   '--results-directory', 'artifacts/test-results')
-    if ($Filter) { $arguments += @('--filter', $Filter) }
-    # The UI suite launches the executable, so instrumenting this process would measure nothing of it.
-    # Naming the runsettings is enough: a data collector declared there is enabled by it, and passing
-    # --collect as well only risks the two disagreeing about what is being measured.
-    if ($Coverage -and $name -ne 'ui') {
-        $arguments += @('--settings', 'tests/coverage.runsettings')
+    $testArgs = @('test', $projects[$name], '-c', $Configuration, '--no-build', '--nologo', '-v', 'q',
+                  '--logger', """trx;LogFileName=$name.trx""",
+                  '--results-directory', 'artifacts/test-results')
+    if ($Filter) { $testArgs += @('--filter', """$Filter""") }
+
+    if ($Coverage) {
+        if ($name -eq 'ui') { $env:CASCADE_TEST_EXE = $binExe }
+        $outcome = Invoke-Timed $coverageTool @(
+            'collect', '--settings', (Join-Path $repo 'tests/coverage.runsettings'),
+            '--output', (Join-Path $results "$name.cobertura.xml"),
+            '--output-format', 'cobertura', ('dotnet ' + ($testArgs -join ' ')))
+        if ($name -eq 'ui' -and (Test-Path $published)) { $env:CASCADE_TEST_EXE = $published }
     }
+    else {
+        $outcome = Invoke-Timed 'dotnet' $testArgs
+    }
+    $seconds = $outcome.Seconds
 
-    $started = Get-Date
-    $run = Start-Process dotnet -WorkingDirectory $repo -ArgumentList $arguments -NoNewWindow -PassThru
-    if (-not $run.WaitForExit($TimeoutMinutes * 60 * 1000)) { $run.Kill($true); throw "$name timed out." }
-    $seconds = ((Get-Date) - $started).TotalSeconds
-
-    $verdict = if ($run.ExitCode -eq 0) { 'green' } else { 'RED' }
-    $colour = if ($run.ExitCode -eq 0) { 'Green' } else { 'Red' }
+    $verdict = if ($outcome.Code -eq 0) { 'green' } else { 'RED' }
+    $colour = if ($outcome.Code -eq 0) { 'Green' } else { 'Red' }
     Write-Host ("{0,-5} {1,-5} {2,6:N1}s" -f $name, $verdict, $seconds) -ForegroundColor $colour
-    if ($run.ExitCode -ne 0) {
+    if ($outcome.Code -ne 0) {
         $failed += $name
         $trx = Join-Path $results "$name.trx"
         if (Test-Path $trx) {
@@ -120,6 +149,16 @@ foreach ($name in $chosen) {
             Write-Host "      full output: $trx" -ForegroundColor DarkGray
         }
     }
+}
+
+# The coverage run drove the build output, so nothing has yet opened the bundle that ships.
+if ($Coverage -and $chosen -contains 'ui' -and (Test-Path $published) -and -not $Filter) {
+    $outcome = Invoke-Timed 'dotnet' @('test', $projects['ui'], '-c', $Configuration, '--no-build',
+                                       '--nologo', '-v', 'q', '--filter', """$bundleChecks""")
+    $verdict = if ($outcome.Code -eq 0) { 'green' } else { 'RED' }
+    Write-Host ("{0,-5} {1,-5} {2,6:N1}s" -f 'exe', $verdict, $outcome.Seconds) `
+               -ForegroundColor $(if ($outcome.Code -eq 0) { 'Green' } else { 'Red' })
+    if ($outcome.Code -ne 0) { $failed += 'exe' }
 }
 
 if ($Coverage) { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Report-Coverage.ps1') -ResultsDirectory $results }

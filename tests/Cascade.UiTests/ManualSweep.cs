@@ -114,7 +114,17 @@ public class ManualSweep : IDisposable
         Stage("goto", GoToAndZoom);
 
         Say($"bugs found: {_bugs.Count}");
-        Assert.True(true);
+
+        // It used to end `Assert.True(true)`: every finding went to bugs.txt and the run reported PASSED
+        // whatever it had seen. So a rig that had quietly rotted looked exactly like a rig that had found
+        // nothing, which is how this one once sat at 17 bad on a clean tree for weeks with nobody the
+        // wiser. A check that cannot fail is not a check.
+        Assert.True(_bugs.Count == 0,
+                    $"{_bugs.Count} of {_bugs.Count + _log.Count(l => l.StartsWith("ok  ", StringComparison.Ordinal))} " +
+                    "checks failed. This rig drives the real mouse and keyboard, so a click or a keypress " +
+                    "during the run fails the stage it lands in AND every stage after it - re-run it on a " +
+                    "desktop nobody is touching before believing any of this." +
+                    Environment.NewLine + string.Join(Environment.NewLine, _bugs));
     }
 
     /// <summary>Markers draw down the map's left edge, so setting one has to change what it paints. Also on
@@ -256,7 +266,8 @@ public class ManualSweep : IDisposable
     /// when that went the parsing stayed behind and answered -1 to everything.</summary>
     private long CaretLine() => _app.CaretLine();
 
-    private void PresetRoundTrip()    {
+    private void PresetRoundTrip()
+    {
         var names = SafePresetNames();
         if (names.Length == 0)
         {

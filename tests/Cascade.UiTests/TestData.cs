@@ -3,9 +3,14 @@ using System.Text;
 
 // Never run these in parallel. Isolation is not the problem - every test already gets its own log file,
 // filter file, settings directory and stub-server port - but the desktop and the UI Automation stack are
-// shared, and driving several apps at once makes each one slower rather than the suite faster. Measured
-// across the three test classes (MaxParallelThreads = 4): 37.9s and three failures, against 30.8s green
-// serially, with one test going from 1.9s to 30.5s purely from contention.
+// shared, and driving several apps at once makes each one slower rather than the suite faster.
+//
+// RE-MEASURED 2026-09-08 on the current suite, because the first measurement predated the rework that
+// stopped these tests needing the foreground, which was the obvious reason parallelism had failed:
+// MaxParallelThreads = 4 gives 48.4s and 42.6s against 64.6s serial, and BOTH runs went red - one failure
+// then three, the same menu test each time. Thirty percent is also all there is to win, because
+// UiFeatureTests alone is 46s of the 66s and xUnit runs a collection serially whatever the setting.
+// A third off the slowest suite, bought with a red run every time, is not a trade worth making.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]
 
 namespace Cascade.UiTests;

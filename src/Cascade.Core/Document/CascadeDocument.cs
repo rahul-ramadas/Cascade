@@ -467,7 +467,9 @@ public sealed class CascadeDocument : IDisposable
 
     public string GetLineText(long line)
     {
-        if (line < 0 || line >= _index.Count) return "";
+        // The source goes before the index does when a file is let go, and the clock detector asks for a
+        // line from whatever is left - so this has to answer for a document that is between files.
+        if (_src is null || _index is null || line < 0 || line >= _index.Count) return "";
         _index.GetRange(line, _src.Length, out long s, out long e);
         return _uiReader.GetString(s, e);
     }

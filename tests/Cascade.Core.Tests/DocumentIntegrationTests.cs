@@ -1573,4 +1573,32 @@ public class DocumentIntegrationTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void A_document_that_has_let_its_file_go_answers_rather_than_throwing()
+    {
+        // Letting a file go puts the SOURCE down before the index, and clears the settled flag on the
+        // detected clock - so the next repaint asks the clock detector for a line, and the detector reads
+        // it out of a document that is between files. It threw a NullReferenceException, and an exception
+        // that escapes OnPaint is what WinForms answers with a red cross over the log view for the rest of
+        // the session.
+        string path = WriteLines("alpha", 40);
+        var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            Assert.NotEqual("", doc.GetLineText(0));
+
+            doc.Dispose();
+
+            Assert.Equal("", doc.GetLineText(0));
+            Assert.Null(doc.Clock);
+        }
+        finally
+        {
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
 }
