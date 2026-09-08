@@ -394,9 +394,26 @@ internal static partial class Checks
         finally { try { File.Delete(path); } catch { } }
     }
 
+    /// <summary>
+    /// The whole document pipeline over a log that exists for its own reasons - a real trace, or whatever
+    /// the nightly found on the runner - rather than a fixture written to be tested.
+    ///
+    /// <para>Nothing here knows what the file says, so there is no expected answer to compare against and
+    /// asking the engine what it found would be circular. Every check therefore holds the engine against an
+    /// INDEPENDENT READ of the same bytes: <see cref="ReferenceLines"/> decodes the head of the file and
+    /// splits it the way the format says lines are split, and the filter is a term taken out of the data
+    /// itself so that it is certain to match something. The head is enough to bite - a decoder, an index or
+    /// a row mapping that is wrong is wrong from the first page - and it keeps this affordable on a file of
+    /// any size.</para>
+    ///
+    /// <para>The timings and the encoding are reported rather than asserted on: they are what a developer
+    /// pointing this at a fifteen-gigabyte trace actually wants to see, and there is no threshold that
+    /// would mean the same thing on their machine and on a hosted runner.</para>
+    /// </summary>
     internal static bool RunFileChecks(string file, string? tat)
     {
         Line($"-- file checks: {file} --");
+        long bytes = new FileInfo(file).Length;
         var total = Stopwatch.StartNew();
         using var doc = new CascadeDocument();
         doc.Open(file);
@@ -406,38 +423,151 @@ internal static partial class Checks
         Line($"first lines available: {first.ElapsedMilliseconds} ms");
 
         doc.WaitForIndex();
-        Line($"indexed {doc.CompletedLineCount:N0} lines in {total.ElapsedMilliseconds} ms");
-        Line("first line: " + Truncate(doc.GetLineText(0), 100));
+        Line($"indexed {doc.CompletedLineCount:N0} lines of {bytes:N0} bytes in {total.ElapsedMilliseconds} ms");
         Line($"encoding: {doc.Encoding.WebName}");
 
-        int enabled;
+        // Everything below reads a line, so an empty document leaves them all vacuous. Fail here rather
+        // than report a row of passes that never looked at anything.
+        if (!Check($"the log has lines in it ({doc.CompletedLineCount:N0})", doc.CompletedLineCount > 0))
+            return false;
+
+        Line("first line: " + Truncate(doc.GetLineText(0), 100));
+
+        var reference = ReferenceLines(file, doc.Encoding, SampleLines);
+        bool ok = Check($"the head of the file decodes to lines at all ({reference.Count:N0} read)",
+                        reference.Count > 0);
+        if (!ok) return false;
+
+        int wrong = 0;
+        string firstWrong = "";
+        for (int i = 0; i < reference.Count && i < doc.CompletedLineCount; i++)
+        {
+            string got = doc.GetLineText(i);
+            if (string.Equals(got, reference[i], StringComparison.Ordinal)) continue;
+            if (wrong++ == 0)
+                firstWrong = $"line {i + 1}: file has [{Truncate(reference[i], 60)}], engine says [{Truncate(got, 60)}]";
+        }
+        ok &= Check($"every one of the first {Math.Min(reference.Count, doc.CompletedLineCount):N0} lines " +
+                    "reads back exactly as the file has it",
+                    wrong == 0, $"{wrong:N0} differ - {firstWrong}");
+
+        // Splitting on a newline that is then handed back with the line would corrupt every filter and
+        // every search against it, and is invisible in a screenshot.
+        ok &= Check("no line carries a line ending of its own",
+                    !reference.Any(l => l.Contains('\n') || l.Contains('\r')));
+
         if (tat is not null && File.Exists(tat))
         {
-            doc.SetFilters(TatImporter.Import(tat));
-            int count = doc.Filters.EnumerateDepthFirst().Count();
-            Line($"imported {count} filters from {tat}");
-            foreach (var f in doc.Filters.Roots.Take(5)) f.Enabled = true;
-            enabled = doc.Filters.EnumerateDepthFirst().Count(f => f.Enabled);
-        }
-        else
-        {
-            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "Error", CaseSensitive = false } });
-            enabled = 1;
+            // Reported, not asserted: a filter file names patterns this log may know nothing about, so the
+            // only honest claim is that importing and running it does not fall over.
+            var imported = TatImporter.Import(tat);
+            doc.SetFilters(imported);
+            foreach (var f in imported.Roots.Take(5)) f.Enabled = true;
+            int enabled = imported.EnumerateDepthFirst().Count(f => f.Enabled);
+            imported.ShowOnlyFilteredLines = true;
+            var tsw = Stopwatch.StartNew();
+            doc.ApplyFilters();
+            WaitFilter(doc, 180000);
+            Line($"imported {imported.EnumerateDepthFirst().Count()} filters from {tat}; " +
+                 $"{enabled} enabled gave {doc.MatchedLineCount:N0} matches in {tsw.ElapsedMilliseconds} ms");
+            ok &= Check("a filter set from a file cannot show more lines than the log has",
+                        doc.MatchedLineCount <= doc.CompletedLineCount,
+                        $"{doc.MatchedLineCount:N0} of {doc.CompletedLineCount:N0}");
         }
 
-        doc.Filters.ShowOnlyFilteredLines = true;
+        // A term lifted out of the log itself, so there is certainly something to find whatever the file
+        // turns out to be. A term written down here would match nothing on most logs, and a filter that
+        // matches nothing makes every check below it pass without looking.
+        string term = TermFrom(reference);
+        ok &= Check($"the head of the log offers a word to filter on [{term}]", term.Length > 0);
+        if (!ok) return false;
+
+        var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+        filters.Add(new Filter { Enabled = true, Match = { Text = term, CaseSensitive = true } });
+        doc.SetFilters(filters);
         var fsw = Stopwatch.StartNew();
         doc.ApplyFilters();
         WaitFilter(doc, 180000);
-        Line($"filtered with {enabled} enabled filter(s): {doc.MatchedLineCount:N0} matches in {fsw.ElapsedMilliseconds} ms");
+        Line($"filtered on [{term}]: {doc.MatchedLineCount:N0} matches in {fsw.ElapsedMilliseconds} ms");
 
-        bool ok = Check("matched count within total", doc.MatchedLineCount <= doc.CompletedLineCount);
-        if (doc.RowCount > 0)
+        // How many of the lines read independently carry the term is knowable without the engine, and
+        // RowAtOrAfterLine says how many rows the view puts before that same line. They are the same
+        // question asked of two different things.
+        long readThrough = Math.Min(reference.Count, doc.CompletedLineCount);
+        long expected = 0;
+        for (int i = 0; i < readThrough; i++)
+            if (reference[i].Contains(term, StringComparison.Ordinal)) expected++;
+        ok &= Check($"the view shows exactly the {expected:N0} lines of the first {readThrough:N0} that carry it",
+                    doc.RowAtOrAfterLine(readThrough) == expected,
+                    $"the view puts {doc.RowAtOrAfterLine(readThrough):N0} rows before line {readThrough:N0}");
+
+        // Sampled across the whole view, not just the head: this is the mapping the window reads every row
+        // it paints, and it has to hold at the far end of a file as well as the near one.
+        long rows = doc.RowCount, step = Math.Max(1, rows / SampleRows), last = -1;
+        int walked = 0, outOfOrder = 0, unmatched = 0;
+        for (long row = 0; row < rows; row += step)
         {
-            long l0 = doc.RowToLine(0);
-            ok &= Check("row->line ascending", doc.RowCount < 2 || doc.RowToLine(1) > l0);
-            Line("first match at line " + (l0 + 1) + ": " + Truncate(doc.GetLineText(l0), 100));
+            long line = doc.RowToLine(row);
+            if (line <= last) outOfOrder++;
+            if (!doc.GetLineText(line).Contains(term, StringComparison.Ordinal)) unmatched++;
+            last = line;
+            walked++;
         }
+        ok &= Check($"row to line climbs over all {rows:N0} rows ({walked:N0} sampled)", outOfOrder == 0,
+                    $"{outOfOrder:N0} went backwards");
+        ok &= Check($"every one of the {walked:N0} rows sampled is a line that really carries the term",
+                    unmatched == 0, $"{unmatched:N0} do not");
         return ok;
+    }
+
+    /// <summary>How much of an unknown log to read independently and compare against.</summary>
+    private const int SampleLines = 20_000;
+
+    /// <summary>How many rows of the filtered view to walk, spread across all of it.</summary>
+    private const int SampleRows = 2_000;
+
+    /// <summary>
+    /// The first lines of a file, decoded and split HERE rather than by anything the engine shares.
+    ///
+    /// <para>Deliberately not <c>StreamReader.ReadLine</c>: that ends a line at a lone carriage return as
+    /// well, and Cascade splits on the newline alone (a carriage return before it belongs to the ending,
+    /// anything else belongs to the text). A log with a bare CR in it - a progress bar, an embedded
+    /// payload - would make the two disagree for a reason that is nothing to do with the engine. This says
+    /// what the format says, so a disagreement is a real one.</para>
+    /// </summary>
+    private static List<string> ReferenceLines(string file, Encoding encoding, int most)
+    {
+        var lines = new List<string>();
+        var line = new StringBuilder();
+        using var reader = new StreamReader(file, encoding, detectEncodingFromByteOrderMarks: true);
+        var buffer = new char[1 << 16];
+        int read;
+        while (lines.Count < most && (read = reader.Read(buffer, 0, buffer.Length)) > 0)
+            for (int i = 0; i < read && lines.Count < most; i++)
+            {
+                if (buffer[i] != '\n') { line.Append(buffer[i]); continue; }
+                if (line.Length > 0 && line[^1] == '\r') line.Length--;
+                lines.Add(line.ToString());
+                line.Clear();
+            }
+
+        // A trailing stretch with no newline after it is a line too, but only once the file has ended -
+        // otherwise it is however much of the next line the read happened to stop in the middle of.
+        if (lines.Count < most && line.Length > 0 && reader.EndOfStream) lines.Add(line.ToString());
+        return lines;
+    }
+
+    /// <summary>
+    /// A word out of the log to filter on. Taken from the line that offers the longest one, so that a file
+    /// beginning with a banner, a blank line or a row of dashes still yields something; case-sensitive
+    /// letters only, so the term cannot collide with the regex or wildcard meaning of any punctuation.
+    /// </summary>
+    private static string TermFrom(List<string> lines)
+    {
+        string best = "";
+        foreach (string line in lines.Take(200))
+            foreach (string word in line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+                if (word.Length > best.Length && word.Length <= 24 && word.All(char.IsLetter)) best = word;
+        return best;
     }
 }
