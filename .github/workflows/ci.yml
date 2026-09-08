@@ -246,7 +246,8 @@ jobs:
           --results-directory artifacts/test-results
 
       # These used to be Cascade.exe --selftest, i.e. the app testing itself. Extracting them made the
-      # released executable 31% smaller and turned one opaque result into one per subject.
+      # released executable a third smaller (1,580,103 -> 1,056,327 bytes, both published back to back from
+      # the same command) and turned one opaque result into one per subject.
       - name: App tests
         timeout-minutes: 15
         run: >

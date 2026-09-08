@@ -7,9 +7,10 @@
     through UI Automation and so pays a process launch per test.
 
     These checks used to live inside the product, as src/Cascade.App/SelfTest.cs behind a "selftest"
-    switch. That made the app carry its own test harness: 12,261 lines, about a third of the managed
-    payload of every release. It also reported as ONE test, so a failure named the whole suite rather than
-    the thing that broke, could not be filtered, and could not be measured for coverage.
+    switch. That made the app carry its own test harness: 12,261 lines, and a third of the managed payload
+    of every release - 1,580,103 bytes published against 1,056,327 without it, measured back to back from
+    the same command. It also reported as ONE test, so a failure named the whole suite rather than the
+    thing that broke, could not be filtered, and could not be measured for coverage.
   -->
 
   <PropertyGroup>
