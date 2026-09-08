@@ -163,6 +163,7 @@ internal static class Program
           --scrollbench [--lines=N] [--payload=N] [--width=N] [--height=N] [--steps=N]
                         [--jump=N] [--rate=N] [--repeat=N] [--only=<text>] [--parts]
                         [--micro] [--cold] [--longway] [--seconds=N]
+                        [--file=<path>] [--filters=<path>] [--settle=N]
                             Drag the scrollbar of a generated log and report what one mouse
                             report costs in wall time, processor time and bytes. --rate gives
                             the mouse a speed in reports a second (0, the default, waits for
@@ -170,6 +171,10 @@ internal static class Program
                             --micro times the ways a screenful can be drawn; --cold forgets the
                             minimap's colours first; --longway puts the text back through the
                             general layout; --seconds drags on for a profiler to watch.
+                            --file drags through a log of your own instead of the generated
+                            one and --filters loads a .cascade file, switching every filter in
+                            it on; --settle is how many seconds to let indexing and the first
+                            filter pass finish before anything is timed.
           --cleanup <pid> <path>
                             Internal. Started by the previous version as it exits, to delete
                             the executable it was running from.

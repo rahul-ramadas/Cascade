@@ -4,7 +4,9 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Cascade.Core.Columns;
+using Cascade.Core.Find;
 using Cascade.Core.Model;
+using Cascade.Core.Persistence;
 
 namespace Cascade.App;
 
@@ -55,6 +57,15 @@ internal static class ScrollBench
         // Every piece of text through the general layout, as it went before the direct path existed. The
         // before half of a before-and-after.
         bool longWay = args.Any(a => a.Equals("--longway", StringComparison.OrdinalIgnoreCase));
+        // A log of the reader's own, and the filter set they actually keep. The generated fixture is a tidy
+        // 120 characters with four filters over it; a real one is ten times the line length and a couple of
+        // hundred filters, and the two do not measure the same program. Given both, this is the same
+        // measurement anyone can repeat on the file that was slow.
+        string? realFile = Arg(args, "--file=");
+        string? filterFile = Arg(args, "--filters=");
+        // How long to let indexing and the filter pass finish before dragging. Two minutes covers the
+        // fixture many times over; a real log of several gigabytes behind two hundred filters does not.
+        int settleMs = IntArg(args, "--settle=", realFile is null ? 120 : 900) * 1000;
 
         // Measuring against whatever else the machine feels like doing is how a change of 20% hides inside
         // the noise. This asks for the scheduler's attention for the couple of minutes it runs.
@@ -68,8 +79,16 @@ internal static class ScrollBench
         Directory.CreateDirectory(configDir);
         Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", configDir);
 
-        string path = Fixture(lines, payload);
-        Console.WriteLine($"file: {path} ({lines:N0} lines)");
+        string path = realFile ?? Fixture(lines, payload);
+        if (realFile is not null && !File.Exists(realFile)) { Console.Error.WriteLine($"no such file: {realFile}"); return 2; }
+        if (filterFile is not null && !File.Exists(filterFile)) { Console.Error.WriteLine($"no such filter file: {filterFile}"); return 2; }
+        var filterSet = FilterSource(filterFile);
+
+        Console.WriteLine(realFile is null
+            ? $"file: {path} ({lines:N0} lines)"
+            : $"file: {path} ({new FileInfo(path).Length / (1024.0 * 1024 * 1024):F2} GB)");
+        if (filterFile is not null)
+            Console.WriteLine($"filters: {filterFile} ({filterSet().EnumerateDepthFirst().Count()} of them, all enabled)");
         Console.WriteLine($"window: {width}x{height}, {steps} moves of {jump}px, {repeats} runs each");
         Console.WriteLine();
 
@@ -92,7 +111,7 @@ internal static class ScrollBench
             Pump();
 
             var doc = form.DocForTesting;
-            for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 120_000 && doc.IsBusy;) Pump();
+            for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
 
             var probe = form.GridForTesting;
             probe.DrawTextTheLongWayForTesting = longWay;
@@ -108,22 +127,22 @@ internal static class ScrollBench
             if (micro)
             {
                 // Against filters, because that is the state a reader is in - and the paint costs more in it.
-                foreach (var (name, prepare) in Scenarios(form))
+                foreach (var (name, prepare) in Scenarios(form, filterSet))
                 {
                     if (!name.Contains("dim", StringComparison.OrdinalIgnoreCase)) continue;
                     prepare();
-                    for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 120_000 && doc.IsBusy;) Pump();
+                    for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
                     Pump();
                 }
                 DrawingWays(form);
                 return 0;
             }
 
-            foreach (var (name, prepare) in Scenarios(form))
+            foreach (var (name, prepare) in Scenarios(form, filterSet))
             {
                 if (only.Length > 0 && !name.Contains(only, StringComparison.OrdinalIgnoreCase)) continue;
                 prepare();
-                for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 120_000 && doc.IsBusy;) Pump();
+                for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
                 Pump();
 
                 Drag(form, steps: 40, jump);   // warm the caches this scenario will lean on
@@ -414,37 +433,60 @@ internal static class ScrollBench
     }
 
     /// <summary>The states worth measuring, each set up through the same wiring the menus use.</summary>
-    private static IEnumerable<(string Name, Action Prepare)> Scenarios(MainForm form)    {
+    private static IEnumerable<(string Name, Action Prepare)> Scenarios(MainForm form, Func<FilterCollection> Filters)
+    {
         var doc = form.DocForTesting;
         yield return ("no filters", () =>
         {
+            Plain(form);
             doc.Filters.ShowOnlyFilteredLines = false;
             doc.SetFilters(new FilterCollection());
         });
         yield return ("dim mode", () =>
         {
+            Plain(form);
             doc.Filters.ShowOnlyFilteredLines = false;
             doc.SetFilters(Filters());
         });
         yield return ("filtered mode", () =>
         {
+            Plain(form);
             var filters = Filters();
             filters.ShowOnlyFilteredLines = true;
             doc.SetFilters(filters);
+        });
+        // Marks put the scrollbar's whole-file scale to work: it walks a pixel of its trough at a time and
+        // asks the document what is marked behind each, on every frame of a drag.
+        yield return ("dim mode, marked", () =>
+        {
+            Plain(form);
+            doc.Filters.ShowOnlyFilteredLines = false;
+            doc.SetFilters(Filters());
+            long span = Math.Max(1, doc.CompletedLineCount);
+            for (int i = 0; i < 5_000; i++) doc.Markers.Set(i * span / 5_000, i % 8, true);
+        });
+        // A find leaves a matcher behind that every visible line is run past on every frame, whether or not
+        // the find bar is still open.
+        yield return ("dim mode, find lit", () =>
+        {
+            Plain(form);
+            doc.Filters.ShowOnlyFilteredLines = false;
+            doc.SetFilters(Filters());
+            form.GridForTesting.SetFindHighlight(FindEngine.CompileQuery(new FindQuery("e", Regex: false, CaseSensitive: false)));
         });
         // A crop is meant to cost nothing: it is a row offset and a count taken off the same rank index every
         // other row lookup uses, so dragging through a cropped file should read the same as dragging through
         // the whole one. Measured over most of the file so the moves are real scrolling, not a few rows.
         yield return ("cropped, dim mode", () =>
         {
-            doc.ClearCrop();
+            Plain(form);
             doc.Filters.ShowOnlyFilteredLines = false;
             doc.SetFilters(Filters());
             doc.SetCrop(doc.CompletedLineCount / 10, doc.CompletedLineCount * 9 / 10);
         });
         yield return ("cropped, filtered mode", () =>
         {
-            doc.ClearCrop();
+            Plain(form);
             var filters = Filters();
             filters.ShowOnlyFilteredLines = true;
             doc.SetFilters(filters);
@@ -452,7 +494,7 @@ internal static class ScrollBench
         });
         yield return ("fields, in columns", () =>
         {
-            doc.ClearCrop();
+            Plain(form);
             doc.Filters.ShowOnlyFilteredLines = false;
             doc.SetFilters(Filters());
             SplitIntoFields(doc, FieldLayout.Columns);
@@ -469,6 +511,34 @@ internal static class ScrollBench
             form.GridForTesting.ApplySettings(new AppSettings { WordWrap = true });
             form.GridForTesting.RefreshView();
         });
+    }
+
+    /// <summary>Puts back everything a scenario before this one may have turned on, so each is measured
+    /// against the same starting state rather than against whatever the last one left behind.</summary>
+    private static void Plain(MainForm form)
+    {
+        var doc = form.DocForTesting;
+        doc.ClearCrop();
+        doc.Markers.Clear();
+        doc.Columns.Enabled = false;
+        form.GridForTesting.SetFindHighlight(null);
+        form.GridForTesting.ApplySettings(new AppSettings { WordWrap = false });
+    }
+
+    /// <summary>Where the filters for a run come from: the reader's own file when they named one, and the
+    /// small set below when they did not. Made fresh each time because a scenario hands its collection to
+    /// the document, which then owns it.</summary>
+    private static Func<FilterCollection> FilterSource(string? path)
+    {
+        if (path is null) return Filters;
+        return () =>
+        {
+            var (filters, _) = CascadeFile.Load(path);
+            // A kept set is mostly switched off - the reader turns on the handful the incident needs. Every
+            // one of them on is the worst case and the one worth measuring.
+            foreach (var filter in filters.EnumerateDepthFirst()) filter.Enabled = true;
+            return filters;
+        };
     }
 
     /// <summary>Splits the fixture's lines the way a reader would: a field per part of the line, under the
