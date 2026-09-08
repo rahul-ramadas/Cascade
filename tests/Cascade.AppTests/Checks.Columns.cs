@@ -51,7 +51,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -875,7 +875,7 @@ internal static partial class Checks
 
         // --- the dialog opens with room to work in, and in the middle of what opened it ---
 
-        using (var opener = new Form { StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(40, 40, 900, 700), Opacity = 0 })
+        using (var opener = new HiddenForm { StartPosition = FormStartPosition.Manual, Bounds = new Rectangle(40, 40, 900, 700), Opacity = 0 })
         {
             opener.Show();
             Pump();
@@ -1014,7 +1014,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(900, 320), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+            host = new HiddenForm { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), ClientSize = new Size(900, 320), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
             host.Controls.Add(grid);
             grid.Attach(doc, settings);
             host.Show();

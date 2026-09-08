@@ -39,7 +39,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -702,7 +702,7 @@ internal static partial class Checks
             doc.Open(path);
             doc.WaitForIndex();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),

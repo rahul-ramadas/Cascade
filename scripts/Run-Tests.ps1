@@ -14,10 +14,11 @@
     app beyond the last monitor, and the app checks show theirs at zero opacity out there too), so nothing
     appears over what you are doing and a stray click cannot reach them.
 
-    THEY DO STILL TAKE THE KEYBOARD, though - showing a window activates it - so typing during a run will
-    lose keystrokes. MEASURED with scripts/Measure-Focus.ps1: core 0%, app 86%, ui 82% of the run.
-    tests/Cascade.AppTests/Infrastructure/Sta.cs records the three ways that were tried and what each of
-    them came to.
+    THE UI SUITE STILL TAKES THE KEYBOARD - it drives the real executable through UI Automation, which is
+    only dependable on a desktop that is in front - so typing during that one will lose keystrokes. The
+    other two leave it alone. MEASURED with scripts/Measure-Focus.ps1: core 0%, app 0.2%, ui 82% of the run.
+    tests/Cascade.AppTests/Infrastructure/Sta.cs records how the app checks got there and what else was
+    tried on the way.
 
 .PARAMETER Suite
     core, app, ui, or all. Default all.
@@ -79,18 +80,22 @@ if (Test-Path $published) {
 $env:CASCADE_TEST_OFFSCREEN = '1'
 
 $results = Join-Path $repo 'artifacts/test-results'
-if ($Coverage -and (Test-Path $results)) { Remove-Item $results -Recurse -Force }
+if (Test-Path $results) { Remove-Item $results -Recurse -Force }
 
 $failed = @()
 foreach ($name in $chosen) {
-    $arguments = @('test', $projects[$name], '-c', $Configuration, '--no-build', '--nologo', '-v', 'q')
+    # A quiet run says only that a suite went red, and a suite here is a hundred checks. The trx carries the
+    # message of every failed one, which is the difference between diagnosing a rare failure and re-running
+    # until it happens again.
+    $arguments = @('test', $projects[$name], '-c', $Configuration, '--no-build', '--nologo', '-v', 'q',
+                   '--logger', "trx;LogFileName=$name.trx",
+                   '--results-directory', 'artifacts/test-results')
     if ($Filter) { $arguments += @('--filter', $Filter) }
     # The UI suite launches the executable, so instrumenting this process would measure nothing of it.
     # Naming the runsettings is enough: a data collector declared there is enabled by it, and passing
     # --collect as well only risks the two disagreeing about what is being measured.
     if ($Coverage -and $name -ne 'ui') {
-        $arguments += @('--settings', 'tests/coverage.runsettings',
-                        '--results-directory', 'artifacts/test-results')
+        $arguments += @('--settings', 'tests/coverage.runsettings')
     }
 
     $started = Get-Date
@@ -101,7 +106,20 @@ foreach ($name in $chosen) {
     $verdict = if ($run.ExitCode -eq 0) { 'green' } else { 'RED' }
     $colour = if ($run.ExitCode -eq 0) { 'Green' } else { 'Red' }
     Write-Host ("{0,-5} {1,-5} {2,6:N1}s" -f $name, $verdict, $seconds) -ForegroundColor $colour
-    if ($run.ExitCode -ne 0) { $failed += $name }
+    if ($run.ExitCode -ne 0) {
+        $failed += $name
+        $trx = Join-Path $results "$name.trx"
+        if (Test-Path $trx) {
+            $xml = [xml](Get-Content $trx -Raw)
+            foreach ($result in $xml.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' }) {
+                Write-Host ("      {0}" -f $result.testName) -ForegroundColor Red
+                foreach ($line in ($result.Output.ErrorInfo.Message -split "`r?`n")) {
+                    if ($line.Trim()) { Write-Host ("        {0}" -f $line.Trim()) -ForegroundColor DarkRed }
+                }
+            }
+            Write-Host "      full output: $trx" -ForegroundColor DarkGray
+        }
+    }
 }
 
 if ($Coverage) { & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'Report-Coverage.ps1') -ResultsDirectory $results }

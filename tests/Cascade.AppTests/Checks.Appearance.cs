@@ -44,7 +44,7 @@ internal static partial class Checks
             for (int i = 0; i < 100 && doc.IsBusy; i++) { Thread.Sleep(10); Pump(); }
 
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),

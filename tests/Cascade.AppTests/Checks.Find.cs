@@ -35,7 +35,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -199,7 +199,7 @@ internal static partial class Checks
         Line("-- the find bar --");
         var searched = new List<(FindQuery Query, bool Forward)>();
         var dlg = new FindBar((q, f) => searched.Add((q, f))) { Visible = true };
-        var host = new Form { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), Opacity = 0, ClientSize = new Size(900, 60) };
+        var host = new HiddenForm { StartPosition = FormStartPosition.Manual, Location = new Point(0, 0), Opacity = 0, ClientSize = new Size(900, 60) };
         host.Controls.Add(dlg);
         try
         {
@@ -470,7 +470,7 @@ internal static partial class Checks
         Line("-- the count changing does not disturb the bar --");
 
         var bar = new FindBar((_, _) => { }) { Visible = true };
-        var host = new Form
+        var host = new HiddenForm
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(0, 0),

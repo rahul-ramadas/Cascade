@@ -84,7 +84,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -185,7 +185,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -317,7 +317,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),

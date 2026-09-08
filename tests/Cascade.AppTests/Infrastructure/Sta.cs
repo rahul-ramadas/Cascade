@@ -55,21 +55,35 @@ internal static class Sta
     {
         Cascade.App.Program.InitialiseUi();
 
+        // Nothing built here may take the keyboard from whatever the developer is doing. Honoured by the
+        // app's two top-level window types; the hosts these checks build are HiddenForms, which say it for
+        // themselves.
+        Cascade.App.WindowActivation.Suppressed = true;
+
         // A headless run has nobody to dismiss anything. Left alone, WinForms puts up its error dialog and
         // waits for ever, which reads as a hung test host with no clue as to why.
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
     }
 
-    // THESE CHECKS STILL TAKE THE KEYBOARD, and it is worth writing down what was tried, because the
-    // remedies all look obvious and none of them works.
+    // HOW THESE CHECKS STOPPED TAKING THE KEYBOARD, and what was tried on the way, because most of the
+    // remedies look obvious and only two of them work.
     //
     // MEASURED with scripts/Measure-Focus.ps1, which samples GetForegroundWindow alongside a run: the
-    // foreground belongs to this process for 86% of one - about a hundred windows, every one of them
+    // foreground used to belong to this process for 86% of one - about a hundred windows, every one of them
     // invisible, each taking the keystrokes meant for whatever the developer was actually doing. Showing a
     // window activates it; zero opacity does not change that, and neither does parking it past the last
     // monitor (Hidden.Show does both anyway, so nothing is ever SEEN, and no stray click can land on one).
-    // The UI suite is the same at 82%, for the same reason one level up - it launches the real executable.
-    // On CI it costs nothing, because nobody is typing there.
+    // It is now 0.2%. Two things did it, and the figure is worth re-measuring after any change here.
+    //
+    //   * ShowWithoutActivation, said by the app's DialogBase and MainForm and by HiddenForm, gated on
+    //     WindowActivation.Suppressed which only this assembly sets. 86% -> 26%.
+    //   * Foreground.Release, called from Checks.Pump. It covers what the override cannot: WinForms reads
+    //     WindowState BEFORE ShowWithoutActivation, so a MAXIMISED form - which is how the app opens -
+    //     activates whatever the override says, and ShowDialog and the common dialogs ignore it outright.
+    //     Worse, the foreground then STAYS here for the rest of the run, because closing the active window
+    //     promotes a sibling rather than giving the desktop back. 26% -> 0.2%.
+    //
+    // What did not work:
     //
     //   * SetThreadDesktop onto a desktop of our own: fails with ERROR_BUSY (170) on a .NET STA thread even
     //     as its first act. Starting a thread as STA initialises the apartment, which creates the hidden
@@ -80,10 +94,13 @@ internal static class Sta
     //   * WS_EX_NOACTIVATE on every window, applied through a CBT hook at HCBT_CREATEWND: no measurable
     //     difference (88% against 90%), and it broke a check. WinForms sets its own extended styles from
     //     CreateParams and shows with SW_SHOW regardless.
+    //   * SetActiveWindow on each host, to give it the keyboard within this thread: that is also how a
+    //     process that ALREADY holds the foreground moves it, so it put back half of what the override had
+    //     just saved (25% -> 51%). Control.Focus is the thread-local way to say it, and is enough.
     //
-    // So it is left alone deliberately, rather than half-fixed. What is worth trying next is the one thing
-    // not tried: giving the product's DialogBase and MainForm a ShowWithoutActivation of their own, gated
-    // on a test-only switch - the supported way to say this, and the only one the framework honours.
+    // The UI suite still holds the foreground for about 82%, one level up: it drives the real executable
+    // through UI Automation, which is only dependable on a desktop that is actually in front. On CI none of
+    // this costs anything, because nobody is typing there.
 
     /// <summary>Runs <paramref name="job"/> on the STA thread and waits for it. An exception it throws is
     /// rethrown here with its original stack trace, so xUnit reports the failure where it happened.</summary>

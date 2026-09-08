@@ -355,18 +355,24 @@ internal static partial class Checks
     }
 
     /// <summary>The letter Alt activates for a caption, or null when it declares none.</summary>
-    private static char? MnemonicOf(string text)    {
+    private static char? MnemonicOf(string text)
+    {
         int i = text.IndexOf('&');
         return i >= 0 && i + 1 < text.Length && text[i + 1] != '&' ? char.ToLowerInvariant(text[i + 1]) : null;
     }
 
-    /// <summary>The clipboard is shared with everything else running, so a read can simply fail.</summary>
+    /// <summary>The clipboard is shared with everything else running, so a read can simply fail - and it
+    /// does not always fail LOUDLY: while another process has it open, ContainsText answers no rather than
+    /// throwing. Believing that would report a copy that did happen as a copy that did not, which was
+    /// measured as one run in six going red on nothing. So an empty answer is waited out too, and only an
+    /// empty one that outlasts the wait is passed on - the caller treats that as "could not read".</summary>
     private static string SafeClipboardText()
     {
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 10; i++)
         {
-            try { return Clipboard.ContainsText() ? Clipboard.GetText() : ""; }
-            catch { Thread.Sleep(60); }
+            try { if (Clipboard.ContainsText()) return Clipboard.GetText(); }
+            catch { /* another process has it open; the wait below is the whole remedy */ }
+            Thread.Sleep(60);
         }
         return "";
     }
@@ -582,6 +588,11 @@ internal static partial class Checks
     /// paid by every one of the thousand calls this makes.</para></summary>
     private static void Pump()
     {
+        // Almost nothing here activates a window, but the few things that must - a modal dialog, a common
+        // dialog - would otherwise leave the foreground in this process for the rest of the run. This is
+        // the one call every check makes often enough to put it back at once. See Infrastructure/Foreground.
+        Foreground.Release();
+
         for (var sw = Stopwatch.StartNew(); sw.ElapsedMilliseconds < 250;)
         {
             Application.DoEvents();

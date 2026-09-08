@@ -488,6 +488,9 @@ public sealed class MainForm : Form
         Location = new Point(virtualScreen.Right + 200, virtualScreen.Top);
     }
 
+    /// <inheritdoc cref="WindowActivation.Suppressed"/>
+    protected override bool ShowWithoutActivation => WindowActivation.Suppressed;
+
     /// <summary>Loads the embedded multi-resolution application icon; falls back to the system icon.</summary>
     private static Icon LoadAppIcon()
     {

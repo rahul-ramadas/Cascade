@@ -48,7 +48,7 @@ internal static partial class Checks
             ok &= Check("a dump leaves the mapped log out unless told otherwise",
                         HangWatchdog.WantedDetail() == DumpDetail.Heap);
 
-            probe = new Form { Opacity = 0, FormBorderStyle = FormBorderStyle.None, ClientSize = new Size(80, 60) };
+            probe = new HiddenForm { Opacity = 0, FormBorderStyle = FormBorderStyle.None, ClientSize = new Size(80, 60) };
             ok &= Check("switched off, nothing is started", HangWatchdog.Start(probe, off) is null);
 
             Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", "1");
@@ -288,7 +288,7 @@ internal static partial class Checks
             doc.WaitForIndex();
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form { ClientSize = new Size(600, 400), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
+            host = new HiddenForm { ClientSize = new Size(600, 400), Opacity = 0, FormBorderStyle = FormBorderStyle.None };
             host.Controls.Add(grid);
             grid.Attach(doc, settings);
             host.Show();

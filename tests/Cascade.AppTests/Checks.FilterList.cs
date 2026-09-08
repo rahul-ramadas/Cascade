@@ -34,7 +34,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -325,7 +325,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -441,7 +441,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -796,7 +796,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -935,7 +935,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -1102,7 +1102,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -1195,6 +1195,11 @@ internal static partial class Checks
             ok &= Check($"anything that moves the selection by itself collapses the group [{Selected()}]",
                         Selected() == "e");
 
+            // Ctrl+A only belongs to the list when the list has the keyboard - in the search box it still
+            // means "select this text". Said here because the window is shown without being activated, so
+            // nothing has the focus until something asks for it.
+            tree.FocusList();
+            ok &= Check("the list has the keyboard, so ctrl+a is its own", tree.ListHasFocus);
             tree.PressCmdKeyForTesting(Keys.Control | Keys.A);
             ok &= Check($"ctrl+a takes every row you can see [{Selected()}]", Selected() == "a b c d e");
 
@@ -1408,7 +1413,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -1594,7 +1599,7 @@ internal static partial class Checks
             doc.WaitForIndex();
 
             var tree = new FilterTreeControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),

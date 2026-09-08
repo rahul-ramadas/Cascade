@@ -44,7 +44,7 @@ internal static partial class Checks
 
             var settings = new AppSettings { MarkerVisibility = MarkerVisibilityMode.Always };
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -87,7 +87,7 @@ internal static partial class Checks
             // ...and it knows its range before anything is painted. A window placed off the screen never
             // gets a paint, so a range measured only while drawing stays empty and Home and End have
             // nowhere to go - which is exactly the state the UI tests run in.
-            using (var quiet = new Form { ClientSize = new Size(420, 300) })
+            using (var quiet = new HiddenForm { ClientSize = new Size(420, 300) })
             using (var unpainted = new LineGridControl())
             {
                 quiet.Controls.Add(unpainted);
@@ -432,7 +432,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -598,7 +598,7 @@ internal static partial class Checks
 
             var settings = new AppSettings();
             var grid = new LineGridControl { Dock = DockStyle.Fill };
-            host = new Form
+            host = new HiddenForm
             {
                 StartPosition = FormStartPosition.Manual,
                 Location = new Point(0, 0),
@@ -862,7 +862,7 @@ internal static partial class Checks
 
         var settings = new AppSettings();
         var grid = new LineGridControl { Dock = DockStyle.Fill };
-        var host = new Form
+        var host = new HiddenForm
         {
             StartPosition = FormStartPosition.Manual,
             Location = new Point(0, 0),

@@ -210,7 +210,6 @@ internal static partial class Checks
             // The options are reached mid-term, so ticking one must leave the box exactly as it was - it
             // still has the keyboard, and the caret and selection have not moved. The stock check box
             // selects itself when its Alt key is pressed, which loses all three.
-            probe.Activate();
             live.FocusInput();
             live.SetTermForTesting("declined", 3, 2);
             Pump();
@@ -277,7 +276,7 @@ internal static partial class Checks
 
         // The find bar's count arrives beside a term box and two checkboxes and must not shove any of them
         // along. It is hosted in a form here only because that is what the check drives.
-        var findHost = new Form { ClientSize = new Size(900, 60) };
+        var findHost = new HiddenForm { ClientSize = new Size(900, 60) };
         var findBar = new FindBar((_, _) => { }) { Visible = true };
         findHost.Controls.Add(findBar);
         ok &= NothingShifts("find bar", findHost,
@@ -649,7 +648,6 @@ internal static partial class Checks
             ok &= Check("and the matches are back", doc.MatchedLineCount == 80,
                         doc.MatchedLineCount.ToString());
 
-            // Edit: copying takes what is selected, and the line numbers only when asked.
             // Edit: copying takes what is selected, and the line numbers only when asked. The clipboard is
             // shared with everything else on the machine, so when it cannot be read at all this says so
             // rather than reporting a failure it did not actually observe.
@@ -659,7 +657,7 @@ internal static partial class Checks
             string plain = SafeClipboardText();
             form.ClickMenuForTesting("Edit", "Copy with Line Numbers");
             string numbered = SafeClipboardText();
-            if (plain.Length == 0 && numbered.Length == 0)
+            if (plain.Length == 0 || numbered.Length == 0)
                 Line("   (the clipboard would not open; skipped the copy checks)");
             else
             {

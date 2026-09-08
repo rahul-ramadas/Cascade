@@ -28,6 +28,9 @@ public abstract class DialogBase : Form
     /// <summary>Scales a logical (96-DPI) pixel value to the current DPI.</summary>
     protected int Dpi(int logical) => LogicalToDeviceUnits(logical);
 
+    /// <inheritdoc cref="WindowActivation.Suppressed"/>
+    protected override bool ShowWithoutActivation => WindowActivation.Suppressed;
+
     protected override bool ProcessDialogKey(Keys keyData)
     {
         if (keyData == Keys.Escape)

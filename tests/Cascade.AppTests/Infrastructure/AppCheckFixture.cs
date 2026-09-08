@@ -28,7 +28,7 @@ public abstract class AppCheckFixture
         {
             Checks.CaptureInto(lines);
             try { return group(); }
-            finally { Checks.CaptureInto(null); }
+            finally { Checks.CaptureInto(null); Foreground.Release(); }
         });
 
         foreach (string line in lines) _output.WriteLine(line);

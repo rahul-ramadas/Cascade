@@ -38,6 +38,7 @@ public class WindowTests(ITestOutputHelper output) : AppCheckFixture(output)
     [Fact] public void Closing_takes_the_window_down_before_the_file() => Verify(Checks.RunClosingChecks);
     [Fact] public void A_dropped_file_opens_as_a_log_or_as_filters() => Verify(Checks.RunFileDropChecks);
     [Fact] public void Tab_has_two_stops_and_stays_inside_an_open_bar() => Verify(Checks.RunTabStopChecks);
+    [Fact] public void A_run_leaves_the_desktop_where_it_found_it() => Verify(Checks.RunDesktopMannersChecks);
 }
 
 /// <summary>Menus and dialogs as keyboard surfaces: one Alt key each, no clashes, and nothing that moves

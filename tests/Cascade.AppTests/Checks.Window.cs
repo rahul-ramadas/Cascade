@@ -220,6 +220,75 @@ internal static partial class Checks
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern bool GetWindowPlacement(IntPtr window, ref WINDOWPLACEMENT placement);
 
+    /// <summary>A run of these checks builds a hundred windows on the developer's own desktop, and must not
+    /// take the keyboard away from what the developer is doing with it. Two things keep that promise -
+    /// <c>ShowWithoutActivation</c>, said by the app's own windows and by the hosts these checks build, and
+    /// <see cref="Foreground.Release"/> for the shows that ignore it - and this is what notices if either
+    /// stops working. scripts/Measure-Focus.ps1 puts a number on the same thing across a whole run.
+    /// <para>It can only ask the question on a desktop that someone is sitting at. With nothing else
+    /// holding the foreground there is nowhere to hand it back TO, and the checks say so rather than
+    /// failing for a reason that has nothing to do with the code.</para></summary>
+    internal static bool RunDesktopMannersChecks()
+    {
+        Line("-- a run leaves the desktop where it found it --");
+
+        if (Foreground.Elsewhere() == IntPtr.Zero)
+        {
+            Line("   nobody else has a window to hand the foreground back to, so there is nothing to check");
+            return true;
+        }
+        if (Foreground.HeldByUs)
+        {
+            Line("   this process already had the foreground, so there is nothing left to keep");
+            return true;
+        }
+
+        // Read before the first pump in each case: pumping is what hands the desktop back, so a window that
+        // took it would be let off if it were asked afterwards.
+        using var host = Hidden.Show(new HiddenForm());
+        bool ok = Check("a host window opens without taking the keyboard", !Foreground.HeldByUs);
+        Pump();
+
+        using var dialog = Hidden.Show(new GoToDialog(1, 100, 1));
+        ok &= Check("and neither does a dialog", !Foreground.HeldByUs);
+        dialog.Close();
+        Pump();
+
+        // A main window that the suites have stood the maximise down on - which is how nearly every check
+        // here builds one - is kept off the desktop by the override alone.
+        string? parked = Environment.GetEnvironmentVariable("CASCADE_TEST_OFFSCREEN");
+        Environment.SetEnvironmentVariable("CASCADE_TEST_OFFSCREEN", "1");
+        MainForm parkedWindow;
+        try { parkedWindow = new MainForm(new AppSettings(), new MachineState(), []) { Opacity = 0, NoSavePrompt = true }; }
+        finally { Environment.SetEnvironmentVariable("CASCADE_TEST_OFFSCREEN", parked); }
+        using (parkedWindow)
+        {
+            parkedWindow.Show();
+            ok &= Check($"nor a main window that is not maximised ({parkedWindow.WindowState})",
+                        !Foreground.HeldByUs);
+            parkedWindow.Close();
+            Pump();
+        }
+
+        // The main window opens MAXIMISED, and WinForms shows a maximised window with SW_SHOWMAXIMIZED
+        // whatever ShowWithoutActivation says - so this is the one show that can still take the desktop,
+        // and what matters is that it does not KEEP it.
+        using var window = ShippedWindow();
+        window.Show();
+        bool took = Foreground.HeldByUs;
+        Pump();
+        ok &= Check($"a maximised main window does not keep the desktop (it took it: {took})",
+                    !Foreground.HeldByUs);
+        // Only the first such window in a run gets to take it at all: once this process has let the
+        // foreground go, Windows will not let it take it back, which is the same lock that stops a
+        // background app stealing your keyboard. So say which of the two happened rather than insisting.
+        Line(took ? "   it took the desktop and gave it straight back"
+                  : "   Windows had already stopped this process taking the desktop back at all");
+        window.Close();
+
+        return ok;
+    }
+
     /// <summary>Leaves the maximised state and takes the new rectangle in one go, which is what snapping
     /// does to a maximised window and what an un-maximise followed by a move would not be.</summary>
     [System.Runtime.InteropServices.DllImport("user32.dll")]
