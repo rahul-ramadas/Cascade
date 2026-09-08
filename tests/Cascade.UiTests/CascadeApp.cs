@@ -822,11 +822,23 @@ internal sealed class CascadeApp : IDisposable
         t.Join(2000);
     }
 
+    /// <summary>
+    /// The dialog if it is up at this moment, with no waiting at all.
+    ///
+    /// <para><see cref="FindDialog"/> retries for five seconds, which is exactly right when waiting for one
+    /// to open and exactly wrong when asking whether one is standing: the answer "no" costs the full five
+    /// seconds every time. The sweep asks that question after every stage, and it was 217 of its 565
+    /// seconds.</para>
+    /// </summary>
+    public Window? DialogNow(string title)
+        => (_automation.GetDesktop().FindFirstChild(cf => cf.ByName(title))
+            ?? _automation.GetDesktop().FindFirstDescendant(cf => cf.ByName(title)))?.AsWindow();
+
+    /// <summary>The dialog, waiting up to five seconds for it to appear. Looks in the same places as
+    /// <see cref="DialogNow"/>, so the two cannot come to different answers.</summary>
     public Window? FindDialog(string title)
-        => Retry.WhileNull(() =>
-               (_automation.GetDesktop().FindFirstChild(cf => cf.ByName(title))
-                ?? _automation.GetDesktop().FindFirstDescendant(cf => cf.ByName(title)))?.AsWindow(),
-               TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100)).Result;
+        => Retry.WhileNull(() => DialogNow(title),
+                           TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(100)).Result;
 
     // ---- menus ----
 
