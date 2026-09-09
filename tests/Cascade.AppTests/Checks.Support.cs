@@ -585,7 +585,12 @@ internal static partial class Checks
     /// <para>Quiet is not the same as finished: the last frame of a drag is drawn by a timer, and a timer
     /// arrives when Windows feels like it - up to two of its ticks later. So the view is asked whether it
     /// still owes a frame, rather than the wait being lengthened to cover the worst case, which would be
-    /// paid by every one of the thousand calls this makes.</para></summary>
+    /// paid by every one of the thousand calls this makes.</para>
+    /// <para>The quiet window is WAITED ON rather than slept through: <c>MsgWaitForMultipleObjectsEx</c>
+    /// comes back the instant anything is posted, so work that lands one millisecond in is pumped at once
+    /// instead of after the whole window. That is what lets the window be short. MEASURED before it was:
+    /// 1,379 calls costing 27.0 s of a 49.2 s run, nearly all of it a flat sleep with nothing to do -
+    /// which is the single most expensive line in this assembly.</para></summary>
     private static void Pump()
     {
         // Almost nothing here activates a window, but the few things that must - a modal dialog, a common
@@ -598,12 +603,22 @@ internal static partial class Checks
             Application.DoEvents();
             if (PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) { Thread.Sleep(1); continue; }
             if (LineGridControl.AnyViewOwesAFrameForTesting) { Thread.Sleep(1); continue; }
-            // Quiet once is not the same as settled - a timer may be about to post. Ask again after a pause.
-            Thread.Sleep(15);
-            Application.DoEvents();
-            if (!PeekMessage(out _, IntPtr.Zero, 0, 0, PM_NOREMOVE)) return;
+            // Quiet once is not the same as settled - a timer may be about to post. Wait for one, and give
+            // up on it the moment the window passes with nothing having arrived.
+            if (MsgWaitForMultipleObjectsEx(0, IntPtr.Zero, QuietMs, QS_ALLINPUT, 0) == WaitTimeout) return;
         }
     }
+
+    // Long enough that a consequence already on its way is seen, short enough that a run of a thousand
+    // calls does not spend ten seconds of it asleep. Nothing here relies on the window covering a whole
+    // refresh tick: a frame the grid still owes is asked about above, which is the case that used to need it.
+    private const uint QuietMs = 6;
+    private const uint QS_ALLINPUT = 0x04FF;
+    private const uint WaitTimeout = 258;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint MsgWaitForMultipleObjectsEx(uint count, IntPtr handles, uint milliseconds,
+                                                           uint wakeMask, uint flags);
 
     private const uint PM_NOREMOVE = 0;
     private const uint WM_KEYDOWN = 0x0100;

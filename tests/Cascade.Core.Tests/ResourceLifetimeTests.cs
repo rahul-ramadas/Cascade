@@ -252,7 +252,12 @@ public class ResourceLifetimeTests
         // find to have started - two wall-clock bets in one test. MEASURED: it failed 2 runs in 6 with the
         // coverage collector attached, which is only the same machine made slower. A gate is the same
         // scenario with the timing taken out of it, and it fails for the reason it names or not at all.
-        string a = WriteSlowToScanLog(lines: 12, width: 24), b = WriteLog();
+        //
+        // The file is the default width for the same reason: once the gate does the holding, every extra
+        // character is one more doubling of backtracking that the release has to sit through AFTER the
+        // assertion has been made. Twelve lines of 24 cost 8.5 s of a 31 s suite and proved nothing the
+        // eight of 22 below do not.
+        string a = WriteSlowToScanLog(), b = WriteLog();
         var gate = new SemaphoreSlim(0);
         int reached = 0;
         var doc = new CascadeDocument();

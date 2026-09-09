@@ -231,9 +231,27 @@ internal sealed class CascadeApp : IDisposable
     // call returning. Waiting for the effect itself is always better and is what most helpers below do;
     // Settle is for the few places where the effect is not observable through automation. Keep it in
     // frames rather than round numbers so it stays tied to the reason it exists.
+    //
+    // A frame is waited out and then the app's UI thread is ASKED, with a message it must come back to its
+    // loop to answer. Sleeping alone proves nothing when the window is busy - it was perfectly possible to
+    // sleep through two frames of a filter pass and read the screen before it had drawn anything - and it
+    // cost the suite 16.9 s of the 64.9 s it took, over 326 calls that were asleep for all of it.
     private const int FrameMs = 33;
     private static readonly TimeSpan Poll = TimeSpan.FromMilliseconds(25);
-    private static void Settle(int frames = 2) => System.Threading.Thread.Sleep(FrameMs * frames);
+
+    private const uint WM_NULL = 0x0000, SMTO_ABORTIFHUNG = 0x0002;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
+                                                    uint flags, uint timeoutMs, out IntPtr result);
+
+    private void Settle(int frames = 2)
+    {
+        System.Threading.Thread.Sleep(FrameMs * Math.Max(1, frames - 1));
+        IntPtr hwnd = Window.Properties.NativeWindowHandle.ValueOrDefault;
+        if (hwnd != IntPtr.Zero) SendMessageTimeout(hwnd, WM_NULL, IntPtr.Zero, IntPtr.Zero,
+                                                    SMTO_ABORTIFHUNG, 2000, out _);
+    }
 
     /// <summary>Un-maximizes and resizes the window, to check layout when space runs short. Waits for the
     /// window to actually move: a resize that silently did nothing makes every later assertion pass
@@ -1136,7 +1154,7 @@ internal sealed class CascadeApp : IDisposable
         return lines.Length == 0 ? "no rows" : $"{lines.Min()}-{lines.Max()} ({lines.Length} rows)";
     }
 
-    private static void Expand(AutomationElement item)
+    private void Expand(AutomationElement item)
     {
         var ec = item.Patterns.ExpandCollapse.PatternOrDefault;
         if (ec is not null) { try { ec.Expand(); } catch { /* fall through */ } }
