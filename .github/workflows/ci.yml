@@ -79,7 +79,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
-      - run: dotnet build Cascade.slnx -c Release --no-restore -v q --nologo
+      - run: dotnet build Cascade.slnx -c Release -v q --nologo
 
   # The exe that ships, and the only checks that open it. Everything else measures coverage, which a
   # single-file bundle cannot give: its assemblies are loaded from inside the exe, where nothing can
@@ -133,7 +133,7 @@ jobs:
       # exe rather than referencing it - so the publish above is the only build of the app in this job.
       - name: Build the checks that open the bundle
         run: >
-          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-restore -v q --nologo
+          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo
           -p:BuildProjectReferences=false ${{ env.FAST_BUILD }}
 
       - name: Verify publish stayed framework-dependent
@@ -260,7 +260,7 @@ jobs:
         with:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
       - name: Which tests are mine
         id: split
         run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -Shard ${{ matrix.shard }} -Of 2 -By Class -ExpectedFile artifacts/test-results/core-${{ matrix.shard }}.expected
@@ -295,7 +295,7 @@ jobs:
         with:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
       - name: Which tests are mine
         id: split
         run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 3 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
@@ -333,7 +333,7 @@ jobs:
         with:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
       - name: Which tests are mine
         id: split
         run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 6 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
