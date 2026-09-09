@@ -7,7 +7,7 @@ namespace Cascade.AppTests;
 /// happening looks exactly like one that did.</summary>
 public class RenderTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void Scrolling_sideways_never_paints_over_the_margin() => Verify(Checks.RunRenderChecks, atLeast: 32);
+    [Fact] public void Scrolling_sideways_never_paints_over_the_margin() => Verify(Checks.RunRenderChecks, atLeast: 35);
     [Fact] public void Home_and_end_reach_both_edges_of_the_widest_line() => Verify(Checks.RunHorizontalScrollChecks, atLeast: 8);
     [Fact] public void Wrapped_rows_leave_no_dead_space() => Verify(Checks.RunWordWrapChecks, atLeast: 26);
     [Fact] public void The_scrollable_width_matches_what_is_drawn() => Verify(Checks.RunTextWidthChecks, atLeast: 6);

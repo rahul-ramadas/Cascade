@@ -1049,6 +1049,9 @@ public sealed class LineGridControl : Control
 
     public void RebuildFonts()
     {
+        // The canvas keeps a GDI handle per face it has drawn with; the ones it holds are about to be
+        // replaced, and nothing else would tell it.
+        _canvas.Discard();
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
@@ -1426,6 +1429,10 @@ public sealed class LineGridControl : Control
     /// <summary>How many times the view has actually repainted. A picture of it cannot answer that - drawing
     /// a control to a bitmap paints it whether or not anything asked it to.</summary>
     internal int PaintsForTesting => _paints;
+
+    /// <summary>How many of the faces this view draws with have a handle that goes the short road, and how
+    /// many had to be left on the general one.</summary>
+    internal (int Working, int Rejected) ShortRoadFacesForTesting => _canvas.FacesForTesting;
 
     /// <summary>When the last frame of text finished. Held against the moment the mouse report arrived, this
     /// is how long the view lags the hand.</summary>
@@ -2096,7 +2103,7 @@ public sealed class LineGridControl : Control
             ColumnAlign.Center => cell.Left + (cell.Width - width) / 2,
             _ => cell.Left
         };
-        ink.Text(span, x, cell.Top, cell, fore, back, font);
+        ink.Text(span, x, cell.Top, cell, fore, back, font, plainFace: true);
     }
 
     /// <summary>Where a character of a cell's text sits on screen.</summary>
@@ -3022,7 +3029,7 @@ public sealed class LineGridControl : Control
         int x = strip.Left - (Wrapping ? 0 : _hScroll);
         bool plain = charWidth > 0 && part.IndexOfAnyExceptInRange(' ', '~') < 0;
         var (shownFrom, shownTo) = plain ? OnScreenPart(part.Length, x, charWidth) : (0, part.Length);
-        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back, font);
+        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back, font, plain);
         if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
         return (plain ? part.Length * charWidth : DrawnWidth(part, font, charWidth)) + 8;
     }
@@ -3180,7 +3187,8 @@ public sealed class LineGridControl : Control
 
         int digitWidth = _longWay ? 0 : CharWidthOf(0);
         if (digitWidth > 0)
-            ink.Text(text, room.Right - text.Length * digitWidth, y, room, colour, _settings.GutterBack, FontRegular);
+            ink.Text(text, room.Right - text.Length * digitWidth, y, room, colour, _settings.GutterBack, FontRegular,
+                     plainFace: true);
         else
             ink.TextIn(text, room, colour, FontRegular,
                        TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
