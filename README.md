@@ -4,11 +4,12 @@
 
 **A log analyzer for files that don't fit in memory, with filters that nest.**
 
-A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.github.io/) for Windows.
+A from-scratch reimplementation of [TextAnalysisTool.NET](https://textanalysistool.github.io/).
 
 [![CI](https://github.com/rahul-ramadas/Cascade/actions/workflows/ci.yml/badge.svg)](https://github.com/rahul-ramadas/Cascade/actions/workflows/ci.yml)
 
 [Download](../../releases/latest/download/Cascade.exe) ·
+[Install](#install) ·
 [Filters](#filters) ·
 [Reading the log](#reading-the-log) ·
 [Fields](#fields) ·
@@ -22,62 +23,75 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 ---
 
+## Install
+
+Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run it. One file, no installer, and it keeps itself up to date.
+
+```powershell
+curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
+```
+
+You need Windows and the .NET 10 Desktop Runtime. Cascade draws with GDI rather than a GPU, so it stays quick over a remote desktop.
+
+---
+
 ## Filters
 
 ### What a filter is
 
 ![The filter editor: match type, pattern, options, colours and the three style flags](docs/images/filter-edit.png)
 
-- Matches a **substring**, a **.NET regular expression**, or **marked by marker 1–8**.
-- A line is shown when an enabled **include** matches it and no enabled **exclude** does — unless an enabled filter nested under that exclude matched it too, which [overrules it](#nesting). Preferences can change this to **first match in the list wins**, described below.
-- Colour, background, bold, italic and underline are each **on, off, or inherited**.
+A filter matches a **substring**, a **.NET regular expression**, or **marked by marker 1–8**, and it either includes lines or excludes them. A line is shown when an enabled include matches it and no enabled exclude does. Colour, background, bold, italic and underline are each **on, off, or inherited**.
 
 ### Nesting
 
 ![Alt+Right nests inventory-svc under warnings, and its count falls from 330,152 to 20,666](docs/images/nesting.gif)
 
-- A child narrows its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*.
-- A child matches a line only if **every one of its ancestors matches it too** — whether or not those ancestors are switched on.
-- So switching a parent off does not stop it narrowing its children: you can scope a branch without showing everything the parent matches.
-- An **enabled** filter nested under an **exclude** overrules it on the lines they both match, so exceptions read straight down the list: `A` → `≠ AB` → `ABC` shows everything with `A`, except `AB`, but keeps `ABC`. Nest another exclude under that one and it takes over again, as deep as you like. Switch the nested filter off and the exclude has the last word again.
+A child narrows its parent: `[ERROR]` → `payment-svc` means *errors, in payments only*. Nest with `Alt+→`, or by dragging.
+
+- A child matches a line only if **every one of its ancestors matches it too** — whether or not those ancestors are switched on. So switching a parent off does not stop it narrowing its children: you can scope a branch without showing everything the parent matches.
+- An **enabled** filter nested under an **exclude** overrules it on the lines they both match, so exceptions read straight down the list. `A` → `≠ AB` → `ABC` shows everything with `A`, except `AB`, but keeps `ABC`. Nest another exclude under that one and it takes over again, as deep as you like. Switch the nested filter off and the exclude has the last word again.
 - Only nesting overrules. An exclude elsewhere in the list — a sibling, or another branch — still takes the line away outright.
-- A line takes its colour from the **first enabled include in the list** that matched it, refined by whichever enabled includes nested under that one matched too — never by a filter in a branch further down, however deeply nested. Excludes never colour anything: a line won back by overruling one is coloured by that same rule, which need not pick the filter that won it back.
-- Whatever the winning filter leaves unset it inherits from the filters above it, so a filter with no colour of its own draws the line in the view's default colours.
+- A line takes its colour from the **first enabled include in the list** that matched it, refined by whichever enabled includes nested under that one matched too — never by a filter in a branch further down, however deeply nested.
+- Excludes never colour anything, and an exception nested under one colours a line only if it also sits under the include that claimed it. Otherwise the line comes back in that include's colour.
+- Whatever the winning filter leaves unset it takes from its nearest ancestor that sets it, attribute by attribute, and from the view's defaults when none does.
 
 ### Which filter wins
 
-- **Preferences ▸ Exclude filters** chooses between two rules, and the whole list is read the same way whichever you pick.
-- **Always hide what they match** is the default, and what every filter file was written against: an exclude takes the line wherever it sits, subject to the nesting above.
-- **Hide only what an earlier filter has not claimed** makes the list one ordered set of rules. The first enabled filter that matches a line decides everything about it — whether you see it, and what colour it is — and only a filter nested under that one may take over. An exclude is then simply a filter whose answer is *hidden*, so put it above what it should beat and below what should beat it.
-- Under that rule an exception needs no special case: `≠ Heartbeat` → `Error` hides heartbeats and keeps the ones that are errors, because the nested filter takes over from the one it sits under. Say *show the rest of the file* with a catch-all at the foot of the list — a filter with an empty pattern, which matches every line including the blank ones.
-- Switching between the two never re-reads the file: the view is rebuilt from what is already in memory.
-- Nest with `Alt+→`, or by dragging.
+An exclude beats everything by default, wherever it sits in the list, which is how TextAnalysisTool.NET behaves. If you would rather an exclude took its precedence from its place in the list, like any other filter, **Preferences ▸ Exclude filters** offers the other rule: **Always hide what they match, wherever they are listed** is the default, **Hide only what an earlier filter has not claimed** the alternative.
+
+Pick the second and the list reads as one ordered set of rules. The first enabled filter that matches a line decides everything about it, whether you see it and what colour it is, and only a filter nested under that one may take over. An exclude is then just a filter whose answer is *hidden*: put it above what it should beat and below what should beat it.
+
+- An exception then needs no special case. `≠ Heartbeat` → `Error` hides heartbeats and keeps the ones that are errors, because a nested filter takes over from the one it sits under.
+- To say *show the rest of the file*, end the list with a catch-all: a filter with an empty pattern matches every line, blank ones included.
+- Switching between the two rules never re-reads the file. The view is rebuilt from the matches already in memory.
 
 ### The filter list
 
 ![The filter list: nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
 
-- **Count** is how many lines in the whole file match, not how many are on screen — or how many are in the crop, when you have one.
+- **Count** is how many lines in the whole file match, not how many are on screen, or how many are in the crop when you have one.
 - `Shift+Space` switches a filter's whole subtree on or off.
-- The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`) — and comes back next time on the same edge, at the same size.
+- The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`), and comes back next time on the same edge at the same size.
 
 ### From the log to a filter
 
 ![Dragging over an order number inside a line, then Ctrl+N: the Add Filter dialog opens seeded with it, and the new filter arrives already coloured](docs/images/new-filter.gif)
 
-- `Ctrl+N` turns the text you have selected inside a line — or the whole line under the caret — into a filter.
+`Ctrl+N` turns the text you have selected inside a line — or the whole line under the caret — into a filter.
 
 ### Where a new filter goes
 
-- Every new filter is made in the same dialog, which asks where it should go:
+Every new filter is made in the same dialog, which asks where it should go:
 
 | Key | Where it goes |
 |---|---|
-| `Ctrl+N` | The top of the list, or the end of it — your preference |
+| `Ctrl+N` | The top of the list, or the end of it, as set in [Preferences](#preferences) |
 | `Ctrl+Shift+N` | Directly above the selected filter, as its sibling |
 | `Ctrl+Alt+N` | Under the selected filter, as its child |
 
-- The key you press only picks a starting point. All three are offered in the dialog, each with its key beside it, and pressing another one there moves the choice — so changing your mind after `Ctrl+N` costs a keystroke and never the mouse.
+The key you press only picks a starting point. All three are offered in the dialog, each with its key beside it, and pressing one of the others moves the choice. Changing your mind after `Ctrl+N` costs a keystroke and never the mouse.
+
 - The pattern box previews the colours the filter would really take where it is going, inheritance and all, so the preview follows the choice.
 - A place that cannot be had — nothing selected to sit above, or nesting that would run past the deepest level — is shown but greyed, and asking for it settles on the default.
 
@@ -102,16 +116,16 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 ![Searching the filter list for 'payment': matches keep their colour, everything else is dimmed but stays where it was](docs/images/filter-search.png)
 
-- `Ctrl+E` searches the list **without hiding or reordering it** — non-matching filters dim rather than disappear.
+- `Ctrl+E` searches the list **without hiding or reordering it**: non-matching filters dim rather than disappear.
 - `F4` / `Shift+F4` walk the log through the selected filter's matches, without changing which filters are on.
 
 ### Presets
 
 ![The presets pane: one preset ticked and a different one highlighted](docs/images/presets.png)
 
-- A preset names a combination of filters — *the payment incident*, *the slow queries*.
+- A preset names a combination of filters: *the payment incident*, *the slow queries*.
 - The **tick** applies a preset; the **highlight** only says which one the commands act on.
-- Ticking two gives you both, and ticking one moves only its own filters — anything you switched on by hand stays as you left it.
+- Ticking two gives you both, and ticking one moves only its own filters, so anything you switched on by hand stays as you left it.
 
 ### Dim or hide
 
@@ -128,8 +142,8 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - Everything then behaves as though the file held only those lines: the counts, the match map, the scrollbar, `Ctrl+End`, `Ctrl+A`, the find tally, elapsed times, **Save Current Lines**. Only the line numbers still read the file's own, so you never lose your place in it.
 - The crop takes everything between the first and last line you selected, **including lines the filters are hiding** — so `Ctrl+H` inside a crop reveals the rest of that stretch rather than a different one.
 - Filters still read the whole file, and a filter's count says how much of it is in front of you. Hover one for both numbers.
-- `Ctrl+]` puts the file back, and pressing it again returns to the same crop — so looking outside for a moment costs two keystrokes and never a re-selection. Clicking the crop in the menu bar does the same.
-- Cropping clears the selection, since the lines were only the way of naming the stretch. Lifting the crop hands them back, exactly — unless you have chosen something else in the meantime, which always wins.
+- `Ctrl+]` puts the file back, and pressing it again returns to the same crop. Looking outside for a moment costs two keystrokes and never a re-selection. Clicking the crop in the menu bar does the same.
+- Cropping clears the selection, since the lines were only the way of naming the stretch. Lifting the crop hands them back exactly, unless you have chosen something else in the meantime, which always wins.
 
 ---
 
@@ -146,24 +160,24 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 
 ![The log filtered down to errors: the line numbers skip, and the margin beside them shows the time between one error and the next falling from tenths of a second to thousandths as the incident starts](docs/images/elapsed.png)
 
-- Cascade finds the timestamp in your log by itself, and puts the time since the previous line in the margin.
-- The previous line **on screen** — so with the noise filtered away it measures between the lines you kept, which is a latency profile of whatever the filters select.
+- Cascade finds the timestamp in your log by itself and puts the time since the previous line in the margin — the previous line **on screen**, so with the noise filtered away it measures between the lines you kept, which is a latency profile of whatever the filters select.
 - `Ctrl+R` on a line measures everything from **that** line instead: how long after the trigger each thing happened, with the lines above it reading as negative. Unlike the gap to the previous line, it does not change when you filter.
 
 ![The same errors measured from one of them: the lines above the reference read as negative, the reference itself sits at zero and is picked out in the margin, and the ones below climb away from it](docs/images/elapsed-reference.png)
 
-- `Ctrl+Shift+R` steps between the three: the previous line, the start of the file, and your reference. The status bar says which — `Δ Prev`, `Δ Start`, `Δ Ref` — and the column stays the same width whichever it is.
+- `Ctrl+Shift+R` steps between the three: the previous line, the start of the file, and your reference. The status bar says which (`Δ Prev`, `Δ Start`, `Δ Ref`) and the column stays the same width whichever it is.
 - Cropped, `Δ Start` measures from the start of the crop, so a test case reads from its own first line rather than from the top of the log.
 - `Ctrl+Shift+G` goes back to the reference, wherever you have scrolled to since.
 - Select a line and the status bar says the same thing in words; select several and it says how long they cover.
-- If your timestamp is somewhere the guess cannot reach, name the field it is in under **Field Settings**; **Ctrl+Shift+M** and **Ctrl+Shift+B** turn the two displays off.
+- If your timestamp is somewhere the guess cannot reach, name the field it is in under **Field Settings**. `Ctrl+Shift+M` and `Ctrl+Shift+B` turn the two displays off.
 
 ### The match map
 
-![The match map beside the log: the whole file at a pixel a line, markers down the left edge, find hits down the right](docs/images/match-map.png)
+![The match map between the log and the scrollbar: a pixel a line, markers down its left edge, find hits down its right](docs/images/match-map.png)
 
-- The scrollbar is replaced by the whole file at a pixel a line, in the colours the filters gave it.
-- Unmatched stretches are compressed, so one error among ten thousand ordinary lines still gets a pixel of its own.
+- `Ctrl+M` puts a strip beside the scrollbar showing the log itself, a pixel a line, in the colours the filters gave it. Markers run down its left edge and find hits down its right.
+- Where one pixel stands for many lines the exception among them wins, so a lone error among ten thousand ordinary ones still gets a pixel of its own.
+- A file too big to fit even at thirty lines a pixel shows as a window around where you are, sliding as you read. The scrollbar beside it is always the whole file.
 
 ### Markers
 
@@ -203,13 +217,13 @@ Long lines are either wrapped (`Alt+Z`) or split into fields you can hide and re
 A template is a picture of your line: write one out, replace what changes with `*`, and wrap each field in `{ }`.
 
 ```
-your line:  [2026-08-05T05:00:02][BthPort][INFO] WDF PnP state: started
+your line:  [2026-08-05T09:44:02.118][payment-svc][ERROR] charge declined for order 48210
 template:   {[*]}{[*]}{[*]} {*}
 ```
 
 | | |
 |---|---|
-| `*` | the text that changes — matches as little as it can, up to whatever you wrote next |
+| `*` | the text that changes: matches as little as it can, up to whatever you wrote next |
 | `.` | any one character, whatever it happens to be |
 | `{ }` | one **field**: the unit that gets hidden or moved, punctuation and all |
 | anything else | has to be there, except a run of spaces, which matches any run of spaces |
@@ -221,12 +235,11 @@ template:   {[*]}{[*]}{[*]} {*}
 
 ![Hiding a field, then Ctrl+Shift+X switching between the two layouts](docs/images/fields.gif)
 
-- **Columns** lays the fields out as a table: drag a header to reorder, double-click it to rename, right-click for the list of which fields are shown.
+**Columns** lays the fields out as a table: drag a header to reorder, double-click it to rename, right-click for the list of which fields are shown.
 
 ![The same log laid out inline, with a chip strip above it and two fields put away](docs/images/fields-inline.png)
 
-- **Inline** keeps every row a line and leaves out what you hid — better when one field dwarfs the rest.
-- A strip of chips stands in for the header: click one to put a field away or bring it back, drag it to move the field along the row.
+**Inline** keeps every row a line and leaves out what you hid — better when one field dwarfs the rest. A strip of chips stands in for the header: click one to put a field away or bring it back, drag it to move the field along the row.
 
 ### Field settings
 
@@ -234,7 +247,7 @@ template:   {[*]}{[*]}{[*]} {*}
 
 - `Ctrl+Shift+D` tries the template against real lines from the file: how many of them match, and where a line that doesn't stopped matching.
 - **Detect** writes the template for you when the line begins with bracketed groups: `[ ]`, `( )` or `< >`.
-- Name a field as the **time** and Cascade proposes the format that reads it — a .NET format string like `yyyy-MM-dd HH:mm:ss.fff`, or `epoch:ms` — and shows it reading your own log back to you.
+- Name a field as the **time** and Cascade proposes the format that reads it — a .NET format string like `yyyy-MM-dd HH:mm:ss.fff`, or `epoch:ms` — and shows that format reading your own log back to you.
 
 ---
 
@@ -245,7 +258,7 @@ template:   {[*]}{[*]}{[*]} {*}
 - Drop a log on the window, hand it to `Cascade.exe` on the command line, or use **Open from Clipboard** for one you have pasted from somewhere else.
 - `F5` re-reads the file, for when you have just re-run whatever produced it.
 - Dropping a `.cascade` or `.tat` file loads its filters instead of opening it as a log.
-- The file is memory-mapped and indexed as it streams, four bytes a line: a 1 GB, 10-million-line log is on screen in milliseconds and fully indexed in under half a second.
+- The file is memory-mapped and indexed as it streams, at a little over two bytes a line: a 1 GB, 10-million-line log is on screen in milliseconds and fully indexed in under half a second.
 
 ### Encodings
 
@@ -268,11 +281,13 @@ template:   {[*]}{[*]}{[*]} {*}
 
 ![The Preferences dialog](docs/images/preferences.png)
 
-- **File ▸ Settings ▸ Export / Import** moves your preferences to another machine.
+Font, colours, tab size and line spacing, plus the switches not worth a menu entry of their own: [which filter wins](#which-filter-wins), loading the last filter file at startup, where `Ctrl+N` puts a new filter, a memory dump to `%TEMP%` if the window ever stops responding, and support for screen readers and UI automation. Anything the View menu already toggles stays there rather than being repeated here.
+
+**File ▸ Settings ▸ Export / Import** moves your preferences to another machine.
 
 ### Where things live
 
-- Preferences in `%APPDATA%\Cascade\settings.json`, machine-local state in `state.json`, and nothing at all in the registry. `CASCADE_SETTINGS_DIR` moves the folder.
+Preferences in `%APPDATA%\Cascade\settings.json`, machine-local state in `state.json`, and nothing at all in the registry. `CASCADE_SETTINGS_DIR` moves the folder.
 
 ### Command line
 
@@ -282,19 +297,6 @@ Cascade.exe [file] [/Filters:<path>]
 
 - `/Filters:` also stops the last-used filter file being loaded automatically.
 - `CASCADE_UPDATE=off` turns off the update check.
-
----
-
-## Install
-
-Download **[Cascade.exe](../../releases/latest/download/Cascade.exe)** and run it — a single file, no installer.
-
-```powershell
-curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/Cascade/releases/latest/download/Cascade.exe
-```
-
-- Needs Windows and the .NET 10 Desktop Runtime. It updates itself.
-- Draws with GDI rather than a GPU, so it stays quick over a remote desktop.
 
 ---
 
@@ -338,7 +340,7 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 | `Ctrl+[` / `Ctrl+]` | Crop to the selected lines / show the whole file again, or return to the crop |
 | `Ctrl+N` / `Ctrl+Shift+N` / `Ctrl+Alt+N` | New filter from the selection or the current line, going to the usual end of the list / above the selected filter / under it as a child |
 | `Ctrl+E` | Search the filter list |
-| `Ctrl+L` / `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Line numbers / match map or plain scrollbar / word wrap / split lines into fields |
+| `Ctrl+L` / `Ctrl+M` / `Alt+Z` / `Ctrl+Shift+C` | Line numbers / match map / word wrap / split lines into fields |
 | `Ctrl+Shift+X` / `Ctrl+Shift+D` | Switch field layout / field settings |
 | `Ctrl+Shift+M` / `Ctrl+Shift+B` | Elapsed times in the margin / in the status bar |
 | `Ctrl+R` / `Ctrl+Shift+R` | Measure from this line / step through what to measure from |
@@ -353,6 +355,8 @@ curl.exe -fL --remove-on-error -o Cascade.exe https://github.com/rahul-ramadas/C
 
 ## Building
 
+Needs the .NET 10 SDK.
+
 ```powershell
 dotnet build Cascade.slnx -c Release
 dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj   # engine tests
@@ -360,7 +364,7 @@ dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj   # engine tests
 ./scripts/Build-DocImages.ps1                                    # every picture above, from the app
 ```
 
-- .NET 10 SDK. `src/Cascade.Core` is the UI-agnostic engine — indexing, filtering, find, markers, columns, persistence — and `src/Cascade.App` is the WinForms GUI.
+`src/Cascade.Core` is the UI-agnostic engine — indexing, filtering, find, markers, columns, persistence — and `src/Cascade.App` is the WinForms GUI.
 
 ## License
 
