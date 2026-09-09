@@ -136,7 +136,12 @@ jobs:
       # The engine over a log big enough to page the index, stream a filter pass, and make the match cache
       # be built from partial information. Answers are compared against the generator's own arithmetic, so
       # nothing here is a snapshot of what the engine happened to say last time.
+      # Every step from here to the end of the job is independent of the ones before it, and each has a
+      # timeout of its own - so none of them may be skipped because an earlier one went red. That is the
+      # same rule as the timeouts, stated for failure rather than for time: the real-file checks below had
+      # never run once on CI, because whatever came before them always used the budget up first.
       - name: Engine soak on a generated multi-hundred-megabyte log
+        if: ${{ !cancelled() }}
         timeout-minutes: 20
         env:
           CASCADE_SOAK: '1'
@@ -156,6 +161,7 @@ jobs:
       # coming back. It arms inside the test host, so it says nothing when the wedge is anywhere else - and
       # the watchdog says nothing about which test was running. Between them there is no silent case left.
       - name: Fuzz the engine harder
+        if: ${{ !cancelled() }}
         timeout-minutes: 30
         env:
           CASCADE_FUZZ_SCALE: ${{ env.FUZZ_SCALE }}
@@ -178,6 +184,7 @@ jobs:
       # underneath would break for a reason that is nothing to do with Cascade.
       - name: Find a real log on the runner
         id: log
+        if: ${{ !cancelled() }}
         timeout-minutes: 5
         run: |
           $roots = @('C:\Windows\Logs', 'C:\Windows\Panther', "$env:SystemRoot\Logs")
@@ -204,7 +211,7 @@ jobs:
       # The copy goes beside the results rather than among them: the results are uploaded whole, and a
       # runner's largest log is not something anybody wants to download to read a trx.
       - name: The engine over a log nobody wrote for it
-        if: steps.log.outputs.path != ''
+        if: ${{ !cancelled() && steps.log.outputs.path != '' }}
         timeout-minutes: 20
         env:
           CASCADE_BIG_FILE: ${{ github.workspace }}\artifacts\reallog\real.log
@@ -295,6 +302,7 @@ jobs:
           -ResultsDirectory artifacts/nightly-core
 
       - name: Repeat the app checks
+        if: ${{ !cancelled() }}
         timeout-minutes: 45
         run: >
           pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
@@ -310,6 +318,7 @@ jobs:
       # and a report behind, and the step after this refuses to pass if any were written. MEASURED at two
       # seconds over a whole suite run: 53 watchdogs armed, 0 hangs, 39 of 39 green.
       - name: Repeat the UI suite, watching for stalls
+        if: ${{ !cancelled() }}
         timeout-minutes: 60
         env:
           CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
