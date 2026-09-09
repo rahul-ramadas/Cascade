@@ -1,21 +1,13 @@
 name: Prepare a .NET runner
 description: >
-  Gets a runner ready to build Cascade: the SDK global.json asks for, and the coverage collector where a
-  job needs it. Every job here starts with it, so the work is written once rather than a dozen times.
+  Gets a runner ready to build Cascade: the SDK global.json asks for, and nothing else.
 
-  DELIBERATELY NO PACKAGE CACHE. actions/cache looked obvious and MEASURED as a bad trade: the packages
-  are thousands of small files, and SAVING them cost between 66 and 106 seconds at the end of every job -
+  DELIBERATELY NO CACHING. actions/cache looked obvious and MEASURED as a bad trade twice over. The
+  packages are thousands of small files and SAVING them cost 66-106s in the post step of every job -
   which counts, because a job is not finished until its post steps are, and whatever waits on it does not
-  start. Each build restores its own project graph instead, which is smaller than the solution's and
-  costs a fraction of that.
-
-inputs:
-  coverage:
-    description: Also make dotnet-coverage available.
-    default: 'false'
-  coverage-version:
-    description: Which version of it, pinned so a new release cannot move the coverage number.
-    default: 18.11.0
+  start. Restoring the 60MB coverage collector from a cache instead of installing it was a wash: 21s of a
+  100s job either way. The collector is now fetched ALONGSIDE the build, where four idle cores and a
+  network wait overlap for nothing, and each build restores its own project graph.
 
 runs:
   using: composite
@@ -40,24 +32,3 @@ runs:
       with:
         global-json-file: global.json
 
-    # The collector is a 60MB download that a dozen jobs would otherwise each make, and MEASURED at 8s on a
-    # quick runner and 23s on a slow one - which is a tenth of the whole pipeline. Restored from a small
-    # cache with a fixed key; nothing here SAVES it, because a cache save runs in the post step and holds
-    # the job open (that mistake cost 66-106s a job when the packages were cached too). The `tools` job
-    # keeps it filled, off everybody's critical path.
-    - uses: actions/cache/restore@v4
-      if: inputs.coverage == 'true'
-      with:
-        path: ~/.dotnet/tools
-        key: dotnet-coverage-${{ runner.os }}-${{ inputs.coverage-version }}
-
-    - name: The coverage collector
-      if: inputs.coverage == 'true'
-      shell: pwsh
-      run: |
-        # Asked to run rather than merely looked for: a cache that restored something unusable would
-        # otherwise fail later, inside a test step, where it reads as the tests being broken.
-        $ok = $false
-        try { $null = & dotnet-coverage --version 2>&1; $ok = $LASTEXITCODE -eq 0 } catch { }
-        if ($ok) { Write-Host 'dotnet-coverage came from the cache.'; exit 0 }
-        dotnet tool install --global dotnet-coverage --version ${{ inputs.coverage-version }}

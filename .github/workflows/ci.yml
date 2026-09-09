@@ -41,8 +41,7 @@ defaults:
 # was necessary. It is now a fan of jobs that hold each other up only where one really needs what another
 # produced:
 #
-#   tools ─────────────────────────────────────┐    keeps the coverage collector's cache filled
-#   strict x5 ─────────────────────────────────┤    every analyzer and code style rule, one project each
+#   strict x5 ─────────────────────────────────┐    every analyzer and code style rule, one project each
 #   package ───────────────────────────────────┤    publish, sign and hand over the exe that ships
 #   bundle ────────────────────────────────────┤    open that same bundle: dialogs, automation, arguments
 #   core x2 ┐                                  │
@@ -75,20 +74,6 @@ env:
   COVERAGE_TOOL_VERSION: 18.11.0
 
 jobs:
-  # Fills the cache the test jobs restore the coverage collector from. Nothing waits on it - it is here so
-  # that the save, which runs in a job's post step and holds it open, never lands on a job anybody needs.
-  tools:
-    name: Keep the collector warm
-    runs-on: windows-latest
-    steps:
-      - uses: actions/cache@v4
-        id: cache
-        with:
-          path: ~/.dotnet/tools
-          key: dotnet-coverage-${{ runner.os }}-${{ env.COVERAGE_TOOL_VERSION }}
-      - if: steps.cache.outputs.cache-hit != 'true'
-        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
-
   # The quality gate. It produces nothing anybody uses; it exists so that every analyzer diagnostic, code
   # style rule and package advisory is still an error, without the other twelve jobs each paying 53
   # seconds to be told the same thing.
@@ -316,10 +301,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
-        with:
-          coverage: true
-          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+      # The collector is a 60MB install and the build has the machine to itself: fetching it alongside
+      # costs nothing, where fetching it first cost 21s of a 100s job.
+      - name: Build, and fetch the coverage collector while it compiles
+        run: |
+          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+          if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+          Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
+          dotnet-coverage --version
       - name: Run the shard
         timeout-minutes: 10
         run: |
@@ -349,10 +339,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
-        with:
-          coverage: true
-          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+      # The collector is a 60MB install and the build has the machine to itself: fetching it alongside
+      # costs nothing, where fetching it first cost 21s of a 100s job.
+      - name: Build, and fetch the coverage collector while it compiles
+        run: |
+          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+          if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+          Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
+          dotnet-coverage --version
       - name: Run the shard
         timeout-minutes: 15
         run: |
@@ -385,10 +380,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
-        with:
-          coverage: true
-          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
-      - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+      # The collector is a 60MB install and the build has the machine to itself: fetching it alongside
+      # costs nothing, where fetching it first cost 21s of a 100s job.
+      - name: Build, and fetch the coverage collector while it compiles
+        run: |
+          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
+          if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
+          Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
+          dotnet-coverage --version
       - name: Run the shard
         timeout-minutes: 15
         env:
