@@ -1238,7 +1238,32 @@ public class ManualSweep : IDisposable
     private string PresetList() => string.Join("|", SafePresetNames());
 
     /// <summary>The top-level filters as one reading, for waits that follow an edit to the list.</summary>
-    private string Roots() => string.Join("|", _app.RootFilterNames());
+    private string Roots() => string.Join("|", RootNames());
+
+    /// <summary>
+    /// The top-level filter names, read again if UI Automation refuses the first attempt.
+    ///
+    /// <para>These are read while the window is rebuilding the very list being walked - every caller is a
+    /// keystroke that duplicates, undoes or redoes a filter - and UI Automation gives way there from time
+    /// to time. Two consecutive nightly runs reported "An event was unable to invoke any of the subscribers
+    /// (0x80040201)" out of this walk, in two DIFFERENT stages, which is the shape of a transient client
+    /// error rather than a fault in the application. A rig that falls over on it files a finding against
+    /// code that did nothing wrong, which is worse than useless.</para>
+    ///
+    /// <para>Tolerated, not swallowed: the last refusal is thrown if it never comes good, so a window that
+    /// really has stopped answering still fails the stage and says why.</para>
+    /// </summary>
+    private string[] RootNames()
+    {
+        Exception? refused = null;
+        for (int attempt = 0; attempt < 4; attempt++)
+        {
+            if (attempt > 0) Wait(150);
+            try { return _app.RootFilterNames(); }
+            catch (COMException ex) { refused = ex; }
+        }
+        throw refused!;
+    }
 
     private List<string> MapColours(AutomationElement map)
     {
@@ -1428,33 +1453,33 @@ public class ManualSweep : IDisposable
     {
         if (!ClickFilterRow(BigFixture.HugeFilter)) { Check("a filter to work on", false); return; }
         Wait(600);
-        int before = _app.RootFilterNames().Length;
+        int before = RootNames().Length;
         Say($"roots before: {before}");
 
         string wasRoots = Roots();
         Chord(VirtualKeyShort.KEY_D);
         WaitForChange(Roots, wasRoots, 2500);
-        int after = _app.RootFilterNames().Length;
+        int after = RootNames().Length;
         Check("Ctrl+D duplicates the filter", after == before + 1, $"{before} -> {after}");
         Shot("undo-duplicated");
 
         string wasDuplicated = Roots();
         Chord(VirtualKeyShort.KEY_Z);
         WaitForChange(Roots, wasDuplicated, 2500);
-        Check("Ctrl+Z takes it back", _app.RootFilterNames().Length == before,
-              $"{_app.RootFilterNames().Length} vs {before}");
+        Check("Ctrl+Z takes it back", RootNames().Length == before,
+              $"{RootNames().Length} vs {before}");
 
         string wasUndone = Roots();
         Chord(VirtualKeyShort.KEY_Y);
         WaitForChange(Roots, wasUndone, 2500);
-        Check("Ctrl+Y puts it back", _app.RootFilterNames().Length == after,
-              $"{_app.RootFilterNames().Length} vs {after}");
+        Check("Ctrl+Y puts it back", RootNames().Length == after,
+              $"{RootNames().Length} vs {after}");
 
         string wasRedone = Roots();
         Chord(VirtualKeyShort.KEY_Z);
         WaitForChange(Roots, wasRedone, 2500);
-        Check("and undo again leaves the list as it started", _app.RootFilterNames().Length == before,
-              $"{_app.RootFilterNames().Length} vs {before}");
+        Check("and undo again leaves the list as it started", RootNames().Length == before,
+              $"{RootNames().Length} vs {before}");
         Shot("undo");
     }
 
