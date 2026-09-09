@@ -8,7 +8,7 @@ name: CI
 # The two lists must stay identical; GitHub Actions does not support YAML anchors.
 on:
   push:
-    branches: [master]
+    branches: [master, ci-speed]
     paths-ignore:
       - '**.md'
       - LICENSE
@@ -36,90 +36,80 @@ defaults:
   run:
     shell: pwsh
 
+# WHY THIS IS SHAPED THE WAY IT IS. The pipeline used to be one job doing everything in a line, and took
+# six and a half minutes: 73s of it a build, 233s of it three suites waiting for each other. Neither order
+# was necessary. It is now a fan of jobs that hold each other up only where one really needs what another
+# produced:
+#
+#   strict ──────────────────────────────────────┐   every analyzer, code style rule and package audit
+#   package ─────────────────────────────────────┤   publish, sign, and open the bundle that ships
+#   core x2 ┐                                    │
+#   app  x3 ├── gate (coverage floor + tallies) ─┴── release
+#   ui   x4 ┘
+#
+# The suites are split across runners rather than run one after another, which is what a desktop-bound
+# suite needs: they cannot share a desktop, but they can have one each. scripts/Split-Tests.ps1 works out
+# each shard from what is really in the assembly, so a test added tomorrow lands in one without anybody
+# remembering to put it there, and the gate proves the shards between them ran all of it - a filter that
+# quietly selected half the tests would otherwise be a green run.
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
-  # Signing switches itself off wherever it cannot work, so no fork has to care that it exists: a fork has
-  # no signing variables, and the federated credential in Entra trusts only this repository on master, so a
-  # token minted anywhere else buys nothing. A fork therefore gets an unsigned exe and a green build.
-  # Restricting it to master also means "Run workflow" on master signs without releasing - the release job
-  # wants a push - which is the way to rehearse a change to any of this before it is load-bearing.
-  SIGN_RELEASE: ${{ vars.SIGNING_ACCOUNT_NAME != '' && github.ref == 'refs/heads/master' }}
+  # Analyzers, code style and the package audit decide nothing about the bytes a build produces: MEASURED
+  # on a runner, a solution build takes 73s with them and 20s without, for identical output. So the jobs
+  # that only want binaries build without them and `strict` runs every one of them beside the tests
+  # instead of in front of them. Nothing is skipped - it is moved off the critical path.
+  FAST_BUILD: -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false -p:NuGetAudit=false
+
+  # Wrapped round every suite rather than using the test SDK's own collector, because the UI suite drives
+  # the app as a separate process and that one will not follow a child - which is why a third of the app's
+  # code once read as untested. tests/coverage.runsettings records the rest. Pinned so a new release cannot
+  # move the number on an unrelated push.
+  COVERAGE_TOOL_VERSION: 18.11.0
 
 jobs:
-  build:
-    name: Build and test
+  # The quality gate. It produces nothing anybody uses; it exists so that every analyzer diagnostic, code
+  # style rule and package advisory is still an error, without the other nine jobs each paying 53 seconds
+  # to be told the same thing.
+  strict:
+    name: Analyzers, style and audit
     runs-on: windows-latest
-    # id-token is what Azure login exchanges for signing credentials. A permission cannot be granted per
-    # step, so pull request runs are handed the same token; it is inert, because the federated credential
-    # accepts only master and a pull request's token says otherwise.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/prepare
+      - run: dotnet build Cascade.slnx -c Release --no-restore -v q --nologo
+
+  # The exe that ships, and the only checks that open it. Everything else measures coverage, which a
+  # single-file bundle cannot give: its assemblies are loaded from inside the exe, where nothing can
+  # instrument them. Same IL, different packaging - so the suites drive the ordinary build output and
+  # these few drive the bundle.
+  package:
+    name: Publish, sign and open the bundle
+    runs-on: windows-latest
+    # id-token is what Azure login exchanges for signing credentials. A pull request run is handed the
+    # same token; it is inert, because the federated credential accepts only master.
     permissions:
       contents: read
       id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
-
+    env:
+      # Signing switches itself off wherever it cannot work, so no fork has to care that it exists: a fork
+      # has no signing variables, and the federated credential in Entra trusts only this repository on
+      # master, so a token minted anywhere else buys nothing. A fork therefore gets an unsigned exe and a
+      # green build. Restricting it to master also means "Run workflow" on master signs without releasing,
+      # which is the way to rehearse a change to any of this before it is load-bearing.
+      SIGN_RELEASE: ${{ vars.SIGNING_ACCOUNT_NAME != '' && github.ref == 'refs/heads/master' }}
     steps:
       - uses: actions/checkout@v7
-
-      # Installing an SDK costs ~45s, almost all of it extracting a 300MB archive. Delegate SDK
-      # resolution to dotnet itself so the probe obeys global.json and its roll-forward rules.
-      - name: Check whether global.json SDK is already available
-        id: sdk
-        run: |
-          $ErrorActionPreference = 'Continue'
-          Write-Host "Resolving the SDK requested by global.json from $env:GITHUB_WORKSPACE."
-          $resolvedSdk = & dotnet --version 2>&1
-          $exitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 }
-
-          if ($exitCode -eq 0) {
-            $found = $true
-            Write-Host "global.json SDK is already available."
-            Write-Host "Resolved SDK: $resolvedSdk"
-          } else {
-            $found = $false
-            Write-Host "global.json SDK is not available yet; setup-dotnet must install it."
-            Write-Host "dotnet --version exit code: $exitCode"
-            $resolvedSdk | ForEach-Object { Write-Host $_ }
-          }
-
-          Write-Host "global.json SDK preinstalled: $found"
-          "found=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          exit 0
-
-      - uses: actions/setup-dotnet@v6
-        if: steps.sdk.outputs.found != 'True'
-        with:
-          global-json-file: global.json
-
-      - name: Record .NET SDK used
-        run: |
-          $resolvedSdk = dotnet --version
-          Write-Host "dotnet --version (SDK resolved through global.json): $resolvedSdk"
-
-          Write-Host "dotnet --list-sdks:"
-          $sdkList = dotnet --list-sdks
-          $sdkList | ForEach-Object { Write-Host $_ }
-
-          Write-Host "dotnet msbuild -version:"
-          $msbuildVersion = dotnet msbuild -version
-          $msbuildVersion | ForEach-Object { Write-Host $_ }
-
-          @(
-            '### .NET SDK used by CI'
-            ''
-            '| Item | Value |'
-            '| --- | --- |'
-            "| SDK resolved by global.json | ``$resolvedSdk`` |"
-            "| MSBuild version | ``$(($msbuildVersion | Where-Object { $_ } | Select-Object -Last 1))`` |"
-          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+      - uses: ./.github/actions/prepare
 
       # CalVer: <year>.<month>.<run number>. Always increasing, never needs bumping by hand.
       # The offset carries the numbering past v2026.8.59, the last release made before the repository was
-      # recreated to drop a rewritten history - that reset GITHUB_RUN_NUMBER to 1, and a version lower than
-      # one already released would read as a downgrade to the updater and never install.
+      # recreated to drop a rewritten history - that reset GITHUB_RUN_NUMBER to 1, and a version lower
+      # than one already released would read as a downgrade to the updater and never install.
       - name: Compute version
         id: version
         run: |
@@ -128,34 +118,28 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Version: $version"
 
-      - name: Restore
-        run: dotnet restore Cascade.slnx
-
-      - name: Build
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: dotnet build Cascade.slnx -c Release --no-restore -p:Version=$env:VERSION
-
       # One self-contained-looking file: the runtime is still shared (framework-dependent), but the app's
       # own assemblies and config are bundled into the exe so it can be copied around on its own.
       # DebugType=embedded keeps line numbers in the crash log without a .pdb sitting next to it.
-      # Published before the tests so they can run against the exe that actually ships.
       - name: Publish
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet publish src/Cascade.App/Cascade.App.csproj
           -c Release -r win-x64 --self-contained false
           -p:PublishSingleFile=true -p:DebugType=embedded
-          -p:Version=$env:VERSION
-          -o artifacts/publish
+          -p:Version=${{ steps.version.outputs.version }}
+          -o artifacts/publish -v q --nologo ${{ env.FAST_BUILD }}
+
+      # The bundle checks below need the UI test assembly. It does not need the app's - it launches the
+      # exe rather than referencing it - so the publish above is the only build of the app in this job.
+      - name: Build the checks that open the bundle
+        run: >
+          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-restore -v q --nologo
+          -p:BuildProjectReferences=false ${{ env.FAST_BUILD }}
 
       - name: Verify publish stayed framework-dependent
         run: |
           $exe = Join-Path $env:GITHUB_WORKSPACE 'artifacts\publish\Cascade.exe'
-          if (-not (Test-Path -LiteralPath $exe)) {
-            throw "Published executable was not found at $exe."
-          }
+          if (-not (Test-Path -LiteralPath $exe)) { throw "Published executable was not found at $exe." }
 
           $thresholdBytes = 5MB
           $actualBytes = (Get-Item -LiteralPath $exe).Length
@@ -168,8 +152,8 @@ jobs:
       # Authenticode signing. SmartScreen accrues reputation to the signing certificate, not to each new
       # file hash, so a signed release inherits the standing of every release before it - where an unsigned
       # build, being a brand new hash on every push to master, always starts again from nothing.
-      # Signed here rather than just before packaging so the tests below drive the bytes that ship: a
-      # signature changes the file, and an exe tested before signing is not the exe anybody downloads.
+      # Signed here rather than just before packaging so the bundle checks below drive the bytes that ship:
+      # a signature changes the file, and an exe tested before signing is not the exe anybody downloads.
       - name: Azure login
         if: env.SIGN_RELEASE == 'true'
         uses: azure/login@v3
@@ -229,84 +213,19 @@ jobs:
             "| Timestamped | ``yes`` |"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      # Three suites, deliberately in this order: cheapest and most specific first, so a failure names its
-      # own cause. The engine never touches a window; the app checks build real controls on a hidden STA
-      # thread in-process; the UI suite drives the shipped executable through UI Automation.
-      #
-      # Run one after another rather than at once. The last two are latency-sensitive - they wait on
-      # repaints, timers and UI Automation transactions - and a runner busy with 800 engine tests is
-      # exactly the condition under which those waits time out. Not being flaky is worth more here than
-      # the half-minute overlapping them would save.
-      # Wrapped in dotnet-coverage rather than using the test SDK's own collector, because the UI suite
-      # drives the app as a separate process and that one will not follow a child - which is why a third of
-      # the app's code read as untested until now. tests/coverage.runsettings records the rest, including
-      # the CompilerGeneratedAttribute exclusion that was quietly deleting every async body from the
-      # figure. Pinned so a new release cannot move the number on an unrelated push.
-      - name: Install the coverage collector
-        run: dotnet tool install --global dotnet-coverage --version 18.11.0
-
-      - name: Core tests
-        run: >
-          dotnet-coverage collect --settings tests/coverage.runsettings
-          --output artifacts/test-results/core.cobertura.xml --output-format cobertura
-          "dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
-          -c Release --no-build
-          --logger trx;LogFileName=core.trx
-          --results-directory artifacts/test-results"
-
-      # These used to be Cascade.exe --selftest, i.e. the app testing itself. Extracting them made the
-      # released executable a third smaller (1,580,103 -> 1,056,327 bytes, both published back to back from
-      # the same command) and turned one opaque result into one per subject.
-      - name: App tests
-        timeout-minutes: 15
-        run: >
-          dotnet-coverage collect --settings tests/coverage.runsettings
-          --output artifacts/test-results/app.cobertura.xml --output-format cobertura
-          "dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj
-          -c Release --no-build
-          --logger trx;LogFileName=app.trx
-          --results-directory artifacts/test-results"
-
-      # Drives the build output rather than the published bundle, and only because coverage demands it: a
-      # single-file bundle loads its assemblies from inside the exe, where nothing can instrument them, so
-      # measured against the published exe this suite reports its own lines and none of the app's. Same IL,
-      # different packaging. The bundle itself is covered by the step below.
-      # CASCADE_TEST_EXE redirects TestData.AppExe(), which every UI test launches. These drive a real
-      # Cascade.exe through UI Automation, so they need the runner's desktop session. Capped so a hung
-      # window cannot burn the whole job's time budget.
-      - name: UI tests
-        timeout-minutes: 15
-        env:
-          CASCADE_TEST_EXE: ${{ github.workspace }}\src\Cascade.App\bin\Release\net10.0-windows\Cascade.exe
-        run: >
-          dotnet-coverage collect --settings tests/coverage.runsettings
-          --output artifacts/test-results/ui.cobertura.xml --output-format cobertura
-          "dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
-          -c Release --no-build
-          --logger trx;LogFileName=ui.trx
-          --results-directory artifacts/test-results"
-
-      # What the step above gave up: nothing has yet opened the bundle that ships. These are the checks that
-      # would notice - every dialog and the main window built from it, the automation stack, the command
-      # line - and they are a fifth of the suite's time rather than all of it.
+      # What the coverage-measured UI shards give up: nothing there has opened the bundle that ships.
+      # These are the checks that would notice - every dialog and the main window built from it, the
+      # automation stack, the command line.
       - name: The published exe really runs
         timeout-minutes: 10
         env:
           CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
         run: >
           dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
-          -c Release --no-build
+          -c Release --no-build -v q --nologo
           --logger "trx;LogFileName=exe.trx"
           --results-directory artifacts/test-results
           --filter "FullyQualifiedName~ScreenshotHarnessTests|FullyQualifiedName~FixtureSmoke|FullyQualifiedName~AutomationTests"
-
-      # Coverage is reported, and a floor is enforced, because a number nobody looks at is not a measure of
-      # anything. The floor sits three points under what the suites reach today (93.0%): it is there to
-      # catch a body of new code arriving untested, not to be ratcheted up for its own sake - a number chased
-      # for its own reward buys tests written to touch lines rather than to state properties.
-      - name: Coverage
-        if: always()
-        run: pwsh -NoProfile -File scripts/Report-Coverage.ps1 -ResultsDirectory artifacts/test-results -MinimumLineRate 90 -MinimumLines 13000
 
       - name: Package
         run: |
@@ -319,19 +238,158 @@ jobs:
           path: artifacts/package/*.exe
           if-no-files-found: error
 
-      - name: Upload test results
+      - uses: actions/upload-artifact@v7
         if: always()
-        uses: actions/upload-artifact@v7
+        with:
+          name: bundle-results
+          path: artifacts/test-results/*.trx
+          if-no-files-found: ignore
+
+  # The engine. No window, no desktop, already parallel within a run - split in two because the coverage
+  # collector roughly doubles what it costs, and a second runner takes that back.
+  core:
+    name: Core ${{ matrix.shard }}/2
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/prepare
+      - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - name: Install the coverage collector
+        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
+      - name: Which tests are mine
+        id: split
+        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -Shard ${{ matrix.shard }} -Of 2 -By Class -ExpectedFile artifacts/test-results/core-${{ matrix.shard }}.expected
+      - name: Run them
+        timeout-minutes: 10
+        run: |
+          $test = 'dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-build -v q --nologo' +
+                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  ' --logger trx;LogFileName=core-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
+          dotnet-coverage collect --settings tests/coverage.runsettings `
+            --output artifacts/test-results/core-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: suite-results-core-${{ matrix.shard }}
+          path: artifacts/test-results/*
+          if-no-files-found: error
+
+  # The WinForms half: real controls, dialogs and windows, built on a hidden STA thread in process. One
+  # such thread per process by design - too much of what these look at is process-wide for two windows to
+  # be driven at once - so the concurrency is bought here instead, one process per shard.
+  app:
+    name: App ${{ matrix.shard }}/3
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/prepare
+      - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - name: Install the coverage collector
+        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
+      - name: Which tests are mine
+        id: split
+        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 3 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
+      - name: Run them
+        timeout-minutes: 15
+        run: |
+          $test = 'dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-build -v q --nologo' +
+                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  ' --logger trx;LogFileName=app-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
+          dotnet-coverage collect --settings tests/coverage.runsettings `
+            --output artifacts/test-results/app-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: suite-results-app-${{ matrix.shard }}
+          path: artifacts/test-results/*
+          if-no-files-found: error
+
+  # The shipped executable, driven through UI Automation - one process launch per test, and a desktop each
+  # test has to itself. Splitting these four ways is the whole reason the pipeline is a fan: they cannot be
+  # made to overlap on one desktop (MEASURED: four threads went red every time), but four desktops is four
+  # times the speed for nothing.
+  # Drives the build output rather than the published bundle, and only because coverage demands it - see
+  # the package job, which opens the bundle.
+  ui:
+    name: UI ${{ matrix.shard }}/4
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/prepare
+      - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
+      - name: Install the coverage collector
+        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
+      - name: Which tests are mine
+        id: split
+        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 4 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
+      - name: Run them
+        timeout-minutes: 15
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\src\Cascade.App\bin\Release\net10.0-windows\Cascade.exe
+        run: |
+          $test = 'dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-build -v q --nologo' +
+                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  ' --logger trx;LogFileName=ui-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
+          dotnet-coverage collect --settings tests/coverage.runsettings `
+            --output artifacts/test-results/ui-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: suite-results-ui-${{ matrix.shard }}
+          path: artifacts/test-results/*
+          if-no-files-found: error
+
+  # Everything the shards produced, put back together: the coverage floor, and the tally that proves the
+  # split did not quietly leave tests unrun. Also the one artifact anybody downloads to read a failure, so
+  # `gh run download <id> -n test-results` still means what it used to.
+  gate:
+    name: Coverage and tallies
+    runs-on: windows-latest
+    # Deliberately NOT waiting for the package job. It signs, which takes half a minute nothing here needs,
+    # and putting it in front of this would put it in front of the release as well.
+    needs: [core, app, ui]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: suite-results-*
+          merge-multiple: true
+          path: artifacts/test-results
+
+      - name: Every shard ran what it discovered
+        run: ./scripts/Check-Shards.ps1 -ResultsDirectory artifacts/test-results
+
+      # Coverage is reported, and a floor is enforced, because a number nobody looks at is not a measure of
+      # anything. The floor sits three points under what the suites reach today (93.0%): it is there to
+      # catch a body of new code arriving untested, not to be ratcheted up for its own sake - a number
+      # chased for its own reward buys tests written to touch lines rather than to state properties.
+      - name: Coverage
+        run: ./scripts/Report-Coverage.ps1 -ResultsDirectory artifacts/test-results -MinimumLineRate 90 -MinimumLines 13000
+
+      - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: test-results
           path: |
             artifacts/test-results/*.trx
-            artifacts/test-results/**/*.cobertura.xml
+            artifacts/test-results/*.cobertura.xml
           if-no-files-found: ignore
 
   release:
     name: Release
-    needs: build
+    needs: [strict, package, gate]
     # Only a green build of master ships; pull requests and manual runs stop at the artifact.
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -348,7 +406,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.build.outputs.version }}
+          VERSION: ${{ needs.package.outputs.version }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
         # The asset keeps a fixed name so that

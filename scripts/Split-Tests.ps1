@@ -27,6 +27,9 @@
     Class (default) keeps a class together and gives a short filter. Method splits classes up, which is
     what a suite with one very large class needs.
 
+.PARAMETER ExpectedFile
+    Where to write every test method the assembly holds, for scripts/Check-Shards.ps1 to hold the shards to.
+
 .EXAMPLE
     scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard 2 -Of 4 -By Method
 #>
@@ -36,6 +39,7 @@ param(
     [Parameter(Mandatory)] [int] $Shard,
     [Parameter(Mandatory)] [int] $Of,
     [ValidateSet('Class', 'Method')] [string] $By = 'Class',
+    [string] $ExpectedFile,
     [ValidateSet('Debug', 'Release')] [string] $Configuration = 'Release'
 )
 
@@ -75,7 +79,16 @@ $mine = @(for ($i = $Shard - 1; $i -lt $groups.Count; $i += $Of) { $groups[$i] }
 $suffix = if ($By -eq 'Class') { '.' } else { '' }
 $filter = ($mine | ForEach-Object { "FullyQualifiedName~$_$suffix" }) -join '|'
 
-Write-Host "Shard $Shard of ${Of}: $($mine.Count) of $($groups.Count) $By groups" -ForegroundColor Cyan
+$methods = @($names | Sort-Object -Unique)
+Write-Host "Shard $Shard of ${Of}: $($mine.Count) of $($groups.Count) $By groups, $($methods.Count) test methods in the assembly" -ForegroundColor Cyan
 $mine | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+
+if ($ExpectedFile) {
+    # Every method the assembly has, so the job that collects the shards can prove that between them they
+    # ran all of it. Methods rather than cases: a theory whose data is not serializable is one entry at
+    # discovery and several at run time, so counting cases would compare two different things.
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ExpectedFile) | Out-Null
+    $methods | Set-Content -LiteralPath $ExpectedFile
+}
 if ($env:GITHUB_OUTPUT) { "filter=$filter" | Out-File -FilePath $env:GITHUB_OUTPUT -Append }
 $filter
