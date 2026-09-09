@@ -44,8 +44,8 @@ defaults:
 #   strict ──────────────────────────────────────┐   every analyzer, code style rule and package audit
 #   package ─────────────────────────────────────┤   publish, sign, and open the bundle that ships
 #   core x2 ┐                                    │
-#   app  x3 ├── gate (coverage floor + tallies) ─┴── release
-#   ui   x4 ┘
+#   app  x4 ├── gate (coverage floor + tallies) ─┴── release
+#   ui   x6 ┘
 #
 # The suites are split across runners rather than run one after another, which is what a desktop-bound
 # suite needs: they cannot share a desktop, but they can have one each. scripts/Split-Tests.ps1 works out
@@ -283,12 +283,12 @@ jobs:
   # such thread per process by design - too much of what these look at is process-wide for two windows to
   # be driven at once - so the concurrency is bought here instead, one process per shard.
   app:
-    name: App ${{ matrix.shard }}/3
+    name: App ${{ matrix.shard }}/4
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
@@ -298,7 +298,7 @@ jobs:
       - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
       - name: Which tests are mine
         id: split
-        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 3 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
+        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 4 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
       - name: Run them
         timeout-minutes: 15
         run: |
