@@ -305,7 +305,9 @@ jobs:
       # costs nothing, where fetching it first cost 21s of a 100s job.
       - name: Build, and fetch the coverage collector while it compiles
         run: |
-          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          # Its own package folder: sharing one with the build means sharing NuGet's locks on it, and
+          # MEASURED, that turned two of four UI builds from 25s into 47s and 96s.
+          $tool = Start-Job { $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'collector-packages'; dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
           dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
           if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
           Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
@@ -343,7 +345,9 @@ jobs:
       # costs nothing, where fetching it first cost 21s of a 100s job.
       - name: Build, and fetch the coverage collector while it compiles
         run: |
-          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          # Its own package folder: sharing one with the build means sharing NuGet's locks on it, and
+          # MEASURED, that turned two of four UI builds from 25s into 47s and 96s.
+          $tool = Start-Job { $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'collector-packages'; dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
           dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
           if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
           Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
@@ -384,7 +388,9 @@ jobs:
       # costs nothing, where fetching it first cost 21s of a 100s job.
       - name: Build, and fetch the coverage collector while it compiles
         run: |
-          $tool = Start-Job { dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
+          # Its own package folder: sharing one with the build means sharing NuGet's locks on it, and
+          # MEASURED, that turned two of four UI builds from 25s into 47s and 96s.
+          $tool = Start-Job { $env:NUGET_PACKAGES = Join-Path $env:RUNNER_TEMP 'collector-packages'; dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }} }
           dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
           if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)." }
           Receive-Job $tool -Wait -AutoRemoveJob | ForEach-Object { Write-Host $_ }
