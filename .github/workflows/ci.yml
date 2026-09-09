@@ -43,7 +43,8 @@ defaults:
 #
 #   tools ─────────────────────────────────────┐    keeps the coverage collector's cache filled
 #   strict x5 ─────────────────────────────────┤    every analyzer and code style rule, one project each
-#   package ───────────────────────────────────┤    publish, sign, and open the bundle that ships
+#   package ───────────────────────────────────┤    publish, sign and hand over the exe that ships
+#   bundle ────────────────────────────────────┤    open that same bundle: dialogs, automation, arguments
 #   core x2 ┐                                  │
 #   app  x4 ├── gate (coverage floor + tallies)┴── release
 #   ui   x6 ┘
@@ -116,12 +117,10 @@ jobs:
       - run: dotnet build ${{ matrix.project }} -c Release -v q --nologo ${{ env.FAST_BUILD }}
       - run: dotnet build ${{ matrix.project }} -c Release -v q --nologo -p:BuildProjectReferences=false
 
-  # The exe that ships, and the only checks that open it. Everything else measures coverage, which a
-  # single-file bundle cannot give: its assemblies are loaded from inside the exe, where nothing can
-  # instrument them. Same IL, different packaging - so the suites drive the ordinary build output and
-  # these few drive the bundle.
+  # The exe that ships. It is signed here and handed straight over; what opens it is the `bundle` job,
+  # beside this one rather than behind it.
   package:
-    name: Publish, sign and open the bundle
+    name: Publish and sign
     runs-on: windows-latest
     # id-token is what Azure login exchanges for signing credentials. A pull request run is handed the
     # same token; it is inert, because the federated credential accepts only master.
@@ -164,13 +163,6 @@ jobs:
           -p:Version=${{ steps.version.outputs.version }}
           -o artifacts/publish -v q --nologo ${{ env.FAST_BUILD }}
 
-      # The bundle checks below need the UI test assembly. It does not need the app's - it launches the
-      # exe rather than referencing it - so the publish above is the only build of the app in this job.
-      - name: Build the checks that open the bundle
-        run: >
-          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo
-          -p:BuildProjectReferences=false ${{ env.FAST_BUILD }}
-
       - name: Verify publish stayed framework-dependent
         run: |
           $exe = Join-Path $env:GITHUB_WORKSPACE 'artifacts\publish\Cascade.exe'
@@ -187,8 +179,14 @@ jobs:
       # Authenticode signing. SmartScreen accrues reputation to the signing certificate, not to each new
       # file hash, so a signed release inherits the standing of every release before it - where an unsigned
       # build, being a brand new hash on every push to master, always starts again from nothing.
-      # Signed here rather than just before packaging so the bundle checks below drive the bytes that ship:
-      # a signature changes the file, and an exe tested before signing is not the exe anybody downloads.
+      #
+      # The checks that open the bundle used to sit behind this, so that they drove the exact bytes that
+      # ship. They now run beside it, on a bundle the `bundle` job publishes for itself from the same
+      # commit and the same command. What they are asking - can a single-file bundle build every dialog,
+      # bring up automation, open a file - is settled by how the bundle was PUBLISHED, and a signature
+      # appends a certificate without touching how assemblies are loaded out of it. What signing can get
+      # wrong is caught by asking Windows below. MEASURED: waiting for the signature put login+sign+checks,
+      # 58s of it, in a line in front of the release, which was the longest path in the pipeline.
       - name: Azure login
         if: env.SIGN_RELEASE == 'true'
         uses: azure/login@v3
@@ -248,20 +246,6 @@ jobs:
             "| Timestamped | ``yes`` |"
           ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      # What the coverage-measured UI shards give up: nothing there has opened the bundle that ships.
-      # These are the checks that would notice - every dialog and the main window built from it, the
-      # automation stack, the command line.
-      - name: The published exe really runs
-        timeout-minutes: 10
-        env:
-          CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
-        run: >
-          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
-          -c Release --no-build -v q --nologo
-          --logger "trx;LogFileName=exe.trx"
-          --results-directory artifacts/test-results
-          --filter "FullyQualifiedName~ScreenshotHarnessTests|FullyQualifiedName~FixtureSmoke|FullyQualifiedName~AutomationTests"
-
       - name: Package
         run: |
           New-Item -ItemType Directory -Force -Path artifacts/package | Out-Null
@@ -272,6 +256,46 @@ jobs:
           name: cascade-win-x64
           path: artifacts/package/*.exe
           if-no-files-found: error
+
+  # What the coverage-measured UI shards give up: nothing there has opened the BUNDLE. They drive the
+  # ordinary build output, because a single-file bundle loads its assemblies from inside the exe where
+  # nothing can instrument them - same IL, different packaging. These are the checks that would notice the
+  # packaging: every dialog and the main window built from it, the automation stack, the command line.
+  # It publishes its own copy, with the same command and the same version as the package job, rather than
+  # waiting for that job's signature - see the note on signing there.
+  bundle:
+    name: The bundle really runs
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/prepare
+      - name: Publish the same bundle
+        run: |
+          $now = [datetime]::UtcNow
+          $version = "$($now.Year).$($now.Month).$([int]$env:GITHUB_RUN_NUMBER + 60)"
+          dotnet publish src/Cascade.App/Cascade.App.csproj `
+            -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=true -p:DebugType=embedded `
+            -p:Version=$version `
+            -o artifacts/publish -v q --nologo ${{ env.FAST_BUILD }}
+
+      # The checks launch the exe rather than referencing the app, so nothing here needs the app built
+      # a second time.
+      - name: Build the checks
+        run: >
+          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo
+          -p:BuildProjectReferences=false ${{ env.FAST_BUILD }}
+
+      - name: Open it
+        timeout-minutes: 10
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
+        run: >
+          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
+          -c Release --no-build -v q --nologo
+          --logger "trx;LogFileName=exe.trx"
+          --results-directory artifacts/test-results
+          --filter "FullyQualifiedName~ScreenshotHarnessTests|FullyQualifiedName~FixtureSmoke|FullyQualifiedName~AutomationTests"
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -425,7 +449,7 @@ jobs:
 
   release:
     name: Release
-    needs: [strict, package, gate]
+    needs: [strict, package, bundle, gate]
     # Only a green build of master ships; pull requests and manual runs stop at the artifact.
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
