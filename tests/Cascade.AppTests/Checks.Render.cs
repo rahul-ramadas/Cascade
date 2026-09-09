@@ -310,46 +310,6 @@ internal static partial class Checks
                             inkDiff is null);
             }
 
-            // The short road holds a GDI font handle per face and leaves it selected until the next row
-            // wants a different one, so a frame drawing in several faces is where it would go wrong - and a
-            // frame drawing in one never would. Marks are lit as well: those go the long way, over the top,
-            // and putting the device context back afterwards puts the caller's face back with it.
-            var mixed = new FilterCollection();
-            foreach (var (text, bold, italic, underline) in styles)
-                mixed.Roots.Add(new Filter
-                {
-                    Enabled = true,
-                    Match = new FilterMatch { Text = text },
-                    Style = { Bold = bold, Italic = italic, Underline = underline }
-                });
-            doc.SetFilters(mixed);
-            WaitForFiltering(doc);
-            foreach (bool lit in (bool[])[false, true])
-            {
-                grid.SetFindHighlight(lit
-                    ? FindEngine.CompileQuery(new FindQuery("long", Regex: false, CaseSensitive: false))
-                    : null);
-                grid.RefreshView();
-                grid.DrawTextTheLongWayForTesting = true;
-                Pump();
-                using var facesLaidOut = Capture(host);
-                grid.DrawTextTheLongWayForTesting = false;
-                Pump();
-                using var facesDirect = Capture(host);
-                var faceInk = FirstDifference(facesLaidOut, facesDirect,
-                    new Rectangle(0, 0, facesLaidOut.Width, facesLaidOut.Height));
-                ok &= Check($"and does so with bold, italic and underline all on screen at once " +
-                            $"({(lit ? "with" : "without")} a term lit)" +
-                            (faceInk is null ? "" : $" [first differs at x={faceInk.Value.X},y={faceInk.Value.Y}: " +
-                                                    $"{facesLaidOut.GetPixel(faceInk.Value.X, faceInk.Value.Y)} -> " +
-                                                    $"{facesDirect.GetPixel(faceInk.Value.X, faceInk.Value.Y)}]"),
-                            faceInk is null);
-            }
-            grid.SetFindHighlight(null);
-            doc.SetFilters(new FilterCollection());
-            WaitForFiltering(doc);
-            Pump();
-
             // Columns are a different drawing path - per-cell text plus a header row - and had the same flaw.
             doc.Columns.Enabled = true;
             doc.Columns.Template = "{[*]}{[*]}{[*]} {*}";

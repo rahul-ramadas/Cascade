@@ -1049,9 +1049,6 @@ public sealed class LineGridControl : Control
 
     public void RebuildFonts()
     {
-        // The canvas keeps a GDI handle per face it has drawn with; the ones it holds are about to be
-        // replaced, and nothing else would tell it.
-        _canvas.Discard();
         for (int i = 0; i < _fonts.Length; i++) _fonts[i]?.Dispose();
         // After the fonts made from it, never before: a font keeps its family alive behind it.
         _fontFamily?.Dispose();
@@ -2099,7 +2096,7 @@ public sealed class LineGridControl : Control
             ColumnAlign.Center => cell.Left + (cell.Width - width) / 2,
             _ => cell.Left
         };
-        ink.Text(span, x, cell.Top, cell, fore, back, font, plainFace: true);
+        ink.Text(span, x, cell.Top, cell, fore, back, font);
     }
 
     /// <summary>Where a character of a cell's text sits on screen.</summary>
@@ -3025,7 +3022,7 @@ public sealed class LineGridControl : Control
         int x = strip.Left - (Wrapping ? 0 : _hScroll);
         bool plain = charWidth > 0 && part.IndexOfAnyExceptInRange(' ', '~') < 0;
         var (shownFrom, shownTo) = plain ? OnScreenPart(part.Length, x, charWidth) : (0, part.Length);
-        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back, font, plain);
+        ink.Text(part[shownFrom..shownTo], x + shownFrom * charWidth, strip.Top, strip, fore, back, font);
         if (Wrapping) return 0;   // nothing scrolls sideways while wrapping, so nothing to measure against
         return (plain ? part.Length * charWidth : DrawnWidth(part, font, charWidth)) + 8;
     }
@@ -3183,8 +3180,7 @@ public sealed class LineGridControl : Control
 
         int digitWidth = _longWay ? 0 : CharWidthOf(0);
         if (digitWidth > 0)
-            ink.Text(text, room.Right - text.Length * digitWidth, y, room, colour, _settings.GutterBack, FontRegular,
-                     plainFace: true);
+            ink.Text(text, room.Right - text.Length * digitWidth, y, room, colour, _settings.GutterBack, FontRegular);
         else
             ink.TextIn(text, room, colour, FontRegular,
                        TextFormatFlags.NoPadding | TextFormatFlags.Right | TextFormatFlags.NoPrefix);
