@@ -123,6 +123,10 @@ finally {
 }
 
 # Anything that was not "Passed" in every single run, with the first message it gave.
+# A SKIP IS NOT AN INSTABILITY. A test that decides at run time it has nothing to run against reports
+# NotExecuted, which is not "Passed" - and counting that as a failure made this report every run red for a
+# test that was behaving exactly as intended. Skips are counted and named separately, because a test
+# skipped in every run is worth seeing; it is just not a flake.
 $outcomes = @{}
 $messages = @{}
 foreach ($trx in Get-ChildItem -Path $ResultsDirectory -Filter '*.trx') {
@@ -130,8 +134,9 @@ foreach ($trx in Get-ChildItem -Path $ResultsDirectory -Filter '*.trx') {
     foreach ($result in @($x.TestRun.Results.UnitTestResult)) {
         if (-not $result) { continue }
         $key = $result.testName
-        if (-not $outcomes.ContainsKey($key)) { $outcomes[$key] = @{ Pass = 0; Fail = 0 } }
+        if (-not $outcomes.ContainsKey($key)) { $outcomes[$key] = @{ Pass = 0; Fail = 0; Skip = 0 } }
         if ($result.outcome -eq 'Passed') { $outcomes[$key].Pass++ }
+        elseif ($result.outcome -eq 'NotExecuted') { $outcomes[$key].Skip++ }
         else {
             $outcomes[$key].Fail++
             if (-not $messages.ContainsKey($key)) { $messages[$key] = "$($result.outcome): $($result.Output.ErrorInfo.Message)" }
@@ -140,9 +145,14 @@ foreach ($trx in Get-ChildItem -Path $ResultsDirectory -Filter '*.trx') {
 }
 
 $unstable = $outcomes.Keys | Where-Object { $outcomes[$_].Fail -gt 0 } | Sort-Object
+$skipped = $outcomes.Keys | Where-Object { $outcomes[$_].Skip -gt 0 -and $outcomes[$_].Fail -eq 0 } | Sort-Object
 Write-Host ''
+foreach ($name in $skipped) {
+    Write-Host ("  skipped in {0} of {1} runs: {2}" -f $outcomes[$name].Skip,
+                ($outcomes[$name].Skip + $outcomes[$name].Pass), $name) -ForegroundColor Yellow
+}
 if (-not $unstable) {
-    Write-Host ("{0} tests passed in every run." -f $outcomes.Count) -ForegroundColor Green
+    Write-Host ("{0} tests passed in every run." -f ($outcomes.Count - $skipped.Count)) -ForegroundColor Green
     exit 0
 }
 
