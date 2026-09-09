@@ -75,8 +75,13 @@ internal sealed class HangWatchdog : IDisposable
         if (!IsWanted(settings)) return null;
         string dir = Folder;
         try { Directory.CreateDirectory(dir); } catch { return null; }
-        return new HangWatchdog(form, SecondsToWait(settings) * 1000, dir, WantedDetail());
+        return new HangWatchdog(form, ThresholdMsForTesting ?? SecondsToWait(settings) * 1000, dir, WantedDetail());
     }
+
+    /// <summary>The limit in milliseconds, for the check that drives a real stall through a real window.
+    /// A whole second is the shortest the preference can express, and the check needs four stalls: at the
+    /// preference's own floor it spent nine of its thirteen seconds asleep.</summary>
+    internal static int? ThresholdMsForTesting;
 
     /// <summary>Where dumps and reports are written.</summary>
     internal static string Folder =>

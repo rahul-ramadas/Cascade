@@ -1,8 +1,16 @@
 name: Prepare a .NET runner
 description: >
-  Gets a runner ready to build Cascade: the SDK global.json asks for, and the packages it needs, taken
-  from the cache when the dependencies have not changed. Every job here starts with it, so the work is
-  written once rather than thirteen times.
+  Gets a runner ready to build Cascade: the SDK global.json asks for, the packages it needs, and the
+  coverage collector - all taken from the cache when the dependencies have not changed. Every job here
+  starts with it, so the work is written once rather than a dozen times.
+
+inputs:
+  coverage:
+    description: Also make dotnet-coverage available.
+    default: 'false'
+  coverage-version:
+    description: Which version of it, pinned so a new release cannot move the coverage number.
+    default: 18.11.0
 
 runs:
   using: composite
@@ -27,15 +35,26 @@ runs:
       with:
         global-json-file: global.json
 
-    # Restoring from cache takes a few seconds where downloading the packages takes fifteen, and every one
-    # of these jobs pays it. Keyed on the files that decide what is restored, so a new package reference
-    # misses the cache rather than silently restoring the old set.
+    # Restoring from cache takes a few seconds where fetching all of this costs twenty, and a dozen jobs
+    # pay it. Keyed on the files that decide what is restored, so a new package reference misses the cache
+    # rather than silently restoring the old set.
     - uses: actions/cache@v4
       with:
-        path: ~/.nuget/packages
-        key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'global.json') }}
-        restore-keys: nuget-${{ runner.os }}-
+        path: |
+          ~/.nuget/packages
+          ~/.dotnet/tools
+        key: nuget-${{ runner.os }}-${{ inputs.coverage-version }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props', 'global.json') }}
+        restore-keys: nuget-${{ runner.os }}-${{ inputs.coverage-version }}-
 
     - name: Restore
       shell: pwsh
       run: dotnet restore Cascade.slnx
+
+    # Guarded rather than run unconditionally: install refuses outright when the tool is already there,
+    # which it is whenever the cache hit.
+    - name: The coverage collector
+      if: inputs.coverage == 'true'
+      shell: pwsh
+      run: |
+        if (Get-Command dotnet-coverage -ErrorAction SilentlyContinue) { Write-Host 'dotnet-coverage came from the cache.'; exit 0 }
+        dotnet tool install --global dotnet-coverage --version ${{ inputs.coverage-version }}

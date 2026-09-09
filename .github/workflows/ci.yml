@@ -257,9 +257,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
+        with:
+          coverage: true
+          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Install the coverage collector
-        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
       - name: Which tests are mine
         id: split
         run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -Shard ${{ matrix.shard }} -Of 2 -By Class -ExpectedFile artifacts/test-results/core-${{ matrix.shard }}.expected
@@ -291,9 +292,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
+        with:
+          coverage: true
+          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Install the coverage collector
-        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
       - name: Which tests are mine
         id: split
         run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 3 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
@@ -319,21 +321,22 @@ jobs:
   # Drives the build output rather than the published bundle, and only because coverage demands it - see
   # the package job, which opens the bundle.
   ui:
-    name: UI ${{ matrix.shard }}/4
+    name: UI ${{ matrix.shard }}/6
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
+        with:
+          coverage: true
+          coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-restore -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Install the coverage collector
-        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
       - name: Which tests are mine
         id: split
-        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 4 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
+        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 6 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
       - name: Run them
         timeout-minutes: 15
         env:
@@ -356,12 +359,16 @@ jobs:
   # `gh run download <id> -n test-results` still means what it used to.
   gate:
     name: Coverage and tallies
-    runs-on: windows-latest
+    # Nothing here builds or runs a Windows binary - it reads XML - and a Linux runner starts and checks
+    # out in a third of the time, which is worth having on the last job before the release.
+    runs-on: ubuntu-latest
     # Deliberately NOT waiting for the package job. It signs, which takes half a minute nothing here needs,
     # and putting it in front of this would put it in front of the release as well.
     needs: [core, app, ui]
     steps:
       - uses: actions/checkout@v7
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v8
         with:
           pattern: suite-results-*

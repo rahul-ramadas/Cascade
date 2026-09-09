@@ -46,21 +46,23 @@ Write-Host "Merging $($reports.Count) coverage report(s)."
 $files = @{}
 
 foreach ($report in $reports) {
-    [xml] $xml = Get-Content -LiteralPath $report.FullName
-    foreach ($package in @($xml.coverage.packages.package)) {
-        if (-not $package) { continue }
+    $xml = [System.Xml.XmlDocument]::new()
+    $xml.Load($report.FullName)
+    # SelectNodes and GetAttribute rather than dot-notation: PowerShell's XML adapter builds an object per
+    # element as you walk it, and these reports carry a hundred thousand line elements each. MEASURED on one
+    # run's twelve reports, that difference is most of what this script costs.
+    foreach ($package in $xml.SelectNodes('/coverage/packages/package')) {
         # A coverage number that counts the test code measures nothing. Named by the suffix rather than by
         # listing the product assemblies, so a new one of those is reported rather than silently dropped.
-        if ($package.name -like '*Tests') { continue }
-        foreach ($class in @($package.classes.class)) {
-            if (-not $class) { continue }
-            $key = "$($package.name)|$($class.filename)"
-            if (-not $files.ContainsKey($key)) { $files[$key] = @{} }
+        $assembly = $package.GetAttribute('name')
+        if ($assembly -like '*Tests') { continue }
+        foreach ($class in $package.SelectNodes('classes/class')) {
+            $key = "$assembly|$($class.GetAttribute('filename'))"
             $seen = $files[$key]
-            foreach ($line in @($class.lines.line)) {
-                if (-not $line) { continue }
-                $number = [int] $line.number
-                $hit = ([int] $line.hits) -gt 0
+            if ($null -eq $seen) { $seen = @{}; $files[$key] = $seen }
+            foreach ($line in $class.SelectNodes('lines/line')) {
+                $number = [int] $line.GetAttribute('number')
+                $hit = [int] $line.GetAttribute('hits') -gt 0
                 # A line counts as covered if ANY suite reached it.
                 if ($hit -or -not $seen.ContainsKey($number)) { $seen[$number] = ($hit -or $seen[$number]) }
             }

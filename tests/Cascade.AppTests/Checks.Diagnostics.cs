@@ -14,6 +14,10 @@ namespace Cascade.AppTests;
 /// <summary>Part of <see cref="Checks"/>: the engine as the window uses it, and what the app does to the machine it runs on.</summary>
 internal static partial class Checks
 {
+    // The watchdog samples every 250ms, so worst-case detection is the limit plus one of those. A stall has
+    // to outlast both with room to spare, and the group sits out four of them.
+    private const int StallLimitMs = 400;
+    private const int StallMs = 900;
 
     /// <summary>The hang watchdog: it must stay out of the way until asked for, notice a UI thread that has
     /// stopped answering, leave one dump and one report per episode rather than a pile of them, and tell the
@@ -55,10 +59,12 @@ internal static partial class Checks
             ok &= Check("the environment can turn it on without touching the preferences", HangWatchdog.IsWanted(off));
             Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", null);
 
-            // From here the PREFERENCE turns it on, which is how a user would.
+            // From here the PREFERENCE turns it on, which is how a user would. The limit is set in
+            // milliseconds, which only a test can do: the preference's own floor is a whole second, and
+            // this group has to sit out four separate stalls at it.
             Directory.CreateDirectory(dir);
-            Environment.SetEnvironmentVariable("CASCADE_HANG_SECONDS", "1");
             Environment.SetEnvironmentVariable("CASCADE_HANG_DIR", dir);
+            HangWatchdog.ThresholdMsForTesting = StallLimitMs;
             var settings = new AppSettings { HangWatchdog = true };   // and the shipping dump kind, not a cheap one
 
             form = new MainForm(settings, new MachineState(), Array.Empty<string>())
@@ -71,23 +77,24 @@ internal static partial class Checks
             form.NoSavePrompt = true;
             form.Show();
 
-            // Answering. Longer than the limit, so a heartbeat that never arrived would already have been
-            // called a hang - which is what makes this the check on the wiring.
-            for (int i = 0; i < 14; i++) { Pump(); Thread.Sleep(100); }
+            // Answering. Longer than the limit and a sampling interval together, so a heartbeat that never
+            // arrived would already have been called a hang - which is what makes this the check on the
+            // wiring.
+            for (int i = 0; i < 8; i++) { Pump(); Thread.Sleep(100); }
             // "Nothing was recorded" only means something once it is clear something was watching.
             ok &= Check("the preference really did start one", form.WatchingForHangsForTesting);
             ok &= Check("and a window that keeps answering is left alone", Directory.GetFiles(dir).Length == 0,
                         string.Join(", ", Directory.GetFiles(dir).Select(Path.GetFileName)));
 
             // Not answering: no pumping at all, on the thread that owns the window. The real thing.
-            Thread.Sleep(1500);
+            Thread.Sleep(StallMs);
 
             // A dump of a process holding a large file takes a second or so to write, so the artefacts do
             // not all appear at once - the report says so until the dump is finished with.
-            for (int i = 0; i < 150 && Directory.GetFiles(dir, "cascade_hang_*.txt")
+            for (int i = 0; i < 400 && Directory.GetFiles(dir, "cascade_hang_*.txt")
                                                 .All(f => File.ReadAllText(f).Contains("still being taken", StringComparison.Ordinal));
                  i++)
-                Thread.Sleep(100);
+                Thread.Sleep(25);
 
             string[] dumps = Directory.GetFiles(dir, "*.dmp");
             string[] reports = Directory.GetFiles(dir, "cascade_hang_*.txt");
@@ -131,9 +138,9 @@ internal static partial class Checks
             // fraction of the size and still name the thread that stopped.
             HangWatchdog.RefuseDumpForTesting = flags => flags == HangWatchdog.FlagsForTesting(DumpDetail.Heap);
             int dumpsBefore = Directory.GetFiles(dir, "*.dmp").Length;
-            Thread.Sleep(1500);
-            for (int i = 0; i < 100 && Directory.GetFiles(dir, "*.dmp").Length == dumpsBefore; i++)
-            { Pump(); Thread.Sleep(50); }
+            Thread.Sleep(StallMs);
+            for (int i = 0; i < 200 && Directory.GetFiles(dir, "*.dmp").Length == dumpsBefore; i++)
+            { Pump(); Thread.Sleep(25); }
             for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
 
             string[] afterFallback = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
@@ -153,9 +160,9 @@ internal static partial class Checks
             HangWatchdog.RefuseDumpForTesting = _ => true;
             int before = Directory.GetFiles(dir, "*.dmp").Length;
             for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
-            Thread.Sleep(1500);
-            for (int i = 0; i < 60 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length < 3; i++)
-            { Pump(); Thread.Sleep(50); }
+            Thread.Sleep(StallMs);
+            for (int i = 0; i < 120 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length < 3; i++)
+            { Pump(); Thread.Sleep(25); }
             for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
 
             string[] afterRefusal = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
@@ -189,6 +196,7 @@ internal static partial class Checks
         finally
         {
             HangWatchdog.RefuseDumpForTesting = null;
+            HangWatchdog.ThresholdMsForTesting = null;
             try { form?.Close(); form?.Dispose(); } catch { /* ignore */ }
             try { probe?.Dispose(); } catch { /* ignore */ }
             Environment.SetEnvironmentVariable("CASCADE_HANG_WATCHDOG", oldOn);

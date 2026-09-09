@@ -494,15 +494,12 @@ internal static class UiShots
         form.StartPosition = FormStartPosition.Manual;
         form.Location = new Point(60, 60);
         form.Show();
-        Application.DoEvents();
-        var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < 250) { Application.DoEvents(); Thread.Sleep(10); }
+        Settle();
         // Some states only exist once the dialog is up and laid out - a sample scrolled to its far end, say.
         if (once is not null && form is ColumnsDialog columns)
         {
             once(columns);
-            sw.Restart();
-            while (sw.ElapsedMilliseconds < 120) { Application.DoEvents(); Thread.Sleep(10); }
+            Settle();
         }
 
         using var bmp = new Bitmap(Math.Max(1, form.Width), Math.Max(1, form.Height));
