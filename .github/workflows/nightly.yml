@@ -127,6 +127,12 @@ jobs:
           if ($dumps.Count -eq 0) { throw 'No dump was written.' }
           Remove-Item -Path $stuck -Recurse -Force
 
+          # This step made something fail on purpose, so it ends holding the watchdog's own exit code -
+          # and Actions ends every pwsh step with `exit $LASTEXITCODE`, which would fail the step for
+          # doing exactly what it was asked to do. Say so explicitly.
+          Write-Host 'The hang machinery still bites.'
+          exit 0
+
       # The engine over a log big enough to page the index, stream a filter pass, and make the match cache
       # be built from partial information. Answers are compared against the generator's own arithmetic, so
       # nothing here is a snapshot of what the engine happened to say last time.

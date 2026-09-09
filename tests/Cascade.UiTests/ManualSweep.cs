@@ -174,6 +174,20 @@ public class ManualSweep : IDisposable
         if (!ok) _bugs.Add($"{what} :: {detail}");
     }
 
+    /// <summary>What went wrong and where it was said. A stage makes dozens of calls, so the message on its
+    /// own leaves the reader guessing: a nightly reported "An event was unable to invoke any of the
+    /// subscribers" and nothing said which UI Automation call had said it. The frames are filtered to this
+    /// assembly, which is the only part of the stack anybody here can act on.</summary>
+    private static string Describe(Exception ex)
+    {
+        var mine = (ex.StackTrace ?? "").Split('\n')
+                     .Select(line => line.Trim())
+                     .Where(line => line.Contains("Cascade.UiTests", StringComparison.Ordinal))
+                     .Take(3);
+        string where = string.Join(" <- ", mine);
+        return $"{ex.GetType().Name}: {ex.Message}{(where.Length > 0 ? " " + where : "")}";
+    }
+
     [Fact]
     public void Sweep()
     {
@@ -200,7 +214,7 @@ public class ManualSweep : IDisposable
             long sleptBefore = Interlocked.Read(ref _slept);
             Say($"===== {name} =====");
             try { Timed("stage body", run); }
-            catch (Exception ex) { Check($"{name} ran to the end", false, ex.Message); }
+            catch (Exception ex) { Check($"{name} ran to the end", false, Describe(ex)); }
             finally
             {
                 // Whatever a stage did to the window, the next one starts from the same place - and above
