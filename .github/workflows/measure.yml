@@ -1,0 +1,178 @@
+name: Measure
+
+# Temporary rig: measures where the CI minutes go, on the runner rather than on a developer's machine.
+# Deleted once the numbers have been used. Triggered by pushing the ci-speed branch.
+on:
+  push:
+    branches: [ci-speed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  NOAN: -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+
+jobs:
+  build-shapes:
+    name: Build shapes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet restore Cascade.slnx
+          "restore: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Solution build, analyzers on
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build Cascade.slnx -c Release --no-restore -v q --nologo
+          "solution analyzers-on: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Solution rebuild, analyzers off
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build Cascade.slnx -c Release --no-restore -t:Rebuild -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "solution analyzers-off (warm msbuild): $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  cold-no-analyzers:
+    name: Cold build without analyzers
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Restore
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet restore Cascade.slnx
+          "restore: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Solution build, analyzers off, cold
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build Cascade.slnx -c Release --no-restore -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "solution analyzers-off cold: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Publish on top
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet publish src/Cascade.App/Cascade.App.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/publish -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "publish after build: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Size of the build outputs
+        run: |
+          $bytes = (Get-ChildItem -Recurse -File src/*/bin, tests/*/bin | Measure-Object Length -Sum).Sum
+          "bin total: $([math]::Round($bytes/1MB,1)) MB"
+      - name: Upload bin
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          "upload starts"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bin
+          path: |
+            src/*/bin/Release/**
+            tests/*/bin/Release/**
+          retention-days: 1
+
+  publish-only:
+    name: Publish from scratch
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish only, no solution build
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet publish src/Cascade.App/Cascade.App.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=embedded -o artifacts/publish -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "publish from scratch (restore included): $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  core-suite:
+    name: Core suite shapes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build just the core test project
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "core build from scratch (restore included): $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Core tests, no coverage
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-build -v q --nologo
+          "core tests, no coverage: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Install coverage collector
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet tool install --global dotnet-coverage --version 18.11.0
+          "tool install: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: Core tests, with coverage
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet-coverage collect --settings tests/coverage.runsettings --output core.cobertura.xml --output-format cobertura "dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-build -v q --nologo"
+          "core tests, with coverage: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  app-suite:
+    name: App suite shapes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build just the app test project
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "app build from scratch (restore included): $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: App tests, no coverage
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-build -v q --nologo
+          "app tests, no coverage: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  ui-suite:
+    name: UI suite shapes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the UI test project and the app
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+          "ui build from scratch (restore included): $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+      - name: UI tests, no coverage
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\src\Cascade.App\bin\Release\net10.0-windows\Cascade.exe
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-build -v q --nologo
+          "ui tests, no coverage: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  ui-parallel:
+    name: UI suite with xunit parallelism
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build
+        run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
+      - name: UI tests, one third of them
+        env:
+          CASCADE_TEST_EXE: ${{ github.workspace }}\src\Cascade.App\bin\Release\net10.0-windows\Cascade.exe
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-build -v q --nologo --filter "FullyQualifiedName~UiFeatureTests"
+          "ui feature tests only: $([math]::Round($sw.Elapsed.TotalSeconds,1))s"
+
+  download:
+    name: Download the bin artifact
+    runs-on: windows-latest
+    needs: cold-no-analyzers
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download
+        uses: actions/download-artifact@v8
+        with:
+          name: bin
+      - name: What arrived
+        run: |
+          Get-ChildItem -Recurse -File . | Measure-Object Length -Sum | ForEach-Object { "downloaded: $([math]::Round($_.Sum/1MB,1)) MB in $($_.Count) files" }
