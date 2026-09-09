@@ -8,7 +8,7 @@ name: CI
 # The two lists must stay identical; GitHub Actions does not support YAML anchors.
 on:
   push:
-    branches: [master, ci-speed]
+    branches: [master]
     paths-ignore:
       - '**.md'
       - LICENSE
@@ -41,10 +41,11 @@ defaults:
 # was necessary. It is now a fan of jobs that hold each other up only where one really needs what another
 # produced:
 #
-#   strict x5 ──────────────────────────────────┐   every analyzer and code style rule, one project each
-#   package ─────────────────────────────────────┤   publish, sign, and open the bundle that ships
-#   core x2 ┐                                    │
-#   app  x4 ├── gate (coverage floor + tallies) ─┴── release
+#   tools ─────────────────────────────────────┐    keeps the coverage collector's cache filled
+#   strict x5 ─────────────────────────────────┤    every analyzer and code style rule, one project each
+#   package ───────────────────────────────────┤    publish, sign, and open the bundle that ships
+#   core x2 ┐                                  │
+#   app  x4 ├── gate (coverage floor + tallies)┴── release
 #   ui   x6 ┘
 #
 # The suites are split across runners rather than run one after another, which is what a desktop-bound
