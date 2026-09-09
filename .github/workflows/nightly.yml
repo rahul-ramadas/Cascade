@@ -40,6 +40,10 @@ on:
       fuzzScale:
         description: Multiplier for the random tests
         default: '25'
+      proveTheHangDump:
+        description: Wedge a run on purpose first, to check the hang machinery still works
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -86,27 +90,74 @@ jobs:
       - name: Build
         run: dotnet build Cascade.slnx -c Release
 
+      # A step that wedges on a runner leaves nothing behind: Actions kills the job at its cap and the log
+      # stops mid-sentence. That happened here - a fuzz run that takes twenty-three seconds took EIGHTY-EIGHT
+      # MINUTES, was cancelled, and took the three steps behind it with it. Nothing could be said about it
+      # afterwards beyond "it did not finish", so nothing was.
+      #
+      # Every long step below now runs under scripts/Invoke-WithHangDump.ps1, which photographs the whole
+      # process tree - managed stacks into the log, a dump beside them - and kills it, well before the step's
+      # own timeout-minutes, which Actions enforces without asking anybody.
+      #
+      # The machinery is only worth having if it still works, and nothing else here would notice if it
+      # stopped. This step is how to find out, on the runner rather than on a desk: it cuts a run short on
+      # purpose and passes only if the stacks and the dump really arrived, and only if the stacks name
+      # Cascade's own frames - which is the difference between a dump and a diagnosis.
+      #
+      # The app checks are what it wedges, because they take a minute or so on any machine: pointing this at
+      # a suite that finishes in under fifteen seconds somewhere would make it fail for the wrong reason.
+      - name: Prove the hang machinery still bites
+        if: inputs.proveTheHangDump
+        timeout-minutes: 10
+        run: |
+          $stuck = 'artifacts/stuck'
+          ./scripts/Invoke-WithHangDump.ps1 -Name proof -TimeoutMinutes 0.25 -ReportDirectory $stuck `
+            -- dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-build --nologo
+          $code = $LASTEXITCODE
+
+          if ($code -ne 124) { throw "The watchdog let a wedged run through: it exited $code, not 124." }
+
+          $stacks = @(Get-ChildItem -Path $stuck -Filter '*-stacks.txt' -ErrorAction SilentlyContinue)
+          $named = @($stacks | Where-Object { Select-String -LiteralPath $_.FullName -Pattern 'Cascade\.' -Quiet })
+          $dumps = @(Get-ChildItem -Path $stuck -Filter '*.dmp' -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Length -gt 0 })
+
+          Write-Host "$($stacks.Count) stack file(s), $($named.Count) of them naming Cascade frames, $($dumps.Count) dump(s)."
+          if ($named.Count -eq 0) { throw 'No captured stack named a Cascade frame; a wedge here would still be undiagnosable.' }
+          if ($dumps.Count -eq 0) { throw 'No dump was written.' }
+          Remove-Item -Path $stuck -Recurse -Force
+
       # The engine over a log big enough to page the index, stream a filter pass, and make the match cache
       # be built from partial information. Answers are compared against the generator's own arithmetic, so
       # nothing here is a snapshot of what the engine happened to say last time.
       - name: Engine soak on a generated multi-hundred-megabyte log
+        timeout-minutes: 20
         env:
           CASCADE_SOAK: '1'
           CASCADE_SOAK_LINES: ${{ env.SOAK_LINES }}
         run: >
-          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          ./scripts/Invoke-WithHangDump.ps1 -Name soak -TimeoutMinutes 15 -ReportDirectory artifacts/stuck
+          -- dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
           -c Release --no-build --filter "FullyQualifiedName~SoakTests"
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
           --logger "trx;LogFileName=soak.trx" --results-directory artifacts/nightly
 
       # The same differential tests the push build runs, given room to explore. The seed moves with the
       # scale, so this is new ground rather than a longer walk down the same road; a failure prints the
       # seed, and setting CASCADE_FUZZ_SCALE to the same value reproduces it exactly.
+      #
+      # --blame-hang is the other half of the watchdog and answers a question it cannot: which TEST stopped
+      # coming back. It arms inside the test host, so it says nothing when the wedge is anywhere else - and
+      # the watchdog says nothing about which test was running. Between them there is no silent case left.
       - name: Fuzz the engine harder
+        timeout-minutes: 30
         env:
           CASCADE_FUZZ_SCALE: ${{ env.FUZZ_SCALE }}
         run: >
-          dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          ./scripts/Invoke-WithHangDump.ps1 -Name fuzz -TimeoutMinutes 22 -ReportDirectory artifacts/stuck
+          -- dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
           -c Release --no-build
+          --blame-hang --blame-hang-timeout 10m --blame-hang-dump-type full
           --logger "trx;LogFileName=fuzz.trx" --results-directory artifacts/nightly
 
       # A log nobody wrote to be tested. The soak above proves the answers are right, but it can only do
@@ -121,6 +172,7 @@ jobs:
       # underneath would break for a reason that is nothing to do with Cascade.
       - name: Find a real log on the runner
         id: log
+        timeout-minutes: 5
         run: |
           $roots = @('C:\Windows\Logs', 'C:\Windows\Panther', "$env:SystemRoot\Logs")
           $live = @('CBS.log', 'WindowsUpdate.log')
@@ -142,17 +194,22 @@ jobs:
 
       # Copied first, and read-only: the engine memory-maps what it opens, and a servicing log the OS
       # decides to roll over mid-run would take the mapping with it.
+      #
+      # The copy goes beside the results rather than among them: the results are uploaded whole, and a
+      # runner's largest log is not something anybody wants to download to read a trx.
       - name: The engine over a log nobody wrote for it
         if: steps.log.outputs.path != ''
         timeout-minutes: 20
         env:
-          CASCADE_BIG_FILE: ${{ github.workspace }}\artifacts\nightly\real.log
+          CASCADE_BIG_FILE: ${{ github.workspace }}\artifacts\reallog\real.log
         run: |
-          New-Item -ItemType Directory -Force -Path artifacts/nightly | Out-Null
+          New-Item -ItemType Directory -Force -Path artifacts/nightly, artifacts/reallog | Out-Null
           Copy-Item -LiteralPath '${{ steps.log.outputs.path }}' -Destination $env:CASCADE_BIG_FILE -Force
-          dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj `
-            -c Release --no-build --filter 'FullyQualifiedName~RealFileTests' `
-            --logger 'trx;LogFileName=realfile.trx' --results-directory artifacts/nightly
+          ./scripts/Invoke-WithHangDump.ps1 -Name realfile -TimeoutMinutes 12 -ReportDirectory artifacts/stuck `
+            -- dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj `
+               -c Release --no-build --filter 'FullyQualifiedName~RealFileTests' `
+               --blame-hang --blame-hang-timeout 8m --blame-hang-dump-type mini `
+               --logger 'trx;LogFileName=realfile.trx' --results-directory artifacts/nightly
 
       # A skipped result here means the checks did not run, and that is the state this step exists to make
       # visible - it was invisible for as long as the test reported a pass instead.
@@ -170,12 +227,16 @@ jobs:
             if ($result) { Write-Host "$($result.outcome): $($result.testName)" }
           }
 
+      # Everything under artifacts/nightly, not just the trx files: --blame writes its sequence file and any
+      # hang dump into the results directory, and those are the whole point of asking for them.
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: nightly-soak
-          path: artifacts/nightly/*.trx
+          path: |
+            artifacts/nightly/**
+            artifacts/stuck/**
           if-no-files-found: ignore
 
   flakes:
@@ -224,14 +285,14 @@ jobs:
         timeout-minutes: 30
         run: >
           pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
-          -Suite core -Runs $env:REPEATS -Load 8
+          -Suite core -Runs $env:REPEATS -Load 8 -TimeoutMinutes 12
           -ResultsDirectory artifacts/nightly-core
 
       - name: Repeat the app checks
         timeout-minutes: 45
         run: >
           pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
-          -Suite app -Runs $env:REPEATS
+          -Suite app -Runs $env:REPEATS -TimeoutMinutes 15
           -ResultsDirectory artifacts/nightly-app
 
       # Fewer repeats: every one of these launches the real executable, and the desktop is shared, so this
@@ -251,7 +312,7 @@ jobs:
           CASCADE_HANG_DIR: ${{ github.workspace }}\artifacts\hangs
         run: >
           pwsh -NoProfile -File scripts/Find-FlakyTests.ps1
-          -Suite ui -Runs 3
+          -Suite ui -Runs 3 -TimeoutMinutes 20
           -ResultsDirectory artifacts/nightly-ui
 
       - name: Report any stall the watchdog recorded
@@ -276,9 +337,9 @@ jobs:
         with:
           name: nightly-repeats
           path: |
-            artifacts/nightly-core/*.trx
-            artifacts/nightly-app/*.trx
-            artifacts/nightly-ui/*.trx
+            artifacts/nightly-core/**
+            artifacts/nightly-app/**
+            artifacts/nightly-ui/**
           if-no-files-found: ignore
 
       - name: Upload any hang dumps
@@ -339,6 +400,9 @@ jobs:
       # geometry before this was wired up (CASCADE_MANUAL_SIZE takes device pixels, so 1536x1152 is the same
       # room on a 150% display): 100 checks pass and one finding stands, which is the minimap not answering
       # a drag at that size. Expect this job to report that until it is settled.
+      # A rig driving a real pointer has a failure mode the others do not: a modal dialog nobody dismissed,
+      # or a menu that never opened, and it simply waits. The watchdog walks the whole tree, so what it
+      # photographs includes Cascade.exe itself - which is the process whose stacks answer that question.
       - name: Sweep the app with a real mouse and keyboard
         timeout-minutes: 25
         env:
@@ -346,8 +410,10 @@ jobs:
           CASCADE_TEST_EXE: ${{ github.workspace }}\artifacts\publish\Cascade.exe
           CASCADE_MANUAL_OUT: ${{ github.workspace }}\artifacts\sweep
         run: >
-          dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
+          ./scripts/Invoke-WithHangDump.ps1 -Name sweep -TimeoutMinutes 18 -ReportDirectory artifacts/sweep/stuck
+          -- dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj
           -c Release --no-build --filter "FullyQualifiedName~ManualSweep"
+          --blame-hang --blame-hang-timeout 15m --blame-hang-dump-type mini
           --logger "trx;LogFileName=sweep.trx" --results-directory artifacts/sweep
 
       # The findings are the product, so they have to be readable without downloading anything - and the
@@ -392,5 +458,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nightly-sweep
-          path: artifacts/sweep/*
+          path: artifacts/sweep/**
           if-no-files-found: ignore

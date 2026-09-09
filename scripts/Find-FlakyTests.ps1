@@ -31,6 +31,12 @@
 .PARAMETER Coverage
     Collect coverage too, which slows execution and is itself a way to shake out timing assumptions.
 
+.PARAMETER TimeoutMinutes
+    How long one run may take before it is treated as wedged. Past that, scripts/Invoke-WithHangDump.ps1
+    takes the managed stacks and a dump of everything under it, prints the stacks, kills it and carries on
+    with the next run. A repeat that never finishes used to take the whole step's budget with it and leave
+    nothing to look at - which is how a nightly spent eighty-eight minutes saying nothing at all.
+
 .EXAMPLE
     pwsh -NoProfile -File scripts/Find-FlakyTests.ps1 -Suite core -Runs 20 -Load 24
 #>
@@ -41,7 +47,8 @@ param(
     [int] $Load = 0,
     [switch] $Coverage,
     [ValidateSet('Debug', 'Release')] [string] $Configuration = 'Release',
-    [string] $ResultsDirectory
+    [string] $ResultsDirectory,
+    [double] $TimeoutMinutes = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +72,11 @@ $chosen = if ($Suite -eq 'all') { $projects.Keys } else { @($Suite) }
 
 if (Test-Path $ResultsDirectory) { Remove-Item $ResultsDirectory -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $ResultsDirectory | Out-Null
+
+# Where a run that never finished leaves its stacks and dumps. Beside the results, not among them: the
+# summary below reads every .trx it finds, and a wedged run does not write one.
+$watchdog = Join-Path $PSScriptRoot 'Invoke-WithHangDump.ps1'
+$stuck = Join-Path $ResultsDirectory 'stuck'
 
 $coverageTool = Join-Path $env:USERPROFILE '.dotnet\tools\dotnet-coverage.exe'
 if ($Coverage -and -not (Test-Path $coverageTool)) {
@@ -94,11 +106,16 @@ try {
 
         for ($run = 1; $run -le $Runs; $run++) {
             $log = Join-Path $ResultsDirectory "$name-$run.trx"
+            # --blame-hang answers the case this hunt is most likely to meet: one repeat in twenty where a
+            # test never returns. It names that test and dumps the host from the inside, which the watchdog
+            # below cannot do - and the watchdog covers what blame cannot, which is everything that goes
+            # wrong before there is a test host to arm it.
             $args = @(
                 'test', (Join-Path $repo $projects[$name])
                 '-c', $Configuration, '--no-build', '--nologo', '-v', 'q'
                 '--logger', "trx;LogFileName=$name-$run.trx"
                 '--results-directory', $ResultsDirectory
+                '--blame-hang', '--blame-hang-timeout', '5m', '--blame-hang-dump-type', 'mini'
             )
             $started = Get-Date
             if ($Coverage) {
@@ -110,11 +127,20 @@ try {
                     --output-format cobertura ('dotnet ' + ($args -join ' ')) | Out-Null
             }
             else {
-                & dotnet @args | Out-Null
+                & $watchdog -Name "$name-$run" -TimeoutMinutes $TimeoutMinutes `
+                            -ReportDirectory $stuck -Quiet -Command (@('dotnet') + $args)
             }
             $seconds = ((Get-Date) - $started).TotalSeconds
             $verdict = if ($LASTEXITCODE -eq 0) { 'green' } else { 'RED' }
             Write-Host ("{0,-5} run {1,2}: {2,-5} {3,6:N1}s" -f $name, $run, $verdict, $seconds)
+
+            # A wedge has already been diagnosed by the time we get here - stacks printed, dump written -
+            # and the repeats after it would each cost another whole timeout for nothing. Stop this suite
+            # and let the next one have the step's remaining budget, which is what the wedge was taking.
+            if ($LASTEXITCODE -eq 124) {
+                Write-Host ("{0,-5} not repeated further: run {1} never finished." -f $name, $run) -ForegroundColor Red
+                break
+            }
         }
     }
 }
@@ -151,10 +177,21 @@ foreach ($name in $skipped) {
     Write-Host ("  skipped in {0} of {1} runs: {2}" -f $outcomes[$name].Skip,
                 ($outcomes[$name].Skip + $outcomes[$name].Pass), $name) -ForegroundColor Yellow
 }
-if (-not $unstable) {
+
+# A run that wedged writes no trx at all, so the tally above cannot see it: every test in it is simply
+# absent, and absent reads as "passed in every run it appeared in". Say so, loudly, and go red - a hunt for
+# instability that reports green because one repeat never came back is worse than no hunt.
+$wedged = @(Get-ChildItem -Path $stuck -Filter '*-hang.txt' -ErrorAction SilentlyContinue)
+foreach ($report in $wedged) {
+    Write-Host ("  never finished: {0}" -f $report.BaseName.Replace('-hang', '')) -ForegroundColor Red
+    Write-Host ("      stacks and dumps beside {0}" -f $report.FullName) -ForegroundColor DarkRed
+}
+
+if (-not $unstable -and -not $wedged) {
     Write-Host ("{0} tests passed in every run." -f ($outcomes.Count - $skipped.Count)) -ForegroundColor Green
     exit 0
 }
+if (-not $unstable) { exit 1 }
 
 Write-Host "Not stable:" -ForegroundColor Red
 foreach ($name in $unstable) {
