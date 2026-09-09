@@ -41,7 +41,7 @@ defaults:
 # was necessary. It is now a fan of jobs that hold each other up only where one really needs what another
 # produced:
 #
-#   strict ──────────────────────────────────────┐   every analyzer, code style rule and package audit
+#   strict x5 ──────────────────────────────────┐   every analyzer and code style rule, one project each
 #   package ─────────────────────────────────────┤   publish, sign, and open the bundle that ships
 #   core x2 ┐                                    │
 #   app  x4 ├── gate (coverage floor + tallies) ─┴── release
@@ -61,7 +61,10 @@ env:
   # on a runner, a solution build takes 73s with them and 20s without, for identical output. So the jobs
   # that only want binaries build without them and `strict` runs every one of them beside the tests
   # instead of in front of them. Nothing is skipped - it is moved off the critical path.
-  FAST_BUILD: -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false -p:NuGetAudit=false
+  # The audit stays on everywhere: it happens during restore, its findings are warnings rather than
+  # errors by design, and turning it off here would leave the strict pass below - which does not restore
+  # from scratch - the only place it could run, where it might quietly not.
+  FAST_BUILD: -p:RunAnalyzers=false -p:EnforceCodeStyleInBuild=false
 
   # Wrapped round every suite rather than using the test SDK's own collector, because the UI suite drives
   # the app as a separate process and that one will not follow a child - which is why a third of the app's
@@ -71,15 +74,32 @@ env:
 
 jobs:
   # The quality gate. It produces nothing anybody uses; it exists so that every analyzer diagnostic, code
-  # style rule and package advisory is still an error, without the other nine jobs each paying 53 seconds
-  # to be told the same thing.
+  # style rule and package advisory is still an error, without the other twelve jobs each paying 53
+  # seconds to be told the same thing.
+  #
+  # One project per runner, because analysing them one after another is what made this the longest job in
+  # the pipeline at a minute and a half. Each job builds its project's references WITHOUT the rules -
+  # whichever job owns a project is the one that analyses it, so every project is still analysed exactly
+  # once - and then builds the project itself with everything on.
+  # MUTATION-TESTED, because the failure to fear here is silence: a violation the first pass accepts does
+  # fail the second, so the second really recompiles rather than finding the output already up to date.
   strict:
-    name: Analyzers, style and audit
+    name: Rules (${{ matrix.project }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - src/Cascade.Core/Cascade.Core.csproj
+          - src/Cascade.App/Cascade.App.csproj
+          - tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj
+          - tests/Cascade.AppTests/Cascade.AppTests.csproj
+          - tests/Cascade.UiTests/Cascade.UiTests.csproj
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/prepare
-      - run: dotnet build Cascade.slnx -c Release -v q --nologo
+      - run: dotnet build ${{ matrix.project }} -c Release -v q --nologo ${{ env.FAST_BUILD }}
+      - run: dotnet build ${{ matrix.project }} -c Release -v q --nologo -p:BuildProjectReferences=false
 
   # The exe that ships, and the only checks that open it. Everything else measures coverage, which a
   # single-file bundle cannot give: its assemblies are loaded from inside the exe, where nothing can

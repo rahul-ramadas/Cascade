@@ -113,7 +113,10 @@ internal sealed class CascadeApp : IDisposable
 
             Window? window = null;
             // Reading the handle of a process that exits mid-wait throws; the next turn of the loop reports it.
-            try { window = app.GetMainWindow(automation, TimeSpan.FromMilliseconds(250)); }
+            // Asked for often rather than in quarter-second steps: MEASURED, the window is up about 190 ms
+            // after the launch, so a coarse poll spends most of a tenth of a second per test having already
+            // been given the answer.
+            try { window = app.GetMainWindow(automation, TimeSpan.FromMilliseconds(40)); }
             catch (InvalidOperationException) { }
             if (window is not null) return window;
 

@@ -38,10 +38,18 @@ foreach ($suite in ($manifests | Group-Object { ($_.BaseName -split '-')[0] })) 
     $ran = [System.Collections.Generic.HashSet[string]]::new()
     $shards = 0
     foreach ($trx in Get-ChildItem -Path $ResultsDirectory -Recurse -Filter "$($suite.Name)-*.trx") {
-        [xml] $xml = Get-Content -LiteralPath $trx.FullName
-        foreach ($result in @($xml.TestRun.Results.UnitTestResult)) {
-            if ($result) { [void] $ran.Add((($result.testName -split '\(', 2)[0])) }
+        # XmlReader rather than an XmlDocument walked through PowerShell's adapter: a shard's results run to
+        # hundreds of entries and the adapter builds an object for every one of them.
+        $reader = [System.Xml.XmlReader]::Create($trx.FullName)
+        try {
+            while ($reader.Read()) {
+                if ($reader.NodeType -eq [System.Xml.XmlNodeType]::Element -and $reader.Name -eq 'UnitTestResult') {
+                    $name = $reader.GetAttribute('testName')
+                    if ($name) { [void] $ran.Add((($name -split '\(', 2)[0])) }
+                }
+            }
         }
+        finally { $reader.Dispose() }
         $shards++
     }
 
