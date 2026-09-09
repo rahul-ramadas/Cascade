@@ -40,7 +40,24 @@ runs:
       with:
         global-json-file: global.json
 
+    # The collector is a 60MB download that a dozen jobs would otherwise each make, and MEASURED at 8s on a
+    # quick runner and 23s on a slow one - which is a tenth of the whole pipeline. Restored from a small
+    # cache with a fixed key; nothing here SAVES it, because a cache save runs in the post step and holds
+    # the job open (that mistake cost 66-106s a job when the packages were cached too). The `tools` job
+    # keeps it filled, off everybody's critical path.
+    - uses: actions/cache/restore@v4
+      if: inputs.coverage == 'true'
+      with:
+        path: ~/.dotnet/tools
+        key: dotnet-coverage-${{ runner.os }}-${{ inputs.coverage-version }}
+
     - name: The coverage collector
       if: inputs.coverage == 'true'
       shell: pwsh
-      run: dotnet tool install --global dotnet-coverage --version ${{ inputs.coverage-version }}
+      run: |
+        # Asked to run rather than merely looked for: a cache that restored something unusable would
+        # otherwise fail later, inside a test step, where it reads as the tests being broken.
+        $ok = $false
+        try { $null = & dotnet-coverage --version 2>&1; $ok = $LASTEXITCODE -eq 0 } catch { }
+        if ($ok) { Write-Host 'dotnet-coverage came from the cache.'; exit 0 }
+        dotnet tool install --global dotnet-coverage --version ${{ inputs.coverage-version }}

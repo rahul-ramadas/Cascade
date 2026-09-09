@@ -73,6 +73,20 @@ env:
   COVERAGE_TOOL_VERSION: 18.11.0
 
 jobs:
+  # Fills the cache the test jobs restore the coverage collector from. Nothing waits on it - it is here so
+  # that the save, which runs in a job's post step and holds it open, never lands on a job anybody needs.
+  tools:
+    name: Keep the collector warm
+    runs-on: windows-latest
+    steps:
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: ~/.dotnet/tools
+          key: dotnet-coverage-${{ runner.os }}-${{ env.COVERAGE_TOOL_VERSION }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: dotnet tool install --global dotnet-coverage --version ${{ env.COVERAGE_TOOL_VERSION }}
+
   # The quality gate. It produces nothing anybody uses; it exists so that every analyzer diagnostic, code
   # style rule and package advisory is still an error, without the other twelve jobs each paying 53
   # seconds to be told the same thing.
@@ -281,14 +295,12 @@ jobs:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Which tests are mine
-        id: split
-        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -Shard ${{ matrix.shard }} -Of 2 -By Class -ExpectedFile artifacts/test-results/core-${{ matrix.shard }}.expected
-      - name: Run them
+      - name: Run the shard
         timeout-minutes: 10
         run: |
+          $filter = ./scripts/Split-Tests.ps1 -Project tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -Shard ${{ matrix.shard }} -Of 2 -By Class -ExpectedFile artifacts/test-results/core-${{ matrix.shard }}.expected
           $test = 'dotnet test tests/Cascade.Core.Tests/Cascade.Core.Tests.csproj -c Release --no-build -v q --nologo' +
-                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  " --filter $filter" +
                   ' --logger trx;LogFileName=core-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
           dotnet-coverage collect --settings tests/coverage.runsettings `
             --output artifacts/test-results/core-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
@@ -316,14 +328,12 @@ jobs:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Which tests are mine
-        id: split
-        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 4 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
-      - name: Run them
+      - name: Run the shard
         timeout-minutes: 15
         run: |
+          $filter = ./scripts/Split-Tests.ps1 -Project tests/Cascade.AppTests/Cascade.AppTests.csproj -Shard ${{ matrix.shard }} -Of 4 -By Method -ExpectedFile artifacts/test-results/app-${{ matrix.shard }}.expected
           $test = 'dotnet test tests/Cascade.AppTests/Cascade.AppTests.csproj -c Release --no-build -v q --nologo' +
-                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  " --filter $filter" +
                   ' --logger trx;LogFileName=app-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
           dotnet-coverage collect --settings tests/coverage.runsettings `
             --output artifacts/test-results/app-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
@@ -354,16 +364,14 @@ jobs:
           coverage: true
           coverage-version: ${{ env.COVERAGE_TOOL_VERSION }}
       - run: dotnet build tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release -v q --nologo ${{ env.FAST_BUILD }}
-      - name: Which tests are mine
-        id: split
-        run: ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 6 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
-      - name: Run them
+      - name: Run the shard
         timeout-minutes: 15
         env:
           CASCADE_TEST_EXE: ${{ github.workspace }}\src\Cascade.App\bin\Release\net10.0-windows\Cascade.exe
         run: |
+          $filter = ./scripts/Split-Tests.ps1 -Project tests/Cascade.UiTests/Cascade.UiTests.csproj -Shard ${{ matrix.shard }} -Of 6 -By Method -ExpectedFile artifacts/test-results/ui-${{ matrix.shard }}.expected
           $test = 'dotnet test tests/Cascade.UiTests/Cascade.UiTests.csproj -c Release --no-build -v q --nologo' +
-                  ' --filter ${{ steps.split.outputs.filter }}' +
+                  " --filter $filter" +
                   ' --logger trx;LogFileName=ui-${{ matrix.shard }}.trx --results-directory artifacts/test-results'
           dotnet-coverage collect --settings tests/coverage.runsettings `
             --output artifacts/test-results/ui-${{ matrix.shard }}.cobertura.xml --output-format cobertura $test
