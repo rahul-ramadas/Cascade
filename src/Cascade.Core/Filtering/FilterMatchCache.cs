@@ -416,15 +416,16 @@ public sealed class FilterMatchCache
     /// <summary>
     /// Rebuilds the visible-line words purely from cached sets: a line is shown when some enabled include
     /// deep-matches it and no enabled exclude does. This is what makes a filter toggle a memory-bandwidth
-    /// operation instead of a re-scan.
+    /// operation instead of a re-scan. <paramref name="hideUnmatched"/> settles the lines no include claimed;
+    /// see <see cref="FilterSnapshot.HidesUnmatchedLines"/>.
     /// </summary>
     public static void Combine(IReadOnlyList<MatchSet> includes, IReadOnlyList<MatchSet> excludes,
-        bool hasEnabledInclude, long lines, ulong[] shown)
+        bool hideUnmatched, long lines, ulong[] shown)
     {
         int words = (int)((lines + 63) / 64);
         var span = shown.AsSpan(0, words);
 
-        Include(span, includes, hasEnabledInclude, lines);
+        Include(span, includes, hideUnmatched, lines);
         foreach (var set in excludes) AndNot(span, set, lines);
         ClearTail(span, lines, words);
     }
@@ -439,12 +440,12 @@ public sealed class FilterMatchCache
     /// <para>Excludes carry whatever overrules them, so an exclude with an enabled include nested under it
     /// vetoes only the lines that include did not claim.</para></summary>
     public static void Combine(IReadOnlyList<MatchSet> includes, IReadOnlyList<ExcludeTerm> excludes,
-        bool hasEnabledInclude, long lines, ulong[] shown)
+        bool hideUnmatched, long lines, ulong[] shown)
     {
         int words = (int)((lines + 63) / 64);
         var span = shown.AsSpan(0, words);
 
-        Include(span, includes, hasEnabledInclude, lines);
+        Include(span, includes, hideUnmatched, lines);
 
         // One scratch buffer, made only if an exclude actually has something overruling it and reused by all
         // of them: an exclude's effective veto has to be materialized before it can be applied, and the
@@ -469,14 +470,14 @@ public sealed class FilterMatchCache
         ClearTail(span, lines, words);
     }
 
-    private static void Include(Span<ulong> span, IReadOnlyList<MatchSet> includes, bool hasEnabledInclude,
+    private static void Include(Span<ulong> span, IReadOnlyList<MatchSet> includes, bool hideUnmatched,
         long lines)
     {
         // Sets differ enormously in shape and it is worth treating them differently: in a real filter file
         // most match nothing at all, most of the rest match a fraction of a percent, and only a handful are
         // dense enough to be worth walking a word at a time. Asking every set for every word costs
         // O(lines x filters) whatever they hold; splitting by shape costs O(lines x dense sets + sparse bits).
-        if (!hasEnabledInclude) { span.Fill(ulong.MaxValue); return; }   // no include filters: everything qualifies
+        if (!hideUnmatched) { span.Fill(ulong.MaxValue); return; }   // nothing asked for: every line qualifies
         span.Clear();
         foreach (var set in includes) Or(span, set, lines);
     }

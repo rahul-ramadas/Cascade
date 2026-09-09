@@ -546,7 +546,7 @@ public sealed class FilterService : IDisposable
         }
 
         var shown = new ulong[(lines + 63) / 64];
-        FilterMatchCache.Combine(includes, excludes, gen.Snapshot.HasEnabledInclude, lines, shown);
+        FilterMatchCache.Combine(includes, excludes, gen.Snapshot.HidesUnmatchedLines, lines, shown);
         _visible.ReplaceAll(shown, lines);
         _visible.Publish();
         lock (gen.CountsSync) Array.Copy(counts, gen.Counts, counts.Length);

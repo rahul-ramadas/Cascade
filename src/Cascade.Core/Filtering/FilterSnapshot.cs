@@ -15,6 +15,9 @@ public readonly record struct LineEval(bool Shown, Filter? ColorFilter);
 /// match) and no enabled exclude deep-matches <i>with nothing enabled nested under it matching too</i> -
 /// an exclude is overruled by anything enabled below it that also matched, which is what makes
 /// "everything with A, except AB, but keep ABC" a matter of nesting three filters.
+/// <para>A line no enabled include claims is hidden only once the set asks for something positively; see
+/// <see cref="HidesUnmatchedLines"/>, which is what makes a set of excludes alone read as "show the file,
+/// less this".</para>
 /// <para>The color comes from the <b>first</b> enabled include that deep-matches, reading the list top to
 /// bottom as it is drawn - even when that filter sets no style, in which case the line takes the view's
 /// defaults. Only a filter <b>nested under</b> that one may take it from there, and among those, again the
@@ -130,7 +133,12 @@ public sealed class FilterSnapshot
 
     public bool ShowOnlyFilteredLines { get; }
     public bool HasAnyEnabled { get; }
-    public bool HasEnabledInclude { get; }
+    /// <summary>Whether a line that no enabled include claimed is hidden. True once the set asks for something
+    /// positively, which an include nested under an enabled exclude does <b>not</b> do: such a filter says
+    /// which lines that exclude may not take, not that the rest of the file has stopped being worth showing.
+    /// Counting one would turn "everything except the heartbeats" into "nothing but the heartbeat errors" the
+    /// moment the exception was switched on.</summary>
+    public bool HidesUnmatchedLines { get; }
     /// <summary>True when an enabled exclude has an enabled include nested under it - the one shape whose
     /// veto can be overruled, and so the one shape whose cached sets need more than a plain union.</summary>
     public bool HasOverruledExclude { get; }
@@ -147,7 +155,7 @@ public sealed class FilterSnapshot
     internal int EvaluatedRootCountForTesting => _evalRoots.Length;
 
     private FilterSnapshot(Node[] roots, Dictionary<Filter, int> index, Node[] nodesByIndex, int filterCount,
-        bool showOnlyFiltered, bool hasAnyEnabled, bool hasEnabledInclude, bool hasMarkerFilter,
+        bool showOnlyFiltered, bool hasAnyEnabled, bool hidesUnmatched, bool hasMarkerFilter,
         bool hasOverruledExclude, LiteralAutomaton? ciAutomaton, LiteralAutomaton? csAutomaton,
         int[]? markerVersions)
     {
@@ -162,7 +170,7 @@ public sealed class FilterSnapshot
         FilterCount = filterCount;
         ShowOnlyFilteredLines = showOnlyFiltered;
         HasAnyEnabled = hasAnyEnabled;
-        HasEnabledInclude = hasEnabledInclude;
+        HidesUnmatchedLines = hidesUnmatched;
         HasMarkerFilter = hasMarkerFilter;
         HasOverruledExclude = hasOverruledExclude;
         _markerVersions = markerVersions;
@@ -397,7 +405,7 @@ public sealed class FilterSnapshot
     private static FilterSnapshot Build(FilterCollection filters, Filter? forceEnabled, HashSet<Filter>? chain,
                                         MarkerStore? markers)
     {
-        bool anyEnabled = false, anyInclude = false, anyMarker = false, anyOverruled = false;
+        bool anyEnabled = false, hidesUnmatched = false, anyMarker = false, anyOverruled = false;
         int counter = 0;
         var index = new Dictionary<Filter, int>();
         var nodes = new List<Node>();
@@ -479,7 +487,9 @@ public sealed class FilterSnapshot
             if (enabled)
             {
                 anyEnabled = true;
-                if (f.Kind == FilterKind.Include) anyInclude = true;
+                // vetoAbove: an enabled exclude stands above this one, so an include here is that exclude's
+                // exception and asks for nothing on its own account.
+                if (f.Kind == FilterKind.Include && !vetoAbove) hidesUnmatched = true;
             }
 
             var kept = new List<Node>(f.Children.Count);
@@ -555,7 +565,7 @@ public sealed class FilterSnapshot
         }
 
         return new FilterSnapshot(roots, index, nodes.ToArray(), counter, filters.ShowOnlyFilteredLines,
-            anyEnabled, anyInclude, anyMarker, anyOverruled, ci, cs, markerVersions);
+            anyEnabled, hidesUnmatched, anyMarker, anyOverruled, ci, cs, markerVersions);
     }
 
     /// <summary>Evaluates a single line. <paramref name="markers"/> may be null when no marker
@@ -609,7 +619,7 @@ public sealed class FilterSnapshot
             if (bit >= 0 && (hits[bit >> 6] & (1UL << (bit & 63))) == 0) continue;
             Dfs(_evalRoots[i], line, lineNumber, markers, counts, context, deepMatches, ref bestEnd, ref best, ref excluded, ref anyIncludeMatched);
         }
-        bool included = HasEnabledInclude ? anyIncludeMatched : true;
+        bool included = !HidesUnmatchedLines || anyIncludeMatched;
         bool shown = included && !excluded;
         return new LineEval(shown, shown ? best : null);
     }

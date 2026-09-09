@@ -1068,13 +1068,13 @@ public class FilterMatchCacheTests
         var thirds = Make(l => l % 3 == 0);
         var shown = new ulong[(lines + 63) / 64];
 
-        FilterMatchCache.Combine(new[] { evens }, new[] { thirds }, hasEnabledInclude: true, lines, shown);
+        FilterMatchCache.Combine(new[] { evens }, new[] { thirds }, hideUnmatched: true, lines, shown);
         for (long l = 0; l < lines; l++)
             Assert.Equal(l % 2 == 0 && l % 3 != 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
 
         // No enabled includes: everything except the excludes.
         FilterMatchCache.Combine(Array.Empty<FilterMatchCache.MatchSet>(), new[] { thirds },
-            hasEnabledInclude: false, lines, shown);
+            hideUnmatched: false, lines, shown);
         for (long l = 0; l < lines; l++)
             Assert.Equal(l % 3 != 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
 
@@ -1113,7 +1113,7 @@ public class FilterMatchCacheTests
         // shape is also tried with lines past the end.
         foreach (long lines in new long[] { 1, 63, 64, 65, 4_097, 100_000, 100_001 })
             foreach (long extra in new long[] { 0, 500 })
-                foreach (bool hasEnabledInclude in new[] { true, false })
+                foreach (bool hideUnmatched in new[] { true, false })
                 {
                     long covered = lines + extra;
                     var inc = new[] { 0.0, 0.00001, 0.002, 0.6 }.Select(d => Make(d, covered)).ToArray();
@@ -1122,15 +1122,15 @@ public class FilterMatchCacheTests
                     var shown = new ulong[(lines + 63) / 64 + 3];        // headroom must be left alone
                     Array.Fill(shown, 0xDEADBEEFDEADBEEFUL);
                     FilterMatchCache.Combine(inc.Select(x => x.Set).ToArray(), exc.Select(x => x.Set).ToArray(),
-                                             hasEnabledInclude, lines, shown);
+                                             hideUnmatched, lines, shown);
 
                     for (long l = 0; l < lines; l++)
                     {
-                        bool included = !hasEnabledInclude || inc.Any(x => x.Members.Contains(l));
+                        bool included = !hideUnmatched || inc.Any(x => x.Members.Contains(l));
                         bool expected = included && !exc.Any(x => x.Members.Contains(l));
                         bool actual = (shown[l >> 6] & (1UL << (int)(l & 63))) != 0;
                         Assert.True(expected == actual,
-                            $"line {l} of {lines} (covered {covered}, includes on {hasEnabledInclude}): " +
+                            $"line {l} of {lines} (covered {covered}, unmatched hidden {hideUnmatched}): " +
                             $"expected {expected}, got {actual}");
                     }
 
@@ -1170,14 +1170,14 @@ public class FilterMatchCacheTests
 
         FilterMatchCache.Combine(new[] { all, sixths },
                                  new[] { new FilterMatchCache.ExcludeTerm(evens, new[] { sixths }) },
-                                 hasEnabledInclude: true, lines, shown);
+                                 hideUnmatched: true, lines, shown);
         for (long l = 0; l < lines; l++)
             Assert.Equal(l % 2 != 0 || l % 6 == 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
 
         // Nothing overruling it, and the veto is whole again - which is what the old shape must still do.
         FilterMatchCache.Combine(new[] { all, sixths },
                                  new[] { new FilterMatchCache.ExcludeTerm(evens, null) },
-                                 hasEnabledInclude: true, lines, shown);
+                                 hideUnmatched: true, lines, shown);
         for (long l = 0; l < lines; l++)
             Assert.Equal(l % 2 != 0, (shown[l >> 6] & (1UL << (int)(l & 63))) != 0);
     }
@@ -1208,7 +1208,7 @@ public class FilterMatchCacheTests
         // sparse one, by a dense one, and by several at once.
         foreach (long lines in new long[] { 1, 63, 64, 65, 4_097, 100_001 })
             foreach (long extra in new long[] { 0, 500 })
-                foreach (bool hasEnabledInclude in new[] { true, false })
+                foreach (bool hideUnmatched in new[] { true, false })
                 {
                     long covered = lines + extra;
                     var inc = new[] { 0.0, 0.002, 0.6 }.Select(d => Make(d, covered)).ToArray();
@@ -1225,17 +1225,17 @@ public class FilterMatchCacheTests
                     var shown = new ulong[(lines + 63) / 64 + 3];        // headroom must be left alone
                     Array.Fill(shown, 0xDEADBEEFDEADBEEFUL);
                     FilterMatchCache.Combine(inc.Select(x => x.Set).ToArray(), terms,
-                                             hasEnabledInclude, lines, shown);
+                                             hideUnmatched, lines, shown);
 
                     for (long l = 0; l < lines; l++)
                     {
-                        bool included = !hasEnabledInclude || inc.Any(x => x.Members.Contains(l));
+                        bool included = !hideUnmatched || inc.Any(x => x.Members.Contains(l));
                         bool vetoed = plain.Members.Contains(l) ||
                                       (opposed.Members.Contains(l) && !winners.Any(w => w.Members.Contains(l)));
                         bool expected = included && !vetoed;
                         bool actual = (shown[l >> 6] & (1UL << (int)(l & 63))) != 0;
                         Assert.True(expected == actual,
-                            $"line {l} of {lines} (covered {covered}, includes on {hasEnabledInclude}): " +
+                            $"line {l} of {lines} (covered {covered}, unmatched hidden {hideUnmatched}): " +
                             $"expected {expected}, got {actual}");
                     }
 
@@ -1320,6 +1320,56 @@ public class FilterMatchCacheTests
                 Assert.Equal(fresh.Counts, cached.Counts);
             }
             Assert.True(doc.FilterCacheHits > hitsBefore, "none of those toggles was served from the cache");
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void An_exception_under_an_exclude_takes_no_lines_away_on_the_cached_path_either()
+    {
+        // The document-level half of FilterSemanticsTests' exception rule. The cached path settles the lines
+        // no include claimed from its own copy of the flag rather than by evaluating them, so it has to reach
+        // the same answer as a sweep - the whole file less the vetoed lines, not the exception's handful.
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var noise = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "noise" } };
+            var disk = new Filter { Enabled = true, Match = { Text = "disk" } };
+            filters.Add(noise);
+            filters.Add(disk, noise);
+            var flat = new List<Filter> { noise, disk };
+
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.Equal(0, doc.FilterCacheHits);          // this one really scanned
+
+            // Read off WriteLog's own rules rather than counted by hand, so it still states the contract when
+            // the fixture changes: every line except the noise ones the exception did not keep.
+            var kept = new List<long>();
+            var vetoedOutright = new List<long>();
+            for (long i = 0; i < Lines; i++)
+            {
+                if (i % 11 != 0 || i % 5 == 0) kept.Add(i);
+                if (i % 11 != 0) vetoedOutright.Add(i);
+            }
+            Assert.Equal(kept, Capture(doc, flat).Visible);
+
+            long hits = doc.FilterCacheHits;
+            disk.Enabled = false;                          // nothing left to overrule, and nothing asked for
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.Equal(vetoedOutright, Capture(doc, flat).Visible);
+
+            disk.Enabled = true;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.Equal(kept, Capture(doc, flat).Visible);
+            Assert.True(doc.FilterCacheHits > hits, "neither toggle was served from the cache");
         }
         finally { File.Delete(path); }
     }

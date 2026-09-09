@@ -674,8 +674,11 @@ public class FilterColouringTests
     private static bool ReferenceShown(FilterCollection c, string line)
     {
         var all = c.EnumerateDepthFirst().ToList();
-        bool anyEnabledInclude = all.Any(f => f.Enabled && f.Kind == FilterKind.Include);
-        bool included = !anyEnabledInclude;
+        // An include under an enabled exclude is that exclude's exception, so it asks for nothing on its own
+        // account and cannot be what makes the unclaimed lines disappear.
+        bool asksForSomething = all.Any(f => f.Enabled && f.Kind == FilterKind.Include &&
+                                             !ReferenceEnabledExcludeAbove(f));
+        bool included = !asksForSomething;
         foreach (var f in all)
         {
             if (!f.Enabled || !ReferenceDeepMatch(f, line)) continue;
@@ -689,6 +692,13 @@ public class FilterColouringTests
             included = true;
         }
         return included;
+    }
+
+    private static bool ReferenceEnabledExcludeAbove(Filter f)
+    {
+        for (Filter? n = f.Parent; n is not null; n = n.Parent)
+            if (n.Enabled && n.Kind == FilterKind.Exclude) return true;
+        return false;
     }
 
     private static IEnumerable<Filter> ReferenceDescendants(Filter f)

@@ -132,6 +132,84 @@ public class FilterSemanticsTests
     }
 
     [Fact]
+    public void An_exception_under_an_exclude_leaves_the_rest_of_the_file_alone()
+    {
+        // "Show everything except heartbeats, but keep the ones that are errors." The nested include is that
+        // exclude's exception, not a statement of what the file is worth showing, so switching it on gives
+        // lines back and takes none away. It used to say what to show, hiding everything it did not name.
+        var c = new FilterCollection();
+        var heartbeat = Make("Heartbeat", true, FilterKind.Exclude);
+        var error = Make("Error", true);
+        c.Add(heartbeat);
+        c.Add(error, heartbeat);
+
+        Assert.False(FilterSnapshot.Build(c).HidesUnmatchedLines);
+        Assert.True(Eval(c, "Payment accepted").Shown);        // claimed by nothing, and nothing asked for it
+        Assert.False(Eval(c, "Heartbeat ok").Shown);           // the exclude has its way
+
+        var kept = Eval(c, "Heartbeat Error timeout");
+        Assert.True(kept.Shown);
+        Assert.Same(error, kept.ColorFilter);
+
+        // Switching the exception off leaves the same file behind, minus the lines it was keeping.
+        error.Enabled = false;
+        Assert.False(FilterSnapshot.Build(c).HidesUnmatchedLines);
+        Assert.True(Eval(c, "Payment accepted").Shown);
+        Assert.False(Eval(c, "Heartbeat Error timeout").Shown);
+    }
+
+    [Fact]
+    public void Everything_under_an_exclude_is_part_of_its_exception_however_deep()
+    {
+        // The question is whether an enabled exclude stands anywhere above, not whether the parent is one:
+        // a filter two levels down is refining the exception, not making a request of its own.
+        var c = new FilterCollection();
+        var heartbeat = Make("Heartbeat", true, FilterKind.Exclude);
+        var error = Make("Error", true);
+        c.Add(heartbeat);
+        c.Add(error, heartbeat);
+        c.Add(Make("disk", true), error);
+
+        Assert.False(FilterSnapshot.Build(c).HidesUnmatchedLines);
+        Assert.True(Eval(c, "Payment accepted").Shown);
+        Assert.False(Eval(c, "Heartbeat ok").Shown);
+        Assert.True(Eval(c, "Heartbeat Error disk").Shown);
+    }
+
+    [Fact]
+    public void One_filter_asking_for_something_still_hides_everything_it_does_not_claim()
+    {
+        // The other half of the rule, without which the two above would read as "an exclude shows the file".
+        var c = new FilterCollection();
+        var heartbeat = Make("Heartbeat", true, FilterKind.Exclude);
+        c.Add(heartbeat);
+        c.Add(Make("Error", true), heartbeat);
+        c.Add(Make("Payment", true));
+
+        Assert.True(FilterSnapshot.Build(c).HidesUnmatchedLines);
+        Assert.True(Eval(c, "Payment accepted").Shown);
+        Assert.False(Eval(c, "Warning: retry").Shown);         // claimed by nothing
+        Assert.True(Eval(c, "Heartbeat Error timeout").Shown);
+        Assert.False(Eval(c, "Heartbeat ok").Shown);
+    }
+
+    [Fact]
+    public void A_filter_under_a_switched_off_exclude_is_an_ordinary_include()
+    {
+        // Nothing is vetoing, so this filter is nobody's exception: it is the only thing the set asks for and
+        // the rest of the file goes. The switched-off exclude's pattern still narrows it, as any parent's does.
+        var c = new FilterCollection();
+        var heartbeat = Make("Heartbeat", false, FilterKind.Exclude);
+        c.Add(heartbeat);
+        c.Add(Make("Error", true), heartbeat);
+
+        Assert.True(FilterSnapshot.Build(c).HidesUnmatchedLines);
+        Assert.False(Eval(c, "Payment accepted").Shown);
+        Assert.False(Eval(c, "Error on its own").Shown);       // no ancestor "Heartbeat"
+        Assert.True(Eval(c, "Heartbeat Error timeout").Shown);
+    }
+
+    [Fact]
     public void Overruling_alternates_to_any_depth()
     {
         var c = new FilterCollection();
