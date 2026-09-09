@@ -69,7 +69,7 @@ public class DiagnosticsTests(ITestOutputHelper output) : AppCheckFixture(output
 /// <summary>Preferences, per-machine state, and the credential the updater is allowed to use.</summary>
 public class SettingsTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void Every_preference_survives_an_export_and_an_import() => Verify(Checks.RunSettingsChecks, atLeast: 37);
+    [Fact] public void Every_preference_survives_an_export_and_an_import() => Verify(Checks.RunSettingsChecks, atLeast: 38);
     [Fact] public void Machine_state_is_a_separate_file_and_is_never_exported() => Verify(Checks.RunMachineStateChecks, atLeast: 8);
     [Fact] public void The_git_credential_only_ever_goes_to_github() => Verify(Checks.RunUpdateCredentialChecks, atLeast: 9);
 }

@@ -259,6 +259,7 @@ public class ManualSweep : IDisposable
         Stage("markers", MarkersAndMap);
         Stage("roundtrip", PresetRoundTrip);
         Stage("goto", GoToAndZoom);
+        Stage("precedence", ExcludePrecedence);
 
         Say($"bugs found: {_bugs.Count}");
         Say($"total waiting: {Interlocked.Read(ref _slept):N0} ms");
@@ -1574,10 +1575,83 @@ public class ManualSweep : IDisposable
         Keyboard.Release(VirtualKeyShort.CONTROL);
     }
 
+    /// <summary>The exclude-precedence preference, changed the way a reader changes it. Nothing else in the
+    /// suite can reach it: the menu item opens a modal, and a modal defeats both of the ways in that need no
+    /// real input. UI Automation's Invoke on the item never returns from the dialog's message loop, and the
+    /// stuck call then times out every other request; and an access key posted as a message is ignored,
+    /// because injected messages leave the thread's key state alone so WinForms sees no Alt held. A real
+    /// keyboard is the only way, which is exactly what this rig has.</summary>
+    private void ExcludePrecedence()
+    {
+        Menu("View", "Focus Text Area");
+        Wait(300);
+        long before = ViewRows();
+
+        Keyboard.Pressing(VirtualKeyShort.ALT);
+        Type(VirtualKeyShort.KEY_E);
+        Keyboard.Release(VirtualKeyShort.ALT);
+        Wait(500);
+        Type(VirtualKeyShort.KEY_R);
+        Wait(1200);
+
+        var dialog = _app.FindDialog("Preferences");
+        Check("Alt+E, R opens Preferences", dialog is not null);
+        if (dialog is null) return;
+
+        var combo = CascadeApp.PrecedenceCombo(dialog);
+        Check("Preferences offers the exclude-precedence choice", combo is not null,
+              string.Join(" | ", dialog.FindAllDescendants(cf => cf.ByControlType(ControlType.ComboBox))
+                                       .Select(CascadeApp.ComboText)));
+        if (combo is null)
+        {
+            Type(VirtualKeyShort.ESCAPE);
+            return;
+        }
+
+        string was = CascadeApp.ComboText(combo);
+        combo.Focus();
+        Wait(200);
+        Type(VirtualKeyShort.DOWN);
+        Wait(200);
+        string now = CascadeApp.ComboText(combo);
+        Check("the drop-down takes the keyboard and moves", now != was, $"{was} -> {now}");
+
+        Type(VirtualKeyShort.RETURN);
+        Wait(1500);
+        Check("OK closes it", _app.FindDialog("Preferences") is null);
+
+        // The set the sweep runs on scopes its exclude under the include above it, so nesting decides it
+        // under either rule and the count is expected to hold. What is on trial here is that a change of
+        // rule redraws the view rather than emptying it or leaving it mid-pass.
+        long after = ViewRows();
+        Check("the view still holds its lines after the rule changed", after == before, $"{before} -> {after}");
+
+        // ...and back, so every stage after this one starts from the shipped default.
+        Keyboard.Pressing(VirtualKeyShort.ALT);
+        Type(VirtualKeyShort.KEY_E);
+        Keyboard.Release(VirtualKeyShort.ALT);
+        Wait(500);
+        Type(VirtualKeyShort.KEY_R);
+        Wait(1200);
+        if (_app.FindDialog("Preferences") is { } again)
+        {
+            if (CascadeApp.PrecedenceCombo(again) is { } back)
+            {
+                back.Focus();
+                Wait(200);
+                Type(VirtualKeyShort.UP);
+                Wait(200);
+                Check("and it goes back the way it came", CascadeApp.ComboText(back) == was,
+                      CascadeApp.ComboText(back));
+            }
+            Type(VirtualKeyShort.RETURN);
+            Wait(1000);
+        }
+    }
+
     // ---- helpers ----
 
     private string Status() => Timed("status bar read", () => _app.AllStatusText());
-
     /// <summary>How many rows the view is showing, off the status bar's Fil: field.
     ///
     /// Every scroll target has to be a fraction of this. The sweep used to name row numbers taken from a

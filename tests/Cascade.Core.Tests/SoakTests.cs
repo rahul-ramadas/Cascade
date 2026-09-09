@@ -128,6 +128,37 @@ public class SoakTests : IDisposable
         WaitForFilters(doc);
         Assert.Equal(before, doc.MatchedLineCount);
 
+        // Which of two matching filters wins, at a size where the answer comes back from cached sets rather
+        // than a sweep - so this is the paint-order combine, not the per-line walk. Stated as a relationship
+        // rather than an arithmetic count: listed BELOW the includes the exclude takes nothing, because they
+        // claimed those lines first; listed ABOVE them it takes back exactly what it took when excludes
+        // always won, whatever that number happens to be.
+        var quiet = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "[WARN ]" } };
+        payments.Enabled = true;
+        filters.Add(quiet);
+        doc.ApplyFilters();
+        WaitForFilters(doc);
+        long vetoed = doc.MatchedLineCount;
+        Assert.True(vetoed < both, "the exclude must take something, or the rest of this proves nothing");
+
+        doc.Precedence = FilterPrecedence.ListOrder;
+        doc.ApplyFilters();
+        WaitForFilters(doc);
+        Assert.Equal(both, doc.MatchedLineCount);
+
+        filters.Remove(quiet);
+        filters.Add(quiet, null, 0);
+        doc.ApplyFilters();
+        WaitForFilters(doc);
+        Assert.Equal(vetoed, doc.MatchedLineCount);
+
+        doc.Precedence = FilterPrecedence.ExcludesWin;
+        filters.Remove(quiet);
+        payments.Enabled = false;
+        doc.ApplyFilters();
+        WaitForFilters(doc);
+        Assert.Equal(before, doc.MatchedLineCount);
+
         // A find over the whole file, counted against the same arithmetic. "WARN " is on every 25th line
         // except where ERROR takes it, which is every 1000th - and 1000 is a multiple of 25.
         long warns = Every(lines, 25) - Every(lines, 1000);

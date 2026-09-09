@@ -11,6 +11,11 @@ public sealed class FilterCollection
 
     public bool ShowOnlyFilteredLines { get; set; }
 
+    /// <summary>Which rule settles a line that matches both an include and an exclude. A user preference
+    /// rather than a property of the filter set, so it is not persisted with one: <c>CascadeDocument</c>
+    /// stamps the app's setting on before every pass.</summary>
+    public FilterPrecedence Precedence { get; set; }
+
     public IReadOnlyList<Filter> ChildrenOf(Filter? parent) => parent?.Children ?? (IReadOnlyList<Filter>)Roots;
 
     /// <summary>A deep copy of the whole tree that keeps every filter's id, so it can be put back and

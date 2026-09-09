@@ -29,7 +29,7 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 ![The filter editor: match type, pattern, options, colours and the three style flags](docs/images/filter-edit.png)
 
 - Matches a **substring**, a **.NET regular expression**, or **marked by marker 1–8**.
-- A line is shown when an enabled **include** matches it and no enabled **exclude** does — unless an enabled filter nested under that exclude matched it too, which [overrules it](#nesting).
+- A line is shown when an enabled **include** matches it and no enabled **exclude** does — unless an enabled filter nested under that exclude matched it too, which [overrules it](#nesting). Preferences can change this to **first match in the list wins**, described below.
 - Colour, background, bold, italic and underline are each **on, off, or inherited**.
 
 ### Nesting
@@ -43,6 +43,14 @@ A from-scratch reimagining of [TextAnalysisTool.NET](https://textanalysistool.gi
 - Only nesting overrules. An exclude elsewhere in the list — a sibling, or another branch — still takes the line away outright.
 - A line takes its colour from the **first enabled include in the list** that matched it, refined by whichever enabled includes nested under that one matched too — never by a filter in a branch further down, however deeply nested. Excludes never colour anything: a line won back by overruling one is coloured by that same rule, which need not pick the filter that won it back.
 - Whatever the winning filter leaves unset it inherits from the filters above it, so a filter with no colour of its own draws the line in the view's default colours.
+
+### Which filter wins
+
+- **Preferences ▸ Exclude filters** chooses between two rules, and the whole list is read the same way whichever you pick.
+- **Always hide what they match** is the default, and what every filter file was written against: an exclude takes the line wherever it sits, subject to the nesting above.
+- **Hide only what an earlier filter has not claimed** makes the list one ordered set of rules. The first enabled filter that matches a line decides everything about it — whether you see it, and what colour it is — and only a filter nested under that one may take over. An exclude is then simply a filter whose answer is *hidden*, so put it above what it should beat and below what should beat it.
+- Under that rule an exception needs no special case: `≠ Heartbeat` → `Error` hides heartbeats and keeps the ones that are errors, because the nested filter takes over from the one it sits under. Say *show the rest of the file* with a catch-all at the foot of the list — a filter with an empty pattern, which matches every line including the blank ones.
+- Switching between the two never re-reads the file: the view is rebuilt from what is already in memory.
 - Nest with `Alt+→`, or by dragging.
 
 ### The filter list

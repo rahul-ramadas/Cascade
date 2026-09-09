@@ -1357,6 +1357,52 @@ public class UiFeatureTests
     }
 
     [Fact]
+    public void A_saved_exclude_precedence_is_in_force_at_startup()
+    {
+        // The whole wiring, in the exe that ships: a preference in settings.json, read at launch and handed
+        // to the engine before the first pass. The filter set is the one shape the two rules disagree about -
+        // an include listed above an exclude that also matches some of its lines.
+        //
+        // Changing it through the dialog is checked in the app suite instead, where the real PreferencesDialog
+        // is built and its OK button pressed. It cannot be driven from here: the menu item opens a modal, and
+        // a modal defeats both ways in. UI Automation's Invoke never returns from it and the stuck call then
+        // times out every other request; and an access key posted as a message cannot work either, because
+        // injected messages leave the thread's key state alone, so WinForms sees no Alt held and ignores the
+        // mnemonic. Both were tried against the real window before this was written down.
+        string log = TestData.WriteLogFile();
+        string filters = TestData.WriteMixedFilterFile(("MATCH", false), ("MATCH line 1", true));
+        int taken = TestData.MatchLinesContaining("MATCH line 1");
+        Assert.InRange(taken, 1, TestData.MatchCount - 1);   // the fixture really does tell the rules apart
+
+        foreach (int precedence in new[] { 0, 1 })
+        {
+            string cfg = CascadeApp.NewSettingsDir();
+            try
+            {
+                Directory.CreateDirectory(cfg);           // the app makes it on the way out, not on the way in
+                File.WriteAllText(Path.Combine(cfg, "settings.json"),
+                                  $$"""{"FilterPrecedence": {{precedence}}}""");
+                using var app = CascadeApp.LaunchExisting(log, filters, cfg, ownsFiles: false,
+                                                          ownsSettingsDir: false);
+                // Excludes win: the exclude takes its lines back off the include above it. List order: the
+                // include claimed them first, so it keeps them.
+                int expected = precedence == 0 ? TestData.MatchCount - taken : TestData.MatchCount;
+                Assert.True(app.WaitStatus("Fil:", $"Fil: {expected:N0}"),
+                            $"precedence {precedence}: {app.StatusText("Fil:")}");
+
+                // And it is reachable: a preference nothing in the window opens is one nobody can change.
+                if (precedence == 0)
+                    Assert.Contains(app.MenuItemNames("Edit"),
+                                    n => n.StartsWith("Preferences", StringComparison.Ordinal));
+            }
+            finally { try { Directory.Delete(cfg, true); } catch { /* ignore */ } }
+        }
+
+        try { File.Delete(log); } catch { /* ignore */ }
+        try { File.Delete(filters); } catch { /* ignore */ }
+    }
+
+    [Fact]
     public void Enter_on_a_selected_filter_opens_the_edit_dialog()
     {
         // The dialog used to be opened from inside the key handler, which ran its message loop before

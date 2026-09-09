@@ -384,6 +384,7 @@ public sealed class MainForm : Form
         _grid.ChromeChanged += SnapSplitter;
 
         _grid.Attach(_doc, _settings);
+        _doc.Precedence = _settings.FilterPrecedence;
         _filterTree.Attach(_doc);
         _presets.Attach(_doc);
         _filterTree.SetSettings(_settings);
@@ -2552,6 +2553,7 @@ public sealed class MainForm : Form
         ApplyFilterListSize();
         SetFilterListVisible(_settings.ShowFilterList);
         SyncMarkersMenu();
+        SyncFilterPrecedence();
         _grid.ApplySettings(_settings);
         // The line height may have moved with it, and the bar is measured in whole log lines.
         _findBar.SnapHeightTo(_grid.RowPitch);
@@ -2562,10 +2564,23 @@ public sealed class MainForm : Form
         UpdateStatus();
     }
 
+    /// <summary>Puts the exclude-precedence preference into force. Only re-filters when it really moved: the
+    /// answer comes back from the match cache either way, but restarting a pass for nothing still blanks the
+    /// view and streams it back in, which is a visible flinch for a setting that did not change.</summary>
+    private void SyncFilterPrecedence()
+    {
+        if (_doc.Precedence == _settings.FilterPrecedence) return;
+        _doc.Precedence = _settings.FilterPrecedence;
+        var anchor = _grid.CaptureViewAnchor();
+        _doc.ApplyFilters();
+        _grid.SetViewAnchor(anchor);
+        _grid.RefreshView();
+        _anchorActive = anchor.IsValid;
+    }
+
     /// <summary>Starts or stops the hang watchdog to match the preference. Built fresh rather than adjusted,
     /// because the only things it holds are the window and how long to wait.</summary>
-    private void SyncHangWatchdog()
-    {
+    private void SyncHangWatchdog()    {
         _watchdog?.Dispose();
         _watchdog = HangWatchdog.Start(this, _settings);
     }
@@ -3089,6 +3104,7 @@ public sealed class MainForm : Form
     internal string? FilterFileForTesting => _filterFilePath;
     internal bool FiltersAreDirtyForTesting => _filtersDirty;
     internal bool WatchingForHangsForTesting => _watchdog is not null;
+    internal void ApplySettingsForTesting() => ApplySettingsEverywhere();
     internal void LoadFiltersForTesting(string path) => LoadFiltersFrom(path);
 
     // Releasing the mapping of a very large log means the kernel has to give back every page of it that is

@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Cascade.Core.IO;
+using Cascade.Core.Model;
 using Cascade.Core.Timing;
 
 namespace Cascade.App;
@@ -75,6 +76,10 @@ public sealed class AppSettings
 
     /// <summary>Where a new filter goes among its siblings: the top of the list, or the end of it.</summary>
     public bool AddNewFiltersAtTop { get; set; } = true;
+
+    /// <summary>Which filter wins a line that matches both an include and an exclude. Defaults to the rule
+    /// every existing filter file was written against, so upgrading changes nothing until it is asked to.</summary>
+    public FilterPrecedence FilterPrecedence { get; set; } = FilterPrecedence.ExcludesWin;
 
     /// <summary>Whether the filter presets pane shares the filter pane.</summary>
     public bool ShowFilterPresets { get; set; } = true;

@@ -415,10 +415,17 @@ public sealed class CascadeDocument : IDisposable
         { IsBackground = true, Name = "Cascade.Index" }.Start();
     }
 
+    /// <summary>Which rule settles a line that matches both an include and an exclude. Applied to whatever
+    /// filter collection is in force on the next <see cref="ApplyFilters"/>.</summary>
+    public FilterPrecedence Precedence { get; set; }
+
     /// <summary>Rebuilds the filter snapshot and (re)starts streaming evaluation. Call after any edit
     /// to the filter tree, its enabled states, or the filtered/dim mode.</summary>
     public void ApplyFilters()
     {
+        // A user preference, not a property of the filter set, so it is stamped on here rather than carried
+        // by whatever collection was loaded - one funnel, and nothing to forget at each place filters arrive.
+        Filters.Precedence = Precedence;
         // The visible set is REUSED by the next pass and rewritten line by line, so for as long as that pass
         // runs the view is still showing rows the OLD filters put there. Remembering those filters is what
         // lets such a row be drawn as it was until the view really drops it - see ColouringSnapshot. A pass

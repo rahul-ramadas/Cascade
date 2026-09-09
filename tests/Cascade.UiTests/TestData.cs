@@ -89,9 +89,32 @@ internal static class TestData
         return path;
     }
 
+    /// <summary>A .tat whose filters are listed in the order given, each with the kind it should have, so a
+    /// test can build the one shape the two precedence rules disagree about: an include listed above an
+    /// exclude that also matches some of its lines.</summary>
+    public static string WriteMixedFilterFile(params (string Text, bool Excluding)[] filters)
+    {
+        var sb = new StringBuilder();
+        sb.Append("""<TextAnalysisTool.NET version="2025-11-21" showOnlyFilteredLines="True">""").Append('\n');
+        sb.Append("  <filters>\n");
+        foreach (var (text, excluding) in filters)
+            sb.Append($"""    <filter enabled="y" excluding="{(excluding ? "y" : "n")}" description="{text}" foreColor="FF0000" type="matches_text" case_sensitive="n" regex="n" text="{text}" />""").Append('\n');
+        sb.Append("  </filters>\n");
+        sb.Append("</TextAnalysisTool.NET>\n");
+        string path = Path.Combine(Path.GetTempPath(), "cascade_uitest_" + Guid.NewGuid().ToString("N") + ".tat");
+        File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+        return path;
+    }
+
+    /// <summary>How many lines the given exclude text takes away from the MATCH lines, worked out from the
+    /// same rules <see cref="WriteLogFile()"/> builds them by rather than counted by hand.</summary>
+    public static int MatchLinesContaining(string text)
+        => Enumerable.Range(0, LineCount)
+                     .Count(i => IsMatchLine(i) &&
+                                 ("MATCH line " + i).Contains(text, StringComparison.Ordinal));
+
     /// <summary>
-    /// A .cascade file with one <b>disabled</b> include filter per match text and the named presets over
-    /// them, so a test can start from "nothing on" and drive the presets pane. Each preset is given as a
+    /// A .cascade file with one <b>disabled</b> include filter per match text and the named presets over    /// them, so a test can start from "nothing on" and drive the presets pane. Each preset is given as a
     /// name and the indices into <paramref name="texts"/> it switches on.
     /// </summary>
     public static string WritePresetFile(string[] texts, params (string Name, int[] Filters)[] presets)

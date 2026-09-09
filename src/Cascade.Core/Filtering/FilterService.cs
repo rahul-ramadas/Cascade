@@ -502,10 +502,6 @@ public sealed class FilterService : IDisposable
         SeedMarkerTailedSets(gen.Snapshot, lines);
         if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return false;
 
-        var includes = new List<FilterMatchCache.MatchSet>();
-        var excludes = new List<FilterMatchCache.ExcludeTerm>();
-        var counts = new long[gen.Counts.Length];
-
         var sets = new FilterMatchCache.MatchSet[filters.Count];
         for (int i = 0; i < filters.Count; i++)
         {
@@ -513,40 +509,18 @@ public sealed class FilterService : IDisposable
             sets[i] = set;
         }
 
-        // Which enabled filters overrule which exclude. Worked out only when the filter set actually holds an
-        // exclude with an enabled include under it - every other set combines exactly as it always did, so
-        // the ordinary case pays nothing for this.
-        List<FilterMatchCache.MatchSet>?[]? overruling = null;
-        if (gen.Snapshot.HasOverruledExclude)
-        {
-            var vetoes = new bool[gen.Counts.Length];
-            foreach (var filter in filters)
-                if (filter.Enabled && filter.IsExclude) vetoes[filter.Index] = true;
-
-            overruling = new List<FilterMatchCache.MatchSet>?[gen.Counts.Length];
-            for (int i = 0; i < filters.Count; i++)
-            {
-                var filter = filters[i];
-                // The nearest enabled ancestor is the only one that needs telling: anything above it has this
-                // filter's lines taken from it wholesale when that ancestor's own veto is narrowed.
-                if (!filter.Enabled || filter.EnabledParent < 0 || !vetoes[filter.EnabledParent]) continue;
-                (overruling[filter.EnabledParent] ??= new List<FilterMatchCache.MatchSet>()).Add(sets[i]);
-            }
-        }
-
+        var counts = new long[gen.Counts.Length];
         for (int i = 0; i < filters.Count; i++)
-        {
-            var filter = filters[i];
-            if (!filter.Enabled) continue;                 // counts only track enabled filters
-            counts[filter.Index] = sets[i].Matches;
-            if (filter.IsExclude)
-                excludes.Add(new FilterMatchCache.ExcludeTerm(sets[i], overruling?[filter.Index]));
-            else
-                includes.Add(sets[i]);
-        }
+            if (filters[i].Enabled) counts[filters[i].Index] = sets[i].Matches;   // counts track enabled only
 
+        // The two rules need different set algebras, so this is the one place either is chosen; each method
+        // owns the whole of its own shape rather than the loop testing which rule it is serving.
         var shown = new ulong[(lines + 63) / 64];
-        FilterMatchCache.Combine(includes, excludes, gen.Snapshot.HidesUnmatchedLines, lines, shown);
+        if (gen.Snapshot.Precedence == FilterPrecedence.ListOrder)
+            CombineByPriority(gen.Snapshot, filters, sets, lines, shown);
+        else
+            CombineByVeto(gen.Snapshot, filters, sets, lines, shown);
+
         _visible.ReplaceAll(shown, lines);
         _visible.Publish();
         lock (gen.CountsSync) Array.Copy(counts, gen.Counts, counts.Length);
@@ -558,6 +532,62 @@ public sealed class FilterService : IDisposable
         }
         CacheHits++;
         return true;
+    }
+
+    /// <summary>Combines cached sets the way <see cref="FilterPrecedence.ExcludesWin"/> reads: the union of
+    /// the enabled includes, less every enabled exclude's veto, each veto first narrowed by whatever enabled
+    /// filters nested under it overrule it.</summary>
+    private static void CombineByVeto(FilterSnapshot snapshot, List<FilterSnapshot.CacheableFilter> filters,
+        FilterMatchCache.MatchSet[] sets, long lines, ulong[] shown)
+    {
+        // Which enabled filters overrule which exclude. Worked out only when the filter set actually holds an
+        // exclude with an enabled include under it - every other set combines exactly as it always did, so
+        // the ordinary case pays nothing for this.
+        List<FilterMatchCache.MatchSet>?[]? overruling = null;
+        if (snapshot.HasOverruledExclude)
+        {
+            var vetoes = new bool[snapshot.NodeCount];
+            foreach (var filter in filters)
+                if (filter.Enabled && filter.IsExclude) vetoes[filter.Index] = true;
+
+            overruling = new List<FilterMatchCache.MatchSet>?[snapshot.NodeCount];
+            for (int i = 0; i < filters.Count; i++)
+            {
+                var filter = filters[i];
+                // The nearest enabled ancestor is the only one that needs telling: anything above it has this
+                // filter's lines taken from it wholesale when that ancestor's own veto is narrowed.
+                if (!filter.Enabled || filter.EnabledParent < 0 || !vetoes[filter.EnabledParent]) continue;
+                (overruling[filter.EnabledParent] ??= new List<FilterMatchCache.MatchSet>()).Add(sets[i]);
+            }
+        }
+
+        var includes = new List<FilterMatchCache.MatchSet>();
+        var excludes = new List<FilterMatchCache.ExcludeTerm>();
+        for (int i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
+            if (!filter.Enabled) continue;
+            if (filter.IsExclude)
+                excludes.Add(new FilterMatchCache.ExcludeTerm(sets[i], overruling?[filter.Index]));
+            else
+                includes.Add(sets[i]);
+        }
+        FilterMatchCache.Combine(includes, excludes, snapshot.HidesUnmatchedLines, lines, shown);
+    }
+
+    /// <summary>Combines cached sets the way <see cref="FilterPrecedence.ListOrder"/> reads: every enabled
+    /// filter painted in <see cref="FilterSnapshot.PaintOrder"/>, so the one that would win a line is the
+    /// last to touch it.</summary>
+    private static void CombineByPriority(FilterSnapshot snapshot, List<FilterSnapshot.CacheableFilter> filters,
+        FilterMatchCache.MatchSet[] sets, long lines, ulong[] shown)
+    {
+        var byIndex = new FilterMatchCache.MatchSet?[snapshot.NodeCount];
+        for (int i = 0; i < filters.Count; i++) byIndex[filters[i].Index] = sets[i];
+
+        var terms = new List<FilterMatchCache.PaintTerm>(snapshot.PaintOrder.Count);
+        foreach (var step in snapshot.PaintOrder)
+            if (byIndex[step.Index] is { } set) terms.Add(new FilterMatchCache.PaintTerm(set, step.Hides));
+        FilterMatchCache.CombineInPaintOrder(terms, snapshot.HidesUnmatchedLines, lines, shown);
     }
 
     /// <summary>Works out and stores the results of every marker-tailed filter whose chain above it is already

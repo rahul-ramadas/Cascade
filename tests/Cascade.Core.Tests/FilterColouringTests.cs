@@ -627,19 +627,22 @@ public class FilterColouringTests
 
     // ---------------------------------------------------------------- differential test
 
-    [Fact]
-    public void The_engine_agrees_with_a_plain_walk_of_the_list_over_random_trees()
+    [Theory]
+    [InlineData(FilterPrecedence.ExcludesWin)]
+    [InlineData(FilterPrecedence.ListOrder)]
+    public void The_engine_agrees_with_a_plain_walk_of_the_list_over_random_trees(FilterPrecedence precedence)
     {
-        // The engine decides the winner with pre-order index arithmetic. This reference does it the way the
-        // rule is written - walk the list from the top, first match claims, only its descendants may take
-        // over - so agreement is a real cross-check and not the same code twice.
+        // The engine decides the winner with pre-order index arithmetic, and folds the rule into per-node
+        // flags before a line is ever read. This reference does it the way each rule is written - walk the
+        // list from the top, first match claims, only its descendants may take over - so agreement is a real
+        // cross-check and not the same code twice.
         int seed = Fuzz.Seed(90210);
         var rnd = new Random(seed);
         string[] tokens = { "alpha", "beta", "gamma", "delta", "eps", "zeta", "Abc", "q1z", "[x]m[y]" };
 
         for (int trial = 0; trial < Fuzz.Cases(400); trial++)
         {
-            var c = new FilterCollection();
+            var c = new FilterCollection { Precedence = precedence };
             var all = new List<Filter>();
             int wanted = rnd.Next(1, 18);
             for (int i = 0; i < wanted; i++)
@@ -663,21 +666,29 @@ public class FilterColouringTests
                 string line = string.Join(' ', Enumerable.Range(0, rnd.Next(1, 6)).Select(_ => tokens[rnd.Next(tokens.Length)]));
                 var eval = snapshot.Evaluate(line.AsSpan(), 0, null);
 
-                Assert.True(ReferenceShown(c, line) == eval.Shown,
+                Assert.True(ReferenceShown(c, line, precedence) == eval.Shown,
                             $"seed {seed}, trial {trial}: shown disagrees for \"{line}\"");
-                Assert.Same(eval.Shown ? ReferenceWinner(c, line) : null, eval.ColorFilter);
+                Assert.Same(eval.Shown ? ReferenceClaimant(c, line, precedence) : null, eval.ColorFilter);
             }
         }
     }
 
     /// <summary>The display rule, written out longhand.</summary>
-    private static bool ReferenceShown(FilterCollection c, string line)
+    private static bool ReferenceShown(FilterCollection c, string line, FilterPrecedence precedence)
     {
         var all = c.EnumerateDepthFirst().ToList();
         // An include under an enabled exclude is that exclude's exception, so it asks for nothing on its own
-        // account and cannot be what makes the unclaimed lines disappear.
+        // account and cannot be what makes the unclaimed lines disappear. True under either rule.
         bool asksForSomething = all.Any(f => f.Enabled && f.Kind == FilterKind.Include &&
                                              !ReferenceEnabledExcludeAbove(f));
+
+        if (precedence == FilterPrecedence.ListOrder)
+        {
+            // One rule and no second thought: whoever claims the line says what happens to it.
+            var claimant = ReferenceClaimant(c, line, precedence);
+            return claimant is null ? !asksForSomething : claimant.Kind == FilterKind.Include;
+        }
+
         bool included = !asksForSomething;
         foreach (var f in all)
         {
@@ -710,15 +721,17 @@ public class FilterColouringTests
         }
     }
 
-    /// <summary>The colour rule, written out longhand: read the list top to bottom, the first enabled
-    /// include that deep-matches claims it, and only a filter nested under the current claimant may
-    /// take over.</summary>
-    private static Filter? ReferenceWinner(FilterCollection c, string line)
+    /// <summary>The colour rule, written out longhand: read the list top to bottom, the first enabled filter
+    /// that deep-matches and can claim takes it, and only a filter nested under the current claimant may take
+    /// over. Where excludes win they claim nothing - they veto - so only includes are considered; under list
+    /// order every enabled filter claims, which is the whole of the difference.</summary>
+    private static Filter? ReferenceClaimant(FilterCollection c, string line, FilterPrecedence precedence)
     {
         Filter? winner = null;
         foreach (var f in c.EnumerateDepthFirst())
         {
-            if (!f.Enabled || f.Kind != FilterKind.Include || !ReferenceDeepMatch(f, line)) continue;
+            if (!f.Enabled || !ReferenceDeepMatch(f, line)) continue;
+            if (precedence == FilterPrecedence.ExcludesWin && f.Kind != FilterKind.Include) continue;
             if (winner is null || winner.IsAncestorOf(f)) winner = f;
         }
         return winner;

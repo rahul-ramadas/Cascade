@@ -1246,10 +1246,129 @@ public class FilterMatchCacheTests
                 }
     }
 
+    [Fact]
+    public void CombineInPaintOrder_agrees_with_a_line_by_line_reference()
+    {
+        // Painting is only the same thing as "the winner decides" if the LAST term to touch a line has the
+        // final say, whatever the shapes in between - a set that matches nothing is skipped, a sparse one is
+        // scattered bit by bit, a dense one is walked a word at a time, and all three have to agree.
+        var rng = new Random(20260908);
+
+        (FilterMatchCache.MatchSet Set, HashSet<long> Members) Make(double density, long covered)
+        {
+            var members = new HashSet<long>();
+            var b = new FilterMatchCache.SetBuilder(covered);
+            for (long w = 0; w < (covered + 63) / 64; w++)
+            {
+                ulong bits = 0;
+                for (int i = 0; i < 64; i++)
+                {
+                    long line = w * 64 + i;
+                    if (line < covered && rng.NextDouble() < density) { bits |= 1UL << i; members.Add(line); }
+                }
+                b.AddWord(w, bits);
+            }
+            return (b.Build(covered), members);
+        }
+
+        foreach (long lines in new long[] { 1, 63, 64, 65, 4_097, 100_001 })
+            foreach (long extra in new long[] { 0, 500 })
+                foreach (bool hideUnmatched in new[] { true, false })
+                {
+                    long covered = lines + extra;
+                    var made = new[] { 0.0, 0.00001, 0.002, 0.4, 0.6 }.Select(d => Make(d, covered)).ToArray();
+                    var terms = new List<FilterMatchCache.PaintTerm>();
+                    for (int i = 0; i < made.Length; i++)
+                        terms.Add(new FilterMatchCache.PaintTerm(made[i].Set, Hides: i % 2 == 1));
+
+                    var shown = new ulong[(lines + 63) / 64 + 3];        // headroom must be left alone
+                    Array.Fill(shown, 0xDEADBEEFDEADBEEFUL);
+                    FilterMatchCache.CombineInPaintOrder(terms, hideUnmatched, lines, shown);
+
+                    for (long l = 0; l < lines; l++)
+                    {
+                        bool expected = !hideUnmatched;
+                        for (int i = 0; i < made.Length; i++)
+                            if (made[i].Members.Contains(l)) expected = i % 2 == 0;
+                        bool actual = (shown[l >> 6] & (1UL << (int)(l & 63))) != 0;
+                        Assert.True(expected == actual,
+                            $"line {l} of {lines} (covered {covered}, unmatched hidden {hideUnmatched}): " +
+                            $"expected {expected}, got {actual}");
+                    }
+
+                    int words = (int)((lines + 63) / 64);
+                    int tail = (int)(lines & 63);
+                    if (tail != 0) Assert.Equal(0UL, shown[words - 1] >> tail);
+                    for (int w = words; w < shown.Length; w++) Assert.Equal(0xDEADBEEFDEADBEEFUL, shown[w]);
+                }
+    }
+
+    [Theory]
+    [InlineData(FilterPrecedence.ExcludesWin)]
+    [InlineData(FilterPrecedence.ListOrder)]
+    public void An_exclude_between_two_includes_combines_from_the_cache_as_it_swept(FilterPrecedence precedence)
+    {
+        // The shape the two rules part company on, taken all the way through the document: an exclude with an
+        // include above it and another below. The cached path reaches the answer by a different route from
+        // the sweep - a painter's algorithm rather than a union less the vetoes - so both have to be checked
+        // against the fixture's own rules rather than against each other alone.
+        bool Shown(long i)
+        {
+            bool disk = i % 5 == 0, noise = i % 11 == 0, net = i % 7 == 0;
+            return precedence == FilterPrecedence.ListOrder
+                ? (disk || (!noise && net))          // the first filter that matches decides
+                : ((disk || net) && !noise);         // an exclude takes the line wherever it sits
+        }
+
+        var expected = new List<long>();
+        var other = new List<long>();
+        for (long i = 0; i < Lines; i++)
+        {
+            if (Shown(i)) expected.Add(i);
+            bool disk = i % 5 == 0, noise = i % 11 == 0, net = i % 7 == 0;
+            if (precedence == FilterPrecedence.ListOrder ? ((disk || net) && !noise) : (disk || (!noise && net)))
+                other.Add(i);
+        }
+        Assert.NotEqual(other, expected);   // the fixture really does tell the two rules apart
+
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Precedence = precedence;
+            doc.Open(path);
+            doc.WaitForIndex();
+
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var disk = new Filter { Enabled = true, Match = { Text = "disk" } };
+            var noise = new Filter { Enabled = true, Kind = FilterKind.Exclude, Match = { Text = "noise" } };
+            var net = new Filter { Enabled = true, Match = { Text = "net" } };
+            filters.Add(disk);
+            filters.Add(noise);
+            filters.Add(net);
+            var flat = new List<Filter> { disk, noise, net };
+
+            doc.SetFilters(filters);
+            WaitIdle(doc);
+            Assert.Equal(0, doc.FilterCacheHits);          // this one really swept
+            Assert.Equal(expected, Capture(doc, flat).Visible);
+
+            long hits = doc.FilterCacheHits;
+            net.Enabled = false;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            net.Enabled = true;
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            Assert.True(doc.FilterCacheHits > hits, "neither toggle was served from the cache");
+            Assert.Equal(expected, Capture(doc, flat).Visible);
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>A filter set holding the one shape whose veto can be overruled, so the cached path has to do
     /// more than union the sets. Toggling it is the case that would quietly disagree with a fresh scan.</summary>
-    private static FilterCollection OverruleFilters(out List<Filter> flat)
-    {
+    private static FilterCollection OverruleFilters(out List<Filter> flat)    {
         var filters = new FilterCollection { ShowOnlyFilteredLines = true };
         var list = new List<Filter>();
         Filter Add(string text, FilterKind kind, Filter? parent)
@@ -1269,9 +1388,11 @@ public class FilterMatchCacheTests
         return filters;
     }
 
-    private static (List<long> Visible, long[] Counts) FreshOverrule(string path, Action<List<Filter>> configure)
+    private static (List<long> Visible, long[] Counts) FreshOverrule(string path, FilterPrecedence precedence,
+                                                                    Action<List<Filter>> configure)
     {
         using var doc = new CascadeDocument();
+        doc.Precedence = precedence;
         doc.Open(path);
         doc.WaitForIndex();
         var filters = OverruleFilters(out var flat);
@@ -1282,13 +1403,16 @@ public class FilterMatchCacheTests
         return Capture(doc, flat);
     }
 
-    [Fact]
-    public void Toggling_an_overruled_exclude_from_cache_matches_a_fresh_evaluation()
+    [Theory]
+    [InlineData(FilterPrecedence.ExcludesWin)]
+    [InlineData(FilterPrecedence.ListOrder)]
+    public void Toggling_an_overruled_exclude_from_cache_matches_a_fresh_evaluation(FilterPrecedence precedence)
     {
         string path = WriteLog();
         try
         {
             using var doc = new CascadeDocument();
+            doc.Precedence = precedence;
             doc.Open(path);
             doc.WaitForIndex();
             var filters = OverruleFilters(out var flat);
@@ -1315,7 +1439,7 @@ public class FilterMatchCacheTests
                 WaitIdle(doc);
 
                 var cached = Capture(doc, flat);
-                var fresh = FreshOverrule(path, configure);
+                var fresh = FreshOverrule(path, precedence, configure);
                 Assert.Equal(fresh.Visible, cached.Visible);
                 Assert.Equal(fresh.Counts, cached.Counts);
             }

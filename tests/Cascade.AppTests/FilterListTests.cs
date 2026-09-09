@@ -17,6 +17,7 @@ public class FilterListTests(ITestOutputHelper output) : AppCheckFixture(output)
     [Fact] public void A_new_filter_can_be_made_from_anywhere() => Verify(Checks.RunNewFilterChecks, atLeast: 27);
     [Fact] public void A_new_filter_lands_where_the_preference_says() => Verify(Checks.RunFilterPlacementChecks, atLeast: 27);
     [Fact] public void A_new_filter_starts_from_the_line_beneath_it() => Verify(Checks.RunNewFilterFromLineChecks, atLeast: 15);
+    [Fact] public void Which_of_two_matching_filters_wins_follows_the_preference() => Verify(Checks.RunFilterPrecedenceChecks, atLeast: 7);
 }
 
 /// <summary>Carrying a filter about with the mouse. Where it lands, what it nests under, and every way a

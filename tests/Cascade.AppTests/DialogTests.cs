@@ -1,5 +1,6 @@
 using System.Reflection;
 using Cascade.App;
+using Cascade.Core.Model;
 
 namespace Cascade.AppTests;
 
@@ -34,6 +35,7 @@ public class DialogTests
             ExtraLineSpacing = 2,
             AutoLoadLastFilterFile = true,
             AddNewFiltersAtTop = true,
+            FilterPrecedence = FilterPrecedence.ListOrder,
             HangWatchdog = false,
             Automation = false,
         };
@@ -47,6 +49,7 @@ public class DialogTests
         Assert.Equal(3m, Numeric(dlg, 2).Value);
         Assert.True(Box(dlg, "Load the last filter file").Checked);
         Assert.True(Box(dlg, "Add new filters at the top").Checked);
+        Assert.Equal(1, Combo(dlg, "earlier filter").SelectedIndex);
         Assert.False(Box(dlg, "Write a memory dump").Checked);
         Assert.False(Box(dlg, "Support screen readers").Checked);
 
@@ -56,6 +59,7 @@ public class DialogTests
         Numeric(dlg, 2).Value = 8m;
         Box(dlg, "Load the last filter file").Checked = false;
         Box(dlg, "Add new filters at the top").Checked = false;
+        Combo(dlg, "earlier filter").SelectedIndex = 0;
         Box(dlg, "Write a memory dump").Checked = true;
         Box(dlg, "Support screen readers").Checked = true;
 
@@ -67,6 +71,7 @@ public class DialogTests
         Assert.Equal(8, settings.TabSize);
         Assert.False(settings.AutoLoadLastFilterFile);
         Assert.False(settings.AddNewFiltersAtTop);
+        Assert.Equal(FilterPrecedence.ExcludesWin, settings.FilterPrecedence);
         Assert.True(settings.HangWatchdog);
         Assert.True(settings.Automation);
     });
@@ -116,7 +121,7 @@ public class DialogTests
         using var dlg = new PreferencesDialog(settings);
         Hidden.Show(dlg);
 
-        var fonts = Descendants(dlg).OfType<ComboBox>().Single();
+        var fonts = Combo(dlg, "No Such Typeface At All");
         Assert.Equal("No Such Typeface At All", fonts.SelectedItem);
 
         Button(dlg, "OK").PerformClick();
@@ -177,6 +182,13 @@ public class DialogTests
         => Descendants(root).OfType<CheckBox>()
                             .First(c => c.Text.StartsWith(startsWith, StringComparison.Ordinal));
 
+    /// <summary>A drop-down named by something only it offers, so the dialog gaining another one cannot
+    /// silently redirect a test to the wrong control.</summary>
+    private static ComboBox Combo(Control root, string offers)
+        => Descendants(root).OfType<ComboBox>()
+                            .Single(c => c.Items.Cast<object>()
+                                          .Any(i => i is string s && s.Contains(offers, StringComparison.Ordinal)));
+
     /// <summary>Guards the assumption the two helpers above rest on. If the dialog gains a spinner or a box,
     /// this fails and says so, rather than the tests silently reading the wrong control.</summary>
     [Fact]
@@ -187,6 +199,7 @@ public class DialogTests
 
         Assert.Equal(3, Descendants(dlg).OfType<NumericUpDown>().Count());
         Assert.Equal(4, Descendants(dlg).OfType<CheckBox>().Count());
+        Assert.Equal(2, Descendants(dlg).OfType<ComboBox>().Count());
 
         // Every switch the dialog owns has to be written back by Apply. Counting the boxes against the
         // number of settings Apply assigns would be circular, so this counts them against the fields the
@@ -195,5 +208,14 @@ public class DialogTests
             .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
             .Count(f => f.FieldType == typeof(CheckBox));
         Assert.Equal(switches, Descendants(dlg).OfType<CheckBox>().Count());
+
+        // The precedence drop-down is read back by casting the selected index straight to the enum, so the
+        // items have to be in the enum's own order - not merely the right number of them.
+        var precedence = Combo(dlg, "earlier filter");
+        Assert.Equal(Enum.GetValues<FilterPrecedence>().Length, precedence.Items.Count);
+        Assert.Contains("Always hide", (string)precedence.Items[(int)FilterPrecedence.ExcludesWin]!,
+                        StringComparison.Ordinal);
+        Assert.Contains("earlier filter", (string)precedence.Items[(int)FilterPrecedence.ListOrder]!,
+                        StringComparison.Ordinal);
     });
 }

@@ -578,6 +578,18 @@ internal sealed class CascadeApp : IDisposable
     /// <summary>Current text of an edit control.</summary>
     public string TextOf(AutomationElement edit) => edit.Patterns.Value.PatternOrDefault?.Value.ValueOrDefault ?? "";
 
+    /// <summary>The Preferences dialog's exclude-precedence drop-down, picked out by something only it
+    /// offers so that another drop-down appearing beside it cannot silently redirect a caller.</summary>
+    public static AutomationElement? PrecedenceCombo(Window dialog)
+        => dialog.FindAllDescendants(cf => cf.ByControlType(ControlType.ComboBox))
+                 .FirstOrDefault(c => ComboText(c).Contains("hide", StringComparison.OrdinalIgnoreCase) ||
+                                      ComboText(c).Contains("earlier filter", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>What a drop-down is showing.</summary>
+    public static string ComboText(AutomationElement combo)
+        => combo.Patterns.Value.PatternOrDefault?.Value.ValueOrDefault ?? combo.Name ?? "";
+
+
     /// <summary>Every non-empty status-bar field, for diagnosing a failed expectation.</summary>
     public string AllStatusText()
         => string.Join(" | ", Window.FindAllDescendants(cf => cf.ByControlType(ControlType.Text))

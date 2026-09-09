@@ -84,7 +84,8 @@ internal static partial class Checks
                 FilterListWidthFraction = 0.18,
                 ForegroundArgb = Color.Teal.ToArgb(),
                 BackgroundArgb = Color.Ivory.ToArgb(),
-                AutoLoadLastFilterFile = false
+                AutoLoadLastFilterFile = false,
+                FilterPrecedence = FilterPrecedence.ListOrder
             };
 
             string file = Path.Combine(dir, "exported.json");

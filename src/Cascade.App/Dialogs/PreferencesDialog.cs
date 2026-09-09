@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Windows.Forms;
+using Cascade.Core.Model;
 
 namespace Cascade.App;
 
@@ -18,6 +19,7 @@ public sealed class PreferencesDialog : DialogBase
     private readonly NumericUpDown _lineSpacing = new() { Minimum = 0, Maximum = 12 };
     private readonly CheckBox _autoLoadFilters = new() { Text = "Load the last filter file automatically at startup", AutoSize = true };
     private readonly CheckBox _newFiltersAtTop = new() { Text = "Add new filters at the top of the list", AutoSize = true };
+    private readonly ComboBox _precedence = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly CheckBox _hangWatchdog = new() { Text = "Write a memory dump to %TEMP% if the window stops responding", AutoSize = true };
     private readonly CheckBox _automation = new() { Text = "Support screen readers and UI automation (takes effect at next launch)", AutoSize = true };
 
@@ -32,6 +34,10 @@ public sealed class PreferencesDialog : DialogBase
         Text = "Preferences";
 
         foreach (var f in FontFamily.Families) _font.Items.Add(f.Name);
+        // Index order is FilterPrecedence's, so the two are converted by cast rather than by a lookup that
+        // could drift from it.
+        _precedence.Items.Add("Always hide what they match, wherever they are listed");
+        _precedence.Items.Add("Hide only what an earlier filter has not claimed");
         _size.Width = Dpi(70);
         _tab.Width = Dpi(70);
         _lineSpacing.Width = Dpi(70);
@@ -72,6 +78,7 @@ public sealed class PreferencesDialog : DialogBase
         Row("Selection:", _selBg);
         Row("Dimmed text:", _dim);
         Row("Tab size:", _tab);
+        Row("Exclude filters:", _precedence);
         Row("", _autoLoadFilters);
         Row("", _newFiltersAtTop);
         Row("", _hangWatchdog);
@@ -120,6 +127,7 @@ public sealed class PreferencesDialog : DialogBase
         _lineSpacing.Value = Math.Clamp(_s.ExtraLineSpacing, 0, 12);
         _autoLoadFilters.Checked = _s.AutoLoadLastFilterFile;
         _newFiltersAtTop.Checked = _s.AddNewFiltersAtTop;
+        _precedence.SelectedIndex = (int)_s.FilterPrecedence;
         _hangWatchdog.Checked = _s.HangWatchdog;
         _automation.Checked = _s.Automation;
     }
@@ -132,6 +140,7 @@ public sealed class PreferencesDialog : DialogBase
         _s.ExtraLineSpacing = (int)_lineSpacing.Value;
         _s.AutoLoadLastFilterFile = _autoLoadFilters.Checked;
         _s.AddNewFiltersAtTop = _newFiltersAtTop.Checked;
+        _s.FilterPrecedence = (FilterPrecedence)_precedence.SelectedIndex;
         _s.HangWatchdog = _hangWatchdog.Checked;
         _s.Automation = _automation.Checked;
     }

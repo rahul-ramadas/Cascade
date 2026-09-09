@@ -470,6 +470,33 @@ public sealed class FilterMatchCache
         ClearTail(span, lines, words);
     }
 
+    /// <summary>One enabled filter's cached lines and what winning does to them: an exclude hides, an
+    /// include shows.</summary>
+    public readonly record struct PaintTerm(MatchSet Set, bool Hides);
+
+    /// <summary>
+    /// Rebuilds the visible-line words for <see cref="FilterPrecedence.ListOrder"/>, where the first enabled
+    /// filter in list order decides a line and an exclude is simply one whose answer is "hidden". That is a
+    /// painter's algorithm rather than a set expression: apply the terms lowest priority first and the winner
+    /// paints over the rest. A nested filter's set is a subset of its parent's, so a child painted after its
+    /// parent overrules it on exactly the lines it matched - which is what makes an exception to an exclude
+    /// come out right with no special case anywhere.
+    /// </summary>
+    public static void CombineInPaintOrder(IReadOnlyList<PaintTerm> terms, bool hideUnmatched, long lines,
+        ulong[] shown)
+    {
+        int words = (int)((lines + 63) / 64);
+        var span = shown.AsSpan(0, words);
+
+        if (hideUnmatched) span.Clear(); else span.Fill(ulong.MaxValue);
+        foreach (var term in terms)
+        {
+            if (term.Hides) AndNot(span, term.Set, lines);
+            else Or(span, term.Set, lines);
+        }
+        ClearTail(span, lines, words);
+    }
+
     private static void Include(Span<ulong> span, IReadOnlyList<MatchSet> includes, bool hideUnmatched,
         long lines)
     {
