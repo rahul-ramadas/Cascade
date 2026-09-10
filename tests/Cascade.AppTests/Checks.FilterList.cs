@@ -159,60 +159,84 @@ internal static partial class Checks
         }
     }
 
-    /// <summary>Every filter carries an eye at the left of its row, crossed out when it hides the lines it
-    /// matches. It is a control, not a mark: it is in the same place on every row, clicking it flips the
-    /// filter, and the pattern beside it starts in the same place either way.</summary>
+    /// <summary>Every filter carries an eye in a gutter of its own, at a fixed x before the tree lines and
+    /// the checkbox, crossed out when the filter hides the lines it matches. A column that moved with the
+    /// row's depth would not be one, so that is the claim the checks are built around.</summary>
     private static bool CheckKindIcon(CascadeDocument doc, FilterTreeControl tree, Form host)
     {
         host.ClientSize = new Size(420, 200);
         Pump();
 
         // Same pattern, same colours, same everything but the kind: then the only thing that can differ
-        // between the two rows is the eye and what it displaces.
+        // between the two rows is the eye. The child is there to say the column does not follow the indent,
+        // and the anchor is somewhere to put the selection - its tint covers the gutter of the row it is on.
         var style = new FilterStyle { Foreground = new RgbColor(31, 31, 112), Background = new RgbColor(255, 255, 255) };
+        var anchor = new Filter { Match = new FilterMatch { Text = "anchor" }, Style = style.Clone() };
         var shown = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
         var hidden = new Filter { Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
-        SetFilters(doc, tree, shown, hidden);
-        tree.SelectForTesting(shown);
+        var nested = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
+        SetFilters(doc, tree, anchor, shown, hidden);
+        doc.Filters.Add(nested, hidden);
+        tree.Rebuild();
+        tree.SelectForTesting(anchor);
         Pump();
 
-        int room = tree.KindIconRoomForTesting;
-        bool ok = Check($"every row gives up the same width to the eye ({room}px)", room > 0);
+        int gutter = tree.GutterWidthForTesting;
+        bool ok = Check($"there is a gutter to put the eyes in ({gutter}px)", gutter > 0);
+        ok &= Check($"the fixture nests, so \"the column does not indent\" can fail " +
+                    $"(root at {tree.ContentLeftForTesting(hidden)}px, child at {tree.ContentLeftForTesting(nested)}px)",
+                    tree.ContentLeftForTesting(nested) > tree.ContentLeftForTesting(hidden));
+        if (!ok) return false;
 
         var area = tree.TreeAreaForTesting;
         var incRow = tree.RowBoundsForTesting(shown);
         var excRow = tree.RowBoundsForTesting(hidden);
-        int incLeft = tree.ContentLeftForTesting(shown);
-        int excLeft = tree.ContentLeftForTesting(hidden);
+        var kidRow = tree.RowBoundsForTesting(nested);
         using var picture = Capture(host);
 
         Color At(int x, int rowY) => x < 0 || x >= picture.Width || rowY < 0 || rowY >= picture.Height
             ? Color.Transparent : picture.GetPixel(x, rowY);
-        var paper = Color.White;                                    // the fixture's own row background
+        var paper = Color.White;                                    // the gutter's own background
         int Away(Color c) => Math.Abs(c.R - paper.R) + Math.Abs(c.G - paper.G) + Math.Abs(c.B - paper.B);
 
-        // Something is actually drawn in the space the eye reserved, on BOTH rows - an include's eye is the
-        // whole reason the column is aimable. Measured against the row's own background, not an absolute
-        // darkness, so dimming the icon cannot quietly weaken this.
-        (int Ink, int Boldest, int Height) Icon(int left, Rectangle row)
+        // Something is actually drawn in the gutter on BOTH kinds of row - an include's eye is the whole
+        // reason the column is aimable. Measured against the background, not an absolute darkness, so
+        // dimming the icon cannot quietly weaken this.
+        (int Ink, int Boldest, int Height, int Left, int Right) Icon(Rectangle row)
         {
-            int ink = 0, boldest = 0, top = int.MaxValue, bottom = int.MinValue;
-            for (int dx = 0; dx < room; dx++)
+            int ink = 0, boldest = 0, top = int.MaxValue, bottom = int.MinValue, left = int.MaxValue, right = int.MinValue;
+            for (int x = 0; x < gutter; x++)
                 for (int y = 1; y < row.Height - 1; y++)
                 {
-                    int away = Away(At(area.Left + left + dx, area.Top + row.Top + y));
+                    int away = Away(At(area.Left + x, area.Top + row.Top + y));
                     boldest = Math.Max(boldest, away);
                     if (away <= 30) continue;
                     ink++;
                     top = Math.Min(top, y);
                     bottom = Math.Max(bottom, y);
+                    left = Math.Min(left, x);
+                    right = Math.Max(right, x);
                 }
-            return (ink, boldest, bottom < top ? 0 : bottom - top + 1);
+            return (ink, boldest, bottom < top ? 0 : bottom - top + 1, left, right);
         }
-        var inc = Icon(incLeft, incRow);
-        var exc = Icon(excLeft, excRow);
-        ok &= Check($"an exclude's eye is drawn, not just reserved ({exc.Ink} pixels of ink in its {room}px)", exc.Ink > 8);
-        ok &= Check($"an include's eye is drawn too ({inc.Ink} pixels of ink in its {room}px)", inc.Ink > 8);
+        var inc = Icon(incRow);
+        var exc = Icon(excRow);
+        var kid = Icon(kidRow);
+        ok &= Check($"an exclude's eye is drawn, not just reserved ({exc.Ink} pixels of ink in the {gutter}px gutter)", exc.Ink > 8);
+        ok &= Check($"an include's eye is drawn too ({inc.Ink} pixels of ink)", inc.Ink > 8);
+
+        // The gutter is the eye's alone. Rows that were not really held clear of it would draw their tree
+        // lines, expander and tick box into it, and the ink would run to its edges - which is what makes
+        // this stronger than asking whether the rows begin somewhere to the right.
+        ok &= Check($"nothing but the eye is drawn in the gutter " +
+                    $"(ink at x {inc.Left}..{inc.Right} and {kid.Left}..{kid.Right}, of 0..{gutter - 1})",
+                    inc.Left >= 2 && inc.Right <= gutter - 3 && kid.Left >= 2 && kid.Right <= gutter - 3);
+
+        // The whole point of the gutter: a nested filter's eye is in the same column as a root's, however
+        // deep it sits. Drawn inside the row it would step right by the indent, like the checkbox does.
+        ok &= Check($"a nested filter's eye is in the same column as a root's " +
+                    $"(root x {inc.Left}..{inc.Right}, child x {kid.Left}..{kid.Right})",
+                    kid.Ink > 8 && kid.Left == inc.Left && kid.Right == inc.Right);
 
         // The slash is what says "hidden", and it runs corner to corner while the eye it crosses is a flat
         // lens: the ink of an exclude reaches well above and below the ink of an include. Compared as
@@ -228,25 +252,27 @@ internal static partial class Checks
                     $"(exclude {exc.Boldest} from the background, include {inc.Boldest})",
                     exc.Boldest > inc.Boldest);
 
-        // ...and it sits behind the pattern rather than beside it.
+        // ...and an include's eye - which is on nearly every row of a real filter set - stays quieter than
+        // the pattern it sits beside. The exclude is allowed to be as loud as it likes: it is the one the
+        // eye should be caught by.
         int text = 0;
-        for (int dx = room; dx < room + 120; dx++)
+        int textLeft = tree.ContentLeftForTesting(hidden);
+        for (int dx = 0; dx < 120; dx++)
             for (int y = 1; y < excRow.Height - 1; y++)
-                text = Math.Max(text, Away(At(area.Left + excLeft + dx, area.Top + excRow.Top + y)));
-        ok &= Check($"the eye is quieter than the pattern it marks " +
-                    $"(eye {exc.Boldest} from the background, text {text})",
-                    text > 0 && exc.Boldest < text * 3 / 4);
+                text = Math.Max(text, Away(At(area.Left + textLeft + dx, area.Top + excRow.Top + y)));
+        ok &= Check($"an include's eye is quieter than the patterns beside it " +
+                    $"(eye {inc.Boldest} from the background, text {text})",
+                    text > 0 && inc.Boldest < text * 3 / 4);
 
-        // ...and the pattern beyond it is the same picture on both rows, in the same place. Marking only
-        // the excludes used to shift their pattern right of everything else's; a column that moves with the
-        // state it shows is not a column.
+        // ...and the pattern is the same picture on both rows, in the same place: the gutter is taken from
+        // the list, once, rather than from each row according to what its eye is doing.
         int compared = 0, differing = 0, firstX = -1;
         int height = Math.Min(incRow.Height, excRow.Height);
-        for (int dx = room; dx < room + 120; dx++)
+        for (int dx = 0; dx < 120; dx++)
             for (int y = 1; y < height - 1; y++)
             {
-                var a = At(area.Left + incLeft + dx, area.Top + incRow.Top + y);
-                var b = At(area.Left + excLeft + dx, area.Top + excRow.Top + y);
+                var a = At(area.Left + tree.ContentLeftForTesting(shown) + dx, area.Top + incRow.Top + y);
+                var b = At(area.Left + textLeft + dx, area.Top + excRow.Top + y);
                 compared++;
                 if (a.ToArgb() == b.ToArgb()) continue;
                 differing++;
@@ -264,17 +290,17 @@ internal static partial class Checks
         {
             host.Font = larger;
             Pump();
-            int grown = tree.KindIconRoomForTesting;
+            int grown = tree.GutterWidthForTesting;
             host.Font = enormous;
             Pump();
-            int capped = tree.KindIconRoomForTesting;
+            int capped = tree.GutterWidthForTesting;
             host.Font = baseFont;
             Pump();
 
-            ok &= Check($"the eye grows with the font ({room}px at {baseFont.Size:0.#}pt, " +
-                        $"{grown}px at {larger.Size:0.#}pt)", grown > room);
+            ok &= Check($"the gutter grows with the font ({gutter}px at {baseFont.Size:0.#}pt, " +
+                        $"{grown}px at {larger.Size:0.#}pt)", grown > gutter);
             ok &= Check($"and stops growing rather than eating the pattern column " +
-                        $"({capped}px at {enormous.Size:0.#}pt)", capped < room * 3);
+                        $"({capped}px at {enormous.Size:0.#}pt)", capped < gutter * 3);
         }
         return ok && CheckKindToggle(doc, tree);
     }

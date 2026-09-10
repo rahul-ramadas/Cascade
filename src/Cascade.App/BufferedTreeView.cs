@@ -9,6 +9,8 @@ namespace Cascade.App;
 internal sealed class BufferedTreeView : TreeView
 {
     private const int TVM_SETEXTENDEDSTYLE = 0x1100 + 44;
+    private const int TVM_SETBORDER = 0x1100 + 35;
+    private const int TVSBF_XBORDER = 0x0001;
     private const int TVS_EX_DOUBLEBUFFER = 0x0004;
     private const int TVS_NOHSCROLL = 0x8000;
     private const int WM_LBUTTONDOWN = 0x0201;
@@ -16,9 +18,30 @@ internal sealed class BufferedTreeView : TreeView
     private const int WM_CONTEXTMENU = 0x007B;
     private const int WM_PAINT = 0x000F;
 
+    private int _leftBorder;
+
     /// <summary>How many times the list has actually repainted. Flicker is repaints nobody asked for, and
     /// counting them is the only way to see it without filming the screen.</summary>
     internal int Paints { get; private set; }
+
+    /// <summary>Insets every row from the left edge of the client area, leaving a strip at a FIXED x that
+    /// the owner draw can use as a gutter. Everything else in a row - the tree lines, the expander, the
+    /// checkbox - moves with the row's depth, so this is the only place a real column can be put.</summary>
+    internal void SetLeftBorder(int px)
+    {
+        if (px == _leftBorder) return;
+        _leftBorder = px;
+        if (IsHandleCreated) ApplyLeftBorder();
+    }
+
+    /// <summary>Where the rows start, which is where the gutter ends.</summary>
+    internal int LeftBorder => _leftBorder;
+
+    private void ApplyLeftBorder()
+    {
+        SendMessage(Handle, TVM_SETBORDER, (IntPtr)TVSBF_XBORDER, (IntPtr)(_leftBorder & 0xFFFF));
+        Invalidate();
+    }
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -46,6 +69,7 @@ internal sealed class BufferedTreeView : TreeView
     {
         base.OnHandleCreated(e);
         SendMessage(Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER);
+        ApplyLeftBorder();   // a new handle knows nothing of the border the old one was given
     }
 
     /// <summary>Expanding a row does not move the list.

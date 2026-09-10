@@ -196,6 +196,7 @@ public sealed class FilterTreeControl : UserControl
     {
         base.OnFontChanged(e);
         SizeSearchBar();
+        SyncGutter();
     }
 
     private const int FocusBarWidth = 3;
@@ -623,13 +624,9 @@ public sealed class FilterTreeControl : UserControl
 
     // ---- include / exclude, from the eye column ----
 
-    /// <summary>Whether this x is over the row's eye. Measured to the whole column, gap included, so the
-    /// target is the width the pattern actually gave up rather than the drawing inside it.</summary>
-    private bool OnKindIcon(TreeNode node, int x)
-    {
-        int left = ContentLeft(node);
-        return node.Tag is Filter && x >= left && x < left + KindIconRoom();
-    }
+    /// <summary>Whether this x is over the gutter, which is the whole of the eye's target. It is left of
+    /// every row, so nothing else can be aimed at there.</summary>
+    private bool OnKindIcon(TreeNode node, int x) => node.Tag is Filter && x >= 0 && x < _tree.LeftBorder;
 
     /// <summary>Flips the eye the click landed on, and takes the rest of the group with it if the row is
     /// part of one - the same rule the checkbox follows.</summary>
@@ -676,11 +673,10 @@ public sealed class FilterTreeControl : UserControl
         }
     }
 
-    // Which row the pointer is over, and where that row's eye is. Cached because asking a TreeNode for its
-    // Bounds makes the tree custom-draw that row synchronously, and a mouse move is not a repaint.
+    // Which row the pointer is over. Cached because asking a TreeNode for its Bounds makes the tree
+    // custom-draw that row synchronously, and a mouse move is not a repaint.
     private TreeNode? _hoverRow;
-    private int _hoverIconLeft = -1;
-    private int _hoverIconRight = -1;
+    private bool _hoverOnRow;
 
     /// <summary>The eye is the only thing in the list a single click acts on, so it is the only thing that
     /// shows a hand.</summary>
@@ -691,10 +687,9 @@ public sealed class FilterTreeControl : UserControl
         if (!ReferenceEquals(node, _hoverRow))
         {
             _hoverRow = node;
-            _hoverIconLeft = node?.Tag is Filter ? ContentLeft(node) : -1;
-            _hoverIconRight = _hoverIconLeft < 0 ? -1 : _hoverIconLeft + KindIconRoom();
+            _hoverOnRow = node?.Tag is Filter;
         }
-        var want = e.X >= _hoverIconLeft && e.X < _hoverIconRight ? Cursors.Hand : Cursors.Default;
+        var want = _hoverOnRow && e.X >= 0 && e.X < _tree.LeftBorder ? Cursors.Hand : Cursors.Default;
         if (_tree.Cursor != want) _tree.Cursor = want;
     }
 
@@ -912,6 +907,7 @@ public sealed class FilterTreeControl : UserControl
     /// half of the space the count did not want.</summary>
     private void LayoutColumns()
     {
+        SyncGutter();
         int available = _tree.ClientSize.Width;
         int count = Math.Clamp(_countDesired, 0, Math.Max(0, available));
         int room = Math.Max(0, available - count);
@@ -948,7 +944,7 @@ public sealed class FilterTreeControl : UserControl
         foreach (var n in _flat)
         {
             if (n.Tag is not Filter f) { n.ToolTipText = ""; continue; }
-            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset - KindIconRoom();
+            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset;
             bool patternCut = Measure(n.Text, Pick(FontStyle.Bold)) > patternRoom;
             bool descCut = !string.IsNullOrWhiteSpace(f.Description)
                            && Measure(f.Description, Pick(FontStyle.Bold)) > _columns.DescriptionWidth - Inset * 2;
@@ -978,15 +974,19 @@ public sealed class FilterTreeControl : UserControl
         return TextRenderer.MeasureText("Xg", Pick(FontStyle.Regular), Unbounded, MeasureFlags).Height;
     }
 
-    /// <summary>Width the eye takes from the pattern, the same on every row. It is a control now rather
-    /// than a mark, and a control has to be in a predictable place: a column only some rows have could not
-    /// be aimed at without reading each row first.</summary>
-    private int KindIconRoom()
-        => KindIconBox(0, new Rectangle(0, 0, 0, _tree.ItemHeight), LineHeight()).Width + KindIconGap;
+    /// <summary>The gutter the eyes live in: a strip at a FIXED x, before the tree lines and the checkbox,
+    /// held clear by insetting every row (<see cref="BufferedTreeView.SetLeftBorder"/>). Drawing the eye
+    /// inside the row instead would indent it with the row's depth, and a column that moves is not one.</summary>
+    private int GutterWidth()
+        => KindIconBox(0, new Rectangle(0, 0, 0, _tree.ItemHeight), LineHeight()).Width + KindIconGap * 2;
 
-    /// <summary>The icon sits at the left of the row's content, a shade shorter than a line of text. The box
-    /// is sized for the SLASH, which runs corner to corner; the eye is a flat lens inside it, so the slash
-    /// reads as crossing an eye rather than bisecting a circle.</summary>
+    /// <summary>Keeps the strip the same width as the eye that goes in it. Called whenever the font or the
+    /// DPI could have moved either.</summary>
+    private void SyncGutter() => _tree.SetLeftBorder(GutterWidth());
+
+    /// <summary>The icon is a shade shorter than a line of text. The box is sized for the SLASH, which runs
+    /// corner to corner; the eye is a flat lens inside it, so the slash reads as crossing an eye rather than
+    /// bisecting a circle.</summary>
     private Rectangle KindIconBox(int left, Rectangle bounds, int textHeight)
     {
         // Tied to the text so it scales with the font and the DPI together, but capped: past a point a
@@ -997,14 +997,13 @@ public sealed class FilterTreeControl : UserControl
         return new Rectangle(left, bounds.Top + (bounds.Height - h) / 2, w, h);
     }
 
-    /// <summary>How far the marker is blended into the row behind it. It says what kind of filter this is,
-    /// which is worth a glance and not a stare, so it is drawn to sit behind the pattern rather than beside
-    /// it. Blended towards the row's own background rather than to a fixed grey, so a filter wearing any
-    /// colours keeps the same relative contrast.
+    /// <summary>How far the eye is faded into the gutter behind it. It says what kind of filter this is,
+    /// which is worth a glance and not a stare. Measured against the SYSTEM colours rather than the row's:
+    /// the gutter is outside the row, so it keeps the window's own background whatever the filter wears.
     /// <para>An include is the ordinary state and fades further back: a whole column of eyes at the
     /// exclude's weight would shout at the reader on every row of an ordinary filter set.</para></summary>
-    private const float ExcludeIconDim = 0.55f;
-    private const float IncludeIconDim = 0.74f;
+    private const float ExcludeIconDim = 0.30f;
+    private const float IncludeIconDim = 0.62f;
 
     private static Color Blend(Color c, Color towards, float t) => Color.FromArgb(
         (int)(c.R + (towards.R - c.R) * t),
@@ -1012,8 +1011,8 @@ public sealed class FilterTreeControl : UserControl
         (int)(c.B + (towards.B - c.B) * t));
 
     /// <summary>An eye, with a slash through it when the filter hides the lines it matches. Drawn rather
-    /// than lettered because it has to take the row's own colours and be legible from about eight pixels up
-    /// to whatever a large system font asks for, which no single font glyph manages.</summary>
+    /// than lettered because it has to be legible from about eight pixels up to whatever a large system font
+    /// asks for, which no single font glyph or fixed bitmap manages.</summary>
     private static void DrawEye(Graphics g, Rectangle r, Color color, bool crossed)
     {
         // Stroke scales with the box, or the glyph is spidery at a large font and a blob at a small one.
@@ -1098,12 +1097,8 @@ public sealed class FilterTreeControl : UserControl
 
         var savedClip = g.Clip;
         g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, filterRight - Inset), bounds.Bottom));
-        bool excluded = f.Kind == FilterKind.Exclude;
-        DrawEye(g, KindIconBox(contentLeft, bounds, textHeight),
-                Blend(fg, bg, excluded ? ExcludeIconDim : IncludeIconDim), crossed: excluded);
-        int textLeft = contentLeft + KindIconRoom();
-        DrawWithSearchHighlight(g, e.Node.Text, new Point(textLeft, textY),
-                                filterRight - Inset - textLeft, fg, style);
+        DrawWithSearchHighlight(g, e.Node.Text, new Point(contentLeft, textY),
+                                filterRight - Inset - contentLeft, fg, style);
 
         if (_columns.HasDescription && !string.IsNullOrEmpty(f.Description))
         {
@@ -1156,6 +1151,13 @@ public sealed class FilterTreeControl : UserControl
             using var focusPen = new Pen(SystemColors.Highlight) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
             g.DrawRectangle(focusPen, 0, bounds.Top, Math.Max(1, rightEdge - 1), Math.Max(1, h - 1));
         }
+
+        // Last, so neither the selection tint nor the focus rectangle it shares the strip with can dull it.
+        bool excluded = f.Kind == FilterKind.Exclude;
+        var icon = KindIconBox(0, bounds, textHeight);
+        icon.Offset((_tree.LeftBorder - icon.Width) / 2, 0);
+        DrawEye(g, icon, Blend(SystemColors.WindowText, _tree.BackColor,
+                               excluded ? ExcludeIconDim : IncludeIconDim), crossed: excluded);
     }
 
     /// <summary>How strongly the strip is tinted for a selected filter, and for the one the keyboard is
@@ -1382,15 +1384,15 @@ public sealed class FilterTreeControl : UserControl
     internal Rectangle RowBoundsForTesting(Filter f) => NodeFor(f)?.Bounds ?? Rectangle.Empty;
     internal int ContentLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) : 0;
 
-    /// <summary>Test seam: what the eye column takes from every row's pattern, gap included.</summary>
-    internal int KindIconRoomForTesting => KindIconRoom();
+    /// <summary>Test seam: how wide the eye's gutter is.</summary>
+    internal int GutterWidthForTesting => _tree.LeftBorder;
 
     /// <summary>Test seam: where a row's eye can be clicked, in tree client coordinates.</summary>
     internal Rectangle KindIconRectForTesting(Filter f)
     {
         if (NodeFor(f) is not { } n) return Rectangle.Empty;
         var row = n.Bounds;
-        return new Rectangle(ContentLeft(n), row.Top, KindIconRoom(), row.Height);
+        return new Rectangle(0, row.Top, _tree.LeftBorder, row.Height);
     }
     internal bool IsCheckedForTesting(Filter f) => NodeFor(f)?.Checked ?? false;
     internal void SelectForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.SelectedNode = n; }
@@ -1474,7 +1476,7 @@ public sealed class FilterTreeControl : UserControl
     }
 
     /// <summary>Where a row's pattern starts, which is where a press picks the filter up.</summary>
-    internal int PatternLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) + KindIconRoom() : 0;
+    internal int PatternLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) : 0;
 
     /// <summary>Whether a placeholder row is standing in for a group being dragged, and what it says.</summary>
     internal string? GhostTextForTesting => _ghost?.Text;

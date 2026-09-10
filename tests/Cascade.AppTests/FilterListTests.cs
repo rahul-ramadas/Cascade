@@ -6,7 +6,7 @@ namespace Cascade.AppTests;
 /// that keep it from flashing while you do it.</summary>
 public class FilterListTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void A_row_says_what_the_filter_is() => Verify(Checks.RunFilterListChecks, atLeast: 32);
+    [Fact] public void A_row_says_what_the_filter_is() => Verify(Checks.RunFilterListChecks, atLeast: 35);
     [Fact] public void The_list_updates_in_place_rather_than_rebuilding() => Verify(Checks.RunFilterSyncChecks, atLeast: 15);
     [Fact] public void Searching_the_list_reveals_the_match() => Verify(Checks.RunFilterSearchRevealChecks, atLeast: 4);
     [Fact] public void The_search_bar_opens_below_and_closes_on_escape() => Verify(Checks.RunFilterSearchBarChecks, atLeast: 21);

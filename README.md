@@ -68,9 +68,9 @@ Pick the second and the list reads as one ordered set of rules. The first enable
 
 ### The filter list
 
-![The filter list: nesting, checkboxes, an eye per row, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
+![The filter list: a column of eyes, nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
 
-- The **eye** at the left of a row says which way that filter answers: open, it shows the lines it matches; crossed out, it takes them away. Click it — or press `Ctrl+Shift+X` — to turn a filter into an exclude and back, over as many filters as are selected.
+- The **eyes** down the left of the list say which way each filter answers: open, it shows the lines it matches; crossed out, it takes them away. Click one — or press `Ctrl+Shift+X` — to turn a filter into an exclude and back, over as many filters as are selected.
 - **Count** is how many lines in the whole file match, not how many are on screen, or how many are in the crop when you have one.
 - `Shift+Space` switches a filter's whole subtree on or off.
 - The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`), and comes back next time on the same edge at the same size.
