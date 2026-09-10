@@ -94,6 +94,7 @@ public sealed class MainForm : Form
     private ToolStripMenuItem _miGoToReference = null!, _miClearReference = null!;
     private ToolStripMenuItem _miColumns = null!, _miLayoutColumns = null!, _miLayoutInline = null!, _miFitColumns = null!;
     private ToolStripMenuItem _miEncoding = null!;
+    private ToolStripMenuItem _miExclude = null!;
     private ToolStripMenuItem _recentFilesMenu = null!, _recentFilterFilesMenu = null!;
 
     /// <summary>The encoding the reader chose for the file that is open, or null while it is being worked
@@ -776,6 +777,7 @@ public sealed class MainForm : Form
             miEdit.Text = n > 1 ? $"&Edit Appearance of {n} Filters…" : "&Edit Filter…";
             miDuplicate.Text = n > 1 ? $"Duplica&te {n} Filters" : "Duplica&te Filter";
             miRemove.Text = n > 1 ? $"&Remove {n} Filters" : "&Remove Filter";
+            _miExclude.Text = FilterTreeControl.KindMenuText(n, _filterTree.SelectionIsExcluding, mnemonic: true);
         };
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Find &Next Match", (_, _) => FindSelectedFilterMatch(true), Keys.F4));
@@ -785,6 +787,8 @@ public sealed class MainForm : Form
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Hint("Enable &Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(true)));
         filters.DropDownItems.Add(Hint("Disa&ble Subtree", "Shift+Space", () => _filterTree.SetSelectedSubtreeEnabled(false)));
+        _miExclude = Hint("&Hide Matching Lines", "Ctrl+Shift+X", () => _filterTree.ToggleSelectedExcluded());
+        filters.DropDownItems.Add(_miExclude);
         filters.DropDownItems.Add(new ToolStripSeparator());
         filters.DropDownItems.Add(Mi("Enable All", (_, _) => _filterTree.SetAllEnabled(true)));
         filters.DropDownItems.Add(Mi("Disable All", (_, _) => _filterTree.SetAllEnabled(false)));

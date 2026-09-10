@@ -256,6 +256,20 @@ public sealed class FilterTreeControl : UserControl
             bool ctrl = (mods & Keys.Control) == Keys.Control;
             bool shift = (mods & Keys.Shift) == Keys.Shift;
 
+            // The eye is a control, not a mark: a plain click on it flips the filter between showing and
+            // hiding what it matches, and does nothing else. It takes the press outright - it must not
+            // collapse the group it is about to be applied to, and it must not arm a drag.
+            if (button == MouseButtons.Left && !ctrl && !shift && OnKindIcon(node, at.X))
+            {
+                if (IsSelected(node)) SetCurrent(node);
+                else if (!ReferenceEquals(_tree.SelectedNode, node)) _tree.SelectedNode = node;
+                else SetSingleSelection(node);
+                ToggleKindFrom(node);
+                _pressed = null;
+                _pressedAt = at;
+                return;
+            }
+
             // Left of the content is the checkbox and the expander, where Shift already means "and
             // everything under it" - so extending a selection is offered on the row's own content only, and
             // the two gestures never have to be told apart by anything but where the pointer is.
@@ -398,9 +412,12 @@ public sealed class FilterTreeControl : UserControl
     private static int ContentLeft(TreeNode n) => n.Bounds.Left + 2;
 
     /// <summary>Only the row's own content opens the editor. The checkbox and the expander to its left have
-    /// jobs of their own, and clicking either twice means doing that twice - not "edit this".</summary>
+    /// jobs of their own, and clicking either twice means doing that twice - not "edit this". So does the
+    /// eye: two clicks on a toggle are two toggles, which is a filter back where it started rather than a
+    /// dialog nobody asked for.</summary>
     private void HandleDoubleClick(TreeNode node, int x)
     {
+        if (OnKindIcon(node, x)) { ToggleKindFrom(node); return; }
         if (x >= ContentLeft(node) && node.Tag is Filter f) EditRequested?.Invoke(f);
     }
 
@@ -604,6 +621,83 @@ public sealed class FilterTreeControl : UserControl
         FiltersChanged?.Invoke();
     }
 
+    // ---- include / exclude, from the eye column ----
+
+    /// <summary>Whether this x is over the row's eye. Measured to the whole column, gap included, so the
+    /// target is the width the pattern actually gave up rather than the drawing inside it.</summary>
+    private bool OnKindIcon(TreeNode node, int x)
+    {
+        int left = ContentLeft(node);
+        return node.Tag is Filter && x >= left && x < left + KindIconRoom();
+    }
+
+    /// <summary>Flips the eye the click landed on, and takes the rest of the group with it if the row is
+    /// part of one - the same rule the checkbox follows.</summary>
+    private void ToggleKindFrom(TreeNode node)
+    {
+        if (node.Tag is not Filter f) return;
+        SetKind(IsSelected(node) ? SelectedFilters : new[] { f }, f.Kind != FilterKind.Exclude);
+    }
+
+    /// <summary>Sets these filters to include or exclude as a single change.
+    ///
+    /// Set, never flip, for the reason the checkbox does not flip either: a group already in a mix of
+    /// states would scramble, and pressing the key twice would not put it back. Filters already in the
+    /// wanted state are left alone, so the undo point is only taken when something really moves.</summary>
+    private void SetKind(IReadOnlyList<Filter> filters, bool exclude)
+    {
+        if (_doc is null) return;
+        var kind = exclude ? FilterKind.Exclude : FilterKind.Include;
+        var changing = filters.Where(f => f.Kind != kind).ToList();
+        if (changing.Count == 0) return;
+
+        BeforeFiltersEdited?.Invoke(Label(exclude ? "Exclude" : "Include", changing.Count));
+        foreach (var f in changing) f.Kind = kind;
+        QueueTooltipUpdate();
+        _tree.Invalidate();
+        FiltersChanged?.Invoke();
+    }
+
+    /// <summary>Flips the selected filters between hiding and showing what they match - the eye column, the
+    /// Ctrl+Shift+X gesture and the menu entries for it. The current row decides which way the whole group
+    /// goes, so a mixed group lands on one state.</summary>
+    public void ToggleSelectedExcluded()
+    {
+        if (_tree.SelectedNode?.Tag is Filter f) SetKind(SelectedFilters, f.Kind != FilterKind.Exclude);
+    }
+
+    /// <summary>True when every selected filter hides what it matches - what the menu wording is about.</summary>
+    public bool SelectionIsExcluding
+    {
+        get
+        {
+            var sel = SelectedFilters;
+            return sel.Count > 0 && sel.All(f => f.Kind == FilterKind.Exclude);
+        }
+    }
+
+    // Which row the pointer is over, and where that row's eye is. Cached because asking a TreeNode for its
+    // Bounds makes the tree custom-draw that row synchronously, and a mouse move is not a repaint.
+    private TreeNode? _hoverRow;
+    private int _hoverIconLeft = -1;
+    private int _hoverIconRight = -1;
+
+    /// <summary>The eye is the only thing in the list a single click acts on, so it is the only thing that
+    /// shows a hand.</summary>
+    private void UpdateHoverCursor(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.None || DragInProgress) return;
+        var node = _tree.GetNodeAt(0, e.Y);
+        if (!ReferenceEquals(node, _hoverRow))
+        {
+            _hoverRow = node;
+            _hoverIconLeft = node?.Tag is Filter ? ContentLeft(node) : -1;
+            _hoverIconRight = _hoverIconLeft < 0 ? -1 : _hoverIconLeft + KindIconRoom();
+        }
+        var want = e.X >= _hoverIconLeft && e.X < _hoverIconRight ? Cursors.Hand : Cursors.Default;
+        if (_tree.Cursor != want) _tree.Cursor = want;
+    }
+
     // ---- type-to-search ----
 
     private void OnSearchKeyDown(object? sender, KeyEventArgs e)
@@ -626,6 +720,13 @@ public sealed class FilterTreeControl : UserControl
         else if (e.KeyCode == Keys.Space && e.Control && !e.Shift && !e.Alt && _tree.SelectedNode is { } toggle)
         {
             ToggleSelected(toggle);
+            e.Handled = e.SuppressKeyPress = true;
+        }
+        else if (e.KeyCode == Keys.X && e.Control && e.Shift && !e.Alt)
+        {
+            // The eye column from the keyboard. Not on a Space of its own: the three that Space can carry
+            // are all spoken for, and a filter's kind is not something to change by leaning on the big key.
+            ToggleSelectedExcluded();
             e.Handled = e.SuppressKeyPress = true;
         }
         else if (!e.Alt && e.KeyCode is Keys.Up or Keys.Down && (e.Control ^ e.Shift))
@@ -847,7 +948,7 @@ public sealed class FilterTreeControl : UserControl
         foreach (var n in _flat)
         {
             if (n.Tag is not Filter f) { n.ToolTipText = ""; continue; }
-            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset - ExcludeIconRoom(f);
+            int patternRoom = _columns.FilterRight - (n.Bounds.Left + 2) - Inset - KindIconRoom();
             bool patternCut = Measure(n.Text, Pick(FontStyle.Bold)) > patternRoom;
             bool descCut = !string.IsNullOrWhiteSpace(f.Description)
                            && Measure(f.Description, Pick(FontStyle.Bold)) > _columns.DescriptionWidth - Inset * 2;
@@ -867,7 +968,7 @@ public sealed class FilterTreeControl : UserControl
 
     // ---- owner draw (color swatch, exclude style, bold search matches, drop indicator) ----
 
-    private int ExcludeIconGap => LogicalToDeviceUnits(3);
+    private int KindIconGap => LogicalToDeviceUnits(4);
 
     /// <summary>Height of one line of the list's own font. The icon is sized from this rather than from the
     /// row, so it keeps its proportion to the text at any DPI or system font size.</summary>
@@ -877,16 +978,16 @@ public sealed class FilterTreeControl : UserControl
         return TextRenderer.MeasureText("Xg", Pick(FontStyle.Regular), Unbounded, MeasureFlags).Height;
     }
 
-    /// <summary>Width an exclude row's icon takes from its pattern; zero for every other filter, because
-    /// most filters are includes and a column of blank space to their left reads as a mistake.</summary>
-    private int ExcludeIconRoom(Filter f) => f.Kind == FilterKind.Exclude
-        ? ExcludeIconBox(0, new Rectangle(0, 0, 0, _tree.ItemHeight), LineHeight()).Width + ExcludeIconGap
-        : 0;
+    /// <summary>Width the eye takes from the pattern, the same on every row. It is a control now rather
+    /// than a mark, and a control has to be in a predictable place: a column only some rows have could not
+    /// be aimed at without reading each row first.</summary>
+    private int KindIconRoom()
+        => KindIconBox(0, new Rectangle(0, 0, 0, _tree.ItemHeight), LineHeight()).Width + KindIconGap;
 
     /// <summary>The icon sits at the left of the row's content, a shade shorter than a line of text. The box
     /// is sized for the SLASH, which runs corner to corner; the eye is a flat lens inside it, so the slash
     /// reads as crossing an eye rather than bisecting a circle.</summary>
-    private Rectangle ExcludeIconBox(int left, Rectangle bounds, int textHeight)
+    private Rectangle KindIconBox(int left, Rectangle bounds, int textHeight)
     {
         // Tied to the text so it scales with the font and the DPI together, but capped: past a point a
         // bigger icon says nothing more and only takes width the pattern needs.
@@ -899,18 +1000,21 @@ public sealed class FilterTreeControl : UserControl
     /// <summary>How far the marker is blended into the row behind it. It says what kind of filter this is,
     /// which is worth a glance and not a stare, so it is drawn to sit behind the pattern rather than beside
     /// it. Blended towards the row's own background rather than to a fixed grey, so a filter wearing any
-    /// colours keeps the same relative contrast.</summary>
+    /// colours keeps the same relative contrast.
+    /// <para>An include is the ordinary state and fades further back: a whole column of eyes at the
+    /// exclude's weight would shout at the reader on every row of an ordinary filter set.</para></summary>
     private const float ExcludeIconDim = 0.55f;
+    private const float IncludeIconDim = 0.74f;
 
     private static Color Blend(Color c, Color towards, float t) => Color.FromArgb(
         (int)(c.R + (towards.R - c.R) * t),
         (int)(c.G + (towards.G - c.G) * t),
         (int)(c.B + (towards.B - c.B) * t));
 
-    /// <summary>An eye with a slash through it: what this filter does is hide the lines it matches. Drawn
-    /// rather than lettered because it has to take the row's own colours and be legible from about eight
-    /// pixels up to whatever a large system font asks for, which no single font glyph manages.</summary>
-    private static void DrawHiddenEye(Graphics g, Rectangle r, Color color)
+    /// <summary>An eye, with a slash through it when the filter hides the lines it matches. Drawn rather
+    /// than lettered because it has to take the row's own colours and be legible from about eight pixels up
+    /// to whatever a large system font asks for, which no single font glyph manages.</summary>
+    private static void DrawEye(Graphics g, Rectangle r, Color color, bool crossed)
     {
         // Stroke scales with the box, or the glyph is spidery at a large font and a blob at a small one.
         float thick = Math.Max(1f, r.Height / 11f);
@@ -935,7 +1039,7 @@ public sealed class FilterTreeControl : UserControl
 
             float iris = lens * 0.78f;
             g.DrawEllipse(pen, cx - iris, cy - iris, iris * 2, iris * 2);
-            g.DrawLine(pen, cx - halfW, cy + halfH, cx + halfW, cy - halfH);
+            if (crossed) g.DrawLine(pen, cx - halfW, cy + halfH, cx + halfW, cy - halfH);
         }
         g.SmoothingMode = mode;
     }
@@ -994,13 +1098,10 @@ public sealed class FilterTreeControl : UserControl
 
         var savedClip = g.Clip;
         g.SetClip(Rectangle.FromLTRB(contentLeft, bounds.Top, Math.Max(contentLeft, filterRight - Inset), bounds.Bottom));
-        int textLeft = contentLeft;
-        if (f.Kind == FilterKind.Exclude)
-        {
-            var icon = ExcludeIconBox(contentLeft, bounds, textHeight);
-            DrawHiddenEye(g, icon, Blend(fg, bg, ExcludeIconDim));
-            textLeft = icon.Right + ExcludeIconGap;
-        }
+        bool excluded = f.Kind == FilterKind.Exclude;
+        DrawEye(g, KindIconBox(contentLeft, bounds, textHeight),
+                Blend(fg, bg, excluded ? ExcludeIconDim : IncludeIconDim), crossed: excluded);
+        int textLeft = contentLeft + KindIconRoom();
         DrawWithSearchHighlight(g, e.Node.Text, new Point(textLeft, textY),
                                 filterRight - Inset - textLeft, fg, style);
 
@@ -1157,6 +1258,7 @@ public sealed class FilterTreeControl : UserControl
 
     private void OnTreeMouseMove(object? sender, MouseEventArgs e)
     {
+        UpdateHoverCursor(e);
         if (_pressed is null || e.Button != MouseButtons.Left || DragInProgress) return;
 
         // The system's own threshold, so a press that wobbles still reads as a click.
@@ -1280,8 +1382,16 @@ public sealed class FilterTreeControl : UserControl
     internal Rectangle RowBoundsForTesting(Filter f) => NodeFor(f)?.Bounds ?? Rectangle.Empty;
     internal int ContentLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) : 0;
 
-    /// <summary>Test seam: what an exclude row's icon takes from its pattern, gap included.</summary>
-    internal int ExcludeIconRoomForTesting(Filter f) => ExcludeIconRoom(f);
+    /// <summary>Test seam: what the eye column takes from every row's pattern, gap included.</summary>
+    internal int KindIconRoomForTesting => KindIconRoom();
+
+    /// <summary>Test seam: where a row's eye can be clicked, in tree client coordinates.</summary>
+    internal Rectangle KindIconRectForTesting(Filter f)
+    {
+        if (NodeFor(f) is not { } n) return Rectangle.Empty;
+        var row = n.Bounds;
+        return new Rectangle(ContentLeft(n), row.Top, KindIconRoom(), row.Height);
+    }
     internal bool IsCheckedForTesting(Filter f) => NodeFor(f)?.Checked ?? false;
     internal void SelectForTesting(Filter f) { if (NodeFor(f) is { } n) _tree.SelectedNode = n; }
     internal void PressKeyForTesting(Keys key) => OnTreeKeyDown(_tree, new KeyEventArgs(key));
@@ -1352,14 +1462,19 @@ public sealed class FilterTreeControl : UserControl
 
     internal void MouseUpForTesting() => OnTreeMouseUp(_tree, new MouseEventArgs(MouseButtons.Left, 1, 0, 0, 0));
 
-    /// <summary>Presses on a filter's row: on its content by default, or on its checkbox.</summary>
+    /// <summary>Presses on a filter's row: on its pattern by default (past the eye, which answers a click
+    /// of its own), or on its checkbox.</summary>
     internal void ClickFilterForTesting(Filter f, Keys mods = Keys.None, bool onCheckbox = false, MouseButtons button = MouseButtons.Left)
     {
         if (NodeFor(f) is not { } n) return;
         var row = n.Bounds;
-        MouseDownForTesting(new Point(onCheckbox ? Math.Max(0, row.Left - 4) : row.Left + 2, row.Top + row.Height / 2), mods, button);
+        MouseDownForTesting(new Point(onCheckbox ? Math.Max(0, row.Left - 4) : PatternLeftForTesting(f),
+                                      row.Top + row.Height / 2), mods, button);
         MouseUpForTesting();
     }
+
+    /// <summary>Where a row's pattern starts, which is where a press picks the filter up.</summary>
+    internal int PatternLeftForTesting(Filter f) => NodeFor(f) is { } n ? ContentLeft(n) + KindIconRoom() : 0;
 
     /// <summary>Whether a placeholder row is standing in for a group being dragged, and what it says.</summary>
     internal string? GhostTextForTesting => _ghost?.Text;
@@ -1790,6 +1905,9 @@ public sealed class FilterTreeControl : UserControl
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(new ToolStripMenuItem("Enable Subtree", null, (_, _) => SetSelectedSubtreeEnabled(true)) { ShortcutKeyDisplayString = "Shift+Space" });
         menu.Items.Add(new ToolStripMenuItem("Disable Subtree", null, (_, _) => SetSelectedSubtreeEnabled(false)) { ShortcutKeyDisplayString = "Shift+Space" });
+        var kind = new ToolStripMenuItem("Hide Matching Lines", null, (_, _) => ToggleSelectedExcluded())
+        { ShortcutKeyDisplayString = "Ctrl+Shift+X" };
+        menu.Items.Add(kind);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Enable All", null, (_, _) => SetAllEnabled(true));
         menu.Items.Add("Disable All", null, (_, _) => SetAllEnabled(false));
@@ -1804,8 +1922,22 @@ public sealed class FilterTreeControl : UserControl
             edit.Text = n > 1 ? $"Edit Appearance of {n} Filters…" : "Edit Filter…";
             duplicate.Text = n > 1 ? $"Duplicate {n} Filters" : "Duplicate Filter";
             remove.Text = n > 1 ? $"Remove {n} Filters" : "Remove Filter";
+            // Named for what it will do next, not for the setting it sets: the row already shows which way
+            // its eye is pointing, and a ticked "Exclude" would say the same thing twice.
+            kind.Text = KindMenuText(n, SelectionIsExcluding, mnemonic: false);
         };
         return menu;
+    }
+
+    /// <summary>What the eye toggle is called where it is offered from a menu. It is named for what it will
+    /// do next rather than for the setting it sets: the row already shows which way its eye is pointing, and
+    /// a ticked "Exclude" would say the same thing twice.</summary>
+    internal static string KindMenuText(int count, bool excluding, bool mnemonic)
+    {
+        string verb = excluding
+            ? (mnemonic ? "S&how Matching Lines Again" : "Show Matching Lines Again")
+            : (mnemonic ? "&Hide Matching Lines" : "Hide Matching Lines");
+        return count > 1 ? $"{verb} ({count} filters)" : verb;
     }
 
     /// <summary>The filter the context menu is about: the row it was opened over, or - when it was asked

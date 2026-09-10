@@ -148,7 +148,7 @@ internal static partial class Checks
                         $"checkbox (worst column x={worstX} is highlighted down {worst} of {rowRect.Height} pixels)",
                         worst <= 2);
 
-            ok &= CheckExcludeIcon(doc, tree, host);
+            ok &= CheckKindIcon(doc, tree, host);
             return ok;
         }
         finally
@@ -159,16 +159,16 @@ internal static partial class Checks
         }
     }
 
-    /// <summary>An exclude hides the lines it matches, so it is marked with an eye that has a slash through
-    /// it. The marker is DRAWN, and only exclude rows give up any width to it - most filters are includes
-    /// and a column of blank space to their left reads as a mistake.</summary>
-    private static bool CheckExcludeIcon(CascadeDocument doc, FilterTreeControl tree, Form host)
+    /// <summary>Every filter carries an eye at the left of its row, crossed out when it hides the lines it
+    /// matches. It is a control, not a mark: it is in the same place on every row, clicking it flips the
+    /// filter, and the pattern beside it starts in the same place either way.</summary>
+    private static bool CheckKindIcon(CascadeDocument doc, FilterTreeControl tree, Form host)
     {
         host.ClientSize = new Size(420, 200);
         Pump();
 
         // Same pattern, same colours, same everything but the kind: then the only thing that can differ
-        // between the two rows is the marker and what it displaces.
+        // between the two rows is the eye and what it displaces.
         var style = new FilterStyle { Foreground = new RgbColor(31, 31, 112), Background = new RgbColor(255, 255, 255) };
         var shown = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
         var hidden = new Filter { Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
@@ -176,10 +176,8 @@ internal static partial class Checks
         tree.SelectForTesting(shown);
         Pump();
 
-        int room = tree.ExcludeIconRoomForTesting(hidden);
-        bool ok = Check($"an include gives up no width to a marker it does not have",
-                        tree.ExcludeIconRoomForTesting(shown) == 0);
-        ok &= Check($"an exclude reserves room for its marker ({room}px)", room > 0);
+        int room = tree.KindIconRoomForTesting;
+        bool ok = Check($"every row gives up the same width to the eye ({room}px)", room > 0);
 
         var area = tree.TreeAreaForTesting;
         var incRow = tree.RowBoundsForTesting(shown);
@@ -193,66 +191,188 @@ internal static partial class Checks
         var paper = Color.White;                                    // the fixture's own row background
         int Away(Color c) => Math.Abs(c.R - paper.R) + Math.Abs(c.G - paper.G) + Math.Abs(c.B - paper.B);
 
-        // Something is actually drawn in the space the marker reserved. Measured against the row's own
-        // background, not an absolute darkness, so dimming the marker cannot quietly weaken this.
-        int drawn = 0, boldest = 0;
-        for (int dx = 0; dx < room; dx++)
-            for (int y = 1; y < excRow.Height - 1; y++)
-            {
-                int away = Away(At(area.Left + excLeft + dx, area.Top + excRow.Top + y));
-                if (away > 30) drawn++;
-                boldest = Math.Max(boldest, away);
-            }
-        ok &= Check($"the marker is drawn, not just reserved ({drawn} pixels of ink in its {room}px)", drawn > 8);
+        // Something is actually drawn in the space the eye reserved, on BOTH rows - an include's eye is the
+        // whole reason the column is aimable. Measured against the row's own background, not an absolute
+        // darkness, so dimming the icon cannot quietly weaken this.
+        (int Ink, int Boldest, int Height) Icon(int left, Rectangle row)
+        {
+            int ink = 0, boldest = 0, top = int.MaxValue, bottom = int.MinValue;
+            for (int dx = 0; dx < room; dx++)
+                for (int y = 1; y < row.Height - 1; y++)
+                {
+                    int away = Away(At(area.Left + left + dx, area.Top + row.Top + y));
+                    boldest = Math.Max(boldest, away);
+                    if (away <= 30) continue;
+                    ink++;
+                    top = Math.Min(top, y);
+                    bottom = Math.Max(bottom, y);
+                }
+            return (ink, boldest, bottom < top ? 0 : bottom - top + 1);
+        }
+        var inc = Icon(incLeft, incRow);
+        var exc = Icon(excLeft, excRow);
+        ok &= Check($"an exclude's eye is drawn, not just reserved ({exc.Ink} pixels of ink in its {room}px)", exc.Ink > 8);
+        ok &= Check($"an include's eye is drawn too ({inc.Ink} pixels of ink in its {room}px)", inc.Ink > 8);
+
+        // The slash is what says "hidden", and it runs corner to corner while the eye it crosses is a flat
+        // lens: the ink of an exclude reaches well above and below the ink of an include. Compared as
+        // SHAPE, not as pixels that merely differ - the two are drawn at different weights, so "the
+        // pictures are not identical" would pass with the slash taken out altogether.
+        ok &= Check($"the slash reaches past the eye it crosses " +
+                    $"(exclude's ink {exc.Height}px tall, include's {inc.Height}px)",
+                    inc.Height > 0 && exc.Height >= inc.Height + 3);
+
+        // The exceptional state is the louder one. An ordinary filter set is nearly all includes, and a
+        // column of eyes at the exclude's weight would shout on every row.
+        ok &= Check($"an exclude's eye is bolder than an include's " +
+                    $"(exclude {exc.Boldest} from the background, include {inc.Boldest})",
+                    exc.Boldest > inc.Boldest);
 
         // ...and it sits behind the pattern rather than beside it.
         int text = 0;
         for (int dx = room; dx < room + 120; dx++)
             for (int y = 1; y < excRow.Height - 1; y++)
                 text = Math.Max(text, Away(At(area.Left + excLeft + dx, area.Top + excRow.Top + y)));
-        ok &= Check($"the marker is quieter than the pattern it marks " +
-                    $"(marker {boldest} from the background, text {text})",
-                    text > 0 && boldest < text * 3 / 4);
+        ok &= Check($"the eye is quieter than the pattern it marks " +
+                    $"(eye {exc.Boldest} from the background, text {text})",
+                    text > 0 && exc.Boldest < text * 3 / 4);
 
-        // ...and the pattern beyond it is the same picture as the include's, just moved right by the room
-        // the marker took. That is the whole claim, and it fails whichever way the marker goes wrong.
+        // ...and the pattern beyond it is the same picture on both rows, in the same place. Marking only
+        // the excludes used to shift their pattern right of everything else's; a column that moves with the
+        // state it shows is not a column.
         int compared = 0, differing = 0, firstX = -1;
         int height = Math.Min(incRow.Height, excRow.Height);
-        for (int dx = 0; dx < 120; dx++)
+        for (int dx = room; dx < room + 120; dx++)
             for (int y = 1; y < height - 1; y++)
             {
                 var a = At(area.Left + incLeft + dx, area.Top + incRow.Top + y);
-                var b = At(area.Left + excLeft + room + dx, area.Top + excRow.Top + y);
+                var b = At(area.Left + excLeft + dx, area.Top + excRow.Top + y);
                 compared++;
                 if (a.ToArgb() == b.ToArgb()) continue;
                 differing++;
                 if (firstX < 0) firstX = dx;
             }
-        ok &= Check($"the marker shifts the pattern right by exactly its own width and nothing else " +
+        ok &= Check($"the pattern starts in the same place whichever way the eye points " +
                     $"({differing} of {compared} pixels differ" + (firstX < 0 ? "" : $", first at +{firstX}px") + ")",
                     compared > 0 && differing == 0);
 
         // Sized from the list's own text, so it follows the font and the DPI together - and then stops,
-        // because past a point a bigger marker says nothing more and only takes width the pattern needs.
+        // because past a point a bigger eye says nothing more and only takes width the pattern needs.
         var baseFont = host.Font;
         using (var larger = new Font(baseFont.FontFamily, baseFont.Size * 1.6f))
         using (var enormous = new Font(baseFont.FontFamily, baseFont.Size * 6f))
         {
             host.Font = larger;
             Pump();
-            int grown = tree.ExcludeIconRoomForTesting(hidden);
+            int grown = tree.KindIconRoomForTesting;
             host.Font = enormous;
             Pump();
-            int capped = tree.ExcludeIconRoomForTesting(hidden);
+            int capped = tree.KindIconRoomForTesting;
             host.Font = baseFont;
             Pump();
 
-            ok &= Check($"the marker grows with the font ({room}px at {baseFont.Size:0.#}pt, " +
+            ok &= Check($"the eye grows with the font ({room}px at {baseFont.Size:0.#}pt, " +
                         $"{grown}px at {larger.Size:0.#}pt)", grown > room);
             ok &= Check($"and stops growing rather than eating the pattern column " +
                         $"({capped}px at {enormous.Size:0.#}pt)", capped < room * 3);
         }
-        return ok;
+        return ok && CheckKindToggle(doc, tree);
+    }
+
+    /// <summary>Flipping a filter between showing and hiding what it matches has to be as quick as ticking
+    /// it: one click on the eye, or one keystroke, over as many filters as are selected.</summary>
+    private static bool CheckKindToggle(CascadeDocument doc, FilterTreeControl tree)
+    {
+        var first = new Filter { Match = new FilterMatch { Text = "ERROR" } };
+        var second = new Filter { Match = new FilterMatch { Text = "WARN" } };
+        var third = new Filter { Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "DEBUG" } };
+        SetFilters(doc, tree, first, second, third);
+        Pump();
+
+        int applied = 0, undoPoints = 0;
+        string? undoLabel = null;
+        void CountApply() => applied++;
+        void CountUndo(string label) { undoPoints++; undoLabel = label; }
+        tree.FiltersChanged += CountApply;
+        tree.BeforeFiltersEdited += CountUndo;
+        try
+        {
+            Point Eye(Filter f)
+            {
+                var r = tree.KindIconRectForTesting(f);
+                return new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
+            }
+
+            // The eye sits inside the row's content, where a press otherwise picks the filter up. It has to
+            // take the press outright, or the gesture would be a drag that happened to start on an icon.
+            bool ok = Check("a press on the eye does not arm a drag", !tree.PressArmsDragForTesting(Eye(first)));
+            ok &= Check("that press was the toggle itself - the eye hides the lines the filter matches",
+                        first.Kind == FilterKind.Exclude, first.Kind.ToString());
+            ok &= Check("and re-applies the filters once", applied == 1, $"{applied} passes");
+            ok &= Check($"and leaves one undo point, named for what it did (\"{undoLabel}\")",
+                        undoPoints == 1 && undoLabel == "Exclude Filter");
+
+            tree.MouseDownForTesting(Eye(first));
+            tree.MouseUpForTesting();
+            Pump();
+            ok &= Check("clicking it again brings those lines back", first.Kind == FilterKind.Include);
+
+            int passes = applied, points = undoPoints;
+            tree.SelectForTesting(first);
+            tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
+            tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
+            Pump();
+            ok &= Check("the keyboard flips it and flips it back (Ctrl+Shift+X)", first.Kind == FilterKind.Include);
+            ok &= Check($"and a flip is one pass and one undo point, not one per filter in the list " +
+                        $"({applied - passes} passes, {undoPoints - points} undo points)",
+                        applied == passes + 2 && undoPoints == points + 2);
+
+            // A group in a mix of states: set, never flip. Flipping each one in turn would scramble it, and
+            // pressing the key twice would not put it back. The current row decides which way they all go.
+            tree.SelectForTesting(first);
+            tree.SelectAllFilters();
+            tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
+            Pump();
+            ok &= Check("one keystroke takes the whole selection, mixed or not",
+                        first.Kind == FilterKind.Exclude && second.Kind == FilterKind.Exclude
+                        && third.Kind == FilterKind.Exclude,
+                        $"{first.Kind}/{second.Kind}/{third.Kind}");
+            // Only two of the three moved: the third was already hiding its lines, and an undo point that
+            // undoes nothing is one the user has to press through twice to get anywhere.
+            ok &= Check($"and the undo point counts what really moved (\"{undoLabel}\")",
+                        undoLabel == "Exclude 2 Filters");
+
+            tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
+            Pump();
+            ok &= Check("and pressing it again puts every one of them back",
+                        first.Kind == FilterKind.Include && second.Kind == FilterKind.Include
+                        && third.Kind == FilterKind.Include,
+                        $"{first.Kind}/{second.Kind}/{third.Kind}");
+
+            // Clicking one row's eye while several are selected is the checkbox's rule: it takes the group,
+            // and the group survives the click - collapsing it to the row that was clicked would leave the
+            // other filters flipped and no longer selected.
+            tree.MouseDownForTesting(Eye(second));
+            tree.MouseUpForTesting();
+            Pump();
+            ok &= Check("clicking one eye of a selected group takes the group with it",
+                        first.Kind == FilterKind.Exclude && second.Kind == FilterKind.Exclude
+                        && third.Kind == FilterKind.Exclude,
+                        $"{first.Kind}/{second.Kind}/{third.Kind}");
+            ok &= Check($"and the group is still selected afterwards ({tree.SelectedCount} of 3)",
+                        tree.SelectedCount == 3);
+
+            ok &= Check("the menu says what it will do next, not what is set",
+                        FilterTreeControl.KindMenuText(1, excluding: true, mnemonic: false) == "Show Matching Lines Again"
+                        && FilterTreeControl.KindMenuText(3, excluding: false, mnemonic: false) == "Hide Matching Lines (3 filters)",
+                        FilterTreeControl.KindMenuText(3, excluding: false, mnemonic: false));
+            return ok;
+        }
+        finally
+        {
+            tree.FiltersChanged -= CountApply;
+            tree.BeforeFiltersEdited -= CountUndo;
+        }
     }
 
     /// <summary>The hover tip is the only place the app answers "why is this line here, and why that
@@ -1007,14 +1127,26 @@ internal static partial class Checks
             // ---- double-clicking a row ----
             var row = tree.RowBoundsForTesting(other);
             int mid = row.Top + row.Height / 2;
+            int textX = tree.PatternLeftForTesting(other);
             ok &= Check("double-clicking a filter's text asks to edit it",
-                        ReferenceEquals(tree.DoubleClickForTesting(new Point(row.Left + 2, mid)).Edit, other));
+                        ReferenceEquals(tree.DoubleClickForTesting(new Point(textX, mid)).Edit, other));
             ok &= Check("so does double-clicking the empty space out to its right",
                         ReferenceEquals(tree.DoubleClickForTesting(new Point(tree.TreeWidthForTesting - 4, mid)).Edit, other));
             ok &= Check("double-clicking the checkbox does not",
                         tree.DoubleClickForTesting(new Point(row.Left - 2, mid)).Edit is null);
             ok &= Check("nor does double-clicking left of it",
                         tree.DoubleClickForTesting(new Point(0, mid)).Edit is null);
+            // Two clicks on a toggle are two toggles: the filter ends where it started, and no dialog opens
+            // on top of a gesture that was only ever about the eye. Both halves of the real sequence - the
+            // tree reports the first click as an ordinary press and only the second as a double-click.
+            var wasKind = other.Kind;
+            int eyeX = tree.KindIconRectForTesting(other).Left + 2;
+            tree.MouseDownForTesting(new Point(eyeX, mid));
+            tree.MouseUpForTesting();
+            ok &= Check("nor does double-clicking the eye",
+                        tree.DoubleClickForTesting(new Point(eyeX, mid)).Edit is null);
+            ok &= Check($"and two clicks on it are two toggles, leaving the filter as it was " +
+                        $"({wasKind} -> {other.Kind})", other.Kind == wasKind);
 
             // ---- double-clicking below the last filter ----
             // The list is 5 filters in a pane with room for far more, so there is real empty space under it.
@@ -1026,7 +1158,7 @@ internal static partial class Checks
             ok &= Check("double-clicking below the last filter asks for a new one", below.Add);
             ok &= Check("and does not also ask to edit one", below.Edit is null);
             ok &= Check("while double-clicking a filter asks only to edit it",
-                        !tree.DoubleClickForTesting(new Point(row.Left + 2, mid)).Add);
+                        !tree.DoubleClickForTesting(new Point(textX, mid)).Add);
 
             // Through the list's own event, not the seam: the empty part of the list is not a node, so the
             // tree's NodeMouseDoubleClick - where this used to be handled - never fires there.
@@ -1062,7 +1194,7 @@ internal static partial class Checks
             var withKids = tree.RowBoundsForTesting(parent);
             int kidMid = withKids.Top + withKids.Height / 2;
             bool openBefore = tree.IsExpandedForTesting(parent);
-            tree.SendDoubleClickOnlyForTesting(new Point(withKids.Left + 2, kidMid));
+            tree.SendDoubleClickOnlyForTesting(new Point(tree.PatternLeftForTesting(parent), kidMid));
             Pump();
             ok &= Check($"double-clicking a filter with children does not fold it " +
                         $"({(openBefore ? "open" : "shut")} -> {(tree.IsExpandedForTesting(parent) ? "open" : "shut")})",
@@ -1170,7 +1302,7 @@ internal static partial class Checks
             // A press inside the group must not throw the group away - that press may be the start of a
             // drag carrying all of it. It only means "just this one" once the button comes up.
             var row = tree.RowBoundsForTesting(b);
-            tree.MouseDownForTesting(new Point(row.Left + 2, row.Top + row.Height / 2));
+            tree.MouseDownForTesting(new Point(tree.PatternLeftForTesting(b), row.Top + row.Height / 2));
             ok &= Check($"pressing inside the group keeps it, so the whole group can be dragged " +
                         $"[{Selected()}]", Selected() == "a b c" && Current() == "b");
             tree.MouseUpForTesting();

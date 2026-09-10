@@ -354,11 +354,12 @@ internal static partial class Checks
             if (!ok) return false;
 
             // A filter can be picked up anywhere in its own content, the blank space between and after the
-            // columns included - but not on the checkbox, where a press has to keep meaning tick.
+            // columns included - but not on the checkbox, where a press has to keep meaning tick, and not on
+            // the eye, which answers a click of its own.
             var row = tree.RowBoundsForTesting(filters.Roots[0]);
             int mid = row.Top + row.Height / 2;
             ok &= Check("a press on the filter's own text picks it up",
-                        tree.PressArmsDragForTesting(new Point(row.Left + 2, mid)));
+                        tree.PressArmsDragForTesting(new Point(tree.PatternLeftForTesting(filters.Roots[0]), mid)));
             ok &= Check("so does one out in the empty space to the right of it",
                         tree.PressArmsDragForTesting(new Point(tree.TreeWidthForTesting - 4, mid)));
             ok &= Check("a press on the checkbox does not",
