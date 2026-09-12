@@ -1,9 +1,12 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
+using System.Linq.Expressions;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Cascade.Core.Columns;
+using Cascade.Core.Document;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
@@ -50,6 +53,7 @@ internal static class ScrollBench
         // costs; a real figure measures what a mouse of that speed does to the program.
         int rate = IntArg(args, "--rate=", 0);
         string only = Arg(args, "--only=") ?? "";
+        if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
         // A drag over ground the minimap has never been over, which is what the first pass down a file is.
@@ -128,6 +132,12 @@ internal static class ScrollBench
             Console.WriteLine($"a line is {sample.Length} characters and {probe.DrawnWidthForTesting(sample, 0)}px wide, " +
                               $"in {probe.Bounds.Width - probe.GutterWidthForTesting - probe.MapWidthForTesting - probe.ScrollBarWidthForTesting}px of room");
             Console.WriteLine();
+
+            if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase))
+            {
+                FilterNavigation(form, filterSet(), steps, repeats, settleMs);
+                return 0;
+            }
 
             if (only.Length == 0 || only.Equals("filter-list", StringComparison.OrdinalIgnoreCase))
             {
@@ -435,6 +445,143 @@ internal static class ScrollBench
         }
     }
 
+    private static void FilterNavigation(MainForm form, FilterCollection filters, int steps, int repeats, int settleMs)
+    {
+        var doc = form.DocForTesting;
+        var tree = form.FilterTreeForTesting;
+        var grid = form.GridForTesting;
+        using var process = Process.GetCurrentProcess();
+        using var context = new WindowsFormsSynchronizationContext();
+        var drop = typeof(CascadeDocument).GetMethod("DropFilterNavigation");
+        var workProperty = typeof(CascadeDocument).GetProperty("FilterNavigationWorkForTesting", BindingFlags.Instance | BindingFlags.NonPublic);
+        var bytesProperty = typeof(CascadeDocument).GetProperty("FilterNavigationBytesForTesting", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        foreach (bool filtered in new[] { false, true })
+        {
+            filters.ShowOnlyFilteredLines = filtered;
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
+            if (doc.IsBusy) throw new InvalidOperationException("The navigation benchmark did not settle.");
+            grid.RefreshView();
+            Pump();
+            var candidates = filters.EnumerateDepthFirst()
+                .Where(filter => filter.Enabled && filter.Kind == FilterKind.Include && doc.MatchSetFor(filter) is { Matches: > 1 })
+                .OrderByDescending(filter => doc.MatchSetFor(filter)!.Matches).ToArray();
+            foreach (bool sparse in new[] { false, true })
+            {
+                Filter? target = null;
+                long first = -1, second = -1;
+                foreach (var candidate in sparse ? candidates.Reverse() : candidates)
+                {
+                    first = doc.FindLineMatchingFilter(candidate, doc.CompletedLineCount / 2, false, CancellationToken.None);
+                    if (first < 0) first = doc.FindLineMatchingFilter(candidate, 0, true, CancellationToken.None);
+                    if (first < 0) continue;
+                    second = doc.FindLineMatchingFilter(candidate, first + 1, true, CancellationToken.None);
+                    if (second >= 0) { target = candidate; break; }
+                }
+                if (target is null) throw new InvalidOperationException("The navigation benchmark needs two visible matches.");
+                tree.SelectForTesting(target);
+                var set = doc.MatchSetFor(target)!;
+                string mode = filtered ? "filtered" : "dim";
+                string shape = sparse ? "sparse" : "common";
+                long count = 0, position = 0;
+                for (long hit = set.Next(0); hit >= 0; hit = set.Next(hit + 1))
+                {
+                    if (!doc.IsLineVisible(hit)) continue;
+                    count++;
+                    if (hit <= first) position++;
+                }
+                for (int sample = 0; sample < 1000; sample++)
+                {
+                    long line = Math.Clamp(doc.CompletedLineCount / 2 + sample - 500, 0, doc.CompletedLineCount - 1);
+                    if (set.Contains(line) != doc.CurrentSnapshot.DeepMatches(doc.GetLineText(line), line, doc.Markers, target))
+                        throw new InvalidOperationException("Cached matches disagree with the real lines.");
+                }
+                Console.WriteLine($"NAV_REFERENCE {mode} {shape} lines={doc.CompletedLineCount} matches={count} position={position} first={first} second={second}");
+                long scanned = doc.FilterLinesScanned;
+                var tally = NavigationTallyReader(doc, target);
+                if (tally is not null)
+                {
+                    for (int repeat = 0; repeat < repeats; repeat++)
+                    {
+                        drop!.Invoke(doc, null);
+                        var clock = Stopwatch.StartNew();
+                        _ = tally(first);
+                        if (workProperty?.GetValue(doc) is Task work && !work.Wait(settleMs))
+                            throw new InvalidOperationException("The navigation count did not settle.");
+                        var counted = tally(first);
+                        clock.Stop();
+                        if (!counted.Complete || counted.Total != count || counted.Position != position)
+                            throw new InvalidOperationException("The navigation tally disagrees with the reference walk.");
+                        Console.WriteLine($"NAV_BUILD {mode} {shape} run={repeat + 1} wall={clock.Elapsed.TotalMilliseconds:F4}ms bytes={bytesProperty?.GetValue(doc)}");
+                    }
+                    const int Queries = 100_000;
+                    for (int repeat = 0; repeat < repeats; repeat++)
+                    {
+                        long allocated = GC.GetAllocatedBytesForCurrentThread();
+                        long checksum = 0;
+                        var clock = Stopwatch.StartNew();
+                        for (int query = 0; query < Queries; query++) checksum += tally(query % 2 == 0 ? first : second).Position;
+                        clock.Stop();
+                        if (checksum != Queries / 2L * (position * 2 + 1)) throw new InvalidOperationException("The tally did not advance in both directions.");
+                        Console.WriteLine($"NAV_QUERY {mode} {shape} run={repeat + 1} ns={clock.Elapsed.TotalNanoseconds / Queries:F1} bytes={(GC.GetAllocatedBytesForCurrentThread() - allocated) / (double)Queries:F3}");
+                    }
+                }
+
+                grid.SelectRowForAccessibility(doc.RowForLine(first));
+                for (int warmup = 0; warmup < 40; warmup++) Step(warmup % 2 == 0);
+                for (int repeat = 0; repeat < repeats; repeat++)
+                {
+                    grid.SelectRowForAccessibility(doc.RowForLine(first));
+                    Pump();
+                    long allocated = GC.GetTotalAllocatedBytes(precise: true);
+                    double processor = process.TotalProcessorTime.TotalMilliseconds;
+                    int paints = grid.PaintsForTesting;
+                    var clock = Stopwatch.StartNew();
+                    for (int step = 0; step < steps; step++) Step(step % 2 == 0);
+                    clock.Stop();
+                    int drawn = grid.PaintsForTesting - paints;
+                    if (drawn < steps) throw new InvalidOperationException("Navigation did not repaint every landing.");
+                    Console.WriteLine($"NAV_UI {mode} {shape} run={repeat + 1} wall={clock.Elapsed.TotalMilliseconds / steps:F4}ms cpu={(process.TotalProcessorTime.TotalMilliseconds - processor) / steps:F4}ms bytes={(GC.GetTotalAllocatedBytes(precise: true) - allocated) / (double)steps:F0} paints={drawn}");
+                }
+                if (doc.FilterLinesScanned != scanned) throw new InvalidOperationException("Cached navigation re-read the file.");
+
+                void Step(bool forward)
+                {
+                    var previous = SynchronizationContext.Current;
+                    try
+                    {
+                        SynchronizationContext.SetSynchronizationContext(context);
+                        if (!form.PressCmdKeyForTesting(forward ? Keys.F4 : Keys.Shift | Keys.F4))
+                            throw new InvalidOperationException("The navigation key was not handled.");
+                    }
+                    finally { SynchronizationContext.SetSynchronizationContext(previous); }
+                    long expected = forward ? second : first;
+                    for (var wait = Stopwatch.StartNew(); doc.IsFindRunning || grid.CaretLine != expected;)
+                    {
+                        if (wait.ElapsedMilliseconds >= settleMs) throw new InvalidOperationException("Navigation did not reach its expected line.");
+                        Pump();
+                    }
+                    Pump();
+                }
+            }
+        }
+    }
+
+    private static Func<long, (long Position, long Total, bool Complete)>? NavigationTallyReader(CascadeDocument doc, Filter filter)
+    {
+        var method = typeof(CascadeDocument).GetMethod("GetFilterNavigationTally");
+        if (method is null) return null;
+        var line = Expression.Parameter(typeof(long), "line");
+        var result = Expression.Variable(method.ReturnType, "tally");
+        var tuple = typeof(ValueTuple<long, long, bool>).GetConstructor([typeof(long), typeof(long), typeof(bool)])!;
+        var body = Expression.Block(new[] { result },
+            Expression.Assign(result, Expression.Call(Expression.Constant(doc), method, Expression.Constant(filter), line)),
+            Expression.New(tuple, Expression.Property(result, "Position"), Expression.Property(result, "Total"), Expression.Property(result, "Complete")));
+        return Expression.Lambda<Func<long, (long Position, long Total, bool Complete)>>(body, line).Compile();
+    }
+
     private static void FilterList(MainForm form, FilterCollection filters, int steps, int repeats, int settleMs)
     {
         if (filters.Roots.Count == 0) filters.Add(new Filter { Match = { Text = "WARN" } });
@@ -651,10 +798,10 @@ internal static class ScrollBench
             Match = new FilterMatch { Text = "elapsed=9" },
             Style = { Bold = true }
         };
-        payment.Children.Add(slow);
-        collection.Roots.Add(error);
-        collection.Roots.Add(warn);
-        collection.Roots.Add(payment);
+        collection.Add(error);
+        collection.Add(warn);
+        collection.Add(payment);
+        collection.Add(slow, payment);
         return collection;
     }
 

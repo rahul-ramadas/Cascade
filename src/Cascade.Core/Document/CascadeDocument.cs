@@ -35,6 +35,9 @@ public sealed class CascadeDocument : IDisposable
     private FindSearch? _search;
     private ThreadLocal<FindEngine.FindMatcher>? _searchMatchers;
     private ThreadLocal<LineReader>? _searchReaders;
+    private sealed record NavigationCount(Filter Filter, FilterSnapshot Snapshot, string Key, bool Filtered,
+        Task<FilterNavigationIndex?> Work, CancellationTokenSource Cancellation);
+    private NavigationCount? _filterNavigation;
     // Readers that have been superseded - a search whose term was replaced, a find that a newer one took
     // over from - but which may still be inside a scan of the file that is open. They are no longer
     // reachable through the fields above, so the release has to be told about them separately or it would
@@ -44,6 +47,7 @@ public sealed class CascadeDocument : IDisposable
     public CascadeDocument()
     {
         _identityView = FilteredView.CreateIdentity(() => CompletedLineCount);
+        Markers.Changed += InvalidateNavigationMarks;
     }
 
     public string FilePath { get; private set; } = "";
@@ -436,6 +440,15 @@ public sealed class CascadeDocument : IDisposable
             _viewSnapshots = [CurrentSnapshot, .. _viewSnapshots.Take(MaxRememberedViews - 1)];
         CurrentSnapshot = FilterSnapshot.Build(Filters, Markers);
         FilterGeneration++;
+        if (_filterNavigation is { } navigation)
+        {
+            if (navigation.Filtered || FilteredMode
+                || !CurrentSnapshot.TryGetCacheKey(navigation.Filter, out string navigationKey)
+                || navigationKey != navigation.Key)
+                DropFilterNavigation();
+            else
+                _filterNavigation = navigation with { Snapshot = CurrentSnapshot };
+        }
         if (_filterService is null)
         {
             // No file open yet (e.g. filters auto-loaded at startup). Keep the snapshot so the filters
@@ -1130,12 +1143,17 @@ public sealed class CascadeDocument : IDisposable
     public bool IsFindRunning => _findTask is { IsCompleted: false };
 
     /// <summary>Cancels a background find in progress (if any).</summary>
-    public void CancelFind() => _findCts?.Cancel();
+    public void CancelFind()
+    {
+        _findCts?.Cancel();
+        DropFilterNavigation();
+    }
 
     /// <summary>Runs the search under the shared find cancellation, so <see cref="IsFindRunning"/> and
     /// <see cref="CancelFind"/> cover it too.</summary>
     public Task<long> FindNextAsync(FindQuery query, long fromLine, bool forward)
     {
+        DropFilterNavigation();
         _findCts?.Cancel();
         Retire(_findTask);
         var cts = new CancellationTokenSource();
@@ -1355,6 +1373,90 @@ public sealed class CascadeDocument : IDisposable
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
     }
 
+    public FilterNavigationTally GetFilterNavigationTally(Filter filter, long line)
+    {
+        if (_filterNavigation is { } previous &&
+            (!ReferenceEquals(previous.Filter, filter) || previous.Filtered != FilteredMode
+             || previous.Snapshot.ChainMarksMoved(filter, Markers)))
+            DropFilterNavigation();
+
+        if (_src is null || !CurrentSnapshot.TryGetIndex(filter, out _) || !IsIndexComplete
+            || (FilteredMode && !IsFilterIdle)) return default;
+        if (CompletedLineCount == 0) return new(0, 0, true);
+
+        var navigation = _filterNavigation ??= CreateFilterNavigation(filter);
+        if (navigation is null) return default;
+        var task = navigation.Work;
+        if (!task.IsCompletedSuccessfully || task.Result is not { } index) return default;
+        long from = FirstDisplayLine, to = LastDisplayLine + 1;
+        long before = index.CountBefore(from);
+        long total = index.CountBefore(to) - before;
+        long position = line >= from && line < to && index.Contains(line) ? index.CountBefore(line + 1) - before : 0;
+        return new(position, total, true);
+    }
+
+    private NavigationCount? CreateFilterNavigation(Filter filter)
+    {
+        var service = _filterService;
+        var snapshot = CurrentSnapshot;
+        FilterMatchCache.MatchSet? matches = service.TryGetMatchSet(snapshot, filter, out var known) ? known : null;
+        if (matches is null)
+        {
+            if (IsFindRunning || !IsFilterIdle) return null;
+            snapshot = FilterSnapshot.BuildForChain(Filters, filter, Markers);
+        }
+        if (!snapshot.TryGetCacheKey(filter, out string key)) return null;
+        var visible = FilteredMode ? MatchView.FilterVisibleWords : null;
+        var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        var checkpoint = FilterNavigationCheckpointForTesting;
+        var work = Task.Run<FilterNavigationIndex?>(() =>
+        {
+            var set = matches;
+            if (set is null)
+            {
+                service.PrimeCache(snapshot, token);
+                if (!service.TryGetMatchSet(snapshot, filter, out set)) return null;
+            }
+            checkpoint?.Invoke();
+            return new FilterNavigationIndex(set, visible, token);
+        }, token);
+        FilterNavigationBuildsForTesting++;
+        return new NavigationCount(filter, snapshot, key, FilteredMode, work, cancellation);
+    }
+
+    public void DropFilterNavigation()
+    {
+        var navigation = _filterNavigation;
+        if (navigation is null) return;
+        _filterNavigation = null;
+        navigation.Cancellation.Cancel();
+        Retire(navigation.Work);
+        _ = navigation.Work.ContinueWith(static (task, state) =>
+        {
+            _ = task.Exception;
+            ((CancellationTokenSource)state!).Dispose();
+        }, navigation.Cancellation, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private void InvalidateNavigationMarks()
+    {
+        if (_filterNavigation is { } navigation &&
+            ((navigation.Filtered && CurrentSnapshot.HasMarkerFilter)
+             || navigation.Snapshot.ChainMarksMoved(navigation.Filter, Markers)))
+        {
+            DropFilterNavigation();
+            _filterService?.ForgetStaleMarkerResults(navigation.Snapshot);
+        }
+    }
+
+    internal int FilterNavigationBuildsForTesting { get; private set; }
+    internal FilterSnapshot? FilterNavigationSnapshotForTesting => _filterNavigation?.Snapshot;
+    internal Task? FilterNavigationWorkForTesting => _filterNavigation?.Work;
+    internal long FilterNavigationBytesForTesting
+        => _filterNavigation?.Work is { IsCompletedSuccessfully: true } work ? work.Result?.Bytes ?? 0 : 0;
+    internal Action? FilterNavigationCheckpointForTesting { get; set; }
+
     /// <summary>Finds the next/previous file line (from <paramref name="startLine"/>, exclusive of it via
     /// the caller's +/-1) that deep-matches <paramref name="filter"/>, or -1 if none. Scans decoded
     /// lines directly, so it works regardless of the filtered/dim view or whether the filter is enabled.</summary>
@@ -1489,6 +1591,16 @@ public sealed class CascadeDocument : IDisposable
     {
         _findCts?.Cancel();
         Retire(_findTask);
+        if (_filterNavigation is { } navigation && ReferenceEquals(navigation.Filter, filter)
+            && navigation.Filtered == FilteredMode && IsIndexComplete && (!FilteredMode || IsFilterIdle)
+            && !navigation.Snapshot.ChainMarksMoved(filter, Markers)
+            && navigation.Work.IsCompletedSuccessfully && navigation.Work.Result is { } index)
+        {
+            _findCts = null;
+            var completed = Task.FromResult(index.Find(startLine, forward, FirstDisplayLine, LastDisplayLine + 1));
+            _findTask = completed;
+            return completed;
+        }
         var cts = new CancellationTokenSource();
         _findCts = cts;
         Action<double>? onProgress = progress is null ? null : progress.Report;
@@ -1523,6 +1635,7 @@ public sealed class CascadeDocument : IDisposable
 
     private void DisposeCurrent(bool releaseAsync = false)
     {
+        DropFilterNavigation();
         // Everything that reads the file is asked to stop here, and NOTHING is waited for with a deadline.
         // The mapping is handed out as a raw pointer, so freeing it while a reader is still inside a scan
         // is an access violation - and a reader can be deep in work that does not answer cancellation at

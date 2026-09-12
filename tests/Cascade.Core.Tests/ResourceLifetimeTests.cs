@@ -242,8 +242,10 @@ public class ResourceLifetimeTests
         }
     }
 
-    [Fact]
-    public async Task Reopening_waits_for_a_find_that_a_newer_one_took_over_from()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reopening_waits_for_a_find_that_a_newer_one_took_over_from(bool tally)
     {
         // Same shape for per-filter find: starting another one supersedes the first, which goes on reading.
         //
@@ -278,10 +280,12 @@ public class ResourceLifetimeTests
                 if (Interlocked.Exchange(ref reached, 1) == 0) gate.Wait(TimeSpan.FromSeconds(30));
             };
 
-            _ = doc.FindLineMatchingFilterAsync(slow, 0, true);
+            if (tally) _ = doc.GetFilterNavigationTally(slow, 0);
+            else _ = doc.FindLineMatchingFilterAsync(slow, 0, true);
             WaitFor(() => Volatile.Read(ref reached) == 1, "the find never reached its first block");
 
             doc.FilterFindCheckpointForTesting = null;    // the one that supersedes it must run freely
+            if (tally) doc.DropFilterNavigation();
             _ = doc.FindLineMatchingFilterAsync(filters.Roots[1], 0, true);
 
             doc.Open(b);

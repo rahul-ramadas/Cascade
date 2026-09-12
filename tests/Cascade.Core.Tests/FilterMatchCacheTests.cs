@@ -19,6 +19,80 @@ public class FilterMatchCacheTests
 {
     private const int Lines = 120_000;
 
+    [Fact]
+    public void Cancelled_cache_publication_cannot_undo_pruning()
+    {
+        var cache = new FilterMatchCache();
+        var builder = new FilterMatchCache.SetBuilder(64);
+        builder.AddWord(0, ulong.MaxValue);
+        var matches = builder.Build(64);
+        cache.Store("obsolete", matches);
+        cache.RetainOnly([]);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Assert.Throws<OperationCanceledException>(() => cache.Store("obsolete", matches, cancellation.Token));
+        Assert.Equal(0, cache.Count);
+        Assert.Equal(0, cache.UsedBytes);
+    }
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(3, false)]
+    [InlineData(3, true)]
+    [InlineData(5_000, false)]
+    [InlineData(5_000, true)]
+    [InlineData(200_000, false)]
+    [InlineData(200_000, true)]
+    public void Navigation_rank_agrees_with_a_walk_without_copying_matches(int stride, bool filtered)
+    {
+        const int length = 120_013;
+        var builder = new FilterMatchCache.SetBuilder(length);
+        var reference = new long[length + 1];
+        var visible = new bool[length];
+        for (int first = 0; first < length; first += 64)
+        {
+            ulong bits = 0;
+            for (int line = first; line < Math.Min(first + 64, length); line++)
+            {
+                bool matched = line % stride == stride - 1;
+                visible[line] = !filtered || (line % 7 != 2 && line % 13 != 3);
+                reference[line + 1] = reference[line] + (matched && visible[line] ? 1 : 0);
+                if (matched) bits |= 1UL << (line - first);
+            }
+            builder.AddWord(first >> 6, bits);
+        }
+        var matches = builder.Build(length);
+        var view = new VisibleLineSet();
+        view.ApplyRange(0, visible);
+        view.Publish();
+        var index = new FilterNavigationIndex(matches, filtered ? view.CopyVisibleWords : null);
+        Assert.Equal(reference[length], index.Count);
+        for (int line = 0; line <= length; line++)
+        {
+            Assert.Equal(reference[line], index.CountBefore(line));
+            Assert.Equal(line < length && reference[line + 1] != reference[line], index.Contains(line));
+        }
+        Assert.Equal(0, index.CountBefore(long.MinValue));
+        Assert.Equal(reference[length], index.CountBefore(long.MaxValue));
+        Assert.InRange(index.Bytes, 0, ((length + 4095L) / 4096 + 1) * sizeof(long));
+        if (stride >= 5_000 && !filtered) Assert.Equal(0, index.Bytes);
+        long[] hits = Enumerable.Range(0, length).Where(line => reference[line + 1] > reference[line]).Select(line => (long)line).ToArray();
+        foreach (var (cropFrom, cropTo) in new[] { (0L, (long)length), (4093L, 109_771L), (4000L, 4000L), (0L, 0L) })
+        foreach (long from in new long[] { -1, 0, 1, 63, 64, 4095, 4096, 55_777, length - 1, length })
+        foreach (bool forward in new[] { true, false })
+        {
+            long expected = forward
+                ? hits.FirstOrDefault(line => line >= from && line >= cropFrom && line < cropTo, -1)
+                : hits.LastOrDefault(line => line <= from && line >= cropFrom && line < cropTo, -1);
+            Assert.Equal(expected, index.Find(from, forward, cropFrom, cropTo));
+        }
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        Assert.Throws<OperationCanceledException>(() =>
+            new FilterNavigationIndex(matches, cancellationToken: cancelled.Token));
+    }
+
     /// <summary>A log whose lines match a known, varied mix of the filters used below.</summary>
     private static string WriteLog()
     {

@@ -119,6 +119,7 @@ The key you press only picks a starting point. All three are offered in the dial
 
 - `Ctrl+E` searches the list **without hiding or reordering it**: non-matching filters dim rather than disappear.
 - `F4` / `Shift+F4` walk the log through the selected filter's matches, without changing which filters are on.
+- While cycling through matches, the status bar shows your position and the total, such as **4 of 10 matching lines**, counting only lines in the current view. Changing the selection in the log clears the tally.
 
 ### Presets
 

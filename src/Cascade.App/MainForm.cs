@@ -5,6 +5,7 @@ using System.Text;
 using System.Windows.Forms;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
+using Cascade.Core.Filtering;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
@@ -123,6 +124,11 @@ public sealed class MainForm : Form
     private int _tallyGeneration = -1;
     private (long From, long ToExclusive)? _tallyCrop;
     private bool _tallyHiding, _tallySwept, _tallySettled;
+    private Filter? _navigationFilter;
+    private FilterNavigationTally? _navigationTally;
+    private string _navigationPattern = "", _navigationDetail = "";
+    private int _navigationRequest;
+    private bool _landingFilterMatch;
     private int _activitySlot, _progressSlot, _baseActivitySlot;
     private int _elapsedSlot;
     private Font? _elapsedSlotFont;
@@ -138,6 +144,9 @@ public sealed class MainForm : Form
     internal CascadeDocument DocForTesting => _doc;
     internal FilterTreeControl FilterTreeForTesting => _filterTree;
     internal string StatusForTesting => string.Join(" | ", _status.Items.OfType<ToolStripStatusLabel>().Select(l => l.Text));
+    internal bool ActivityIsOnscreenForTesting => _busyLabel.Visible && _status.ClientRectangle.Contains(_busyLabel.Bounds);
+    internal string ActivityTextForTesting => _busyLabel.Text ?? "";
+    internal string ActivityDetailForTesting => _busyLabel.ToolTipText ?? "";
 
     internal bool CropLabelVisibleForTesting => _cropLabel.Visible;
 
@@ -395,7 +404,14 @@ public sealed class MainForm : Form
         // does - so anything that has to keep up with the gesture is pushed out rather than waited for.
         // A note about a match being out of sight answers for the line the search landed on, so moving to
         // another line by hand retires it; the next search will say so again if it still applies.
-        _grid.SelectionChanged += () => { _hiddenMatch = ""; SyncCropCommands(); UpdateStatus(); _status.Update(); };
+        _grid.SelectionChanged += () =>
+        {
+            if (!_landingFilterMatch) ClearFilterNavigation();
+            _hiddenMatch = "";
+            SyncCropCommands();
+            UpdateStatus();
+            _status.Update();
+        };
         _grid.NewFilterRequested += NewFilterFromDoubleClick;
         _grid.ZoomChanged += () => { UpdateStatus(); _status.Update(); SaveSettingsSoon(); _findBar.SnapHeightTo(_grid.RowPitch); SnapSplitter(); };
         _filterTree.FiltersChanged += OnFiltersChanged;
@@ -418,6 +434,7 @@ public sealed class MainForm : Form
         // own menu does exactly what the same key does in the log: seed from the selection, offer the places.
         _filterTree.AddRequested += NewFilter;
         _filterTree.FindFilterRequested += FindFilterMatch;
+        _filterTree.SelectedFilterChanged += FilterNavigationSelectionChanged;
         _filterTree.NoFilterMatch += q => NoMoreMatches("No more filters", $"No more filters matching {Quote(q)}");
         _grid.NoMoreMarkers += i => NoMoreMatches($"No more marker {i + 1}");
         _grid.CopyTruncated += (copied, selected) => ShowFindMessage(
@@ -440,6 +457,7 @@ public sealed class MainForm : Form
             else if (_doc.IsBusy) _filterTree.RefreshCounts();
             if (_anchorActive && !_doc.IsBusy) { _grid.RefreshView(); _grid.RetireViewAnchor(); _anchorActive = false; }
             _doc.DropRememberedViews();
+            if (RefreshFilterNavigation()) UpdateStatus();
             UpdateStatusIfChanged();
             FlushConfig();
         };
@@ -550,7 +568,13 @@ public sealed class MainForm : Form
         //     scoping this one to focus removes the conflict outright rather than ranking two unrelated
         //     things against each other - and it is the nearest state to hand when you are in that pane.
         //  3. The find bar, which is the log pane's equivalent and the fallback everywhere else.
-        if (keyData == Keys.Escape && _findBusy) { _doc.CancelFind(); return true; }
+        if (keyData == Keys.Escape && _findBusy)
+        {
+            ClearFilterNavigation();
+            _doc.CancelFind();
+            SetFindBusy(false);
+            return true;
+        }
         if (keyData == Keys.Escape && _saveCts is { } saving) { saving.Cancel(); return true; }
         if (keyData == Keys.Escape && _filterTree.SearchOpen && _filterTree.ContainsFocus)
         {
@@ -562,6 +586,12 @@ public sealed class MainForm : Form
         // guard only applies outside the bar.
         if (keyData == Keys.Escape && (_findBar.Visible || _lastQuery is not null)
             && (_findBar.ContainsFocus || !IsTextInputFocused())) { CloseFind(); return true; }
+        if (keyData == Keys.Escape && _navigationFilter is not null && !IsTextInputFocused())
+        {
+            ClearFilterNavigation();
+            UpdateStatus();
+            return true;
+        }
         if (keyData == (Keys.Control | Keys.Shift | Keys.L)) { ToggleFilterList(); return true; }
         if (keyData == SwitchLayoutKey && SwitchLayout()) return true;
         // Handled here rather than registered on the menu items, because whether they may run depends on
@@ -1257,6 +1287,18 @@ public sealed class MainForm : Form
         return total;
     }
 
+    private bool EnsureActivitySlot()
+    {
+        int fixedWidth = CurrentMetricWidth() + _srcLabel.Margin.Horizontal + _filterLabel.Margin.Horizontal
+            + _busyLabel.Margin.Horizontal + (_filterLabel.Spring ? 0 : _filterLabel.Width)
+            + (_elapsedLabel.Visible ? _elapsedLabel.Width + _elapsedLabel.Margin.Horizontal : 0);
+        int wanted = Math.Clamp(_status.DisplayRectangle.Width - fixedWidth - Dpi(2), 0, _baseActivitySlot);
+        if (_activitySlot == wanted) return false;
+        _activitySlot = wanted;
+        _busyLabel.Width = Math.Max(0, wanted - (_progress.Visible ? _progressSlot : 0));
+        return true;
+    }
+
     private ToolStripStatusLabel[] MetricLabels => new[] { _selLabel, _filLabel, _totalLabel, _showLabel, _zoomLabel };
 
     private static string[] MetricSamples(long magnitude)
@@ -1512,6 +1554,7 @@ public sealed class MainForm : Form
 
     private void OpenFile(string path, Encoding? enc)
     {
+        ClearFilterNavigation();
         // An export is reading the file that is about to be replaced. Opening waits for its readers to
         // stop, so leaving it running would freeze the window for exactly as long as this avoids.
         _saveCts?.Cancel();
@@ -1868,17 +1911,23 @@ public sealed class MainForm : Form
     private async void FindFilterMatch(Filter filter, bool forward)
     {
         if (string.IsNullOrEmpty(_doc.FilePath)) return;
+        if (!ReferenceEquals(_navigationFilter, filter)) ClearFilterNavigation();
+        _navigationFilter = filter;
+        _findMsg = "";
+        int request = ++_navigationRequest;
+        int generation = _doc.FilterGeneration;
         long caret = _grid.CaretLine;
         long start = caret < 0 ? (forward ? _doc.FirstDisplayLine : _doc.LastDisplayLine) : caret + (forward ? 1 : -1);
 
         // A filter scan decodes and matches every line, which on a multi-gigabyte file takes long enough
         // that doing it inline would freeze the window with no sign of progress.
-        SetFindBusy(true, "Searching", $"Searching for {Quote(filter.Match.Text)}");
-        var progress = new Progress<double>(f => _findFraction = f);
+        var progress = new Progress<double>(fraction => { if (request == _navigationRequest) _findFraction = fraction; });
+        var pending = _doc.FindLineMatchingFilterAsync(filter, start, forward, progress);
+        if (!pending.IsCompleted) SetFindBusy(true, "Searching", $"Searching for {Quote(filter.Match.Text)}");
         long found;
         try
         {
-            found = await _doc.FindLineMatchingFilterAsync(filter, start, forward, progress);
+            found = await pending;
         }
         catch (OperationCanceledException)
         {
@@ -1886,10 +1935,60 @@ public sealed class MainForm : Form
             if (!_doc.IsFindRunning) SetFindBusy(false);
             return;
         }
+        if (request != _navigationRequest) return;
         SetFindBusy(false);
+        if (generation != _doc.FilterGeneration) return;
 
-        if (found >= 0) GoToLine(found + 1);
+        if (found >= 0)
+        {
+            _landingFilterMatch = true;
+            try { GoToLine(found + 1); }
+            finally { _landingFilterMatch = false; }
+        }
         else NoMoreMatches("No more matches", $"No more matches for {Quote(filter.Match.Text)}");
+        UpdateStatus();
+        _grid.Update();
+        _status.Update();
+    }
+
+    private void FilterNavigationSelectionChanged()
+    {
+        if (_navigationFilter is null || ReferenceEquals(_navigationFilter, _filterTree.SelectedFilter)) return;
+        ClearFilterNavigation();
+        UpdateStatus();
+    }
+
+    private void ClearFilterNavigation()
+    {
+        if (_navigationFilter is null) return;
+        bool running = _navigationFilter is not null && _findBusy;
+        _navigationRequest++;
+        _navigationFilter = null;
+        _navigationTally = null;
+        _navigationPattern = _navigationDetail = "";
+        _doc.DropFilterNavigation();
+        if (running)
+        {
+            _doc.CancelFind();
+            SetFindBusy(false);
+        }
+    }
+
+    private bool RefreshFilterNavigation()
+    {
+        if (_navigationFilter is not { } filter) return false;
+        if (!ReferenceEquals(filter, _filterTree.SelectedFilter) || !_doc.CurrentSnapshot.TryGetIndex(filter, out _))
+        {
+            ClearFilterNavigation();
+            return true;
+        }
+        FilterNavigationTally tally = _doc.GetFilterNavigationTally(filter, _grid.CaretLine);
+        string pattern = filter.Match.ToDisplayString();
+        if (_navigationTally == tally && _navigationPattern == pattern) return false;
+        _navigationTally = tally;
+        _navigationPattern = pattern;
+        _navigationDetail = $"\u201c{pattern}\u201d: {FindStatusText.NavigationText(tally)}. Only matching lines in the current view are counted.";
+        return true;
     }
 
     /// <summary>Shared end-of-search feedback for every find command: a very short whole-window flash for
@@ -2303,6 +2402,7 @@ public sealed class MainForm : Form
     {
         if (_treePanel == 1) _split.Panel1Collapsed = !visible;
         else _split.Panel2Collapsed = !visible;
+        UpdateStatus();
         if (_settings.ShowFilterList == visible) return;
         _settings.ShowFilterList = visible;
         SaveSettingsSoon();
@@ -2643,6 +2743,11 @@ public sealed class MainForm : Form
     /// taking the keyboard away from the log - the arrow keys have to keep working between matches.</summary>
     private void ShowFind(bool focus = true)
     {
+        if (_navigationFilter is not null)
+        {
+            ClearFilterNavigation();
+            UpdateStatus();
+        }
         if (!_findBar.Visible)
         {
             _findBar.SetHistory(_state.RecentFindTerms);
@@ -2679,6 +2784,7 @@ public sealed class MainForm : Form
     /// nothing on screen to say so is the state this bar exists to remove.</summary>
     private void CloseFind()
     {
+        ClearFilterNavigation();
         if (!_findBar.Visible && _lastQuery is null) return;
         ClearFind();
         int given = _findBar.Visible ? _findBar.Height / _grid.RowPitch : 0;
@@ -2693,6 +2799,7 @@ public sealed class MainForm : Form
 
     private async void DoFind(FindQuery query, bool forward)
     {
+        ClearFilterNavigation();
         bool sameTerm = _lastQuery == query;
         _lastQuery = query;
         // A different term counts differently, and nothing else here would notice if it happened to land on
@@ -2844,6 +2951,13 @@ public sealed class MainForm : Form
         _tally = FindStatusText.Short(t);
         _tallyDetail = FindStatusText.Long(t, query.Text);
         return _tally;
+    }
+
+    internal void SetNavigationActivity(FilterNavigationTally tally, string detail)
+    {
+        string text = FindStatusText.FitNavigationText(tally,
+            _busyLabel.Width - _busyLabel.Padding.Horizontal - Dpi(16), _busyLabel.Font);
+        SetActivity(text, SystemColors.ControlText, detail);
     }
 
     /// <summary>Writes the activity slot's text, trimming it to the space reserved for it. The untrimmed
@@ -3152,6 +3266,7 @@ public sealed class MainForm : Form
 
     private void UpdateStatus()
     {
+        RefreshFilterNavigation();
         _lastRowCount = _doc.RowCount;
         _lastMatched = _doc.MatchedLineCount;
         _lastBusy = _doc.IsBusy;
@@ -3161,6 +3276,7 @@ public sealed class MainForm : Form
         bool structural = EnsureMetricWidths();
         structural |= EnsureFilterSlot();
         structural |= EnsureElapsedSlot();
+        structural |= EnsureActivitySlot();
         if (structural && !_inStatusLayout)
         {
             _inStatusLayout = true;
@@ -3177,7 +3293,7 @@ public sealed class MainForm : Form
         if (_findMsg.Length > 0 && DateTime.UtcNow > _findMsgUntil) _findMsg = "";
 
         bool exporting = _saveCts is not null;
-        bool showBar = _findBusy || exporting || indexing || filtering;
+        bool showBar = (_findBusy || exporting || indexing || filtering) && _activitySlot >= _progressSlot + Dpi(80);
         if (showBar != _progress.Visible)
         {
             _progress.Visible = showBar;
@@ -3216,6 +3332,10 @@ public sealed class MainForm : Form
             SetActivity($"Filtering\u2026 {done * 100:F0}%", SystemColors.ControlText,
                 $"Filtering\u2026 {_doc.FilterProcessedLineCount:N0} of {_doc.CompletedLineCount:N0} lines");
             SetProgress(done);
+        }
+        else if (_navigationTally is { } navigation)
+        {
+            SetNavigationActivity(navigation, _navigationDetail);
         }
         else
         {

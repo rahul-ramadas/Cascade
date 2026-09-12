@@ -15,6 +15,189 @@ namespace Cascade.AppTests;
 internal static partial class Checks
 {
 
+    internal static bool RunFilterNavigationChecks()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "cascade_navigation_" + Guid.NewGuid().ToString("N") + ".log");
+        File.WriteAllLines(path, Enumerable.Range(0, 30).Select(line =>
+            $"[2026-09-11T09:31:{line:00}] " + (line % 3 == 0 ? $"TARGET line {line}" : $"plain line {line}")));
+        using var form = new MainForm(new AppSettings(), new MachineState(), []) { NoSavePrompt = true, Opacity = 0 };
+        using var context = new WindowsFormsSynchronizationContext();
+        try
+        {
+            form.Show();
+            form.OpenForTesting(path);
+            var doc = form.DocForTesting;
+            doc.WaitForIndex();
+            var target = new Filter { Enabled = false, Match = { Text = "TARGET" } };
+            var other = new Filter { Enabled = false, Match = { Text = "plain" } };
+            doc.Filters.Add(target);
+            doc.Filters.Add(other);
+            doc.ApplyFilters();
+            var tree = form.FilterTreeForTesting;
+            var grid = form.GridForTesting;
+            tree.Rebuild();
+            tree.SelectForTesting(target);
+            Pump();
+            using var originalHeader = tree.HeaderPictureForTesting();
+            bool Wait(Func<bool> ready)
+            {
+                var watch = Stopwatch.StartNew();
+                while (!ready() && watch.ElapsedMilliseconds < 10_000) Pump();
+                return ready();
+            }
+
+            bool Press(Keys keys)
+            {
+                var previous = SynchronizationContext.Current;
+                try { SynchronizationContext.SetSynchronizationContext(context); return form.PressCmdKeyForTesting(keys); }
+                finally { SynchronizationContext.SetSynchronizationContext(previous); }
+            }
+
+            bool ok = Check("F4 reaches the filter navigation command", Press(Keys.F4));
+            ok &= Check("the first match is counted in the activity slot", Wait(() => form.ActivityTextForTesting == "1 of 10 matching lines"), form.ActivityTextForTesting);
+            ok &= Check("the detail identifies the filter", form.ActivityDetailForTesting.Contains("TARGET", StringComparison.Ordinal));
+            ok &= Check("the activity slot stays onscreen", form.ActivityIsOnscreenForTesting);
+            ok &= Check("the filter header keeps its identity", tree.Controls.OfType<FilterListHeader>().Single().AccessibleName == "Filter list");
+            using (var currentHeader = tree.HeaderPictureForTesting())
+            {
+                bool unchanged = originalHeader.Size == currentHeader.Size;
+                for (int vertical = 0; unchanged && vertical < originalHeader.Height; vertical++)
+                for (int horizontal = 0; unchanged && horizontal < originalHeader.Width; horizontal++)
+                    unchanged = originalHeader.GetPixel(horizontal, vertical) == currentHeader.GetPixel(horizontal, vertical);
+                ok &= Check("navigation does not replace any header pixels", unchanged);
+            }
+            for (int match = 2; match <= 4; match++)
+            {
+                Press(Keys.F4);
+                ok &= Check($"F4 reaches match {match}", Wait(() => form.ActivityTextForTesting == $"{match} of 10 matching lines"), form.ActivityTextForTesting);
+            }
+            Press(Keys.Shift | Keys.F4);
+            ok &= Check("Shift+F4 decrements the ordinal", Wait(() => form.ActivityTextForTesting == "3 of 10 matching lines"), form.ActivityTextForTesting);
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            ok &= Check("the filter pane really is hidden", !form.FilterListVisibleForTesting);
+            ok &= Check("hiding the pane leaves the tally in the same slot", form.ActivityTextForTesting == "3 of 10 matching lines", form.StatusForTesting);
+            var previousSize = form.ClientSize;
+            var previousWindowState = form.WindowState;
+            form.WindowState = FormWindowState.Normal;
+            form.ClientSize = new Size(form.LogicalToDeviceUnits(720), form.LogicalToDeviceUnits(560));
+            Pump();
+            ok &= Check("the narrow status includes the elapsed-time slot", doc.Clock is not null);
+            ok &= Check("the status check really narrowed the window", form.ClientSize.Width == form.LogicalToDeviceUnits(720));
+            ok &= Check("the activity's whole bounds stay onscreen", form.ActivityIsOnscreenForTesting, form.StatusLayoutForTesting);
+            ok &= Check("the narrow activity slot keeps both numbers", form.StatusForTesting.Contains("3 of 10", StringComparison.Ordinal)
+                || form.StatusForTesting.Contains("3/10", StringComparison.Ordinal), form.StatusForTesting);
+            form.ClientSize = previousSize;
+            form.WindowState = previousWindowState;
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            ok &= Check("the tally remains in the status when the pane returns", form.ActivityTextForTesting == "3 of 10 matching lines");
+            tree.SelectForTesting(other);
+            ok &= Check("another selection clears the old filter tally", form.ActivityTextForTesting.Length == 0);
+            tree.SelectForTesting(target);
+            Press(Keys.Shift | Keys.F4);
+            ok &= Check("reverse navigation starts the tally again", Wait(() => form.ActivityTextForTesting == "2 of 10 matching lines"), form.ActivityTextForTesting);
+            Press(Keys.Shift | Keys.F4);
+            ok &= Check("reverse reaches the first match", Wait(() => form.ActivityTextForTesting == "1 of 10 matching lines"), form.ActivityTextForTesting);
+            Press(Keys.Shift | Keys.F4);
+            ok &= Check("no-more feedback takes priority in the shared slot", Wait(() => form.ActivityTextForTesting == "No more matches"), form.ActivityTextForTesting);
+            Press(Keys.F4);
+            ok &= Check("cycling again replaces no-more feedback with the tally", Wait(() => form.ActivityTextForTesting == "2 of 10 matching lines"), form.ActivityTextForTesting);
+            Press(Keys.Control | Keys.F);
+            ok &= Check("text find retires the filter tally", form.ActivityTextForTesting.Length == 0);
+
+            form.CloseFindForTesting();
+            var cold = new Filter { Enabled = false, Match = { Text = "TARGET.*line", Regex = true } };
+            doc.Filters.Add(cold);
+            foreach (bool changeSelection in new[] { false, true })
+            {
+                cold.Match.Text = changeSelection ? "TARGET.+line" : "TARGET.*line";
+                doc.ApplyFilters();
+                tree.Rebuild();
+                tree.SelectForTesting(cold);
+                using var entered = new ManualResetEventSlim();
+                using var release = new ManualResetEventSlim();
+                doc.FilterFindCheckpointForTesting = _ => { entered.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+                try
+                {
+                    Press(Keys.F4);
+                    ok &= Check("the pending filter search reaches its gate", entered.Wait(TimeSpan.FromSeconds(5)));
+                    ok &= Check("the pending search has a busy indicator", form.StatusForTesting.Contains("Searching", StringComparison.Ordinal));
+                    if (changeSelection)
+                    {
+                        grid.SelectRowForAccessibility(1);
+                        ok &= Check("selection cancels a search that is still running", form.ActivityTextForTesting.Length == 0);
+                    }
+                    release.Set();
+                    ok &= Check("the worker completes before its UI continuation", SpinWait.SpinUntil(() => !doc.IsFindRunning, 5000));
+                    if (!changeSelection)
+                    {
+                        ok &= Check("the UI continuation really is still queued", form.StatusForTesting.Contains("Searching", StringComparison.Ordinal));
+                        ok &= Check("Escape is handled in the completion window", Press(Keys.Escape));
+                    }
+                    Pump();
+                    ok &= Check("cancelling retires the search's busy indicator",
+                        !form.StatusForTesting.Contains("Searching", StringComparison.Ordinal), form.StatusForTesting);
+                    ok &= Check("the late result cannot put its tally back", form.ActivityTextForTesting.Length == 0,
+                        $"activity={form.ActivityTextForTesting}; focus={form.FocusedAreaForTesting}; find={form.FindBarIsOpenForTesting}");
+                    if (changeSelection) ok &= Check("the late result cannot replace the user's selection", grid.CaretLine == 1);
+                }
+                finally { release.Set(); doc.FilterFindCheckpointForTesting = null; }
+            }
+
+            tree.SelectForTesting(target);
+            Press(Keys.F4);
+            ok &= Check("navigation is active before the selection changes", Wait(() => form.ActivityTextForTesting.Contains("of 10", StringComparison.Ordinal)));
+            var workProperty = typeof(CascadeDocument).GetProperty("FilterNavigationWorkForTesting", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            ok &= Check("the active navigation has a cached index", workProperty.GetValue(doc) is Task { IsCompletedSuccessfully: true });
+            grid.SelectRowForAccessibility(1);
+            ok &= Check("a manual log selection clears the tally immediately", form.ActivityTextForTesting.Length == 0, form.ActivityTextForTesting);
+            ok &= Check("a manual log selection releases the navigation index", workProperty.GetValue(doc) is null);
+            Pump();
+            ok &= Check("refresh cannot resurrect the retired tally", form.ActivityTextForTesting.Length == 0, form.ActivityTextForTesting);
+
+            foreach (bool sameCaret in new[] { true, false })
+            {
+                Press(Keys.F4);
+                ok &= Check("F4 reactivates the tally after manual selection", Wait(() => form.ActivityTextForTesting.Contains("of 10", StringComparison.Ordinal)));
+                var activeIndex = workProperty.GetValue(doc);
+                long caret = grid.CaretLine;
+                string tally = form.ActivityTextForTesting;
+                grid.PressKeyForTesting(Keys.Control | Keys.Down);
+                Pump();
+                ok &= Check("scrolling alone keeps the tally and its cache", form.ActivityTextForTesting == tally
+                    && ReferenceEquals(activeIndex, workProperty.GetValue(doc)));
+                if (sameCaret)
+                {
+                    grid.SelectLinesForTesting(caret, caret + 1);
+                    ok &= Check("the selection changed without moving the caret", grid.CaretLine == caret && grid.SelectedCount == 2);
+                }
+                else grid.PressKeyForTesting(Keys.Down);
+                ok &= Check("range and keyboard selection changes clear the activity immediately", form.ActivityTextForTesting.Length == 0, form.ActivityTextForTesting);
+                ok &= Check("range and keyboard selection changes release the cached index", workProperty.GetValue(doc) is null);
+            }
+
+            var font = form.Controls.OfType<StatusStrip>().Single().Font;
+            foreach (int width in new[] { 220, 360, 640 })
+            {
+                int pixels = form.LogicalToDeviceUnits(width);
+                string text = FindStatusText.FitNavigationText(new(99_999_999, 100_000_000, true), pixels, font);
+                int measured = TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue),
+                    TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+                ok &= Check($"large counts fit a {width}px slot", measured <= pixels, text);
+                ok &= Check($"large counts keep both numbers at {width}px", text.Contains("99,999,999", StringComparison.Ordinal)
+                    && text.Contains("100,000,000", StringComparison.Ordinal), text);
+            }
+            ok &= Check("unfinished counts are labelled honestly", FindStatusText.NavigationText(default).StartsWith("Counting", StringComparison.Ordinal));
+            ok &= Check("an empty result has a complete readable label", FindStatusText.NavigationText(new(0, 0, true)) == "No matching lines");
+            return ok;
+        }
+        finally
+        {
+            form.Close();
+            form.Dispose();
+            File.Delete(path);
+        }
+    }
+
     /// <summary>Every occurrence of the find term is marked on every visible line, and the line the search
     /// landed on is marked more strongly - which is how navigation can stay line-by-line without leaving you
     /// wondering which line it meant.</summary>

@@ -37,6 +37,11 @@ internal static class UiShots
         Environment.SetEnvironmentVariable("CASCADE_SETTINGS_DIR", settingsDir);
 
         Console.WriteLine($"DPI scaling test. Output: {outDir}");
+        if (args.Contains("--only=filter-navigation", StringComparer.OrdinalIgnoreCase))
+        {
+            try { ShotFilterNavigation(outDir); return 0; }
+            finally { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); }
+        }
 
         var demoFilter = new Filter
         {
@@ -174,12 +179,130 @@ internal static class UiShots
         ShotGridStates(outDir);
         ShotMatchMap(outDir);
         ShotFilterSearch(outDir);
+        ShotFilterNavigation(outDir);
         ShotLuckyColors(outDir);
 
         try { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); } catch { /* ignore */ }
 
         Console.WriteLine("done");
         return 0;
+    }
+
+    private static void ShotFilterNavigation(string dir)
+    {
+        string path = Path.Combine(dir, "filter-navigation.log");
+        File.WriteAllLines(path, Enumerable.Range(0, 30).Select(line =>
+            $"[2026-09-11T09:31:{line:00}][payment-svc][{(line % 3 == 0 ? "ERROR" : "INFO")}] "
+            + $"charge {(line % 3 == 0 ? "declined" : "accepted")} for order {4400 + line}"));
+        bool suppressed = WindowActivation.Suppressed;
+        WindowActivation.Suppressed = true;
+        using var form = new MainForm(new AppSettings
+        {
+            FilterListDock = FilterDock.Right,
+            FilterListWidthFraction = 0.34,
+            ShowFilterPresets = false
+        }, new MachineState(), [])
+        {
+            NoSavePrompt = true,
+            Opacity = 0,
+            ShowInTaskbar = false,
+            WindowState = FormWindowState.Normal,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0)
+        };
+        using var context = new WindowsFormsSynchronizationContext();
+        try
+        {
+            form.ClientSize = new Size(form.LogicalToDeviceUnits(1000), form.LogicalToDeviceUnits(660));
+            form.Show();
+            form.OpenForTesting(path);
+            var doc = form.DocForTesting;
+            doc.WaitForIndex();
+            var declined = new Filter
+            {
+                Enabled = true,
+                Description = "Declined charges",
+                Match = { Text = "declined" },
+                Style = { Foreground = new RgbColor(0xB0, 0x20, 0x20), Bold = true }
+            };
+            doc.Filters.Add(declined);
+            doc.Filters.Add(new Filter
+            {
+                Enabled = true,
+                Description = "Accepted charges",
+                Match = { Text = "accepted" },
+                Style = { Foreground = new RgbColor(0x16, 0x65, 0x40) }
+            });
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            var tree = form.FilterTreeForTesting;
+            tree.Rebuild();
+            tree.SelectForTesting(declined);
+            Capture("filter-navigation-normal");
+            for (int match = 0; match < 4; match++) Navigate(Keys.F4);
+            Capture("filter-navigation-forward");
+            Navigate(Keys.Shift | Keys.F4);
+            Capture("filter-navigation-reverse");
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            Capture("filter-navigation-hidden");
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            form.ClientSize = new Size(form.LogicalToDeviceUnits(720), form.LogicalToDeviceUnits(560));
+            Capture("filter-navigation-narrow");
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            Capture("filter-navigation-hidden-narrow");
+            Press(Keys.Control | Keys.Shift | Keys.L);
+            form.GridForTesting.SelectRowForAccessibility(1);
+            Capture("filter-navigation-cleared");
+            Capture("filter-navigation-counting", () => form.SetNavigationActivity(default, "Counting matches for declined"));
+            declined.Match.Text = "unseen-token";
+            doc.ApplyFilters();
+            WaitIdle(doc);
+            tree.Rebuild();
+            tree.SelectForTesting(declined);
+            Navigate(Keys.F4);
+            Capture("filter-navigation-none");
+
+            Press(Keys.Escape);
+            form.ClientSize = new Size(form.LogicalToDeviceUnits(1000), form.LogicalToDeviceUnits(660));
+            Capture("filter-navigation-large", () => form.SetNavigationActivity(new(99_999_999, 100_000_000, true),
+                "99,999,999 of 100,000,000 matching lines"));
+
+            void Press(Keys key)
+            {
+                var previous = SynchronizationContext.Current;
+                try { SynchronizationContext.SetSynchronizationContext(context); form.PressCmdKeyForTesting(key); }
+                finally { SynchronizationContext.SetSynchronizationContext(previous); }
+            }
+
+            void Navigate(Keys key)
+            {
+                Press(key);
+                for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < 5000;)
+                {
+                    Settle();
+                    if (!doc.IsFindRunning && form.ActivityTextForTesting.Length > 0
+                        && !form.ActivityTextForTesting.StartsWith("Counting", StringComparison.Ordinal)
+                        && !form.ActivityTextForTesting.StartsWith("Searching", StringComparison.Ordinal)) return;
+                }
+                throw new InvalidOperationException("The filter-navigation screenshot did not settle.");
+            }
+
+            void Capture(string name, Action? state = null)
+            {
+                Settle();
+                state?.Invoke();
+                using var image = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                image.Save(Path.Combine(dir, name + ".png"), ImageFormat.Png);
+                Console.WriteLine($"{name}: {image.Width}x{image.Height}");
+            }
+        }
+        finally
+        {
+            form.Dispose();
+            WindowActivation.Suppressed = suppressed;
+            File.Delete(path);
+        }
     }
 
     /// <summary>Renders the filter list with an active search term so the highlight (matching filters keep

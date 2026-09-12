@@ -813,6 +813,9 @@ internal sealed class CascadeApp : IDisposable
     public void FindNextForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Next Match");
     public void FindPrevForSelectedFilter() => ClickMenuOrThrow("Filters", "Find Previous Match");
 
+    public bool WaitFilterNavigationTally(string text, int ms = 4000)
+        => WaitStatus(text, text, ms);
+
     /// <summary>The concatenated text labels in a dialog.</summary>
     public string DialogText(Window dlg)
         => string.Join(" | ", dlg.FindAllDescendants(cf => cf.ByControlType(ControlType.Text)).Select(t => t.Name ?? "").Where(n => n.Length > 0));

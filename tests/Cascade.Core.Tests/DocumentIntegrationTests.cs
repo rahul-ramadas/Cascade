@@ -263,6 +263,282 @@ public class DocumentIntegrationTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Filter_navigation_tallies_the_lines_each_direction_can_visit(bool enabled, bool filtered)
+    {
+        string path = WriteStreamLog(hidden: 100);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = StreamFilters(out var target, hideSkipped: true);
+            target.Enabled = enabled;
+            filters.ShowOnlyFilteredLines = filtered;
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            long[] expected = Enumerable.Range(0, StreamLines).Select(number => (long)number)
+                .Where(line => doc.GetLineText(line).Contains("TARGET", StringComparison.Ordinal) && doc.IsLineVisible(line))
+                .ToArray();
+            foreach (bool forward in new[] { true, false })
+            {
+                foreach (long start in new long[] { 0, 101, 40_000, 40_001, 150_001, StreamLines - 1 })
+                {
+                    long expectedLine = forward ? expected.FirstOrDefault(line => line >= start, -1)
+                                                : expected.LastOrDefault(line => line <= start, -1);
+                    long found = doc.FindLineMatchingFilter(target, start, forward, CancellationToken.None);
+                    Assert.Equal(expectedLine, found);
+                    long scanned = doc.FilterLinesScanned;
+                    var tally = SettledNavigationTally(doc, target, found);
+                    Assert.Equal(expected.LongLength, tally.Total);
+                    Assert.Equal(found < 0 ? 0 : Array.IndexOf(expected, found) + 1, tally.Position);
+                    Assert.Equal(scanned, doc.FilterLinesScanned);
+                    var immediate = doc.FindLineMatchingFilterAsync(target, start, forward);
+                    Assert.True(immediate.IsCompletedSuccessfully, "a settled navigation index must not dispatch a worker");
+                    Assert.Equal(expectedLine, await immediate);
+                }
+            }
+            Assert.Equal(1, doc.FilterNavigationBuildsForTesting);
+            Assert.Equal(0, SettledNavigationTally(doc, target, 2).Position);
+            for (int warmup = 0; warmup < 1000; warmup++) _ = doc.GetFilterNavigationTally(target, expected[0]);
+            long allocated = GC.GetAllocatedBytesForCurrentThread();
+            long total = 0;
+            for (int query = 0; query < 1000; query++) total += doc.GetFilterNavigationTally(target, expected[0]).Total;
+            long used = GC.GetAllocatedBytesForCurrentThread() - allocated;
+            Assert.Equal(expected.LongLength * 1000, total);
+            Assert.Equal(0, used);
+            doc.DropFilterNavigation();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(0, doc.FilterNavigationBytesForTesting);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static Cascade.Core.Filtering.FilterNavigationTally SettledNavigationTally(CascadeDocument doc, Filter filter, long line)
+    {
+        Cascade.Core.Filtering.FilterNavigationTally tally = default;
+        WaitFor(() => (tally = doc.GetFilterNavigationTally(filter, line)).Complete, "the filter tally never completed");
+        return tally;
+    }
+
+    [Fact]
+    public void Filter_navigation_reuses_crop_counts_and_discards_changed_views_and_predicates()
+    {
+        string path = WriteStreamLog(hidden: 100);
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = StreamFilters(out var target, hideSkipped: true);
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.Equal(2, SettledNavigationTally(doc, target, 40_000).Total);
+            var original = doc.FilterNavigationWorkForTesting;
+            doc.SetCrop(40_001, StreamLines);
+            var cropped = SettledNavigationTally(doc, target, 150_000);
+            Assert.Equal(1, cropped.Total);
+            Assert.Equal(1, cropped.Position);
+            Assert.Same(original, doc.FilterNavigationWorkForTesting);
+            doc.ClearCrop();
+            Assert.Equal(2, SettledNavigationTally(doc, target, 150_000).Position);
+            Assert.Same(original, doc.FilterNavigationWorkForTesting);
+
+            filters.ShowOnlyFilteredLines = false;
+            doc.ApplyFilters();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            WaitFilter(doc);
+            Assert.Equal(3, SettledNavigationTally(doc, target, 150_000).Total);
+            var dim = doc.FilterNavigationWorkForTesting;
+            target.Description = "same predicate";
+            doc.ApplyFilters();
+            Assert.Same(dim, doc.FilterNavigationWorkForTesting);
+            Assert.Same(doc.CurrentSnapshot, doc.FilterNavigationSnapshotForTesting);
+
+            target.Match.Text = "line";
+            doc.ApplyFilters();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            WaitFilter(doc);
+            Assert.Equal(StreamLines, SettledNavigationTally(doc, target, 150_000).Total);
+            Assert.True(doc.FilterNavigationBytesForTesting > 0);
+            doc.SetFilters(new FilterCollection());
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(0, doc.FilterNavigationBytesForTesting);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void Filter_navigation_follows_parent_marker_and_tree_changes_without_unnecessary_scans()
+    {
+        string path = WriteStreamLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            var filters = new FilterCollection();
+            var parent = new Filter { Enabled = false, Match = { Text = "TARGET" } };
+            var marker = new Filter { Enabled = false, Match = { Type = FilterMatchType.Marker, MarkerIndex = 1 } };
+            filters.Add(parent);
+            filters.Add(marker, parent);
+            doc.Markers.Set(100, 1, true);
+            doc.Markers.Set(200, 1, true);
+            doc.Markers.Set(40_000, 1, true);
+            doc.SetFilters(filters);
+            WaitFilter(doc);
+            Assert.Equal(2, SettledNavigationTally(doc, marker, 40_000).Total);
+            var original = doc.FilterNavigationWorkForTesting;
+            long scanned = doc.FilterLinesScanned;
+            doc.Markers.Set(300, 5, true);
+            Assert.Same(original, doc.FilterNavigationWorkForTesting);
+            doc.Markers.Set(150_000, 1, true);
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            var changed = SettledNavigationTally(doc, marker, 150_000);
+            Assert.Equal(3, changed.Total);
+            Assert.Equal(3, changed.Position);
+            Assert.Equal(scanned, doc.FilterLinesScanned);
+            int cached = doc.FilterCacheCount;
+            for (int change = 0; change < 8; change++)
+            {
+                doc.Markers.Set(150_000, 1, change % 2 != 0);
+                var refreshed = SettledNavigationTally(doc, marker, 40_000);
+                Assert.Equal(StreamHits.LongCount(hit => doc.Markers.Has(hit, 1)), refreshed.Total);
+                Assert.Equal(cached, doc.FilterCacheCount);
+            }
+
+            parent.Match.Text = "line";
+            doc.ApplyFilters();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(4, SettledNavigationTally(doc, marker, 150_000).Total);
+            var emptyParent = new Filter { Enabled = false, Match = { Text = "absent" } };
+            filters.Add(emptyParent);
+            Assert.True(filters.Move(marker, emptyParent, -1));
+            doc.ApplyFilters();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(0, SettledNavigationTally(doc, marker, 150_000).Total);
+            Assert.True(filters.Move(marker, null, -1));
+            doc.ApplyFilters();
+            Assert.Equal(4, SettledNavigationTally(doc, marker, 150_000).Total);
+            doc.Markers.Set(100, 1, false);
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(3, SettledNavigationTally(doc, marker, 150_000).Total);
+
+            var beforeSwitch = doc.FilterNavigationWorkForTesting;
+            var switched = SettledNavigationTally(doc, parent, 150_000);
+            Assert.Equal(StreamLines, switched.Total);
+            Assert.Equal(150_001, switched.Position);
+            Assert.NotSame(beforeSwitch, doc.FilterNavigationWorkForTesting);
+            doc.Open(path);
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(0, doc.FilterNavigationBytesForTesting);
+            doc.WaitForIndex();
+            doc.Dispose();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task Filter_navigation_cancelled_priming_cannot_publish_a_deleted_filters_matches()
+    {
+        string path = WriteStreamLog();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            var target = new Filter { Enabled = false, Match = { Text = "line" } };
+            doc.Filters.Add(target);
+            doc.ApplyFilters();
+            doc.FilterFindCheckpointForTesting = frontier =>
+            {
+                if (frontier < StreamLines) return;
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(20));
+            };
+            Assert.False(doc.GetFilterNavigationTally(target, 100).Complete);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "priming never reached its final block");
+            var pending = doc.FilterNavigationWorkForTesting!;
+            doc.SetFilters(new FilterCollection());
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            release.Set();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, doc.FilterCacheCount);
+            Assert.Equal(0, doc.FilterCacheBytes);
+        }
+        finally
+        {
+            release.Set();
+            doc.FilterFindCheckpointForTesting = null;
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task Filter_navigation_cancelled_work_cannot_restore_a_discarded_cache()
+    {
+        string path = WriteStreamLog();
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        using var doc = new CascadeDocument();
+        try
+        {
+            doc.Open(path);
+            doc.WaitForIndex();
+            doc.SetFilters(StreamFilters(out var target));
+            WaitFilter(doc);
+            doc.FilterNavigationCheckpointForTesting = () =>
+            {
+                entered.Set();
+                release.Wait(TimeSpan.FromSeconds(20));
+            };
+            Assert.False(doc.GetFilterNavigationTally(target, 100).Complete);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(10)), "the count never reached its checkpoint");
+            var pending = doc.FilterNavigationWorkForTesting!;
+            Assert.Equal(40_000, doc.FindLineMatchingFilter(target, 101, true, CancellationToken.None));
+            doc.CancelFind();
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            Assert.Equal(0, doc.FilterNavigationBytesForTesting);
+            release.Set();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Null(doc.FilterNavigationWorkForTesting);
+            doc.FilterNavigationCheckpointForTesting = null;
+            Assert.Equal(2, SettledNavigationTally(doc, target, 40_000).Position);
+        }
+        finally
+        {
+            release.Set();
+            doc.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Filter_navigation_counting_does_not_delay_a_streamed_jump_or_scan_again()
+    {
+        using var held = new HeldPass(WriteStreamLog(), StreamFilters(out var target));
+        var doc = held.Doc;
+        long scanned = doc.FilterLinesScanned;
+        Assert.False(doc.GetFilterNavigationTally(target, 100).Complete);
+        Assert.Equal(100, doc.FindLineMatchingFilter(target, 0, true, CancellationToken.None));
+        Assert.False(doc.GetFilterNavigationTally(target, 100).Complete);
+        Assert.Equal(scanned, doc.FilterLinesScanned);
+        Assert.Null(doc.FilterNavigationWorkForTesting);
+        held.ReleaseAll();
+        var tally = SettledNavigationTally(doc, target, 100);
+        Assert.Equal(StreamHits.LongLength, tally.Total);
+        Assert.Equal(1, tally.Position);
+        Assert.Equal(StreamLines, doc.FilterLinesScanned);
+    }
+
     // ---- a filtering pass held still, so streaming behaviour can be tested without racing it ----
 
     private const int StreamLines = 200_000;                        // seven 32,768-line blocks

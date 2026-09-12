@@ -87,6 +87,7 @@ public sealed class FilterTreeControl : UserControl
     /// a right-click selects the row under it before the menu opens.</summary>
     public event Action<NewFilterPlacement>? AddRequested;
     public event Action<Filter, bool>? FindFilterRequested; // (filter, forward)
+    public event Action? SelectedFilterChanged;
 
     /// <summary>Raised with a label for the menu ("Remove Filter") immediately before the list changes the
     /// tree, so the host can snapshot it for undo. Raised speculatively - a move that turns out to be
@@ -434,6 +435,7 @@ public sealed class FilterTreeControl : UserControl
     {
         _header.SetSelectionCount(_selected.Count);
         _tree.Invalidate();
+        SelectedFilterChanged?.Invoke();
     }
 
     /// <summary>Where the row's own content starts: just right of the checkbox, never over it. The paint

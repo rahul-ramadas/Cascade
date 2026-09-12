@@ -254,10 +254,16 @@ public class UiFeatureTests
         app.FilterNode("MATCH")?.AsTreeItem().Select();
         app.FindNextForSelectedFilter();
         Check("per-filter find next -> line 6", app.WaitCaretLine(6), $"line {app.CaretLine()}");
+        Check("activity slot reports the second matching line", app.WaitFilterNavigationTally($"2 of {TestData.MatchCount:N0} matching lines"));
         app.FindNextForSelectedFilter();
         Check("per-filter find next -> line 11", app.WaitCaretLine(11), $"line {app.CaretLine()}");
+        Check("activity tally advances with F4", app.WaitFilterNavigationTally($"3 of {TestData.MatchCount:N0} matching lines"));
         app.FindPrevForSelectedFilter();
         Check("per-filter find prev -> line 6", app.WaitCaretLine(6), $"line {app.CaretLine()}");
+        Check("activity tally reverses with Shift+F4", app.WaitFilterNavigationTally($"2 of {TestData.MatchCount:N0} matching lines"));
+          app.SelectLine(11);
+          Check("manual selection of another matching line clears the tally",
+              !app.AllStatusText().Contains("matching lines", StringComparison.Ordinal), app.AllStatusText());
 
         // ---- zoom (menu) ----
         app.ClickMenuOrThrow("View", "Reset Zoom");

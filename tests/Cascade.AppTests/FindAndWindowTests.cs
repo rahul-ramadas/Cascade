@@ -13,6 +13,7 @@ public class FindBarTests(ITestOutputHelper output) : AppCheckFixture(output)
     [Fact] public void A_search_starts_from_where_the_reader_is() => Verify(Checks.RunFindSeedChecks, atLeast: 5);
     [Fact] public void Matches_are_marked_only_where_they_can_be_drawn() => Verify(Checks.RunFindHighlightChecks, atLeast: 6);
     [Fact] public void The_tally_says_what_it_knows_and_no_more() => Verify(Checks.RunFindStatusChecks, atLeast: 17);
+    [Fact] public void Filter_navigation_has_its_own_readable_tally_in_both_directions() => Verify(Checks.RunFilterNavigationChecks, atLeast: 59);
 }
 
 /// <summary>The minimap: the log zoomed out, one pixel a row until there are more rows than

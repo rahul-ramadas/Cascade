@@ -1,4 +1,5 @@
 using System.Text;
+using Cascade.Core.Filtering;
 using Cascade.Core.Find;
 
 namespace Cascade.App;
@@ -17,6 +18,28 @@ namespace Cascade.App;
 /// </summary>
 internal static class FindStatusText
 {
+    internal static string NavigationText(FilterNavigationTally tally)
+        => !tally.Complete ? "Counting matches\u2026"
+            : tally.Total == 0 ? "No matching lines"
+            : tally.Position > 0 ? $"{tally.Position:N0} of {tally.Total:N0} matching lines"
+            : $"{tally.Total:N0} matching lines";
+
+    internal static string FitNavigationText(FilterNavigationTally tally, int width, Font font)
+    {
+        string full = NavigationText(tally);
+        string shortText = !tally.Complete ? "Counting\u2026"
+            : tally.Total == 0 ? "No matches"
+            : tally.Position > 0 ? $"{tally.Position:N0} of {tally.Total:N0}"
+            : $"{tally.Total:N0} lines";
+        string compact = !tally.Complete ? "Counting"
+            : tally.Position > 0 ? $"{tally.Position:N0}/{tally.Total:N0}" : $"{tally.Total:N0}";
+        foreach (string text in new[] { full, shortText, compact, "Matches" })
+            if (TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue),
+                    TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width <= width)
+                return text;
+        return "";
+    }
+
     /// <summary>The short form. Clauses only appear when they say something: hit counts only when a line
     /// matched more than once, the hidden half only when the filters are keeping matches back.</summary>
     public static string Short(FindTally t)

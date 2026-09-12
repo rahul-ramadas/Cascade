@@ -179,6 +179,16 @@ public sealed class FilterService : IDisposable
     /// instant. Called on every filter change - including the one that leaves none.</summary>
     public void RetainCachedResults(FilterSnapshot snapshot) => _cache.RetainOnly(snapshot.CacheKeys());
 
+    internal void ForgetStaleMarkerResults(FilterSnapshot snapshot)
+    {
+        for (int index = 0; index < snapshot.FilterCount; index++)
+        {
+            var filter = snapshot.FilterAt(index);
+            if (snapshot.ChainMarksMoved(filter, _markers) && snapshot.TryGetCacheKey(filter, out string key))
+                _cache.Remove(key);
+        }
+    }
+
     /// <summary>Bytes currently held by the per-filter match cache.</summary>
     public long CacheBytes => _cache.UsedBytes;
 
@@ -601,8 +611,9 @@ public sealed class FilterService : IDisposable
     ///
     /// <para>Taken in index order, which is the order the tree is drawn, so a chain of markers seeds each of
     /// its own prefixes before it needs them.</para></summary>
-    private void SeedMarkerTailedSets(FilterSnapshot snapshot, long lines)
+    private void SeedMarkerTailedSets(FilterSnapshot snapshot, long lines, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var tailed = snapshot.MarkerTailedFilters();
         if (tailed.Count == 0) return;
 
@@ -634,8 +645,10 @@ public sealed class FilterService : IDisposable
             // ascending order the builder requires.
             long currentWord = -1;
             ulong word = 0;
+            int inspected = 0;
             foreach (var (line, mask) in marks)
             {
+                if ((inspected++ & 4095) == 0) cancellationToken.ThrowIfCancellationRequested();
                 if ((mask & bit) == 0 || line < 0 || line >= lines) continue;
                 if (prefix is not null && !prefix.Contains(line)) continue;
 
@@ -653,7 +666,7 @@ public sealed class FilterService : IDisposable
             // The marks moved while this was being worked out, so it describes neither the state the key
             // names nor reliably the new one. Drop it: the change that moved them restarts the pass anyway.
             if (_markers.Version != version) return;
-            _cache.Store(filter.Key, builder.Build(lines));
+            _cache.Store(filter.Key, builder.Build(lines), cancellationToken);
         }
     }
 
@@ -828,7 +841,7 @@ public sealed class FilterService : IDisposable
 
         // A chain ending in a marker is answerable from the marks alone, so take what can be had for nothing
         // before deciding there is a file to read.
-        SeedMarkerTailedSets(snapshot, lines);
+        SeedMarkerTailedSets(snapshot, lines, ct);
 
         var cacheable = snapshot.CacheableFilters();
         if (cacheable.Count == 0) return;
@@ -850,8 +863,9 @@ public sealed class FilterService : IDisposable
             AfterPrimeBlockForTesting?.Invoke(start + len);
         }
 
+        ct.ThrowIfCancellationRequested();
         foreach (var f in filters)
-            if (builders[f.Index] is { } builder) _cache.Store(f.Key, builder.Build(lines));
+            if (builders[f.Index] is { } builder) _cache.Store(f.Key, builder.Build(lines), ct);
     }
 
     /// <summary>Asks the worker to stop. It does <b>not</b> wait: wait on <see cref="Stopped"/> instead,

@@ -148,7 +148,7 @@ public sealed class FilterMatchCache
         }
 
         /// <summary>Index of the first sparse entry at or after <paramref name="line"/>.</summary>
-        private int LowerBound(long line)
+        internal int LowerBound(long line)
         {
             int lo = 0, hi = _sparseCount;
             while (lo < hi)
@@ -194,14 +194,21 @@ public sealed class FilterMatchCache
         }
     }
 
-    internal void Store(string key, MatchSet set)
+    internal void Store(string key, MatchSet set, CancellationToken cancellationToken = default)
     {
         lock (_sync)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (_sets.TryGetValue(key, out var old)) _usedBytes -= old.Bytes;
             _sets[key] = set;
             _usedBytes += set.Bytes;
         }
+    }
+
+    internal void Remove(string key)
+    {
+        lock (_sync)
+            if (_sets.Remove(key, out var removed)) _usedBytes -= removed.Bytes;
     }
 
     /// <summary>Accumulates one filter's matching lines during a pass, switching from a sorted list to a bit
