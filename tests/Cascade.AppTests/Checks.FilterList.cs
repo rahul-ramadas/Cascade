@@ -159,9 +159,6 @@ internal static partial class Checks
         }
     }
 
-    /// <summary>Every filter carries an eye in a gutter of its own, at a fixed x before the tree lines and
-    /// the checkbox, crossed out when the filter hides the lines it matches. A column that moved with the
-    /// row's depth would not be one, so that is the claim the checks are built around.</summary>
     private static bool CheckKindIcon(CascadeDocument doc, FilterTreeControl tree, Form host)
     {
         host.ClientSize = new Size(420, 200);
@@ -172,17 +169,19 @@ internal static partial class Checks
         // and the anchor is somewhere to put the selection - its tint covers the gutter of the row it is on.
         var style = new FilterStyle { Foreground = new RgbColor(31, 31, 112), Background = new RgbColor(255, 255, 255) };
         var anchor = new Filter { Match = new FilterMatch { Text = "anchor" }, Style = style.Clone() };
-        var shown = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
+        var shown = new Filter { Enabled = true, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
         var hidden = new Filter { Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
-        var nested = new Filter { Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
+        var nested = new Filter { Enabled = false, Kind = FilterKind.Exclude, Match = new FilterMatch { Text = "ERROR" }, Style = style.Clone() };
         SetFilters(doc, tree, anchor, shown, hidden);
         doc.Filters.Add(nested, hidden);
         tree.Rebuild();
         tree.SelectForTesting(anchor);
+        WaitForFiltering(doc);
+        tree.RefreshCounts();
         Pump();
 
         int gutter = tree.GutterWidthForTesting;
-        bool ok = Check($"there is a gutter to put the eyes in ({gutter}px)", gutter > 0);
+        bool ok = Check($"the gutter is 24 logical pixels wide ({gutter}px)", gutter == tree.LogicalToDeviceUnits(24));
         ok &= Check($"the fixture nests, so \"the column does not indent\" can fail " +
                     $"(root at {tree.ContentLeftForTesting(hidden)}px, child at {tree.ContentLeftForTesting(nested)}px)",
                     tree.ContentLeftForTesting(nested) > tree.ContentLeftForTesting(hidden));
@@ -196,17 +195,14 @@ internal static partial class Checks
 
         Color At(int x, int rowY) => x < 0 || x >= picture.Width || rowY < 0 || rowY >= picture.Height
             ? Color.Transparent : picture.GetPixel(x, rowY);
-        var paper = Color.White;                                    // the gutter's own background
+        var paper = At(area.Left + 2, area.Top + incRow.Top + 2);
         int Away(Color c) => Math.Abs(c.R - paper.R) + Math.Abs(c.G - paper.G) + Math.Abs(c.B - paper.B);
 
-        // Something is actually drawn in the gutter on BOTH kinds of row - an include's eye is the whole
-        // reason the column is aimable. Measured against the background, not an absolute darkness, so
-        // dimming the icon cannot quietly weaken this.
         (int Ink, int Boldest, int Height, int Left, int Right) Icon(Rectangle row)
         {
             int ink = 0, boldest = 0, top = int.MaxValue, bottom = int.MinValue, left = int.MaxValue, right = int.MinValue;
-            for (int x = 0; x < gutter; x++)
-                for (int y = 1; y < row.Height - 1; y++)
+            for (int x = 2; x < gutter - 2; x++)
+                for (int y = 2; y < row.Height - 2; y++)
                 {
                     int away = Away(At(area.Left + x, area.Top + row.Top + y));
                     boldest = Math.Max(boldest, away);
@@ -223,46 +219,39 @@ internal static partial class Checks
         var exc = Icon(excRow);
         var kid = Icon(kidRow);
         ok &= Check($"an exclude's eye is drawn, not just reserved ({exc.Ink} pixels of ink in the {gutter}px gutter)", exc.Ink > 8);
-        ok &= Check($"an include's eye is drawn too ({inc.Ink} pixels of ink)", inc.Ink > 8);
+        ok &= Check($"an include's gutter cell stays blank ({inc.Ink} pixels of ink)", inc.Ink == 0);
 
         // The gutter is the eye's alone. Rows that were not really held clear of it would draw their tree
         // lines, expander and tick box into it, and the ink would run to its edges - which is what makes
         // this stronger than asking whether the rows begin somewhere to the right.
         ok &= Check($"nothing but the eye is drawn in the gutter " +
-                    $"(ink at x {inc.Left}..{inc.Right} and {kid.Left}..{kid.Right}, of 0..{gutter - 1})",
-                    inc.Left >= 2 && inc.Right <= gutter - 3 && kid.Left >= 2 && kid.Right <= gutter - 3);
+                $"(ink at x {exc.Left}..{exc.Right} and {kid.Left}..{kid.Right}, of 0..{gutter - 1})",
+                exc.Left >= 3 && exc.Right <= gutter - 4 && kid.Left >= 3 && kid.Right <= gutter - 4);
 
         // The whole point of the gutter: a nested filter's eye is in the same column as a root's, however
         // deep it sits. Drawn inside the row it would step right by the indent, like the checkbox does.
         ok &= Check($"a nested filter's eye is in the same column as a root's " +
-                    $"(root x {inc.Left}..{inc.Right}, child x {kid.Left}..{kid.Right})",
-                    kid.Ink > 8 && kid.Left == inc.Left && kid.Right == inc.Right);
+                    $"(root x {exc.Left}..{exc.Right}, child x {kid.Left}..{kid.Right})",
+                    kid.Ink > 8 && kid.Left == exc.Left && kid.Right == exc.Right);
+        ok &= Check("a disabled exclude keeps its marker", !nested.Enabled && kid.Ink == exc.Ink);
+        ok &= Check("the gutter is visibly separate from the list", paper != SystemColors.Window);
+        ok &= Check("the gutter band continues below the last row",
+                    At(area.Left + 2, area.Bottom - 2) == paper);
 
-        // The slash is what says "hidden", and it runs corner to corner while the eye it crosses is a flat
-        // lens: the ink of an exclude reaches well above and below the ink of an include. Compared as
-        // SHAPE, not as pixels that merely differ - the two are drawn at different weights, so "the
-        // pictures are not identical" would pass with the slash taken out altogether.
-        ok &= Check($"the slash reaches past the eye it crosses " +
-                    $"(exclude's ink {exc.Height}px tall, include's {inc.Height}px)",
-                    inc.Height > 0 && exc.Height >= inc.Height + 3);
+        using var header = tree.HeaderPictureForTesting();
+        int iconSize = tree.LogicalToDeviceUnits(16);
+        int iconLeft = (gutter - iconSize) / 2;
+        int headerIconTop = (header.Height - 1 - iconSize) / 2;
+        int rowIconTop = excRow.Top + (excRow.Height - iconSize) / 2;
+        int headerDifferences = 0;
+        for (int pixelY = 0; pixelY < iconSize; pixelY++)
+            for (int pixelX = 0; pixelX < iconSize; pixelX++)
+                if (header.GetPixel(iconLeft + pixelX, headerIconTop + pixelY) !=
+                    At(area.Left + iconLeft + pixelX, area.Top + rowIconTop + pixelY)) headerDifferences++;
+        ok &= Check("the header uses the same exclude icon as the rows", headerDifferences == 0, $"{headerDifferences} pixels differ");
+        ok &= CheckKindHover(tree, host, shown, hidden);
 
-        // The exceptional state is the louder one. An ordinary filter set is nearly all includes, and a
-        // column of eyes at the exclude's weight would shout on every row.
-        ok &= Check($"an exclude's eye is bolder than an include's " +
-                    $"(exclude {exc.Boldest} from the background, include {inc.Boldest})",
-                    exc.Boldest > inc.Boldest);
-
-        // ...and an include's eye - which is on nearly every row of a real filter set - stays quieter than
-        // the pattern it sits beside. The exclude is allowed to be as loud as it likes: it is the one the
-        // eye should be caught by.
-        int text = 0;
         int textLeft = tree.ContentLeftForTesting(hidden);
-        for (int dx = 0; dx < 120; dx++)
-            for (int y = 1; y < excRow.Height - 1; y++)
-                text = Math.Max(text, Away(At(area.Left + textLeft + dx, area.Top + excRow.Top + y)));
-        ok &= Check($"an include's eye is quieter than the patterns beside it " +
-                    $"(eye {inc.Boldest} from the background, text {text})",
-                    text > 0 && inc.Boldest < text * 3 / 4);
 
         // ...and the pattern is the same picture on both rows, in the same place: the gutter is taken from
         // the list, once, rather than from each row according to what its eye is doing.
@@ -282,8 +271,7 @@ internal static partial class Checks
                     $"({differing} of {compared} pixels differ" + (firstX < 0 ? "" : $", first at +{firstX}px") + ")",
                     compared > 0 && differing == 0);
 
-        // Sized from the list's own text, so it follows the font and the DPI together - and then stops,
-        // because past a point a bigger eye says nothing more and only takes width the pattern needs.
+        ok &= Check("the font fixture has a visible count column", tree.ColumnsForTesting.HasCount);
         var baseFont = host.Font;
         using (var larger = new Font(baseFont.FontFamily, baseFont.Size * 1.6f))
         using (var enormous = new Font(baseFont.FontFamily, baseFont.Size * 6f))
@@ -291,22 +279,94 @@ internal static partial class Checks
             host.Font = larger;
             Pump();
             int grown = tree.GutterWidthForTesting;
+            ok &= Check("a larger font remeasures the count column", tree.ColumnsForTesting.HasCount &&
+                        tree.ColumnsForTesting.CountWidth >= tree.HeaderWidthForTesting("Count") + tree.LogicalToDeviceUnits(8),
+                        $"column {tree.ColumnsForTesting.CountWidth}, heading {tree.HeaderWidthForTesting("Count")}");
             host.Font = enormous;
             Pump();
             int capped = tree.GutterWidthForTesting;
             host.Font = baseFont;
             Pump();
 
-            ok &= Check($"the gutter grows with the font ({gutter}px at {baseFont.Size:0.#}pt, " +
-                        $"{grown}px at {larger.Size:0.#}pt)", grown > gutter);
-            ok &= Check($"and stops growing rather than eating the pattern column " +
-                        $"({capped}px at {enormous.Size:0.#}pt)", capped < gutter * 3);
+            ok &= Check($"the gutter stays fixed when the font grows ({gutter}px -> {grown}px)", grown == gutter);
+            ok &= Check($"even an enormous font leaves the gutter at {gutter}px", capped == gutter);
         }
-        return ok && CheckKindToggle(doc, tree);
+        SetFilters(doc, tree);
+        using var empty = Capture(host);
+        var emptyArea = tree.TreeAreaForTesting;
+        ok &= Check("an empty list keeps the gutter band", empty.GetPixel(emptyArea.Left + 2, emptyArea.Bottom - 2) == paper);
+        return CheckKindToggle(doc, tree) & ok;
     }
 
-    /// <summary>Flipping a filter between showing and hiding what it matches has to be as quick as ticking
-    /// it: one click on the eye, or one keystroke, over as many filters as are selected.</summary>
+    private static bool CheckKindHover(FilterTreeControl tree, Form host, Filter include, Filter exclude)
+    {
+        tree.MouseLeaveForTesting();
+        Pump();
+        var area = tree.TreeAreaForTesting;
+        var includeRow = tree.RowBoundsForTesting(include);
+        var excludeRow = tree.RowBoundsForTesting(exclude);
+        var cell = new Rectangle(area.Left, area.Top + includeRow.Top, tree.GutterWidthForTesting, includeRow.Height);
+        int middle = includeRow.Top + includeRow.Height / 2;
+        using var rest = Capture(host);
+        tree.MouseMoveForTesting(new Point(tree.TreeWidthForTesting - 4, middle));
+        Pump();
+        using var rowHover = Capture(host);
+        bool ok = Check("hovering a row leaves the gutter unchanged", SameRegion(rest, rowHover, area));
+        tree.MouseMoveForTesting(new Point(tree.GutterWidthForTesting / 2, middle));
+        Pump();
+        using var cellHover = Capture(host);
+        ok &= Check("the whole gutter cell offers a hand cursor", tree.GutterHasHandForTesting);
+
+        int inside = 0, outside = 0;
+        for (int pixelY = area.Top; pixelY < area.Bottom; pixelY++)
+            for (int pixelX = area.Left; pixelX < area.Right; pixelX++)
+            {
+                if (rest.GetPixel(pixelX, pixelY) == cellHover.GetPixel(pixelX, pixelY)) continue;
+                if (cell.Contains(pixelX, pixelY)) inside++;
+                else outside++;
+            }
+        ok &= Check("hover highlights only its gutter cell", inside > 0 && outside == 0, $"{inside} inside, {outside} outside");
+
+        bool Blank(Bitmap image)
+        {
+            var background = image.GetPixel(cell.Left + 2, cell.Top + 2);
+            for (int pixelY = cell.Top + 2; pixelY < cell.Bottom - 2; pixelY++)
+                for (int pixelX = cell.Left + 2; pixelX < cell.Right - 2; pixelX++)
+                    if (image.GetPixel(pixelX, pixelY) != background) return false;
+            return true;
+        }
+        ok &= Check("include cells stay blank on both row and cell hover", Blank(rowHover) && Blank(cellHover));
+        ok &= Check("hover leaves the exclude marker alone", SameRegion(rest, cellHover,
+                    new Rectangle(area.Left, area.Top + excludeRow.Top, tree.GutterWidthForTesting, excludeRow.Height)));
+
+        int paints = tree.PaintsForTesting;
+        for (int move = 0; move < 30; move++) tree.MouseMoveForTesting(new Point(2 + move % (tree.GutterWidthForTesting - 4), middle));
+        Pump();
+        ok &= Check("moving inside one cell does not keep repainting it", tree.PaintsForTesting == paints,
+                    $"{tree.PaintsForTesting - paints} repaints");
+        tree.MouseLeaveForTesting();
+        Pump();
+        using var left = Capture(host);
+        ok &= Check("leaving the list clears its hover state", !tree.GutterHasHandForTesting && SameRegion(rest, left, area));
+
+        var previous = tree.SelectedFilter;
+        tree.SelectForTesting(include);
+        tree.FocusList();
+        Pump();
+        using var focused = Capture(host);
+        ok &= Check("keyboard focus does not reveal an include icon", Blank(focused));
+        var kinds = tree.SelectedFilters.Select(filter => filter.Kind).ToArray();
+        bool focusBefore = tree.ListFocusedForTesting;
+        tree.ClickGutterHeaderForTesting();
+        ok &= Check("the header is a label, not a toggle or a focus stop", !tree.GutterHeaderCanSelectForTesting &&
+                tree.ListFocusedForTesting == focusBefore && tree.SelectedFilters.Select(filter => filter.Kind).SequenceEqual(kinds),
+                $"focus {focusBefore} -> {tree.ListFocusedForTesting}, header selectable {tree.GutterHeaderCanSelectForTesting}");
+        if (previous is not null) tree.SelectForTesting(previous);
+        tree.MouseMoveForTesting(new Point(tree.GutterWidthForTesting / 2, tree.TreeHeightForTesting - 2));
+        ok &= Check("the empty part of the gutter is not a button", !tree.GutterHasHandForTesting);
+        return ok;
+    }
+
     private static bool CheckKindToggle(CascadeDocument doc, FilterTreeControl tree)
     {
         var first = new Filter { Match = new FilterMatch { Text = "ERROR" } };
@@ -329,14 +389,30 @@ internal static partial class Checks
                 return new Point(r.Left + r.Width / 2, r.Top + r.Height / 2);
             }
 
-            // The eye sits inside the row's content, where a press otherwise picks the filter up. It has to
-            // take the press outright, or the gesture would be a drag that happened to start on an icon.
             bool ok = Check("a press on the eye does not arm a drag", !tree.PressArmsDragForTesting(Eye(first)));
-            ok &= Check("that press was the toggle itself - the eye hides the lines the filter matches",
+            ok &= Check("pressing the gutter leaves the filter unchanged until release", first.Kind == FilterKind.Include && applied == 0);
+            tree.MouseUpForTesting();
+            ok &= Check("releasing on the same cell changes it to exclude",
                         first.Kind == FilterKind.Exclude, first.Kind.ToString());
             ok &= Check("and re-applies the filters once", applied == 1, $"{applied} passes");
             ok &= Check($"and leaves one undo point, named for what it did (\"{undoLabel}\")",
                         undoPoints == 1 && undoLabel == "Exclude Filter");
+
+            int beforeCancel = applied;
+            tree.MouseDownForTesting(Eye(first));
+            tree.MouseUpForTesting(new Point(tree.GutterWidthForTesting + 1, Eye(first).Y));
+            ok &= Check("releasing outside the gutter cancels the press", first.Kind == FilterKind.Exclude && applied == beforeCancel);
+            tree.MouseDownForTesting(Eye(first));
+            tree.MouseUpForTesting(Eye(second));
+            ok &= Check("releasing on another row cancels the press", first.Kind == FilterKind.Exclude && second.Kind == FilterKind.Include && applied == beforeCancel);
+            tree.MouseDownForTesting(Eye(first));
+            tree.PressKeyForTesting(Keys.Escape);
+            tree.MouseUpForTesting();
+            ok &= Check("Escape cancels a pending toggle", first.Kind == FilterKind.Exclude && applied == beforeCancel);
+            tree.MouseDownForTesting(Eye(first));
+            tree.LoseCaptureForTesting();
+            tree.MouseUpForTesting();
+            ok &= Check("losing capture cancels a pending toggle", first.Kind == FilterKind.Exclude && applied == beforeCancel);
 
             tree.MouseDownForTesting(Eye(first));
             tree.MouseUpForTesting();
@@ -346,6 +422,7 @@ internal static partial class Checks
             int passes = applied, points = undoPoints;
             tree.SelectForTesting(first);
             tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
+            ok &= Check("Ctrl+Shift+X changes the current filter to exclude", first.Kind == FilterKind.Exclude);
             tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
             Pump();
             ok &= Check("the keyboard flips it and flips it back (Ctrl+Shift+X)", first.Kind == FilterKind.Include);
@@ -353,8 +430,6 @@ internal static partial class Checks
                         $"({applied - passes} passes, {undoPoints - points} undo points)",
                         applied == passes + 2 && undoPoints == points + 2);
 
-            // A group in a mix of states: set, never flip. Flipping each one in turn would scramble it, and
-            // pressing the key twice would not put it back. The current row decides which way they all go.
             tree.SelectForTesting(first);
             tree.SelectAllFilters();
             tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
@@ -370,7 +445,7 @@ internal static partial class Checks
 
             tree.PressKeyForTesting(Keys.X | Keys.Control | Keys.Shift);
             Pump();
-            ok &= Check("and pressing it again puts every one of them back",
+            ok &= Check("pressing it again makes the whole group include",
                         first.Kind == FilterKind.Include && second.Kind == FilterKind.Include
                         && third.Kind == FilterKind.Include,
                         $"{first.Kind}/{second.Kind}/{third.Kind}");
@@ -389,9 +464,87 @@ internal static partial class Checks
                         tree.SelectedCount == 3);
 
             ok &= Check("the menu says what it will do next, not what is set",
-                        FilterTreeControl.KindMenuText(1, excluding: true, mnemonic: false) == "Show Matching Lines Again"
-                        && FilterTreeControl.KindMenuText(3, excluding: false, mnemonic: false) == "Hide Matching Lines (3 filters)",
+                        FilterTreeControl.KindMenuText(1, excluding: true, mnemonic: false) == "Make Include Filter"
+                        && FilterTreeControl.KindMenuText(3, excluding: false, mnemonic: false) == "Make Exclude Filters (3)",
                         FilterTreeControl.KindMenuText(3, excluding: false, mnemonic: false));
+
+            tree.SelectForTesting(first);
+            first.Kind = FilterKind.Include;
+            second.Kind = FilterKind.Exclude;
+            third.Kind = FilterKind.Include;
+            first.Enabled = true;
+            second.Enabled = false;
+            third.Enabled = true;
+            var child = new Filter { Enabled = true, Match = { Text = "child" } };
+            doc.Filters.Add(child, first);
+            tree.SyncToModel();
+            tree.CollapseForTesting(first);
+            tree.SelectForTesting(first);
+            tree.SelectAllFilters();
+            tree.PressKeyForTesting(Keys.Control | Keys.Down);
+            tree.OpenFilterMenuForTesting();
+            var kindMenu = tree.FilterMenuForTesting.Items.OfType<ToolStripMenuItem>()
+                .Single(item => item.ShortcutKeyDisplayString == "Ctrl+Shift+X");
+            ok &= Check("a mixed group's menu follows its current exclude", kindMenu.Text == "Make Include Filters (3)" && kindMenu.Enabled);
+            ok &= Check("the kind menu adds no tooltip", string.IsNullOrEmpty(kindMenu.ToolTipText));
+            var snapshot = doc.Filters.CloneRoots();
+            var selected = tree.SelectedNamesForTesting;
+            int built = tree.NodesBuiltForTesting;
+            var history = new FilterHistory();
+            void Begin(string label) => history.Begin(label, doc.Filters);
+            void Commit() => history.Commit(doc.Filters);
+            tree.BeforeFiltersEdited += Begin;
+            tree.FiltersChanged += Commit;
+            try
+            {
+                tree.MouseDownForTesting(Eye(second), Keys.Shift);
+                tree.MouseUpForTesting();
+                ok &= Check("a mixed selection follows the clicked filter, without cascading into children",
+                            doc.Filters.Roots.All(filter => filter.Kind == FilterKind.Include) && child.Kind == FilterKind.Include);
+                ok &= Check("kind changes preserve enabled states", first.Enabled && !second.Enabled && third.Enabled && child.Enabled);
+                ok &= Check("kind changes reuse the rows", tree.NodesBuiltForTesting == built);
+                ok &= Check("one undo restores the original mixed kinds", history.Undo(doc.Filters) is not null &&
+                            FilterCollection.SameStructure(snapshot, doc.Filters.Roots) && !history.CanUndo);
+                tree.SyncToModel();
+                ok &= Check("undo keeps the group selected and the parent collapsed",
+                            tree.SelectedNamesForTesting.SequenceEqual(selected) && !tree.IsExpandedForTesting(doc.Filters.Roots[0]));
+                ok &= Check("redo restores the include group", history.Redo(doc.Filters) is not null &&
+                            doc.Filters.Roots.All(filter => filter.Kind == FilterKind.Include));
+                tree.SyncToModel();
+                tree.OpenFilterMenuForTesting();
+                ok &= Check("the menu changes direction with the restored group", kindMenu.Text == "Make Exclude Filters (3)");
+                kindMenu.PerformClick();
+                ok &= Check("excluding the group still leaves an unselected child alone",
+                            doc.Filters.Roots.All(filter => filter.Kind == FilterKind.Exclude) &&
+                            doc.Filters.Roots[0].Children[0].Kind == FilterKind.Include);
+            }
+            finally
+            {
+                tree.BeforeFiltersEdited -= Begin;
+                tree.FiltersChanged -= Commit;
+            }
+
+            first = doc.Filters.Roots[0];
+            second = doc.Filters.Roots[1];
+            third = doc.Filters.Roots[2];
+            tree.SelectForTesting(first);
+            tree.PressKeyForTesting(Keys.Control | Keys.Down);
+            ok &= Check("an off-group current row has a single-filter menu action", tree.KindToggleMenuText(false) == "Make Include Filter");
+            tree.PressKeyForTesting(Keys.Control | Keys.Shift | Keys.X);
+            ok &= Check("an off-group keyboard toggle follows the checkbox rule",
+                        first.Kind == FilterKind.Exclude && second.Kind == FilterKind.Include && third.Kind == FilterKind.Exclude);
+            tree.MouseDownForTesting(Eye(third));
+            tree.MouseUpForTesting();
+            ok &= Check("clicking an unselected cell affects only that filter", third.Kind == FilterKind.Include && first.Kind == FilterKind.Exclude && tree.SelectedCount == 1);
+
+            tree.SelectForTesting(first);
+            int beforeDoubleClick = applied, editRequests = 0;
+            void CountEdits(Filter _) => editRequests++;
+            tree.EditRequested += CountEdits;
+            try { tree.SendDoubleClickForTesting(Eye(first)); }
+            finally { tree.EditRequested -= CountEdits; }
+            ok &= Check("two native gutter clicks toggle twice and release capture", first.Kind == FilterKind.Exclude &&
+                        applied == beforeDoubleClick + 2 && editRequests == 0 && !tree.ListHoldsMouseForTesting);
             return ok;
         }
         finally
@@ -1469,12 +1622,15 @@ internal static partial class Checks
             // The strip left of the text is the only part of a row the filter's own colours do not own, so
             // that is where being selected has to show. How blue it is says which of the three states a row
             // is in - and the tint has to be read off a pixel, since it is a wash over what is already there.
-            int Blueness(Rectangle row) => Pixel(3, row.Top + row.Height / 2) is var px ? px.B - px.R : 0;
+            int Blueness(Rectangle row) => Pixel(tree.GutterWidthForTesting + 3, row.Top + row.Height / 2) is var px ? px.B - px.R : 0;
             int plain = Blueness(r4), inGroup = Blueness(r1), cursor = Blueness(r3);
             ok &= Check($"an unselected filter's strip is left alone (blue {plain})", plain < 12);
             ok &= Check($"a selected one is tinted (blue {inGroup})", inGroup > 25);
             ok &= Check($"and the row the keyboard is on is tinted harder still " +
                         $"({cursor} against {inGroup})", cursor > inGroup + 25);
+            int GutterBlueness(Rectangle row) => Pixel(3, row.Top + row.Height / 2) is var pixel ? pixel.B - pixel.R : 0;
+            ok &= Check("the quieter gutter also distinguishes the current row and the group",
+                        GutterBlueness(r3) > GutterBlueness(r1) && GutterBlueness(r1) > GutterBlueness(r4));
 
             // ...and it stops where the filter's own colours start, or selecting a filter would misreport
             // the very thing the list is there to show.

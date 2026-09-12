@@ -13,6 +13,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets\cascade.ico" />
+    <EmbeddedResource Include="Assets\eye-off.png" />
+    <EmbeddedResource Include="Assets\lucide-LICENSE.txt" />
   </ItemGroup>
 
   <PropertyGroup>

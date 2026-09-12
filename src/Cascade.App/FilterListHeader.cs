@@ -21,17 +21,28 @@ internal sealed class FilterListHeader : Control
 {
     private FilterColumns _columns;
     private int _selectedCount;
+    private int _gutterWidth;
+    internal readonly FilterGutter Gutter = new();
 
     public FilterListHeader()
     {
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, false);
+        TabStop = false;
         Height = TextRenderer.MeasureText("Xg", Font).Height + 8;
         BackColor = SystemColors.Control;
         AccessibleName = "Filter list";
     }
 
     internal int Inset => LogicalToDeviceUnits(4);
+
+    internal void SetGutterWidth(int width)
+    {
+        if (_gutterWidth == width) return;
+        _gutterWidth = width;
+        Invalidate();
+    }
 
     internal void SetColumns(FilterColumns columns)
     {
@@ -66,8 +77,12 @@ internal sealed class FilterListHeader : Control
         var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis;
         var fore = SystemColors.ControlText;
 
-        int filterRoom = Math.Max(0, _columns.FilterRight - inset * 2);
-        TextRenderer.DrawText(g, "Filter", Font, new Rectangle(inset, 0, filterRoom, Height), fore, flags);
+        var gutter = new Rectangle(0, 0, _gutterWidth, Height - 1);
+        FilterGutter.DrawBand(g, gutter);
+        Gutter.DrawIcon(g, gutter, LogicalToDeviceUnits(FilterGutter.LogicalIconSize));
+        int filterLeft = _gutterWidth + inset;
+        int filterRoom = Math.Max(0, _columns.FilterRight - filterLeft - inset);
+        TextRenderer.DrawText(g, "Filter", Font, new Rectangle(filterLeft, 0, filterRoom, Height), fore, flags);
 
         // Always, even while the bar is up: it is as much a reminder of how to get BACK to the box after
         // clicking away from it as it is an announcement that the list can be searched. Only when there is
@@ -80,7 +95,7 @@ internal sealed class FilterListHeader : Control
         string note = _selectedCount > 1 ? $"  ({_selectedCount} selected)" : "  (Ctrl+E to search)";
         int wants = TextRenderer.MeasureText(g, note, Font, unbounded, measure).Width;
         if (used + wants <= filterRoom)
-            TextRenderer.DrawText(g, note, Font, new Rectangle(inset + used, 0, wants, Height),
+            TextRenderer.DrawText(g, note, Font, new Rectangle(filterLeft + used, 0, wants, Height),
                                   SystemColors.GrayText, flags);
         if (_columns.HasDescription)
             TextRenderer.DrawText(g, "Description", Font,
@@ -94,5 +109,11 @@ internal sealed class FilterListHeader : Control
         if (_columns.HasDescription) g.DrawLine(pen, _columns.DescX, 3, _columns.DescX, Height - 3);
         if (_columns.HasCount) g.DrawLine(pen, _columns.CountX, 3, _columns.CountX, Height - 3);
         g.DrawLine(pen, 0, Height - 1, Width, Height - 1);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) Gutter.Dispose();
+        base.Dispose(disposing);
     }
 }

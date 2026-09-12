@@ -68,9 +68,9 @@ Pick the second and the list reads as one ordered set of rules. The first enable
 
 ### The filter list
 
-![The filter list: a column of eyes, nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
+![The filter list: an exclude column, nesting, checkboxes, live counts, and an excluding filter at the foot](docs/images/filter-list.png)
 
-- The **eyes** down the left of the list say which way each filter answers: open, it shows the lines it matches; crossed out, it takes them away. Click one — or press `Ctrl+Shift+X` — to turn a filter into an exclude and back, over as many filters as are selected.
+- The **exclude column** has a crossed-out eye in its header. A crossed-out eye in a row marks an exclude filter; a blank cell means include. Click a cell or press `Ctrl+Shift+X` to switch. Clicking within a selected group sets the group to the clicked filter's opposite kind, without changing its checkboxes or unselected children. Undo restores the original mixed states.
 - **Count** is how many lines in the whole file match, not how many are on screen, or how many are in the crop when you have one.
 - `Shift+Space` switches a filter's whole subtree on or off.
 - The list docks to any edge of the window, or hides altogether (`Ctrl+Shift+L`), and comes back next time on the same edge at the same size.
@@ -322,7 +322,7 @@ Cascade.exe [file] [/Filters:<path>]
 | Key | Action |
 |---|---|
 | `Space` / `Shift+Space` | Enable or disable the selection / their subtrees |
-| `Ctrl+Shift+X` | Hide or show the lines the selection matches |
+| `Ctrl+Shift+X` | Switch the current filter or selected group between include and exclude |
 | `Enter` / `Delete` / `Ctrl+D` | Edit / remove / duplicate the selection |
 | `Shift+↑ ↓` / `Ctrl+↑ ↓` / `Ctrl+Space` / `Ctrl+A` | Extend, move through, add to, or take the whole selection |
 | `Alt+↑ ↓ ← →` | Move, nest and un-nest |

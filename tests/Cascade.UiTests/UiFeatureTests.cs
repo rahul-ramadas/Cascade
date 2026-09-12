@@ -2,6 +2,7 @@ using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.Core.Tools;
 using FlaUI.Core.WindowsAPI;
+using System.Text.Json.Nodes;
 
 namespace Cascade.UiTests;
 
@@ -372,6 +373,91 @@ public class UiFeatureTests
             Assert.True(fails.Count == 0, "Undo/redo failures:\n  " + string.Join("\n  ", fails));
         }
         finally { File.Delete(log); File.Delete(tat); }
+    }
+
+    [Fact]
+    public void The_exclude_gutter_toggles_without_editing_and_preserves_undo_and_saved_state()
+    {
+        string log = TestData.WriteLogFile();
+        string[] patterns = ["MATCH", "line 999", "line 998", "line"];
+        string filters = TestData.WritePresetFile(patterns);
+        try
+        {
+            var settings = JsonNode.Parse(File.ReadAllText(filters))!.AsObject();
+            foreach (var filter in settings["filters"]!.AsArray()) filter!["enabled"] = true;
+            settings["showOnlyFilteredLines"] = true;
+            File.WriteAllText(filters, settings.ToJsonString());
+            var lines = File.ReadAllLines(log);
+
+            using var app = CascadeApp.LaunchExisting(log, filters, CascadeApp.NewSettingsDir(),
+                                                      ownsFiles: false, ownsSettingsDir: true);
+            var tree = app.Tree();
+            void Count(params string[] excludes)
+            {
+                int expected = lines.Count(line => patterns.Any(pattern => line.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                    && !excludes.Any(pattern => line.Contains(pattern, StringComparison.OrdinalIgnoreCase)));
+                Assert.True(app.WaitStatus("Fil:", $"Fil: {expected:N0}"),
+                    $"Expected {expected:N0} with excludes [{string.Join(", ", excludes)}], got {app.StatusText("Fil:")}.");
+            }
+
+            JsonArray SavedFilters()
+            {
+                app.ClickMenuOrThrow("File", "Save Filters");
+                return JsonNode.Parse(File.ReadAllText(filters))!["filters"]!.AsArray();
+            }
+
+            Assert.Equal(patterns.Length, app.RootFilterNames().Length);
+            Count();
+            app.FocusFilter("MATCH");
+            app.ShiftKey(tree, VirtualKeyShort.SPACE);
+            Count();
+            app.ClickFilterGutter("MATCH");
+            Count();
+            var saved = SavedFilters();
+            Assert.Equal("Exclude", saved[0]!["kind"]!.GetValue<string>());
+            Assert.False(saved[0]!["enabled"]!.GetValue<bool>());
+
+            app.FocusFilter("MATCH");
+            app.ShiftKey(tree, VirtualKeyShort.SPACE);
+            Count("MATCH");
+            Assert.NotEmpty(app.Rows());
+            Assert.All(app.Rows(), row => Assert.DoesNotContain("MATCH", row.Name, StringComparison.Ordinal));
+
+            app.FocusFilter("line 999");
+            app.ShiftKey(tree, VirtualKeyShort.DOWN);
+            Assert.True(app.WaitForSelectionCount(2));
+            app.SendKey(tree, VirtualKeyShort.KEY_X, VirtualKeyShort.CONTROL, VirtualKeyShort.SHIFT);
+            Count("MATCH", "line 999", "line 998");
+            Assert.True(app.WaitForSelectionCount(2));
+
+            app.SendKeyAsDialogKey(tree, VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Count("MATCH");
+            Assert.True(app.WaitForSelectionCount(2));
+            app.SendKeyAsDialogKey(tree, VirtualKeyShort.KEY_Y, VirtualKeyShort.CONTROL);
+            Count("MATCH", "line 999", "line 998");
+            saved = SavedFilters();
+            Assert.All(saved.Take(3), filter => Assert.Equal("Exclude", filter!["kind"]!.GetValue<string>()));
+            Assert.All(saved, filter => Assert.True(filter!["enabled"]!.GetValue<bool>()));
+
+            app.SendKeyAsDialogKey(tree, VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Count("MATCH");
+            app.SendKeyAsDialogKey(tree, VirtualKeyShort.KEY_Z, VirtualKeyShort.CONTROL);
+            Count();
+            saved = SavedFilters();
+            Assert.False(saved[0]!["enabled"]!.GetValue<bool>());
+            app.FocusFilter("MATCH");
+            app.ShiftKey(tree, VirtualKeyShort.SPACE);
+            Count();
+            app.ClickFilterGutter("MATCH", cancel: true);
+            Count();
+            app.ClickFilterGutter("MATCH");
+            Count("MATCH");
+            app.ClickFilterGutter("MATCH");
+            Count();
+            saved = SavedFilters();
+            Assert.All(saved, filter => Assert.Equal("Include", filter!["kind"]!.GetValue<string>()));
+        }
+        finally { File.Delete(log); File.Delete(filters); }
     }
 
     [Fact]

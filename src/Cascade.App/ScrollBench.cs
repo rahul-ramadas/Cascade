@@ -129,6 +129,12 @@ internal static class ScrollBench
                               $"in {probe.Bounds.Width - probe.GutterWidthForTesting - probe.MapWidthForTesting - probe.ScrollBarWidthForTesting}px of room");
             Console.WriteLine();
 
+            if (only.Length == 0 || only.Equals("filter-list", StringComparison.OrdinalIgnoreCase))
+            {
+                FilterList(form, filterSet(), steps, repeats, settleMs);
+                if (only.Length > 0) return 0;
+            }
+
             if (micro)
             {
                 // Against filters, because that is the state a reader is in - and the paint costs more in it.
@@ -426,6 +432,62 @@ internal static class ScrollBench
             clock.Stop();
             double cpu = (process.TotalProcessorTime.Ticks - cpu0) / (double)TimeSpan.TicksPerMillisecond / times;
             Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / times,6:F2} ms wall | {cpu,6:F2} ms cpu");
+        }
+    }
+
+    private static void FilterList(MainForm form, FilterCollection filters, int steps, int repeats, int settleMs)
+    {
+        if (filters.Roots.Count == 0) filters.Add(new Filter { Match = { Text = "WARN" } });
+        var templates = filters.Roots.ToArray();
+        for (int index = 0; filters.EnumerateDepthFirst().Count() < 120; index++)
+            filters.Add(templates[index % templates.Length].Clone());
+        filters.ShowOnlyFilteredLines = false;
+        var all = filters.EnumerateDepthFirst().ToArray();
+        var doc = form.DocForTesting;
+        var tree = form.FilterTreeForTesting;
+        var native = tree.Controls.OfType<TreeView>().Single();
+        using var process = Process.GetCurrentProcess();
+
+        foreach (var (name, stride) in new[] { ("includes", 0), ("mixed", 12), ("excludes", 1) })
+        {
+            for (int index = 0; index < all.Length; index++)
+                all[index].Kind = stride > 0 && index % stride == 0 ? FilterKind.Exclude : FilterKind.Include;
+            doc.SetFilters(filters);
+            tree.Rebuild();
+            for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
+            if (doc.IsBusy) throw new InvalidOperationException("The filter-list benchmark did not settle.");
+            Pump();
+            int visible = Math.Min(native.VisibleCount, native.GetNodeCount(true));
+            if (!native.Visible || visible < 2) throw new InvalidOperationException("The filter-list benchmark needs visible rows.");
+            Console.WriteLine($"  filter-list {name}: {all.Length} filters, {visible} visible rows, {native.ClientSize}");
+
+            Measure("repaint", () => { native.Invalidate(); native.Update(); }, mustPaint: true);
+            int move = 0;
+            Measure("hover", () =>
+            {
+                int vertical = move++ % visible * native.ItemHeight + native.ItemHeight / 2;
+                SendMessage(native.Handle, WmMouseMove, 0, (vertical << 16) | 3);
+                native.Update();
+            }, mustPaint: false);
+
+            void Measure(string operation, Action work, bool mustPaint)
+            {
+                for (int warmup = 0; warmup < 20; warmup++) work();
+                for (int repeat = 0; repeat < repeats; repeat++)
+                {
+                    long allocations = GC.GetAllocatedBytesForCurrentThread();
+                    double processor = process.TotalProcessorTime.TotalMilliseconds;
+                    int paints = tree.PaintsForTesting;
+                    var clock = Stopwatch.StartNew();
+                    for (int step = 0; step < steps; step++) work();
+                    clock.Stop();
+                    double bytes = (GC.GetAllocatedBytesForCurrentThread() - allocations) / (double)steps;
+                    double cpu = (process.TotalProcessorTime.TotalMilliseconds - processor) / steps;
+                    int drawn = tree.PaintsForTesting - paints;
+                    if (mustPaint && drawn < steps) throw new InvalidOperationException("The filter-list benchmark did not repaint.");
+                    Console.WriteLine($"FILTER_LIST {name} {operation} run={repeat + 1} wall={clock.Elapsed.TotalMilliseconds / steps:F4}ms cpu={cpu:F4}ms bytes={bytes:F0} paints={drawn}");
+                }
+            }
         }
     }
 

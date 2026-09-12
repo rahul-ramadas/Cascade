@@ -6,12 +6,12 @@ namespace Cascade.AppTests;
 /// that keep it from flashing while you do it.</summary>
 public class FilterListTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void A_row_says_what_the_filter_is() => Verify(Checks.RunFilterListChecks, atLeast: 35);
+    [Fact] public void A_row_says_what_the_filter_is() => Verify(Checks.RunFilterListChecks, atLeast: 70);
     [Fact] public void The_list_updates_in_place_rather_than_rebuilding() => Verify(Checks.RunFilterSyncChecks, atLeast: 15);
     [Fact] public void Searching_the_list_reveals_the_match() => Verify(Checks.RunFilterSearchRevealChecks, atLeast: 4);
     [Fact] public void The_search_bar_opens_below_and_closes_on_escape() => Verify(Checks.RunFilterSearchBarChecks, atLeast: 21);
     [Fact] public void Ticking_a_filter_switches_on_what_it_should() => Verify(Checks.RunFilterEnableChecks, atLeast: 22);
-    [Fact] public void Several_filters_can_be_chosen_at_once() => Verify(Checks.RunFilterSelectionChecks, atLeast: 35);
+    [Fact] public void Several_filters_can_be_chosen_at_once() => Verify(Checks.RunFilterSelectionChecks, atLeast: 36);
     [Fact] public void Nothing_is_remembered_about_a_filter_that_is_gone() => Verify(Checks.RunFilterPaneMemoryChecks, atLeast: 11);
     [Fact] public void Hovering_a_line_says_which_filters_match_it() => Verify(Checks.RunFilterTipChecks, atLeast: 21);
     [Fact] public void A_new_filter_can_be_made_from_anywhere() => Verify(Checks.RunNewFilterChecks, atLeast: 27);

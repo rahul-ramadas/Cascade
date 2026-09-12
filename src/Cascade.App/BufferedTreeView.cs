@@ -14,11 +14,35 @@ internal sealed class BufferedTreeView : TreeView
     private const int TVS_EX_DOUBLEBUFFER = 0x0004;
     private const int TVS_NOHSCROLL = 0x8000;
     private const int WM_LBUTTONDOWN = 0x0201;
+    private const int WM_LBUTTONUP = 0x0202;
     private const int WM_LBUTTONDBLCLK = 0x0203;
     private const int WM_CONTEXTMENU = 0x007B;
     private const int WM_PAINT = 0x000F;
+    private const int WM_REFLECT_NOTIFY = 0x204E;
+    private const int NM_CUSTOMDRAW = -12;
+    private const int CDDS_PREPAINT = 1;
+    private const int CDDS_POSTPAINT = 2;
+    private const int CDRF_NOTIFYPOSTPAINT = 0x10;
 
     private int _leftBorder;
+    private bool _borderPressed;
+    internal event Action<Graphics>? EmptyAreaPaint;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NotificationHeader
+    {
+        public IntPtr Window;
+        public IntPtr Id;
+        public int Code;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CustomDraw
+    {
+        public NotificationHeader Header;
+        public int Stage;
+        public IntPtr DeviceContext;
+    }
 
     /// <summary>How many times the list has actually repainted. Flicker is repaints nobody asked for, and
     /// counting them is the only way to see it without filming the screen.</summary>
@@ -110,6 +134,38 @@ internal sealed class BufferedTreeView : TreeView
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_PAINT) Paints++;
+        if (m.Msg is WM_LBUTTONDOWN or WM_LBUTTONDBLCLK)
+        {
+            var point = PointAt(m.LParam);
+            if (point.X >= 0 && point.X < _leftBorder && GetNodeAt(0, point.Y) is not null)
+            {
+                Focus();
+                _borderPressed = true;
+                Capture = true;
+                OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, point.X, point.Y, 0));
+                return;
+            }
+        }
+        if (m.Msg == WM_LBUTTONUP && _borderPressed)
+        {
+            var point = PointAt(m.LParam);
+            _borderPressed = false;
+            OnMouseUp(new MouseEventArgs(MouseButtons.Left, 1, point.X, point.Y, 0));
+            Capture = false;
+            return;
+        }
+        if (m.Msg == WM_REFLECT_NOTIFY && Marshal.ReadInt32(m.LParam, IntPtr.Size * 2) == NM_CUSTOMDRAW)
+        {
+            var draw = Marshal.PtrToStructure<CustomDraw>(m.LParam);
+            base.WndProc(ref m);
+            if (draw.Stage == CDDS_PREPAINT) m.Result |= CDRF_NOTIFYPOSTPAINT;
+            else if (draw.Stage == CDDS_POSTPAINT && Nodes.Count == 0 && EmptyAreaPaint is { } paint)
+            {
+                using var graphics = Graphics.FromHdc(draw.DeviceContext);
+                paint(graphics);
+            }
+            return;
+        }
         // A menu asked for from the keyboard reports no position (lParam -1), so it belongs to the selected
         // row rather than to whatever the pointer happens to be over.
         if (m.Msg == WM_CONTEXTMENU) ContextMenuFromKeyboard = m.LParam.ToInt64() == -1;
@@ -128,11 +184,19 @@ internal sealed class BufferedTreeView : TreeView
         if ((MouseButtons & MouseButtons.Left) == 0) Capture = false;
     }
 
-    private TreeViewHitTestLocations HitAt(IntPtr lParam)
+    protected override void OnMouseCaptureChanged(EventArgs e)
+    {
+        if (!Capture) _borderPressed = false;
+        base.OnMouseCaptureChanged(e);
+    }
+
+    private static Point PointAt(IntPtr lParam)
     {
         long packed = lParam.ToInt64();
-        return HitTest(new Point((short)(packed & 0xFFFF), (short)((packed >> 16) & 0xFFFF))).Location;
+        return new Point((short)(packed & 0xFFFF), (short)((packed >> 16) & 0xFFFF));
     }
+
+    private TreeViewHitTestLocations HitAt(IntPtr lParam) => HitTest(PointAt(lParam)).Location;
 
     protected override void OnFontChanged(EventArgs e)
     {

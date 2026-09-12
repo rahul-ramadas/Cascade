@@ -463,6 +463,23 @@ internal sealed class CascadeApp : IDisposable
         Settle(1);
     }
 
+    public void ClickFilterGutter(string containsText, bool cancel = false)
+    {
+        var tree = Tree();
+        var node = FilterNode(containsText) ?? throw new InvalidOperationException($"Filter '{containsText}' not found.");
+        var row = node.BoundingRectangle;
+        var area = tree.BoundingRectangle;
+        if (row.Height <= 0) throw new InvalidOperationException("The filter row is not visible.");
+        IntPtr handle = tree.Properties.NativeWindowHandle.ValueOrDefault;
+        GiveKeyboardFocus(handle);
+        int vertical = row.Top - area.Top + row.Height / 2;
+        var down = (IntPtr)((vertical << 16) | 3);
+        var up = (IntPtr)((vertical << 16) | (cancel ? area.Width - 3 : 3));
+        SendMessage(handle, 0x0201, (IntPtr)1, down);
+        SendMessage(handle, 0x0202, IntPtr.Zero, up);
+        Settle();
+    }
+
     /// <summary>The filter the list has selected, by name, or null when nothing is.</summary>
     public string? SelectedFilterName()
         => Window.FindAllDescendants(cf => cf.ByControlType(ControlType.TreeItem))

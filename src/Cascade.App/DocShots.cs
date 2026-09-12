@@ -107,6 +107,7 @@ internal static class DocShots
 
         Hero(form);
         FilterListShots(form);
+        if (args.Contains("--gutter-checks")) GutterShots(form);
         PresetShots(form);
         FindShots(form);
         MatchMapShot(form);
@@ -315,6 +316,51 @@ internal static class DocShots
         tree.HideSearch();
         tree.ClickFilterForTesting(Root(form, 0));
         Ready(form);
+    }
+
+    private static void GutterShots(MainForm form)
+    {
+        var tree = form.FilterTreeForTesting;
+        var doc = form.DocForTesting;
+        var before = doc.Filters.CloneRoots();
+        var font = tree.Font;
+        try
+        {
+            var filter = Root(form, 1);
+            var row = tree.RowBoundsForTesting(filter);
+            var point = new Point(tree.GutterWidthForTesting / 2, row.Top + row.Height / 2);
+            tree.MouseMoveForTesting(point);
+            Ready(form);
+            Save(Crop(form, Around(form, tree)), "gutter-hover");
+            tree.MouseDownForTesting(point);
+            Ready(form);
+            Save(Crop(form, Around(form, tree)), "gutter-pressed");
+            tree.MouseUpForTesting(point);
+            Ready(form);
+            Save(Crop(form, Around(form, tree)), "gutter-excluded");
+            tree.MouseLeaveForTesting();
+
+            using var larger = new Font(font.FontFamily, font.Size * 1.6f, font.Style);
+            tree.Font = larger;
+            Ready(form);
+            Save(Crop(form, Around(form, tree)), "gutter-large-font");
+            tree.Font = font;
+            doc.Filters.Roots.Clear();
+            doc.ApplyFilters();
+            tree.Rebuild();
+            Ready(form);
+            Save(Crop(form, Around(form, tree)), "gutter-empty");
+        }
+        finally
+        {
+            tree.Font = font;
+            tree.MouseLeaveForTesting();
+            doc.Filters.ReplaceRoots(before);
+            doc.ApplyFilters();
+            tree.SyncToModel();
+            tree.SelectFirst();
+            Ready(form);
+        }
     }
 
     private static void PresetShots(MainForm form)
