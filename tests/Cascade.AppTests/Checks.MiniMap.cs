@@ -712,11 +712,29 @@ internal static partial class Checks
             grid.RefreshView();
             Pump();
 
+            map.Invalidate();
+            map.Update();
+            paintsBefore = map.PaintsForTesting;
+            int rebuildsBefore = map.PictureRebuildsForTesting;
+            int resolvedBeforePaints = map.ColoursResolvedForTesting;
+            const int Repaints = 100;
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            for (int i = 0; i < 100; i++) { map.Invalidate(); map.Update(); }
+            for (int repaint = 0; repaint < Repaints; repaint++) { map.Invalidate(); map.Update(); }
             watch.Stop();
-            ok &= Check("and a repaint is a blit, not a rebuild", watch.ElapsedMilliseconds < 200,
-                        $"{watch.ElapsedMilliseconds} ms for 100 repaints");
+            ok &= Check("every requested repaint reaches the map", map.PaintsForTesting - paintsBefore >= Repaints,
+                        $"{map.PaintsForTesting - paintsBefore} paints for {Repaints} requests");
+            ok &= Check("and a repaint is a blit, not a rebuild",
+                        map.PictureRebuildsForTesting == rebuildsBefore && map.ColoursResolvedForTesting == resolvedBeforePaints,
+                        $"{watch.ElapsedMilliseconds} ms for {Repaints} repaints, " +
+                        $"{map.PictureRebuildsForTesting - rebuildsBefore} picture rebuilds, " +
+                        $"{map.ColoursResolvedForTesting - resolvedBeforePaints} colours resolved");
+
+            map.InvalidateColors();
+            map.Update();
+            ok &= Check("invalidating colours really does rebuild the picture",
+                        map.PictureRebuildsForTesting == rebuildsBefore + 1 && map.ColoursResolvedForTesting > resolvedBeforePaints,
+                        $"{map.PictureRebuildsForTesting - rebuildsBefore} picture rebuilds, " +
+                        $"{map.ColoursResolvedForTesting - resolvedBeforePaints} colours resolved");
 
             // Scrubbing the scrollbar re-centres the window on every mouse move, so a rebuild has to be
             // cheap enough to keep up with a hand - the whole point of the live update.

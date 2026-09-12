@@ -19,7 +19,7 @@ public class FindBarTests(ITestOutputHelper output) : AppCheckFixture(output)
 /// pixels.</summary>
 public class MiniMapTests(ITestOutputHelper output) : AppCheckFixture(output)
 {
-    [Fact] public void The_map_follows_the_view_and_the_marks_follow_the_file() => Verify(Checks.RunMatchMapChecks, atLeast: 94);
+    [Fact] public void The_map_follows_the_view_and_the_marks_follow_the_file() => Verify(Checks.RunMatchMapChecks, atLeast: 96);
 }
 
 /// <summary>Times read out of the log itself, and the margin and status bar that report them.</summary>

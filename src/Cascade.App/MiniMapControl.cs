@@ -96,6 +96,7 @@ internal sealed class MiniMapControl : Control
     private int _tipSlot = -1;
     private Point _tipPoint;
     private int _paints;
+    private int _pictureRebuilds;
     private int _resolved;
 
     public MiniMapControl(LineGridControl grid)
@@ -162,6 +163,8 @@ internal sealed class MiniMapControl : Control
     /// control draws it whether or not it was invalidated, so a screenshot always looks up to date even when
     /// the real window has been sitting stale for minutes.</summary>
     internal int PaintsForTesting => _paints;
+
+    internal int PictureRebuildsForTesting => _pictureRebuilds;
 
     /// <summary>Rows whose colour a build had to read the file for. Everything else came from the last
     /// build, which is what keeps a drag affordable.</summary>
@@ -565,6 +568,7 @@ internal sealed class MiniMapControl : Control
     private void RedrawPicture(int width, int height)
     {
         if (_slots <= 0) { _picture?.Dispose(); _picture = null; return; }
+        _pictureRebuilds++;
 
         var settings = _grid.Settings;
         int backArgb = settings.GutterBack.ToArgb();
