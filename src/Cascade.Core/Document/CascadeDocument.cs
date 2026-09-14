@@ -1211,6 +1211,7 @@ public sealed class CascadeDocument : IDisposable
     /// <summary>The next line matching <paramref name="query"/> from <paramref name="fromLine"/> in the given
     /// direction, or -1 once there are none left. The term is swept for once, in the background, and kept
     /// until the term changes - so asking again costs nothing and no line is ever examined twice.
+    /// A navigation origin outside the crop starts at its near edge; the sweep still covers the whole file.
     ///
     /// Waits when the sweep has not reached the answer yet, which is why -1 always means "no more" rather
     /// than "not found yet".</summary>
@@ -1223,9 +1224,10 @@ public sealed class CascadeDocument : IDisposable
         if (!IsIndexComplete)
             return await Task.Run(() => FindLine(query, fromLine, forward, ct), ct).ConfigureAwait(false);
 
-        var search = SearchFor(query, fromLine);
+        long start = forward ? Math.Max(fromLine, FirstDisplayLine) : Math.Min(fromLine, LastDisplayLine);
+        var search = SearchFor(query, start);
         if (search is null) return -1;      // an empty term, or a regex that will not parse
-        return await search.NextAsync(fromLine, forward, IsLineVisible, ct).ConfigureAwait(false);
+        return await search.NextAsync(start, forward, IsLineVisible, ct).ConfigureAwait(false);
     }
 
     private const int ScanGroupLines = 64;

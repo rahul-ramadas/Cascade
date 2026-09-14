@@ -53,7 +53,8 @@ internal static class ScrollBench
         // costs; a real figure measures what a mouse of that speed does to the program.
         int rate = IntArg(args, "--rate=", 0);
         string only = Arg(args, "--only=") ?? "";
-        if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
+        if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase)
+            || only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
         // A drag over ground the minimap has never been over, which is what the first pass down a file is.
@@ -136,6 +137,12 @@ internal static class ScrollBench
             if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase))
             {
                 FilterNavigation(form, filterSet(), steps, repeats, settleMs);
+                return 0;
+            }
+
+            if (only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase))
+            {
+                CroppedFind(form, filterSet(), Arg(args, "--term=") ?? "request", repeats, settleMs);
                 return 0;
             }
 
@@ -443,6 +450,55 @@ internal static class ScrollBench
             double cpu = (process.TotalProcessorTime.Ticks - cpu0) / (double)TimeSpan.TicksPerMillisecond / times;
             Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / times,6:F2} ms wall | {cpu,6:F2} ms cpu");
         }
+    }
+
+    private static void CroppedFind(MainForm form, FilterCollection filters, string term, int repeats, int settleMs)
+    {
+        var doc = form.DocForTesting;
+        filters.ShowOnlyFilteredLines = true;
+        doc.SetFilters(filters);
+        for (var wait = Stopwatch.StartNew(); wait.ElapsedMilliseconds < settleMs && doc.IsBusy;) Pump();
+        if (doc.IsBusy || doc.CompletedLineCount < 2)
+            throw new InvalidOperationException("The cropped-find benchmark did not settle on a usable file.");
+        long from = doc.CompletedLineCount / 3;
+        long to = Math.Min(doc.CompletedLineCount, from + Math.Max(1, doc.CompletedLineCount / 100));
+        doc.SetCrop(from, to);
+        form.GridForTesting.RefreshView();
+        Pump();
+        long expected = -1;
+        for (long row = 0; row < doc.RowCount; row++)
+        {
+            long line = doc.RowToLine(row);
+            if (!doc.GetLineText(line).Contains(term, StringComparison.OrdinalIgnoreCase)) continue;
+            expected = line;
+            break;
+        }
+        if (expected < 0) throw new InvalidOperationException("The cropped-find benchmark needs a visible match for its term.");
+        Console.WriteLine($"FIND_REFERENCE crop={from + 1}..{to} rows={doc.RowCount} term={term} first={expected + 1}");
+        var query = new FindQuery(term, false, false);
+        using var process = Process.GetCurrentProcess();
+        long wholeMatches = -1;
+        for (int repeat = 0; repeat < repeats; repeat++)
+        {
+            doc.DropSearch();
+            long allocated = GC.GetTotalAllocatedBytes(precise: true);
+            double processor = process.TotalProcessorTime.TotalMilliseconds;
+            var clock = Stopwatch.StartNew();
+            long found = doc.FindNextAsync(query, 0, true).WaitAsync(TimeSpan.FromMilliseconds(settleMs)).GetAwaiter().GetResult();
+            double firstMs = clock.Elapsed.TotalMilliseconds;
+            bool background = !doc.FindComplete;
+            if (found != expected) throw new InvalidOperationException("Find disagrees with the visible-row reference walk.");
+            while (!doc.FindComplete && clock.ElapsedMilliseconds < settleMs) Pump();
+            if (!doc.FindComplete) throw new InvalidOperationException("The whole-file find did not finish.");
+            if (wholeMatches >= 0 && wholeMatches != doc.FindHitCount)
+                throw new InvalidOperationException("The whole-file find cache changed between runs.");
+            wholeMatches = doc.FindHitCount;
+            Console.WriteLine($"CROPPED_FIND run={repeat + 1} first={firstMs:F4}ms whole={clock.Elapsed.TotalMilliseconds:F4}ms "
+                + $"cpu={process.TotalProcessorTime.TotalMilliseconds - processor:F4}ms "
+                + $"bytes={GC.GetTotalAllocatedBytes(precise: true) - allocated} background={background} matches={wholeMatches}");
+        }
+        doc.DropSearch();
+        doc.ClearCrop();
     }
 
     private static void FilterNavigation(MainForm form, FilterCollection filters, int steps, int repeats, int settleMs)

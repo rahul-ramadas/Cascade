@@ -160,6 +160,68 @@ public class DocumentFindTests
         finally { File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task A_cropped_find_returns_its_first_visible_hit_while_the_whole_file_keeps_scanning(bool forward, bool filtered)
+    {
+        const long cropFrom = 10_000, cropTo = 20_000;
+        const string filterText = "ERROR disk full 15";
+        string body = Body(50_000);
+        string path = Harness.TempFile(Encoding.UTF8.GetBytes(body));
+        var query = new FindQuery("ERROR", false, true);
+        var expected = Expected(body, query);
+        var raw = body.Split('\n');
+        var shown = expected.Where(line => !filtered || raw[(int)line].Contains(filterText, StringComparison.OrdinalIgnoreCase)).ToArray();
+        var inCrop = shown.Where(line => line >= cropFrom && line < cropTo).ToArray();
+        try
+        {
+            using var release = new ManualResetEventSlim();
+            using var outside = new ManualResetEventSlim();
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            if (filtered)
+            {
+                doc.Filters.Add(new Filter { Enabled = true, Match = { Text = filterText } });
+                doc.Filters.ShowOnlyFilteredLines = true;
+                doc.ApplyFilters();
+                Assert.True(SpinWait.SpinUntil(() => doc.IsFilterIdle, TimeSpan.FromSeconds(5)));
+            }
+            Assert.True(doc.SetCrop(cropFrom, cropTo));
+            int blocks = 0;
+            doc.FindCheckpointForTesting = from =>
+            {
+                Interlocked.Increment(ref blocks);
+                if (from >= cropFrom && from < cropTo) return;
+                outside.Set();
+                release.Wait();
+            };
+            try
+            {
+                long start = forward ? 0 : doc.CompletedLineCount - 1;
+                var pending = doc.FindNextAsync(query, start, forward, CancellationToken.None);
+                Assert.True(outside.Wait(TimeSpan.FromSeconds(5)), "No outside-crop scan reached the gate.");
+                Assert.Equal(forward ? inCrop[0] : inCrop[^1], await pending.WaitAsync(TimeSpan.FromSeconds(5)));
+                Assert.False(doc.FindComplete);
+            }
+            finally { release.Set(); }
+
+            Assert.True(SpinWait.SpinUntil(() => doc.FindComplete, TimeSpan.FromSeconds(5)));
+            Assert.Equal(expected.Count, doc.FindHitCount);
+            int scanned = Volatile.Read(ref blocks);
+            doc.ClearCrop();
+            var uncropped = doc.FindNextAsync(query, forward ? 0 : doc.CompletedLineCount - 1,
+                                              forward, CancellationToken.None);
+            Assert.True(uncropped.IsCompletedSuccessfully);
+            Assert.Equal(forward ? shown[0] : shown[^1], await uncropped);
+            Assert.Equal(scanned, Volatile.Read(ref blocks));
+        }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public async Task Changing_the_filters_does_not_make_it_sweep_again()
     {

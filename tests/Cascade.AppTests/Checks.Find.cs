@@ -878,6 +878,85 @@ internal static partial class Checks
         }
     }
 
+    internal static bool RunCroppedFindChecks()
+    {
+        const long cropFrom = 10_000, cropTo = 20_000;
+        string log = Path.Combine(Path.GetTempPath(), "cascade_crop_find_" + Guid.NewGuid().ToString("N") + ".log");
+        var lines = Enumerable.Range(0, 50_000)
+            .Select(line => $"{(line % 5 == 0 ? "shown" : "hidden")} device line {line}").ToArray();
+        File.WriteAllLines(log, lines);
+        long expected = Enumerable.Range((int)cropFrom, (int)(cropTo - cropFrom))
+            .First(line => lines[line].StartsWith("shown", StringComparison.Ordinal)
+                           && lines[line].Contains("device", StringComparison.OrdinalIgnoreCase));
+        using var releaseFirst = new ManualResetEventSlim();
+        using var releaseRest = new ManualResetEventSlim();
+        using var entered = new ManualResetEventSlim();
+        using var form = new MainForm(new AppSettings(), new MachineState(), []) { NoSavePrompt = true, Opacity = 0 };
+        var previous = SynchronizationContext.Current;
+        try
+        {
+            form.Show();
+            form.OpenForTesting(log);
+            var doc = form.DocForTesting;
+            doc.WaitForIndex();
+            bool ok = Check("the cropped-find log is fully indexed", doc.IsIndexComplete);
+            doc.Filters.Add(new Filter { Enabled = true, Match = { Text = "shown" } });
+            doc.Filters.ShowOnlyFilteredLines = true;
+            doc.ApplyFilters();
+            ok &= Check("the visibility filter has settled", Wait(() => doc.IsFilterIdle));
+            var grid = form.GridForTesting;
+            grid.SelectLinesForTesting(cropFrom, cropTo - 1);
+            ok &= Check("the crop shortcut is handled", form.PressCmdKeyForTesting(Keys.Control | Keys.OemOpenBrackets));
+            ok &= Check("cropping leaves the right bounds and no caret", doc.Crop == (cropFrom, cropTo) && grid.CaretLine == -1);
+            ok &= Check("Ctrl-F opens the find bar", form.PressCmdKeyForTesting(Keys.Control | Keys.F) && form.FindBarIsOpenForTesting);
+            var bar = form.FindBarForTesting;
+            bar.SetTerm("device");
+            int blocks = 0;
+            doc.FindCheckpointForTesting = from =>
+            {
+                Interlocked.Increment(ref blocks);
+                entered.Set();
+                (from == cropFrom ? releaseFirst : releaseRest).Wait();
+            };
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+            bar.EnterForTesting();
+            ok &= Check("Enter starts the scan", entered.Wait(TimeSpan.FromSeconds(5)));
+            ok &= Check("the pending navigation shows its busy state", bar.SearchingForTesting() && doc.IsFindRunning);
+            ok &= Check("no result is selected before its block is published", grid.CaretLine == -1);
+            releaseFirst.Set();
+            ok &= Check("the UI goes to the first visible match as its block arrives", Wait(() => grid.CaretLine == expected));
+            ok &= Check("the rest of the file is still being scanned", !doc.FindComplete);
+            ok &= Check("navigation clears its busy state without waiting for that scan", !bar.SearchingForTesting() && !doc.IsFindRunning);
+            releaseRest.Set();
+            ok &= Check("the background scan continues to completion", Wait(() => doc.FindComplete));
+            ok &= Check("it caches every whole-file match", doc.FindHitCount == lines.LongCount(line => line.Contains("device", StringComparison.OrdinalIgnoreCase)));
+            int scanned = Volatile.Read(ref blocks);
+            ok &= Check("the crop can be removed", form.PressCmdKeyForTesting(Keys.Control | Keys.OemCloseBrackets) && doc.Crop is null);
+            ok &= Check("uncropping exposes the cached results without scanning again",
+                doc.FindTally(grid.CaretLine) is { Complete: true } tally
+                && tally.VisibleLines == lines.LongCount(line => line.StartsWith("shown", StringComparison.Ordinal))
+                && Volatile.Read(ref blocks) == scanned);
+            return ok;
+        }
+        finally
+        {
+            releaseFirst.Set();
+            releaseRest.Set();
+            form.CloseFindForTesting();
+            form.Close();
+            Pump();
+            SynchronizationContext.SetSynchronizationContext(previous);
+            File.Delete(log);
+        }
+
+        static bool Wait(Func<bool> ready)
+        {
+            var watch = Stopwatch.StartNew();
+            while (!ready() && watch.ElapsedMilliseconds < 5000) Pump();
+            return ready();
+        }
+    }
+
     /// <summary>Asking to find something with part of a line picked out means "find that". Whole lines do
     /// not: selecting them is how you copy or mark them, and a line's worth of log is no kind of term.</summary>
     internal static bool RunFindSeedChecks()
