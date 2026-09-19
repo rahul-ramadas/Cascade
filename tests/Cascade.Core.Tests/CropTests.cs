@@ -177,6 +177,10 @@ public class CropTests
             long whole = doc.MatchCountFor(f);
             Assert.Equal(Expected(doc, 0, Lines, "ERROR").Count, whole);
 
+            var matches = doc.MatchSetFor(f);
+            Assert.NotNull(matches);
+            int scans = 0;
+            matches.RangeCountedForTesting = () => Interlocked.Increment(ref scans);
             doc.SetCrop(5_000, 6_000);
             long inCrop = doc.MatchCountFor(f, out bool final);
             Assert.True(final);
@@ -184,6 +188,22 @@ public class CropTests
             Assert.True(inCrop < whole);
             // The comparison the reader is offered: what it matches here, against the file it came from.
             Assert.Equal(whole, doc.WholeFileMatchCountFor(f));
+            for (int repeat = 0; repeat < 20; repeat++) Assert.Equal(inCrop, doc.MatchCountFor(f));
+            Assert.Equal(1, scans);
+
+            var ranges = new[] { (From: 1_111L, To: 9_731L), (From: 3_001L, To: 3_077L) };
+            var expected = ranges.Select(range => (long)Expected(doc, range.From, range.To, "ERROR").Count).ToArray();
+            for (int index = 0; index < ranges.Length; index++)
+            {
+                doc.SetCrop(ranges[index].From, ranges[index].To);
+                Assert.Equal(expected[index], doc.MatchCountFor(f));
+            }
+            Assert.Equal(3, scans);
+            Parallel.For(0, 200, iteration =>
+            {
+                int index = iteration % ranges.Length;
+                Assert.Equal(expected[index], matches.CachedCountInRange(ranges[index].From, ranges[index].To));
+            });
         }
         finally { File.Delete(path); }
     }

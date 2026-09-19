@@ -32,18 +32,20 @@ public sealed class VisibleLineSet
     /// block taken from exactly those bits. One reference, so a reader can never pair one with the other's.</summary>
     private sealed class Index
     {
-        public static readonly Index Empty = new([], new long[1], 0, 0);
+        public static readonly Index Empty = new([], new long[1], 0, 0, 0);
         public readonly long[][] Pages;
         public readonly long[] Cumulative; // Cumulative[b] = visible lines before block b; last entry = Total
         public readonly long Total;
         public readonly long Lines;
+        public readonly long Revision;
 
-        public Index(long[][] pages, long[] cumulative, long total, long lines)
+        public Index(long[][] pages, long[] cumulative, long total, long lines, long revision)
         {
             Pages = pages;
             Cumulative = cumulative;
             Total = total;
             Lines = lines;
+            Revision = revision;
         }
     }
 
@@ -53,6 +55,8 @@ public sealed class VisibleLineSet
     private int _blocks;                    // writer-only: rank blocks covering _lines
     private long[] _cum = new long[1];      // writer-only running cumulative (_blocks + 1 entries)
     private Index _index = Index.Empty;
+    private long _revision;
+    internal Action? BeforeSparseJumpForTesting;
 
     /// <summary>Number of visible lines in the last published snapshot.</summary>
     public long Count => Volatile.Read(ref _index).Total;
@@ -96,6 +100,7 @@ public sealed class VisibleLineSet
     public void ApplyRange(long start, ReadOnlySpan<bool> visible)
     {
         if (start < 0 || visible.Length == 0) return;
+        Interlocked.Increment(ref _revision);
         long end = start + visible.Length;
         EnsureLines(end);
 
@@ -187,7 +192,7 @@ public sealed class VisibleLineSet
     {
         var cum = new long[_blocks + 1];
         Array.Copy(_cum, cum, _blocks + 1);
-        Volatile.Write(ref _index, new Index(_pages, cum, _cum[_blocks], _lines));
+        Volatile.Write(ref _index, new Index(_pages, cum, _cum[_blocks], _lines, Volatile.Read(ref _revision)));
     }
 
     private void SetWord(long word, long value) => _pages[(int)(word / PageWords)][(int)(word % PageWords)] = value;
@@ -346,7 +351,7 @@ public sealed class VisibleLineSet
     /// <summary>Walks set bits forward from <paramref name="firstRow"/> — one select, then a linear scan, so a
     /// whole screen costs about as much as a single lookup. <paramref name="limit"/> caps how many rows may be
     /// taken, which is what stops a crop's last screen running past its end.</summary>
-    private static int Fill(Index idx, long[][] pages, long firstRow, Span<long> lines, long limit)
+    private int Fill(Index idx, long[][] pages, long firstRow, Span<long> lines, long limit)
     {
         if (idx.Total <= 0 || lines.Length == 0 || limit <= 0) return 0;
         firstRow = Math.Max(0, firstRow);
@@ -364,9 +369,23 @@ public sealed class VisibleLineSet
 
         while (n < room)
         {
+            int emptyWords = 0;
             while (w == 0)
             {
                 if (++word >= lastWord) return n;
+                if (++emptyWords == BlockWords && idx.Revision == Volatile.Read(ref _revision))
+                {
+                    long nextWord = firstRow + n < idx.Total
+                        ? SelectLine(idx, pages, firstRow + n) / WordBits
+                        : lastWord;
+                    BeforeSparseJumpForTesting?.Invoke();
+                    if (idx.Revision == Volatile.Read(ref _revision))
+                    {
+                        if (nextWord >= lastWord) return n;
+                        word = Math.Max(word, nextWord);
+                    }
+                    emptyWords = 0;
+                }
                 w = (ulong)GetWord(pages, word);
             }
             int next = BitOperations.TrailingZeroCount(w);

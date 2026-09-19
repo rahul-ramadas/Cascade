@@ -124,7 +124,7 @@ public class FindTallyTests
     }
 
     [Fact]
-    public void Visibility_is_asked_about_a_word_at_a_time()
+    public async Task Visibility_is_asked_about_a_word_at_a_time()
     {
         // The status bar asks for this on every caret move, so it must scale with the file rather than with
         // how much matched. Asking line by line cost 160 ms per keystroke on a term matching twenty million
@@ -146,6 +146,41 @@ public class FindTallyTests
         // One pass for the split and at most one more to attribute the repeats, plus a chunk of slack.
         long words = (lines + 63) / 64;
         Assert.True(asked <= words * 2 + 512, $"asked for {asked:N0} words of a {words:N0}-word file");
+
+        foreach (bool inverse in new[] { false, true })
+        {
+            bool Visible(long line) => ((line >> 6) % 2 == 0) != inverse;
+            var referenceReader = Shown(Visible);
+            VisibleWordReader measuredReader = (from, into) =>
+            {
+                asked += into.Length;
+                referenceReader(from, into);
+            };
+            var view = new object();
+            foreach (var (from, to) in new[] { (0L, lines), (77L, lines - 39) })
+            {
+                Assert.Equal(search.Count(referenceReader, from, to, -1),
+                             search.Count(measuredReader, from, to, -1, view));
+                foreach (long caret in new[] { from, from + 100, to - 2, to })
+                {
+                    var expected = search.Count(referenceReader, from, to, caret);
+                    asked = 0;
+                    Assert.Equal(expected, search.Count(measuredReader, from, to, caret, view));
+                    Assert.InRange(asked, 0, 130);
+                    foreach (bool forward in new[] { false, true })
+                    {
+                        long expectedLine = -1;
+                        long start = forward ? Math.Max(caret, from) : Math.Min(caret, to - 1);
+                        for (long line = start; line >= from && line < to; line += forward ? 1 : -1)
+                            if (line % 2 == 0 && Visible(line)) { expectedLine = line; break; }
+                        asked = 0;
+                        Assert.Equal(expectedLine, await search.NextVisibleAsync(caret, forward,
+                            () => new FindScope(measuredReader, from, to, view), CancellationToken.None));
+                        Assert.InRange(asked, 0, 192);
+                    }
+                }
+            }
+        }
     }
 
     [Fact]

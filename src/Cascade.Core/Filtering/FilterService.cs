@@ -54,6 +54,37 @@ public sealed class FilterService : IDisposable
         public ulong[] Deep = Array.Empty<ulong>();
     }
 
+    private sealed class WorkerPool(FilterService service, FilterSnapshot snapshot) : IDisposable
+    {
+        private readonly ConcurrentBag<Worker> _ready = new();
+        private readonly ConcurrentBag<Worker> _owned = new();
+
+        public Worker Rent(int deepWords)
+        {
+            if (!_ready.TryTake(out var worker))
+            {
+                worker = new Worker
+                {
+                    Reader = new LineReader(service._src, service._encoding),
+                    Counts = new long[snapshot.FilterCount],
+                    Deep = deepWords == 0 ? Array.Empty<ulong>() : new ulong[deepWords]
+                };
+                _owned.Add(worker);
+            }
+            else Interlocked.Increment(ref service._workerReuses);
+            Array.Clear(worker.Counts);
+            worker.Context = snapshot.GetThreadContext();
+            return worker;
+        }
+
+        public void Return(Worker worker) => _ready.Add(worker);
+
+        public void Dispose()
+        {
+            foreach (var worker in _owned) worker.Reader.ReleaseScratch();
+        }
+    }
+
     private const int Block = 1 << 15; // 32,768 lines per ordered block
 
     /// <summary>How many 64-line groups one parallel step takes. Groups are the unit of ownership - each one
@@ -100,6 +131,8 @@ public sealed class FilterService : IDisposable
     private long _processed;
     private long _genId;
     private long _linesScanned;
+    private long _workerReuses;
+    internal long WorkerReusesForTesting => Volatile.Read(ref _workerReuses);
     private CancellationTokenSource _cts = new();
     private volatile bool _disposed;
 
@@ -177,7 +210,15 @@ public sealed class FilterService : IDisposable
     /// contains. The key is the whole predicate chain, so a filter that has been deleted or edited can never
     /// be asked about again; disabled filters keep their results, which is what makes switching one back on
     /// instant. Called on every filter change - including the one that leaves none.</summary>
-    public void RetainCachedResults(FilterSnapshot snapshot) => _cache.RetainOnly(snapshot.CacheKeys());
+    public void RetainCachedResults(FilterSnapshot snapshot)
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _cts.Cancel();
+            _cache.RetainOnly(snapshot.CacheKeys());
+        }
+    }
 
     internal void ForgetStaleMarkerResults(FilterSnapshot snapshot)
     {
@@ -431,7 +472,7 @@ public sealed class FilterService : IDisposable
             // that, and overwrote it a few milliseconds later with the real answer - and a frame drawn in
             // between was drawn from a set nothing was ever going to show, which threw the viewport clear
             // across the file for one frame before it settled.
-            if (TryApplyFromCache(gen))
+            if (TryApplyFromCache(gen, ct))
             {
                 lock (_lock)
                 {
@@ -450,6 +491,7 @@ public sealed class FilterService : IDisposable
             _visible.Publish();
         }
 
+        using var workers = new WorkerPool(this, gen.Snapshot);
         while (!ct.IsCancellationRequested)
         {
             long from;
@@ -468,7 +510,7 @@ public sealed class FilterService : IDisposable
 
             if (from >= to)
             {
-                StoreCacheIfComplete(gen, from);
+                StoreCacheIfComplete(gen, from, ct);
                 return; // caught up; wait for next Notify
             }
 
@@ -477,7 +519,7 @@ public sealed class FilterService : IDisposable
             for (long start = from; start < to && !ct.IsCancellationRequested; start += Block)
             {
                 int len = (int)Math.Min(Block, to - start);
-                ProcessBlock(gen, start, len, ct);
+                ProcessBlock(gen, workers, start, len, ct);
 
                 lock (_lock)
                 {
@@ -501,7 +543,7 @@ public sealed class FilterService : IDisposable
 
     /// <summary>Rebuilds the visible set purely from cached per-filter results. Only possible once indexing is
     /// finished and every participating filter has a cached set covering the whole file.</summary>
-    private bool TryApplyFromCache(Generation gen)
+    private bool TryApplyFromCache(Generation gen, CancellationToken ct)
     {
         if (SkipCacheForTesting) return false;
         if (!_indexComplete()) return false;
@@ -509,15 +551,11 @@ public sealed class FilterService : IDisposable
         if (lines <= 0) return false;
         // A marker predicate's answer is the marks themselves, which are already in hand - so those sets are
         // made here rather than found, and the combine below then has every term it needs.
-        SeedMarkerTailedSets(gen.Snapshot, lines);
+        SeedMarkerTailedSets(gen.Snapshot, lines, ct);
         if (!gen.Snapshot.TryGetCacheableFilters(out var filters) || filters.Count == 0) return false;
 
         var sets = new FilterMatchCache.MatchSet[filters.Count];
-        for (int i = 0; i < filters.Count; i++)
-        {
-            if (!_cache.TryGet(filters[i].Key, lines, out var set)) return false;
-            sets[i] = set;
-        }
+        if (!ReadOrCompleteCachedSets(gen.Snapshot, filters, sets, lines, ct, out bool evaluated)) return false;
 
         var counts = new long[gen.Counts.Length];
         for (int i = 0; i < filters.Count; i++)
@@ -531,6 +569,7 @@ public sealed class FilterService : IDisposable
         else
             CombineByVeto(gen.Snapshot, filters, sets, lines, shown);
 
+        ct.ThrowIfCancellationRequested();
         _visible.ReplaceAll(shown, lines);
         _visible.Publish();
         lock (gen.CountsSync) Array.Copy(counts, gen.Counts, counts.Length);
@@ -540,8 +579,65 @@ public sealed class FilterService : IDisposable
             gen.CacheBuild = null;    // and nothing for a find to read - the cache has it all
             gen.CacheFilters = null;
         }
-        CacheHits++;
+        if (!evaluated) CacheHits++;
         return true;
+    }
+
+    internal Action<CancellationToken>? BeforeDerivedStoreForTesting;
+
+    private bool ReadOrCompleteCachedSets(FilterSnapshot snapshot, List<FilterSnapshot.CacheableFilter> filters,
+        FilterMatchCache.MatchSet[] sets, long lines, CancellationToken token, out bool evaluated)
+    {
+        evaluated = false;
+        List<(int Position, FilterMatchCache.MatchSet Parent)>? missing = null;
+        long candidates = 0;
+        for (int index = 0; index < filters.Count; index++)
+        {
+            if (_cache.TryGet(filters[index].Key, lines, out var known)) { sets[index] = known; continue; }
+            if (!snapshot.TryGetLeafParentKey(filters[index].Index, out string parentKey)
+                || !_cache.TryGet(parentKey, lines, out var parent)
+                || parent.Matches > lines / 128) return false;
+            candidates += parent.Matches;
+            if (candidates > lines / 32) return false;
+            (missing ??= new()).Add((index, parent));
+        }
+        if (missing is null) return true;
+
+        evaluated = true;
+        var reader = new LineReader(_src, _encoding);
+        try
+        {
+            foreach (var (position, parent) in missing)
+            {
+                var filter = filters[position];
+                var builder = new FilterMatchCache.SetBuilder(lines);
+                long line = -1, currentWord = -1;
+                ulong bits = 0;
+                Interlocked.Add(ref _linesScanned, parent.Matches);
+                for (long match = 0; match < parent.Matches; match++)
+                {
+                    if ((match & 63) == 0) token.ThrowIfCancellationRequested();
+                    line = parent._sparse is { } sparse ? sparse[match] : parent.Next(line + 1);
+                    _index.GetRange(line, _fileLength, out long start, out long end);
+                    if (!snapshot.MatchesOwnPredicate(filter.Index, reader.GetChars(start, end), line, _markers)) continue;
+                    long word = line >> 6;
+                    if (word != currentWord)
+                    {
+                        if (bits != 0) builder.AddWord(currentWord, bits);
+                        currentWord = word;
+                        bits = 0;
+                    }
+                    bits |= 1UL << (int)(line & 63);
+                }
+                if (bits != 0) builder.AddWord(currentWord, bits);
+                var result = builder.Build(lines);
+                BeforeDerivedStoreForTesting?.Invoke(token);
+                _cache.Store(filter.Key, result, token);
+                sets[position] = result;
+            }
+            return true;
+        }
+        finally { reader.ReleaseScratch(); }
     }
 
     /// <summary>Combines cached sets the way <see cref="FilterPrecedence.ExcludesWin"/> reads: the union of
@@ -671,7 +767,7 @@ public sealed class FilterService : IDisposable
     }
 
     /// <summary>Stores the accumulated results once the pass has covered the whole file.</summary>
-    private void StoreCacheIfComplete(Generation gen, long processed)
+    private void StoreCacheIfComplete(Generation gen, long processed, CancellationToken ct)
     {
         if (gen.CacheStored || gen.CacheBuild is null || gen.CacheFilters is null) return;
         if (!_indexComplete() || processed < _completedCount()) return;
@@ -682,7 +778,7 @@ public sealed class FilterService : IDisposable
             foreach (var filter in gen.CacheFilters)
             {
                 var builder = gen.CacheBuild[filter.Index];
-                if (builder is not null) _cache.Store(filter.Key, builder.Build(processed));
+                if (builder is not null) _cache.Store(filter.Key, builder.Build(processed), ct);
             }
             gen.CacheBuild = null;
             gen.CacheFilters = null;
@@ -690,12 +786,12 @@ public sealed class FilterService : IDisposable
         }
     }
 
-    private void ProcessBlock(Generation gen, long start, int len, CancellationToken ct)
+    private void ProcessBlock(Generation gen, WorkerPool workers, long start, int len, CancellationToken ct)
     {
         bool[] shown = ArrayPool<bool>.Shared.Rent(len);
         try
         {
-            long[] blockCounts = ScanBlock(gen.Snapshot, start, len, shown, gen.CacheBuild, gen.CacheFilters,
+            long[] blockCounts = ScanBlock(gen.Snapshot, workers, start, len, shown, gen.CacheBuild, gen.CacheFilters,
                                            shareBuilders: true, ct);
 
             // Update the visible set IN PLACE for this block: lines that still match keep their place, lines
@@ -715,7 +811,7 @@ public sealed class FilterService : IDisposable
     /// match counts. Shared by the live filtering pass and by <see cref="PrimeCache"/>, so a find computes
     /// results exactly the same way enabling the filter would. <paramref name="shareBuilders"/> publishes the
     /// results under the lock, which the pass needs because a find may be reading them as they are written.</summary>
-    private long[] ScanBlock(FilterSnapshot snapshot, long start, int len, bool[]? shown,
+    private long[] ScanBlock(FilterSnapshot snapshot, WorkerPool workers, long start, int len, bool[]? shown,
         FilterMatchCache.SetBuilder?[]? builders, List<FilterSnapshot.CacheableFilter>? cacheFilters,
         bool shareBuilders, CancellationToken ct)
     {
@@ -749,13 +845,7 @@ public sealed class FilterService : IDisposable
             var ranges = Partitioner.Create(0, groups, GroupsPerRange);
 
             Parallel.ForEach(ranges, options,
-                () => new Worker
-                {
-                    Reader = new LineReader(_src, _encoding),
-                    Counts = new long[snapshot.FilterCount],
-                    Context = snapshot.GetThreadContext(),
-                    Deep = deepWords == 0 ? Array.Empty<ulong>() : new ulong[deepWords]
-                },
+                () => workers.Rent(deepWords),
                 (range, _, w) =>
                 {
                     for (int g = range.Item1; g < range.Item2; g++)
@@ -795,7 +885,11 @@ public sealed class FilterService : IDisposable
                     }
                     return w;
                 },
-                w => { lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i]; });
+                w =>
+                {
+                    lock (mergeLock) for (int i = 0; i < blockCounts.Length; i++) blockCounts[i] += w.Counts[i];
+                    workers.Return(w);
+                });
 
             // Hand this block's per-filter results to the sets being built.
             if (deepBits is not null && builders is not null && cacheFilters is not null)
@@ -854,11 +948,12 @@ public sealed class FilterService : IDisposable
         var builders = new FilterMatchCache.SetBuilder?[snapshot.FilterCount];
         foreach (var f in filters) builders[f.Index] = new FilterMatchCache.SetBuilder(lines);
 
+        using var workers = new WorkerPool(this, snapshot);
         for (long start = 0; start < lines; start += Block)
         {
             ct.ThrowIfCancellationRequested();
             int len = (int)Math.Min(Block, lines - start);
-            ScanBlock(snapshot, start, len, null, builders, filters, shareBuilders: false, ct);
+            ScanBlock(snapshot, workers, start, len, null, builders, filters, shareBuilders: false, ct);
             onProgress?.Invoke((start + len) / (double)lines);
             AfterPrimeBlockForTesting?.Invoke(start + len);
         }

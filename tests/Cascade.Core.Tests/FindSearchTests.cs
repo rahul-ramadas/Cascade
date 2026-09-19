@@ -43,8 +43,27 @@ public class FindSearchTests
         return s;
     }
 
-    [Fact]
-    public async Task It_walks_every_match_forwards_and_backwards()
+    private static Task<long> Next(FindSearch search, long from, bool forward, bool wordwise,
+                                   Func<long, bool>? visible = null, CancellationToken cancellationToken = default)
+    {
+        if (!wordwise) return search.NextAsync(from, forward, visible, cancellationToken);
+        VisibleWordReader? reader = visible is null ? null : (first, words) =>
+        {
+            for (int index = 0; index < words.Length; index++)
+            {
+                ulong bits = 0;
+                for (int bit = 0; bit < 64; bit++)
+                    if (visible(((first + index) << 6) + bit)) bits |= 1UL << bit;
+                words[index] = bits;
+            }
+        };
+        return search.NextVisibleAsync(from, forward, () => new FindScope(reader, 0, long.MaxValue), cancellationToken);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task It_walks_every_match_forwards_and_backwards(bool wordwise)
     {
         var fake = new Fake(l => l % 7 == 0);
         using var search = Started(10_000, 5_000, fake);
@@ -52,7 +71,7 @@ public class FindSearchTests
         var forward = new List<long>();
         for (long at = 0; ;)
         {
-            long hit = await search.NextAsync(at, true, null, CancellationToken.None);
+            long hit = await Next(search, at, true, wordwise);
             if (hit < 0) break;
             forward.Add(hit);
             at = hit + 1;
@@ -62,7 +81,7 @@ public class FindSearchTests
         var backward = new List<long>();
         for (long at = 9_999; ;)
         {
-            long hit = await search.NextAsync(at, false, null, CancellationToken.None);
+            long hit = await Next(search, at, false, wordwise);
             if (hit < 0) break;
             backward.Add(hit);
             at = hit - 1;
@@ -113,14 +132,16 @@ public class FindSearchTests
         Assert.True(search.Progress < 0.5);
     }
 
-    [Fact]
-    public async Task Asking_past_what_has_been_examined_waits_for_it_rather_than_starting_again()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Asking_past_what_has_been_examined_waits_for_it_rather_than_starting_again(bool wordwise)
     {
         var gate = new SemaphoreSlim(1);          // only the first forward block may run
         var fake = new Fake(l => l == 900_000, gate);
         using var search = Started(1_000_000, 0, fake);
 
-        var pending = search.NextAsync(0, true, null, CancellationToken.None);
+        var pending = Next(search, 0, true, wordwise);
         Assert.False(pending.IsCompleted);        // line 900,000 is far beyond the first block
 
         gate.Release(int.MaxValue - 1);           // let the sweep run on
@@ -128,15 +149,17 @@ public class FindSearchTests
         Assert.Equal(1, fake.Blocks > 1 ? 1 : 0); // it waited for the sweep instead of scanning on its own
     }
 
-    [Fact]
-    public async Task No_more_matches_is_only_reported_once_that_direction_is_fully_examined()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task No_more_matches_is_only_reported_once_that_direction_is_fully_examined(bool wordwise)
     {
         // Nothing matches at all, so the only correct answer is -1 - but not until the whole file is read.
         var gate = new SemaphoreSlim(1);
         var fake = new Fake(_ => false, gate);
         using var search = Started(1_000_000, 500_000, fake);
 
-        var pending = search.NextAsync(500_000, true, null, CancellationToken.None);
+        var pending = Next(search, 500_000, true, wordwise);
         Assert.False(pending.IsCompleted);        // must not claim "no more" while most of the file is unread
 
         gate.Release(int.MaxValue - 1);
@@ -187,8 +210,10 @@ public class FindSearchTests
         Assert.Equal(10, await pending);
     }
 
-    [Fact]
-    public async Task A_result_the_view_is_hiding_is_stepped_over()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_result_the_view_is_hiding_is_stepped_over(bool wordwise)
     {
         var fake = new Fake(l => l % 10 == 0);
         using var search = Started(1_000, 0, fake);
@@ -199,13 +224,32 @@ public class FindSearchTests
         var seen = new List<long>();
         for (long at = 0; ;)
         {
-            long hit = await search.NextAsync(at, true, Visible, CancellationToken.None);
+            long hit = await Next(search, at, true, wordwise, Visible);
             if (hit < 0) break;
             seen.Add(hit);
             at = hit + 1;
         }
         Assert.All(seen, l => Assert.Equal(0, l % 20));
         Assert.Equal(50, seen.Count);
+    }
+
+    [Fact]
+    public async Task A_view_changed_while_building_the_rank_index_is_recaptured_before_answering()
+    {
+        var fake = new Fake(line => line % 10 == 0);
+        using var search = Started(1000, 0, fake);
+        Assert.True(search.WaitForCompletion());
+        FindScope current = default;
+        var replacement = new FindScope(null, 201, 299, new object());
+        VisibleWordReader changing = (_, words) =>
+        {
+            words.Fill(ulong.MaxValue);
+            current = replacement;
+        };
+        current = new FindScope(changing, 0, 1000, new object());
+        long expected = Enumerable.Range(201, 98).First(line => line % 10 == 0);
+        Assert.Equal(expected, await search.NextVisibleAsync(0, true, () => current, CancellationToken.None));
+        Assert.Equal(1000, fake.LinesExamined);
     }
 
     [Fact]
@@ -228,21 +272,23 @@ public class FindSearchTests
         Assert.Equal(examined, fake.LinesExamined);   // never re-read the file for any of that
     }
 
-    [Fact]
-    public async Task A_wait_can_be_given_up_on_without_stopping_the_search()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_wait_can_be_given_up_on_without_stopping_the_search(bool wordwise)
     {
         var gate = new SemaphoreSlim(1);
         var fake = new Fake(l => l == 999_999, gate);
         using var search = Started(1_000_000, 0, fake);
 
         using var cts = new CancellationTokenSource();
-        var pending = search.NextAsync(0, true, null, cts.Token);
+        var pending = Next(search, 0, true, wordwise, cancellationToken: cts.Token);
         cts.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
 
         // The sweep is unharmed: ask again and it still answers.
         gate.Release(int.MaxValue - 1);
-        Assert.Equal(999_999, await search.NextAsync(0, true, null, CancellationToken.None));
+        Assert.Equal(999_999, await Next(search, 0, true, wordwise));
     }
 
     [Fact]

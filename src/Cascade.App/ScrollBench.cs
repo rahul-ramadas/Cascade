@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Cascade.Core.Columns;
 using Cascade.Core.Document;
+using Cascade.Core.Filtering;
 using Cascade.Core.Find;
 using Cascade.Core.Model;
 using Cascade.Core.Persistence;
@@ -54,7 +55,8 @@ internal static class ScrollBench
         int rate = IntArg(args, "--rate=", 0);
         string only = Arg(args, "--only=") ?? "";
         if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase)
-            || only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
+            || only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase)
+            || only.Equals("operations", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
         // A drag over ground the minimap has never been over, which is what the first pass down a file is.
@@ -133,6 +135,12 @@ internal static class ScrollBench
             Console.WriteLine($"a line is {sample.Length} characters and {probe.DrawnWidthForTesting(sample, 0)}px wide, " +
                               $"in {probe.Bounds.Width - probe.GutterWidthForTesting - probe.MapWidthForTesting - probe.ScrollBarWidthForTesting}px of room");
             Console.WriteLine();
+
+            if (only.Equals("operations", StringComparison.OrdinalIgnoreCase))
+            {
+                Operations(form, filterSet(), Arg(args, "--term=") ?? "request", steps, repeats, settleMs);
+                return 0;
+            }
 
             if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase))
             {
@@ -449,6 +457,206 @@ internal static class ScrollBench
             clock.Stop();
             double cpu = (process.TotalProcessorTime.Ticks - cpu0) / (double)TimeSpan.TicksPerMillisecond / times;
             Console.WriteLine($"      {what,-42} {clock.Elapsed.TotalMilliseconds / times,6:F2} ms wall | {cpu,6:F2} ms cpu");
+        }
+    }
+
+    private static void Operations(MainForm form, FilterCollection filters, string term, int steps, int repeats, int settleMs)
+    {
+        var doc = form.DocForTesting;
+        var grid = form.GridForTesting;
+        using var process = Process.GetCurrentProcess();
+        long lines = doc.CompletedLineCount;
+        if (!doc.IsIndexComplete || lines < 512) throw new InvalidOperationException("Operations needs an indexed file with at least 512 lines.");
+
+        foreach (long stride in new[] { 3L, Math.Max(4, lines / 128) })
+        {
+            var words = new ulong[(lines + 63) / 64];
+            for (long line = 0; line < lines; line += stride) words[line >> 6] |= 1UL << (int)(line & 63);
+            var visible = new VisibleLineSet();
+            visible.ReplaceAll(words, lines);
+            visible.Publish();
+            var window = new long[64];
+            long first = 0;
+            Measure($"rows-stride-{stride}", Math.Max(100, steps), () =>
+            {
+                first = (first + 1) % (visible.Count - window.Length);
+                int count = visible.LinesForRows(first, window);
+                if (count != window.Length) throw new InvalidOperationException("A row window was incomplete.");
+                for (int offset = 0; offset < count; offset++)
+                    if (window[offset] != (first + offset) * stride) throw new InvalidOperationException("A row window disagrees with its reference.");
+            });
+        }
+
+        filters.ShowOnlyFilteredLines = true;
+        doc.SetFilters(filters);
+        Until(() => doc.IsFilterIdle);
+        long expectedRows = doc.RowCount;
+        doc.SkipFilterCacheForTesting = true;
+        try
+        {
+            Measure("filter-pass", 1, () =>
+            {
+                long scanned = doc.FilterLinesScanned;
+                doc.ApplyFilters();
+                Until(() => doc.IsFilterIdle);
+                if (doc.FilterLinesScanned - scanned != lines || doc.RowCount != expectedRows)
+                    throw new InvalidOperationException("The forced pass did not scan exactly once or changed its answer.");
+            });
+        }
+        finally { doc.SkipFilterCacheForTesting = false; }
+
+        var counted = filters.EnumerateDepthFirst().MaxBy(filter => doc.MatchCountFor(filter));
+        if (counted is not null && doc.MatchSetFor(counted) is { } matches)
+        {
+            long from = lines / 4, to = lines * 3 / 4;
+            long expected = matches.CountInRange(from, to);
+            doc.SetCrop(from, to);
+            _ = doc.MatchCountFor(counted);
+            Measure("crop-count", Math.Max(1000, steps), () =>
+            {
+                if (doc.MatchCountFor(counted) != expected) throw new InvalidOperationException("The crop count changed.");
+            });
+            doc.ClearCrop();
+        }
+
+        long stored = 0;
+        Measure("cache-finalize", 1, () =>
+        {
+            var builder = new FilterMatchCache.SetBuilder(64);
+            for (int word = 0; word < 32; word++) builder.AddWord(word, ulong.MaxValue);
+            var result = builder.Build(Math.Max(lines, 262_144));
+            stored = result.Bytes;
+            if (result.Matches != 2048) throw new InvalidOperationException("Finalizing a cache lost matches.");
+        });
+        Console.WriteLine($"OP_CACHE retained={stored} matches=2048");
+
+        var parent = filters.Roots.Where(filter => filter.Children.Count == 0
+            && doc.MatchSetFor(filter) is { Matches: > 0 } set && set.Matches <= lines / 128)
+            .MaxBy(filter => doc.MatchSetFor(filter)!.Matches);
+        if (parent is null)
+        {
+            for (long line = lines / 4; line < lines / 2; line += Math.Max(256, lines / 1000))
+                doc.Markers.Set(line, 0, true);
+            parent = new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 0 } };
+            filters.Add(parent);
+            doc.ApplyFilters();
+            Until(() => doc.IsFilterIdle);
+        }
+        if (parent is not null)
+        {
+            var candidates = doc.MatchSetFor(parent)!;
+            long expected = 0;
+            for (long line = candidates.Next(0); line >= 0; line = candidates.Next(line + 1))
+                if (doc.GetLineText(line).Contains(term, StringComparison.OrdinalIgnoreCase)) expected++;
+            Measure("leaf-add-remove", 1, () =>
+            {
+                var child = new Filter { Enabled = true, Match = { Text = term } };
+                filters.Add(child, parent);
+                doc.ApplyFilters();
+                Until(() => doc.IsFilterIdle);
+                if (doc.MatchCountFor(child) != expected) throw new InvalidOperationException("The leaf disagrees with its parent reference walk.");
+                filters.Remove(child);
+                doc.ApplyFilters();
+                Until(() => doc.IsFilterIdle);
+            });
+            Console.WriteLine($"OP_LEAF candidates={candidates.Matches} matches={expected}");
+        }
+
+        doc.SetCrop(lines / 2, Math.Min(lines, lines / 2 + 200_000));
+        string export = Path.Combine(Path.GetTempPath(), $"cascade_operations_{Guid.NewGuid():N}.log");
+        try
+        {
+            long expected = doc.RowCount;
+            Measure("export", 1, () => doc.SaveRowsAsync(export, null, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromMilliseconds(settleMs)).GetAwaiter().GetResult());
+            if (File.ReadLines(export).LongCount() != expected) throw new InvalidOperationException("The export lost rows.");
+        }
+        finally { File.Delete(export); }
+
+        doc.ClearCrop();
+        doc.DropSearch();
+        doc.SetFilters(new FilterCollection());
+        var query = new FindQuery(term, false, false);
+        long firstHit = doc.FindNextAsync(query, lines / 4, true)
+            .WaitAsync(TimeSpan.FromMilliseconds(settleMs)).GetAwaiter().GetResult();
+        Until(() => doc.FindComplete);
+        long secondHit = doc.FindNextAsync(query, lines * 3 / 4, true)
+            .WaitAsync(TimeSpan.FromMilliseconds(settleMs)).GetAwaiter().GetResult();
+        if (firstHit < 0 || secondHit <= firstHit) throw new InvalidOperationException("The term needs two separated matches.");
+        doc.Markers.Clear();
+        doc.Markers.Set(firstHit, 0, true);
+        doc.Markers.Set(secondHit, 0, true);
+        var marked = new FilterCollection { ShowOnlyFilteredLines = true };
+        marked.Add(new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 0 } });
+        doc.SetFilters(marked);
+        Until(() => doc.IsFilterIdle);
+        if (doc.RowCount != 2) throw new InvalidOperationException("The navigation fixture must show exactly two matching lines.");
+        _ = doc.FindTally(firstHit);
+        Measure("text-next", Math.Max(100, steps), () =>
+        {
+            if (doc.FindNextAsync(query, firstHit + 1, true).GetAwaiter().GetResult() != secondHit)
+                throw new InvalidOperationException("Find skipped its reference hit.");
+        });
+        Measure("text-tally", Math.Max(1000, steps), () =>
+        {
+            if (doc.FindTally(secondHit) is not { Position: 2, VisibleLines: 2 })
+                throw new InvalidOperationException("The tally disagrees with the visible reference.");
+        });
+
+        form.FilterTreeForTesting.Rebuild();
+        grid.RefreshView();
+        Pump();
+        grid.SelectRowForAccessibility(0);
+        form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+        form.FindBarForTesting.SetTerm(term);
+        var context = new WindowsFormsSynchronizationContext();
+        bool forward = true;
+        Step();
+        Step();
+        Measure("text-ui", Math.Max(2, steps), Step);
+
+        void Step()
+        {
+            long expected = forward ? secondHit : firstHit;
+            var previous = SynchronizationContext.Current;
+            try
+            {
+                SynchronizationContext.SetSynchronizationContext(context);
+                if (!form.PressCmdKeyForTesting(forward ? Keys.F3 : Keys.Shift | Keys.F3))
+                    throw new InvalidOperationException("Find did not handle its navigation key.");
+            }
+            finally { SynchronizationContext.SetSynchronizationContext(previous); }
+            Until(() => !doc.IsFindRunning && grid.CaretLine == expected);
+            Pump();
+            forward = !forward;
+        }
+
+        void Until(Func<bool> done)
+        {
+            var clock = Stopwatch.StartNew();
+            while (!done())
+            {
+                if (clock.ElapsedMilliseconds >= settleMs) throw new TimeoutException("The operations benchmark did not settle.");
+                Pump();
+            }
+        }
+
+        void Measure(string name, int count, Action work)
+        {
+            for (int repeat = 0; repeat < repeats; repeat++)
+            {
+                long allocated = GC.GetTotalAllocatedBytes(precise: true);
+                var cpu = process.TotalProcessorTime;
+                int paints = grid.PaintsForTesting;
+                var clock = Stopwatch.StartNew();
+                for (int iteration = 0; iteration < count; iteration++) work();
+                clock.Stop();
+                if (name == "text-ui" && grid.PaintsForTesting - paints < count)
+                    throw new InvalidOperationException("Find navigation did not repaint every landing.");
+                Console.WriteLine($"OP {name} run={repeat + 1} us={clock.Elapsed.TotalMicroseconds / count:F3} "
+                    + $"cpu-us={(process.TotalProcessorTime - cpu).TotalMicroseconds / count:F3} "
+                    + $"bytes={(GC.GetTotalAllocatedBytes(precise: true) - allocated) / count} paints={grid.PaintsForTesting - paints}");
+            }
         }
     }
 

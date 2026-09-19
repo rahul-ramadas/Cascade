@@ -27,6 +27,16 @@ public sealed class LineReader
     /// <summary>Scratch this reader is holding on to, pooled or not.</summary>
     internal int HeldChars => _buffer.Length + (_large?.Length ?? 0);
 
+    internal void ReleaseScratch()
+    {
+        if (_large is not null)
+        {
+            ArrayPool<char>.Shared.Return(_large);
+            _large = null;
+        }
+        _buffer = Array.Empty<char>();
+    }
+
     public LineReader(MemoryMappedTextSource src, Encoding encoding)
     {
         _src = src;

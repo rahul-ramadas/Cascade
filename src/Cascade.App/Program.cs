@@ -175,6 +175,9 @@ internal static class Program
                             paint order and mark-scale changes, interleaved in one process,
                             because two builds measured apart on a real log disagree by more
                             than the change being looked for.
+                            --only=operations measures sparse rows, filtering, crop counts,
+                            cache storage, leaf edits, export and text navigation through F3.
+                            --term=<text> chooses the term for operations and cropped-find.
                             --file drags through a log of your own instead of the generated
                             one and --filters loads a .cascade file, switching every filter in
                             it on; --settle is how many seconds to let indexing and the first

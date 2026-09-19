@@ -18,13 +18,16 @@ public sealed class FilteredView
     private readonly VisibleLineSet? _set;
     private readonly Func<long>? _identityCount;
     private readonly long _lo, _hiExclusive;   // file lines the crop admits; the whole file when uncropped
+    internal object VisibilityIdentity { get; }
 
-    private FilteredView(VisibleLineSet? set, Func<long>? identityCount, long lo, long hiExclusive)
+    private FilteredView(VisibleLineSet? set, Func<long>? identityCount, long lo, long hiExclusive,
+                         object? visibilityIdentity = null)
     {
         _set = set;
         _identityCount = identityCount;
         _lo = lo;
         _hiExclusive = hiExclusive;
+        VisibilityIdentity = visibilityIdentity ?? this;
     }
 
     public static FilteredView CreateExplicit(VisibleLineSet set) => new(set, null, 0, long.MaxValue);
@@ -47,8 +50,8 @@ public sealed class FilteredView
     public FilteredView Cropped(long lo, long hiExclusive)
     {
         lo = Math.Max(0, lo);
-        if (lo <= 0 && hiExclusive >= long.MaxValue) return new(_set, _identityCount, 0, long.MaxValue);
-        return new(_set, _identityCount, lo, Math.Max(lo, hiExclusive));
+        if (lo <= 0 && hiExclusive >= long.MaxValue) return new(_set, _identityCount, 0, long.MaxValue, VisibilityIdentity);
+        return new(_set, _identityCount, lo, Math.Max(lo, hiExclusive), VisibilityIdentity);
     }
 
     /// <summary>How many rows the underlying view has, crop or no crop - what a crop is a fraction <i>of</i>.

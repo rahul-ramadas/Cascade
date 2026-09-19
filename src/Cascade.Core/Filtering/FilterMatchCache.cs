@@ -32,6 +32,20 @@ public sealed class FilterMatchCache
         internal readonly ulong[]? _dense;   // one bit per line
         internal readonly uint[]? _sparse;   // sorted matching line numbers
         internal readonly int _sparseCount;
+        private sealed record RangeCount(long From, long ToExclusive, long Count);
+        private RangeCount? _rangeCount;
+        internal Action? RangeCountedForTesting;
+
+        internal long CachedCountInRange(long from, long toExclusive)
+        {
+            var cached = Volatile.Read(ref _rangeCount);
+            if (cached is not null && cached.From == from && cached.ToExclusive == toExclusive)
+                return cached.Count;
+            long count = CountInRange(from, toExclusive);
+            RangeCountedForTesting?.Invoke();
+            Volatile.Write(ref _rangeCount, new RangeCount(from, toExclusive, count));
+            return count;
+        }
 
         internal MatchSet(ulong[]? dense, uint[]? sparse, int sparseCount, long covered, long matches, long bytes)
         {
@@ -280,6 +294,21 @@ public sealed class FilterMatchCache
         {
             if (_dense is not null)
             {
+                if (covered <= (long)uint.MaxValue + 1 && _matches <= covered / 128)
+                {
+                    var sparse = new uint[checked((int)_matches)];
+                    int entry = 0;
+                    for (int index = 0; index < _dense.Length; index++)
+                    {
+                        ulong bits = _dense[index];
+                        while (bits != 0)
+                        {
+                            sparse[entry++] = (uint)(((long)index << 6) + BitOperations.TrailingZeroCount(bits));
+                            bits &= bits - 1;
+                        }
+                    }
+                    return new MatchSet(null, sparse, entry, covered, _matches, sparse.LongLength * sizeof(uint));
+                }
                 // Trim the growth headroom (always past the end of the file) so the stored set costs exactly
                 // what it needs.
                 long words = (covered + 63) / 64;

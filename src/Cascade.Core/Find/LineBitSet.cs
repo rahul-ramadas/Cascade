@@ -17,6 +17,7 @@ internal sealed class LineBitSet
     }
 
     public long Lines => _lines;
+    internal ulong[] Words => _words;
 
     public void Add(long line)
     {

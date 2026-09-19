@@ -33,8 +33,9 @@ public sealed class CascadeDocument : IDisposable
     private CancellationTokenSource? _findCts;
     private Task<long>? _findTask;
     private FindSearch? _search;
-    private ThreadLocal<FindEngine.FindMatcher>? _searchMatchers;
-    private ThreadLocal<LineReader>? _searchReaders;
+    private Task _searchCleanup = Task.CompletedTask;
+    internal Task SearchCleanupForTesting => _searchCleanup;
+    internal Action<LineReader>? SearchReaderCreatedForTesting;
     private sealed record NavigationCount(Filter Filter, FilterSnapshot Snapshot, string Key, bool Filtered,
         Task<FilterNavigationIndex?> Work, CancellationTokenSource Cancellation);
     private NavigationCount? _filterNavigation;
@@ -864,21 +865,32 @@ public sealed class CascadeDocument : IDisposable
         var task = Task.Run(() => AtomicFile.Write(path, writer =>
         {
             var reader = new LineReader(src, encoding);
-            for (long r = 0; r < rows; r++)
+            Span<long> batch = stackalloc long[512];
+            try
             {
-                // Often enough that Esc feels immediate, rarely enough to cost nothing against the read
-                // and the write it sits between.
-                if ((r & 0xFFF) == 0)
+                for (long row = 0; row < rows;)
                 {
                     token.ThrowIfCancellationRequested();
-                    progress?.Report((double)r / rows);
+                    if ((row & 0xFFF) == 0) progress?.Report((double)row / rows);
+                    int count = (int)Math.Min(batch.Length, rows - row);
+                    if (view.IsIdentity)
+                    {
+                        for (int offset = 0; offset < count; offset++) batch[offset] = view.CropFrom + row + offset;
+                    }
+                    else count = view.LinesForRows(row, batch[..count]);
+                    if (count == 0) break;
+                    for (int offset = 0; offset < count; offset++)
+                    {
+                        long line = batch[offset];
+                        if (line < 0 || line >= index.Count) continue;
+                        index.GetRange(line, src.Length, out long start, out long end);
+                        writer.WriteLine(reader.GetChars(start, end));
+                    }
+                    row += count;
                 }
-                long line = view.LineAt(r);
-                if (line < 0 || line >= index.Count) continue;
-                index.GetRange(line, src.Length, out long s, out long e);
-                writer.WriteLine(reader.GetString(s, e));
+                token.ThrowIfCancellationRequested();
             }
-            token.ThrowIfCancellationRequested();
+            finally { reader.ReleaseScratch(); }
         }), token);          // written as UTF-8, as it always has been - the source encoding decodes only
         Retire(task);
         return task;
@@ -1046,7 +1058,7 @@ public sealed class CascadeDocument : IDisposable
             && _filterService.TryGetMatchSet(gen.Snapshot, filter, out var known))
         {
             final = true;
-            return Crop is { } crop ? known.CountInRange(crop.From, crop.ToExclusive) : known.Matches;
+            return Crop is { } crop ? known.CachedCountInRange(crop.From, crop.ToExclusive) : known.Matches;
         }
 
         // Cropped, with nothing remembered for this filter. The pass keeps one running total per filter for
@@ -1189,8 +1201,11 @@ public sealed class CascadeDocument : IDisposable
     /// file, so the tally reads exactly as it would over a file that short, and never reports lines the
     /// reader has put out of sight. What is left is the filters, and they can then be named.</summary>
     public FindTally? FindTally(long currentLine)
-        => _search?.Count(DisplayView.FilterVisibleWords, Crop?.From ?? 0,
-                          Crop?.ToExclusive ?? CompletedLineCount, currentLine);
+    {
+        if (_search is not { } search) return null;
+        var scope = CaptureFindScope();
+        return search.Count(scope.Visible, scope.From, scope.ToExclusive, currentLine, scope.StableView);
+    }
 
     /// <summary>Lines the current find term has been found on so far, or 0 when nothing is being looked for.
     /// A summary of the whole file keys its cache on this, so that a sweep filling in matches behind it is
@@ -1227,7 +1242,14 @@ public sealed class CascadeDocument : IDisposable
         long start = forward ? Math.Max(fromLine, FirstDisplayLine) : Math.Min(fromLine, LastDisplayLine);
         var search = SearchFor(query, start);
         if (search is null) return -1;      // an empty term, or a regex that will not parse
-        return await search.NextAsync(start, forward, IsLineVisible, ct).ConfigureAwait(false);
+        return await search.NextVisibleAsync(start, forward, CaptureFindScope, ct).ConfigureAwait(false);
+    }
+
+    private FindScope CaptureFindScope()
+    {
+        var view = DisplayView;
+        return new FindScope(view.FilterVisibleWords, view.CropFrom, Math.Min(view.CropToExclusive, CompletedLineCount),
+                             view.IsIdentity || IsFilterIdle ? view.VisibilityIdentity : null);
     }
 
     private const int ScanGroupLines = 64;
@@ -1263,7 +1285,12 @@ public sealed class CascadeDocument : IDisposable
         // One matcher and one reader per thread: a Regex shared across threads hands out a single cached
         // runner, so all but one caller would allocate a fresh one on every line.
         var matchers = new ThreadLocal<FindEngine.FindMatcher>(() => FindEngine.CompileQuery(query)!);
-        var readers = new ThreadLocal<LineReader>(() => new LineReader(src, encoding));
+        var readers = new ThreadLocal<LineReader>(() =>
+        {
+            var reader = new LineReader(src, encoding);
+            SearchReaderCreatedForTesting?.Invoke(reader);
+            return reader;
+        }, trackAllValues: true);
 
         void ScanRange(long from, long count, FindHits hits, CancellationToken ct)
         {
@@ -1339,11 +1366,15 @@ public sealed class CascadeDocument : IDisposable
             }
         }
 
-        _searchMatchers = matchers;
-        _searchReaders = readers;
         long lineCount = CompletedLineCount;
         _search = new FindSearch(query, lineCount, startLine, ScanRange,
                                  lineCount > 0 ? length / lineCount : 0);
+        _searchCleanup = _search.Stopped.ContinueWith(_ =>
+        {
+            foreach (var reader in readers.Values) reader.ReleaseScratch();
+            readers.Dispose();
+            matchers.Dispose();
+        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
         _search.Start();
         return _search;
     }
@@ -1355,24 +1386,12 @@ public sealed class CascadeDocument : IDisposable
     public void DropSearch()
     {
         var search = _search;
-        var matchers = _searchMatchers;
-        var readers = _searchReaders;
+        var cleanup = _searchCleanup;
         _search = null;
-        _searchMatchers = null;
-        _searchReaders = null;
-        if (search is null)
-        {
-            matchers?.Dispose();
-            readers?.Dispose();
-            return;
-        }
+        _searchCleanup = Task.CompletedTask;
+        if (search is null) return;
         search.Dispose();
-        Retire(search.Stopped);
-        _ = search.Stopped.ContinueWith(_ =>
-        {
-            matchers?.Dispose();
-            readers?.Dispose();
-        }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        Retire(cleanup);
     }
 
     public FilterNavigationTally GetFilterNavigationTally(Filter filter, long line)
@@ -1646,11 +1665,9 @@ public sealed class CascadeDocument : IDisposable
         try { _indexCts.Cancel(); } catch { /* ignore */ }
 
         var search = _search;
-        var matchers = _searchMatchers;
-        var readers = _searchReaders;
+        var searchCleanup = _searchCleanup;
         _search = null;
-        _searchMatchers = null;
-        _searchReaders = null;
+        _searchCleanup = Task.CompletedTask;
         try { search?.Dispose(); } catch { /* ignore */ }
 
         var service = _filterService;
@@ -1681,7 +1698,7 @@ public sealed class CascadeDocument : IDisposable
         _src = null!;
 
         var stopped = Task.WhenAll(service?.Stopped ?? Task.CompletedTask,
-                                   search?.Stopped ?? Task.CompletedTask,
+                                   Settled(searchCleanup),
                                    _retired,
                                    Settled(findTask), Settled(indexTask));
         _retired = Task.CompletedTask;
@@ -1689,9 +1706,6 @@ public sealed class CascadeDocument : IDisposable
         void Release()
         {
             ReleaseDelayForTesting?.Invoke();
-            // Only now: these are what the sweeps read the file through.
-            matchers?.Dispose();
-            readers?.Dispose();
             source?.Dispose();
         }
 

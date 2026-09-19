@@ -375,6 +375,41 @@ public class VisibleLineSetTests
         Assert.Equal(0, set.LinesForRows(set.Count, lines));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Sparse_windows_jump_only_while_the_published_counts_still_describe_the_bits(bool changeDuringJump)
+    {
+        const int length = 3_000_000;
+        var words = new ulong[(length + 63) / 64];
+        for (int line = 0; line < length; line += 1_000_000)
+            words[line >> 6] |= 1UL << (line & 63);
+        var set = new VisibleLineSet();
+        set.ReplaceAll(words, length);
+        set.Publish();
+
+        int jumps = 0;
+        set.BeforeSparseJumpForTesting = () =>
+        {
+            jumps++;
+            set.BeforeSparseJumpForTesting = null;
+            if (!changeDuringJump) return;
+            const int added = 20_000;
+            set.ApplyRange(added, new[] { true });
+            words[added >> 6] |= 1UL << (added & 63);
+        };
+
+        var window = new long[20];
+        int found = set.LinesForRows(0, window);
+        var expected = new List<long>();
+        for (int line = 0; line < length; line++)
+            if ((words[line >> 6] & (1UL << (line & 63))) != 0) expected.Add(line);
+        Assert.Equal(1, jumps);
+        Assert.Equal(expected, window.Take(found));
+        set.Publish();
+        Assert.Equal(expected, Enumerable.Range(0, (int)set.Count).Select(row => set.LineAt(row)));
+    }
+
     [Fact]
     public void ResolveWindow_holds_the_anchor_still_while_a_pass_rewrites_earlier_lines()
     {

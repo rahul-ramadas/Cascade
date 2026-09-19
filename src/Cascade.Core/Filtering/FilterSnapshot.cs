@@ -379,6 +379,23 @@ public sealed class FilterSnapshot
         return true;
     }
 
+    internal bool TryGetLeafParentKey(int index, out string key)
+    {
+        var node = _nodesByIndex[index];
+        key = node.ParentKey;
+        return node.HasParent && node.Children.Length == 0;
+    }
+
+    internal bool MatchesOwnPredicate(int index, ReadOnlySpan<char> line, long lineNumber, MarkerStore markers)
+    {
+        var node = _nodesByIndex[index];
+        if (node.Type == FilterMatchType.Text && !node.IsRegex)
+            return line.Contains(node.Text, node.Comparison);
+        if (node.Sequence is not null)
+            return RegexLiteralRewriter.Matches(line, node.Sequence, node.Comparison);
+        return Matches(node, line, lineNumber, markers, ThreadContext);
+    }
+
     /// <summary>True if <paramref name="target"/> <i>deep-matches</i> the line: its own predicate and
     /// every ancestor's predicate match (independent of enabled state). Used by per-filter find.</summary>
     public bool DeepMatches(ReadOnlySpan<char> line, long lineNumber, MarkerStore? markers, Filter target)

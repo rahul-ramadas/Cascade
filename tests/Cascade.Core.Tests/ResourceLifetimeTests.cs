@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using Cascade.Core.Document;
@@ -208,33 +209,38 @@ public class ResourceLifetimeTests
         string a = WriteSlowToScanLog(), b = WriteLog();
         var gate = new SemaphoreSlim(0);
         int reached = 0;
+        var readers = new ConcurrentBag<LineReader>();
         var doc = new CascadeDocument();
         try
         {
             doc.Open(a);
             doc.WaitForIndex();
-            doc.FindCheckpointForTesting = _ =>
+            doc.SearchReaderCreatedForTesting = reader =>
             {
+                readers.Add(reader);
                 if (Interlocked.Exchange(ref reached, 1) == 0) gate.Wait(TimeSpan.FromSeconds(30));
             };
 
             _ = doc.FindNextAsync(new FindQuery(SlowPattern, Regex: true, CaseSensitive: false), 0, true);
             WaitFor(() => Volatile.Read(ref reached) == 1, "the sweep never reached its first block");
 
-            doc.FindCheckpointForTesting = null;    // the replacement must sweep freely
+            doc.SearchReaderCreatedForTesting = null;
             _ = doc.FindNextAsync(new FindQuery("zzz", Regex: false, CaseSensitive: false), 0, true);
 
             doc.Open(b);
             Assert.False(await Finishes(doc.ReleasePending, 400),
                          "the mapping was released while a replaced search was still sweeping it");
+            Assert.NotEmpty(readers);
+            Assert.All(readers, reader => Assert.True(reader.HeldChars > 0));
 
             gate.Release(1000);
             await doc.ReleasePending.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.All(readers, reader => Assert.Equal(0, reader.HeldChars));
         }
         finally
         {
             gate.Release(1000);
-            doc.FindCheckpointForTesting = null;
+            doc.SearchReaderCreatedForTesting = null;
             doc.Dispose();
             gate.Dispose();
             File.Delete(a);

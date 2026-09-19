@@ -47,7 +47,8 @@ public class SaveRowsTests
     [Fact]
     public async Task Every_line_is_written_when_nothing_is_filtered()
     {
-        string log = Log(500, i => $"line {i}");
+        const int count = 1_200;
+        string log = Log(count, line => $"line {line}");
         string outPath = Target();
         try
         {
@@ -58,9 +59,7 @@ public class SaveRowsTests
             await doc.SaveRowsAsync(outPath, null, CancellationToken.None);
 
             string[] written = File.ReadAllLines(outPath);
-            Assert.Equal(500, written.Length);
-            Assert.Equal("line 0", written[0]);
-            Assert.Equal("line 499", written[499]);
+            Assert.Equal(Enumerable.Range(0, count).Select(line => $"line {line}"), written);
         }
         finally { File.Delete(log); File.Delete(outPath); }
     }
@@ -180,12 +179,19 @@ public class SaveRowsTests
             doc.Open(log);
             doc.WaitForIndex();
 
-            var progress = new Recorder();
+            long firstAllocation = -1, lastAllocation = -1;
+            var progress = new Recorder(_ =>
+            {
+                long allocated = GC.GetAllocatedBytesForCurrentThread();
+                if (firstAllocation < 0) firstAllocation = allocated;
+                lastAllocation = allocated;
+            });
             await doc.SaveRowsAsync(outPath, progress, CancellationToken.None);
 
             lock (progress.Seen)
             {
-                Assert.NotEmpty(progress.Seen);
+                Assert.True(progress.Seen.Count > 1);
+                Assert.InRange(lastAllocation - firstAllocation, 0, 50_000 * sizeof(long));
                 Assert.All(progress.Seen, f => Assert.InRange(f, 0, 1));
                 for (int i = 1; i < progress.Seen.Count; i++)
                     Assert.True(progress.Seen[i] >= progress.Seen[i - 1],

@@ -82,6 +82,12 @@ public class LineReaderTests
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
             Assert.True(allocated < longChars, $"{allocated:N0} bytes allocated over 20 reads of one long line");
+            reader.ReleaseScratch();
+            Assert.Equal(0, reader.HeldChars);
+            Assert.Equal(longChars, reader.GetChars(start, end).Length);
+            reader.ReleaseScratch();
+            reader.ReleaseScratch();
+            Assert.Equal(0, reader.HeldChars);
         }
         finally { src.Dispose(); }
     }

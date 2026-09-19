@@ -1,4 +1,5 @@
 using System.Numerics;
+using Cascade.Core.Filtering;
 
 namespace Cascade.Core.Find;
 
@@ -14,6 +15,9 @@ public delegate void FindRangeScanner(long from, long count, FindHits hits, Canc
 /// <summary>Fills <paramref name="words"/> with the visibility of the lines starting at
 /// <paramref name="fromWord"/> * 64, one bit per line.</summary>
 public delegate void VisibleWordReader(long fromWord, Span<ulong> words);
+
+internal readonly record struct FindScope(VisibleWordReader? Visible, long From, long ToExclusive,
+                                         object? StableView = null);
 
 /// <summary>How far the hit counts in a <see cref="FindTally"/> can be trusted. Line counts are always
 /// exact; the only thing a capped record of multi-hit lines can cost is the hits, and how much it costs
@@ -89,6 +93,10 @@ public sealed class FindSearch : IDisposable
     private Exception? _failure;
     private Task[] _sweeps = Array.Empty<Task>();
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private sealed record NavigationCache(object View, FilterNavigationIndex Index);
+    private sealed record TallyCache(object View, long From, long ToExclusive, FindTally Value);
+    private NavigationCache? _navigationCache;
+    private TallyCache? _tallyCache;
 
     public FindSearch(FindQuery query, long lines, long startLine, FindRangeScanner scanner, long bytesPerLine = 0)
     {
@@ -166,6 +174,10 @@ public sealed class FindSearch : IDisposable
     /// Both are answered a machine word at a time: asking line by line meant twenty million callbacks on a
     /// common term, which was 160 ms of frozen window every time the caret moved.</summary>
     public FindTally Count(VisibleWordReader? shown, long from, long toExclusive, long currentLine)
+        => Count(shown, from, toExclusive, currentLine, null);
+
+    internal FindTally Count(VisibleWordReader? shown, long from, long toExclusive, long currentLine,
+                             object? stableView)
     {
         lock (_sync)
         {
@@ -173,6 +185,8 @@ public sealed class FindSearch : IDisposable
             long lo = Math.Clamp(from, 0, _lines);
             long hi = Math.Clamp(toExclusive, lo, _lines);
             if (hi <= lo) return new FindTally(0, 0, 0, 0, 0, complete, HitCount.Exact);
+            if (complete && stableView is not null)
+                return SettledCount(shown, lo, hi, currentLine, stableView);
 
             // Whole file and nothing hidden is the common case by far, and it is the one the running totals
             // already answer outright.
@@ -239,6 +253,40 @@ public sealed class FindSearch : IDisposable
 
     /// <summary>The same over the whole file, for callers with no crop to apply.</summary>
     public FindTally Count(VisibleWordReader? shown, long currentLine) => Count(shown, 0, _lines, currentLine);
+
+    private FilterNavigationIndex NavigationFor(object view, VisibleWordReader? visible,
+                                                CancellationToken cancellationToken = default)
+    {
+        if (_navigationCache is { } cached && ReferenceEquals(cached.View, view)) return cached.Index;
+        var matches = new FilterMatchCache.MatchSet(_hits.Words, null, 0, _lines, _found, _hits.Words.LongLength * sizeof(ulong));
+        var index = new FilterNavigationIndex(matches, visible, cancellationToken);
+        _navigationCache = new NavigationCache(view, index);
+        return index;
+    }
+
+    private FindTally SettledCount(VisibleWordReader? shown, long lo, long hi, long currentLine, object view)
+    {
+        var navigation = NavigationFor(view, shown);
+        if (_tallyCache is not { } cached || !ReferenceEquals(cached.View, view)
+            || cached.From != lo || cached.ToExclusive != hi)
+        {
+            bool whole = lo == 0 && hi == _lines;
+            long all = whole ? _found : _hits.CountInRange(lo, hi);
+            long visibleLines = navigation.CountBefore(hi) - navigation.CountBefore(lo);
+            long hiddenLines = all - visibleLines;
+            var trust = Trust(whole, hiddenLines);
+            long total = trust == HitCount.TotalUnknown ? 0 : whole ? _occurrences : OccurrencesInRange(lo, hi);
+            long visibleOccurrences = trust == HitCount.TotalUnknown ? 0
+                : shown is null ? total : VisibleOccurrences(shown, lo, hi, visibleLines, hiddenLines, total);
+            cached = new TallyCache(view, lo, hi,
+                new FindTally(0, visibleLines, hiddenLines, visibleOccurrences, total, true, trust));
+            _tallyCache = cached;
+        }
+        long position = currentLine >= lo && currentLine < hi && navigation.Contains(currentLine)
+            ? navigation.CountBefore(currentLine + 1) - navigation.CountBefore(lo)
+            : 0;
+        return cached.Value with { Position = position };
+    }
 
     /// <summary>What the cap on the multi-hit record costs this particular question. With nothing hidden
     /// every hit inside the crop is on a shown line, so the split is exact however little of the record
@@ -376,20 +424,79 @@ public sealed class FindSearch : IDisposable
     /// <paramref name="visible"/> accepts, or -1 once that direction is exhausted. Waits for the sweep when
     /// the answer is not known yet; -1 is only ever returned once that direction has been fully examined, so
     /// "no more matches" is never reported early.</summary>
-    public async Task<long> NextAsync(long from, bool forward, Func<long, bool>? visible, CancellationToken ct)
+    public Task<long> NextAsync(long from, bool forward, Func<long, bool>? visible, CancellationToken ct)
+        => NextAsync(from, forward, visible, null, ct);
+
+    internal Task<long> NextVisibleAsync(long from, bool forward, Func<FindScope> scope, CancellationToken ct)
+        => NextAsync(from, forward, null, scope, ct);
+
+    private async Task<long> NextAsync(long from, bool forward, Func<long, bool>? visible,
+                                       Func<FindScope>? scope, CancellationToken ct)
     {
         while (true)
         {
             Task changed;
             lock (_sync)
             {
+                ct.ThrowIfCancellationRequested();
                 ObjectDisposedException.ThrowIf(_stopped, this);
                 if (_failure is not null) throw new InvalidOperationException("The search could not be completed.", _failure);
-                if (TryAnswer(from, forward, visible, out long line)) return line;
+                long line;
+                bool answered;
+                if (scope is null) answered = TryAnswer(from, forward, visible, out line);
+                else
+                {
+                    var captured = scope();
+                    answered = TryAnswerVisible(from, forward, captured, ct, out line);
+                    if (captured != scope()) continue;
+                }
+                ct.ThrowIfCancellationRequested();
+                if (answered) return line;
                 changed = _changed.Task;
             }
             await changed.WaitAsync(ct).ConfigureAwait(false);
         }
+    }
+
+    private bool TryAnswerVisible(long from, bool forward, FindScope scope, CancellationToken token, out long line)
+    {
+        line = -1;
+        long lower = Math.Clamp(scope.From, 0, _lines);
+        long upper = Math.Clamp(scope.ToExclusive, lower, _lines);
+        from = forward ? Math.Max(from, lower) : Math.Min(from, upper - 1);
+        if (from < lower || from >= upper) return true;
+        if (_lo == 0 && _hi == _lines && scope.StableView is not null)
+        {
+            line = NavigationFor(scope.StableView, scope.Visible, token).Find(from, forward, lower, upper);
+            return true;
+        }
+        if (forward ? from < _lo : from >= _hi) return false;
+        long lo = forward ? from : Math.Max(lower, _lo);
+        long hi = forward ? Math.Min(upper, _hi) : from + 1;
+        long firstWord = lo >> 6, lastWord = (hi - 1) >> 6;
+        Span<ulong> visible = stackalloc ulong[VisibilityChunk];
+        long edge = forward ? firstWord : lastWord;
+        while (edge >= firstWord && edge <= lastWord)
+        {
+            token.ThrowIfCancellationRequested();
+            long start = forward ? edge : Math.Max(firstWord, edge - VisibilityChunk + 1);
+            int count = (int)Math.Min(VisibilityChunk, lastWord - start + 1);
+            if (!forward) count = (int)(edge - start + 1);
+            scope.Visible?.Invoke(start, visible[..count]);
+            for (int offset = 0; offset < count; offset++)
+            {
+                int index = forward ? offset : count - offset - 1;
+                long word = start + index;
+                ulong bits = _hits.Word(word) & ScopeMask(word, lo, hi);
+                if (scope.Visible is not null) bits &= visible[index];
+                if (bits == 0) continue;
+                line = (word << 6) + (forward ? BitOperations.TrailingZeroCount(bits)
+                                                   : 63 - BitOperations.LeadingZeroCount(bits));
+                return true;
+            }
+            edge = forward ? start + count : start - 1;
+        }
+        return forward ? _hi >= upper : _lo <= lower;
     }
 
     /// <summary>Whether the answer follows from what has been examined so far. Called under the lock.</summary>

@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using Cascade.Core.Document;
 using Cascade.Core.Find;
+using Cascade.Core.IO;
 using Xunit;
 
 namespace Cascade.Core.Tests;
@@ -39,6 +41,8 @@ public class FindParallelScanTests
             using var doc = new CascadeDocument();
             doc.Open(path);
             doc.WaitForIndex();
+            var readers = new ConcurrentBag<LineReader>();
+            doc.SearchReaderCreatedForTesting = readers.Add;
 
             var query = new FindQuery("NEEDLE", false, false);
             var expected = Enumerable.Range(0, Lines).Where(IsMatch).Select(i => (long)i).ToArray();
@@ -76,6 +80,10 @@ public class FindParallelScanTests
             Assert.Equal(0, tally.Value.HiddenLines);
             Assert.Equal(Enumerable.Range(0, Lines).Sum(Occurrences), tally.Value.Occurrences);
             Assert.Equal(HitCount.Exact, tally.Value.Hits);
+            await doc.SearchCleanupForTesting.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.NotEmpty(readers);
+            Assert.All(readers, reader => Assert.Equal(0, reader.HeldChars));
+            Assert.Equal(expected[0], await doc.FindNextAsync(query, 0, true, CancellationToken.None));
         }
         finally { File.Delete(path); }
     }

@@ -911,7 +911,10 @@ public class FilterMatchCacheTests
             WaitUntil(() => service.IsIdle);
 
             Assert.True(service.CacheBytes > 0, "the streaming pass should have filled the cache");
-            Assert.Equal(Fresh(path, f => { }).Visible, Rows(gen));
+            var reference = Fresh(path, f => { });
+            Assert.Equal(reference.Visible, Rows(gen));
+            Assert.Equal(reference.Counts, gen.Counts);
+            Assert.True(service.WorkerReusesForTesting > 0);
 
             // The cache built from those unaligned releases must serve the next change correctly.
             long hits = service.CacheHits;
@@ -945,10 +948,129 @@ public class FilterMatchCacheTests
         throw new TimeoutException("the filter service did not catch up");
     }
 
-    // ---- storage-level tests ----
+    [Theory]
+    [InlineData("ERROR", false, true)]
+    [InlineData("error", false, false)]
+    [InlineData("ERROR.+line", true, true)]
+    [InlineData(@"^(ERROR|WARN)\b", true, false)]
+    public void A_new_leaf_evaluates_only_its_cached_parent_and_agrees_with_a_full_walk(string pattern, bool regex, bool sensitive)
+    {
+        string path = WriteLog();
+        try
+        {
+            using var doc = new CascadeDocument();
+            doc.Open(path);
+            doc.WaitForIndex();
+            foreach (var precedence in Enum.GetValues<FilterPrecedence>())
+            foreach (var kind in Enum.GetValues<FilterKind>())
+            {
+                doc.Precedence = precedence;
+                var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+                filters.Add(new Filter { Enabled = true, Match = { Text = "WARN" } });
+                var parent = new Filter { Enabled = true, Match = { Text = "line 1000" } };
+                filters.Add(parent);
+                doc.SetFilters(filters);
+                WaitIdle(doc);
+                long candidates = doc.MatchSetFor(parent)!.Matches;
+                Assert.InRange(candidates, 1, Lines / 128);
+                parent.Enabled = kind == FilterKind.Exclude;
+                var child = new Filter { Enabled = true, Kind = kind,
+                    Match = { Text = pattern, Regex = regex, CaseSensitive = sensitive } };
+                filters.Add(child, parent);
+                long before = doc.FilterLinesScanned, cacheHits = doc.FilterCacheHits;
+                doc.ApplyFilters();
+                WaitIdle(doc);
+                Assert.Equal(candidates, doc.FilterLinesScanned - before);
+                Assert.Equal(cacheHits, doc.FilterCacheHits);
+
+                var snapshot = doc.CurrentSnapshot;
+                var counts = new long[snapshot.FilterCount];
+                var visible = new List<long>();
+                for (long line = 0; line < doc.CompletedLineCount; line++)
+                    if (snapshot.Evaluate(doc.GetLineText(line), line, doc.Markers, counts).Shown) visible.Add(line);
+                Assert.Equal(visible, Enumerable.Range(0, (int)doc.RowCount).Select(row => doc.RowToLine(row)));
+                foreach (var filter in filters.EnumerateDepthFirst())
+                {
+                    Assert.True(snapshot.TryGetIndex(filter, out int index));
+                    Assert.Equal(counts[index], doc.MatchCountFor(filter));
+                }
+                long scanned = doc.FilterLinesScanned;
+                doc.ApplyFilters();
+                WaitIdle(doc);
+                Assert.Equal(scanned, doc.FilterLinesScanned);
+                Assert.Equal(cacheHits + 1, doc.FilterCacheHits);
+            }
+        }
+        finally { File.Delete(path); }
+    }
 
     [Fact]
-    public void Set_builder_grows_when_lines_arrive_after_it_starts()
+    public async Task A_superseded_leaf_cannot_publish_results_after_the_cache_was_pruned()
+    {
+        string path = WriteLog();
+        try
+        {
+            using var source = new MemoryMappedTextSource(path);
+            var index = new LineIndex();
+            new LineIndexer(source, index, 0, 1, false).Run(null, CancellationToken.None);
+            var markers = new MarkerStore();
+            for (long line = 0; line < index.Count; line += 1000) markers.Toggle(line, 0);
+            using var service = new FilterService(source, index, source.Length, markers, Encoding.UTF8,
+                                                   () => index.Count, () => true);
+            var filters = new FilterCollection { ShowOnlyFilteredLines = true };
+            var parent = new Filter { Enabled = true, Match = { Type = FilterMatchType.Marker, MarkerIndex = 0 } };
+            filters.Add(parent);
+            service.Restart(FilterSnapshot.Build(filters, markers));
+            WaitUntil(() => service.IsIdle);
+            var child = new Filter { Enabled = true, Match = { Text = "ERROR" } };
+            filters.Add(child, parent);
+            var original = FilterSnapshot.Build(filters, markers);
+            using var reached = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            CancellationToken held = default;
+            service.BeforeDerivedStoreForTesting = token => { held = token; reached.Set(); release.Wait(CancellationToken.None); };
+            try
+            {
+                service.RetainCachedResults(original);
+                service.Restart(original);
+                Assert.True(reached.Wait(TimeSpan.FromSeconds(5)));
+                child.Match.Text = "WARN";
+                var replacement = FilterSnapshot.Build(filters, markers);
+                service.RetainCachedResults(replacement);
+                Assert.True(held.IsCancellationRequested);
+                service.Restart(replacement);
+                service.BeforeDerivedStoreForTesting = null;
+                release.Set();
+                WaitUntil(() => service.IsIdle);
+                Assert.Equal(2, service.CacheCount);
+                Assert.False(service.TryGetMatchSet(original, child, out _));
+                Assert.True(service.TryGetMatchSet(replacement, child, out var matches));
+                var reader = new LineReader(source, Encoding.UTF8);
+                for (long line = 0; line < index.Count; line++)
+                {
+                    index.GetRange(line, source.Length, out long start, out long end);
+                    bool expected = markers.Has(line, 0)
+                        && reader.GetChars(start, end).Contains("WARN", StringComparison.OrdinalIgnoreCase);
+                    Assert.Equal(expected, matches.Contains(line));
+                }
+                reader.ReleaseScratch();
+            }
+            finally
+            {
+                release.Set();
+                service.Dispose();
+                await service.Stopped.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    // ---- storage-level tests ----
+
+    [Theory]
+    [InlineData(320_000)]
+    [InlineData(72_000_000)]
+    public void Set_builder_grows_when_lines_arrive_after_it_starts(long covered)
     {
         // A builder created mid-indexing knows only a fraction of the file, so it must resize as later words
         // arrive rather than quietly dropping them.
@@ -956,10 +1078,14 @@ public class FilterMatchCacheTests
         const long Words = 5_000;
         for (long w = 0; w < Words; w++) builder.AddWord(w, ulong.MaxValue);   // dense: every line matches
 
-        var set = builder.Build(Words * 64);
+        var set = builder.Build(covered);
         Assert.Equal(Words * 64, set.Matches);
         for (long line = 0; line < Words * 64; line += 7) Assert.True(set.Contains(line), $"lost line {line}");
         Assert.True(set.Contains(Words * 64 - 1), "lost the last line");
+        Assert.Equal(Words * 64, set.CountInRange(0, covered));
+        Assert.Equal(-1, set.Next(Words * 64));
+        Assert.Equal(Words * 64 - 1, set.Previous(covered - 1));
+        Assert.InRange(set.Bytes, 0, Math.Min((covered + 63) / 64 * sizeof(ulong), Words * 64 * sizeof(uint)));
     }
 
     [Theory]
