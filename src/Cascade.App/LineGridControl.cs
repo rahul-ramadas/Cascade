@@ -417,7 +417,15 @@ public sealed class LineGridControl : Control
     // ---- find highlighting ----
 
     private FindEngine.FindMatcher? _highlight;
+    private bool _selectionCaseSensitive;
     private readonly List<(int At, int Length, Color Colour)> _highlights = new();
+
+    public void SetSelectionCaseSensitive(bool caseSensitive)
+    {
+        if (_selectionCaseSensitive == caseSensitive) return;
+        _selectionCaseSensitive = caseSensitive;
+        Invalidate();
+    }
 
     /// <summary>Marks every occurrence of a term on the lines currently on screen. Set while a find term is
     /// live - which outlasts the dialog, since F3 does - and cleared when it is dropped.</summary>
@@ -460,11 +468,12 @@ public sealed class LineGridControl : Control
         // Occurrences of what is selected, so picking a request id out of one line shows the rest at once.
         if (selected is { Length: > 1 })
         {
+            var comparison = _selectionCaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
             int at = Math.Max(0, from - selected.Length + 1);
             while (at < to && _highlights.Count < MaxHighlightsPerRow)
             {
                 int hit = text.AsSpan(at, Math.Min(text.Length, to + selected.Length) - at)
-                              .IndexOf(selected, StringComparison.Ordinal);
+                              .IndexOf(selected, comparison);
                 if (hit < 0) break;
                 hit += at;
                 if (hit >= to) break;

@@ -156,6 +156,7 @@ The key you press only picks a starting point. All three are offered in the dial
 ![The find bar above the log, every occurrence marked and the tally reading 'Match 1 of 8,688'](docs/images/find.png)
 
 - `Ctrl+F` searches the text, literal or regex, marking every occurrence on screen as you type.
+- Selecting two or more characters marks their other occurrences on screen, using the find bar's **Case sensitive** setting even when the bar is closed.
 - Find works on every line, not just the shown ones: hits on hidden lines are counted separately, and it says so when a match lands on one.
 
 ### Elapsed times

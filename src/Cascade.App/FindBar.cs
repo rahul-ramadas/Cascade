@@ -319,6 +319,7 @@ public sealed class FindBar : UserControl
     public Func<IEnumerable<string>>? History;
 
     public bool HasTerm => _text.Text.Length > 0;
+    public bool CaseSensitive => _case.Checked;
 
     /// <summary>Fills the drop-down with the terms searched for before, most recent first.</summary>
     public void SetHistory(IEnumerable<string> terms)
@@ -442,6 +443,7 @@ public sealed class FindBar : UserControl
         _text.Focused ? "term" : _regex.Focused ? "regex" : _case.Focused ? "case"
         : _prev.Focused ? "previous" : _next.Focused ? "next" : _close.Focused ? "close" : "none";
     internal void SetRegexForTesting(bool on) => _regex.Checked = on;
+    internal void SetCaseForTesting(bool on) => _case.Checked = on;
     internal bool MessageRedrawsInOneGoForTesting => _message.RedrawsInOneGo;
     internal int BarPaintsForTesting => _barPaints;
     internal int MessagePaintsForTesting => _message.Paints;

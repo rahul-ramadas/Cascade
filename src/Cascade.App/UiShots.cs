@@ -42,6 +42,11 @@ internal static class UiShots
             try { ShotFilterNavigation(outDir); return 0; }
             finally { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); }
         }
+        if (args.Contains("--only=selection-case", StringComparer.OrdinalIgnoreCase))
+        {
+            try { ShotSelectionCase(outDir); return 0; }
+            finally { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); }
+        }
 
         var demoFilter = new Filter
         {
@@ -180,12 +185,74 @@ internal static class UiShots
         ShotMatchMap(outDir);
         ShotFilterSearch(outDir);
         ShotFilterNavigation(outDir);
+        ShotSelectionCase(outDir);
         ShotLuckyColors(outDir);
 
         try { if (Directory.Exists(settingsDir)) Directory.Delete(settingsDir, true); } catch { /* ignore */ }
 
         Console.WriteLine("done");
         return 0;
+    }
+
+    private static void ShotSelectionCase(string dir)
+    {
+        string path = Path.Combine(dir, "selection-case.log");
+        string[] identifiers = ["req-a1b2", "REQ-A1B2", "Req-A1b2", "req-c3d4", "req-a1b2", "REQ-A1B2"];
+        File.WriteAllLines(path, identifiers.Select((identifier, line) =>
+            $"[2026-09-19T09:31:{line:00}][payment-svc][INFO] request={identifier} charge accepted"));
+        bool suppressed = WindowActivation.Suppressed;
+        WindowActivation.Suppressed = true;
+        using var form = new MainForm(new AppSettings { ShowFilterPresets = false }, new MachineState(), [])
+        {
+            NoSavePrompt = true,
+            Opacity = 0,
+            ShowInTaskbar = false,
+            WindowState = FormWindowState.Normal,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0)
+        };
+        try
+        {
+            form.ClientSize = new Size(form.LogicalToDeviceUnits(1100), form.LogicalToDeviceUnits(560));
+            form.Show();
+            form.OpenForTesting(path);
+            form.DocForTesting.WaitForIndex();
+            if (form.FilterListVisibleForTesting) form.PressCmdKeyForTesting(Keys.Control | Keys.Shift | Keys.L);
+            var grid = form.GridForTesting;
+            var bar = form.FindBarForTesting;
+            string text = form.DocForTesting.GetLineText(0);
+            int selectedAt = text.IndexOf(identifiers[0], StringComparison.Ordinal);
+            foreach (bool caseSensitive in new[] { false, true })
+            {
+                form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+                bar.SetTerm("");
+                bar.SetCaseForTesting(caseSensitive);
+                grid.RefreshView();
+                Settle();
+                grid.DragForTesting(0, grid.XForCharForTesting(0, selectedAt),
+                    grid.XForCharForTesting(0, selectedAt + identifiers[0].Length));
+                if (grid.SelectedText != identifiers[0]) throw new InvalidOperationException("The screenshot must have a text selection.");
+                string mode = caseSensitive ? "sensitive" : "insensitive";
+                Capture($"selection-{mode}-open");
+                form.CloseFindForTesting();
+                Capture($"selection-{mode}-closed");
+            }
+
+            void Capture(string name)
+            {
+                Settle();
+                using var image = new Bitmap(form.Width, form.Height);
+                form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                image.Save(Path.Combine(dir, name + ".png"), ImageFormat.Png);
+                Console.WriteLine($"{name}: {image.Width}x{image.Height}");
+            }
+        }
+        finally
+        {
+            form.Dispose();
+            WindowActivation.Suppressed = suppressed;
+            File.Delete(path);
+        }
     }
 
     private static void ShotFilterNavigation(string dir)

@@ -2734,6 +2734,7 @@ public sealed class MainForm : Form
         // move until a search is actually asked for.
         _findBar.PreviewChanged += q =>
         {
+            _grid.SetSelectionCaseSensitive(_findBar.CaseSensitive);
             _grid.SetFindHighlight(q is null ? null : FindEngine.CompileQuery(q));
             if (q is null && _lastQuery is not null) ClearFind();
         };

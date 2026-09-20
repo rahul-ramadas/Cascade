@@ -283,6 +283,95 @@ internal static partial class Checks
         }
     }
 
+    internal static bool RunSelectionCaseHighlightChecks()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "cascade_selection_case_" + Guid.NewGuid().ToString("N") + ".log");
+        string[] lines = Enumerable.Range(0, 6).Select(line => $"line {line:00} a.b A.B aXb a.b AxB tail").ToArray();
+        File.WriteAllText(path, string.Join('\n', lines));
+        var settings = new AppSettings();
+        using var form = new MainForm(settings, new MachineState(), [])
+        {
+            NoSavePrompt = true,
+            Opacity = 0,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(0, 0),
+            Size = new Size(1100, 700)
+        };
+        try
+        {
+            form.Show();
+            form.OpenForTesting(path);
+            form.DocForTesting.WaitForIndex();
+            var grid = form.GridForTesting;
+            var bar = form.FindBarForTesting;
+            grid.RefreshView();
+            Pump();
+            const string selected = "a.b";
+            int selectedAt = lines[1].IndexOf(selected, StringComparison.Ordinal);
+            grid.DragForTesting(1, grid.XForCharForTesting(1, selectedAt), grid.XForCharForTesting(1, selectedAt + selected.Length));
+            bool ok = Check("the mixed-case fixture is fully visible", grid.RowMiddleForTesting(lines.Length - 1) < grid.ClientSize.Height);
+            ok &= Check("the literal term is selected", grid.SelectedText == selected, grid.SelectedText ?? "(none)");
+            ok &= Check("find starts closed and case-insensitive", !bar.Visible && !bar.CaseIsOnForTesting && !bar.HasTerm);
+            ok &= VerifyHighlights("before find has opened", caseSensitive: false);
+
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            bar.SetTerm("");
+            ok &= Check("find is open with no search term", bar.Visible && !bar.HasTerm);
+            ok &= VerifyHighlights("with an empty find box", caseSensitive: false);
+
+            int invalidations = 0;
+            grid.Invalidated += (_, _) => invalidations++;
+            bar.SetCaseForTesting(true);
+            ok &= Check("checking case repaints the selected matches", invalidations > 0);
+            ok &= VerifyHighlights("after checking case with no search term", caseSensitive: true);
+            form.CloseFindForTesting();
+            ok &= Check("closing find retains the checked case option", !bar.Visible && bar.CaseIsOnForTesting);
+            ok &= VerifyHighlights("after closing case-sensitive find", caseSensitive: true);
+
+            grid.DragForTesting(1, grid.XForCharForTesting(1, selectedAt), grid.XForCharForTesting(1, selectedAt + selected.Length));
+            ok &= VerifyHighlights("with a fresh selection while find is closed", caseSensitive: true);
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            bar.SetTerm("not-present");
+            invalidations = 0;
+            bar.SetCaseForTesting(false);
+            ok &= Check("unchecking case repaints the selected matches", invalidations > 0);
+            ok &= VerifyHighlights("after unchecking case with a search term", caseSensitive: false);
+            bar.SetRegexForTesting(true);
+            ok &= VerifyHighlights("with regex enabled for find only", caseSensitive: false);
+            form.CloseFindForTesting();
+            ok &= Check("closing find retains the unchecked case option", !bar.Visible && !bar.CaseIsOnForTesting);
+            ok &= VerifyHighlights("after closing case-insensitive find", caseSensitive: false);
+            return ok;
+
+            bool VerifyHighlights(string state, bool caseSensitive)
+            {
+                var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+                int expected = 0;
+                foreach (string line in lines)
+                    for (int offset = 0; offset <= line.Length - selected.Length; offset++)
+                        if (line.AsSpan(offset, selected.Length).Equals(selected, comparison)) expected++;
+                expected--;
+                using var picture = new Bitmap(grid.Width, grid.Height);
+                grid.MarksMadeForTesting = 0;
+                grid.DrawToBitmap(picture, grid.ClientRectangle);
+                bool matches = Check($"selection matches follow the reference scan {state}", grid.MarksMadeForTesting == expected,
+                    $"expected {expected}, marked {grid.MarksMadeForTesting}");
+                int upperAt = lines[2].IndexOf("A.B", StringComparison.Ordinal);
+                double fraction = PixelFraction(picture, grid.XForCharForTesting(2, upperAt),
+                    grid.XForCharForTesting(2, upperAt + selected.Length), grid.RowMiddleForTesting(2), settings.FindHighlight);
+                matches &= Check($"the mixed-case occurrence is painted correctly {state}", caseSensitive ? fraction < 0.2 : fraction > 0.5,
+                    $"highlight fraction {fraction:F2}");
+                return matches;
+            }
+        }
+        finally
+        {
+            form.Close();
+            form.Dispose();
+            File.Delete(path);
+        }
+    }
+
     /// <summary>What a search reports. The rules are all about saying no more than there is to say: hit
     /// counts only when a line matched more than once, a hidden half only when the filters are keeping
     /// matches back, and a "+" on anything the sweep has not finished counting. One word per idea throughout

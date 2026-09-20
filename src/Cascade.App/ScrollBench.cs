@@ -56,6 +56,7 @@ internal static class ScrollBench
         string only = Arg(args, "--only=") ?? "";
         if (only.Equals("filter-navigation", StringComparison.OrdinalIgnoreCase)
             || only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase)
+            || only.Equals("selection", StringComparison.OrdinalIgnoreCase)
             || only.Equals("operations", StringComparison.OrdinalIgnoreCase)) WindowActivation.Suppressed = true;
         bool parts = args.Any(a => a.Equals("--parts", StringComparison.OrdinalIgnoreCase));
         bool micro = args.Any(a => a.Equals("--micro", StringComparison.OrdinalIgnoreCase));
@@ -151,6 +152,12 @@ internal static class ScrollBench
             if (only.Equals("cropped-find", StringComparison.OrdinalIgnoreCase))
             {
                 CroppedFind(form, filterSet(), Arg(args, "--term=") ?? "request", repeats, settleMs);
+                return 0;
+            }
+
+            if (only.Equals("selection", StringComparison.OrdinalIgnoreCase))
+            {
+                SelectionHighlights(form, Arg(args, "--term="), steps, repeats);
                 return 0;
             }
 
@@ -1188,6 +1195,41 @@ internal static class ScrollBench
                               $"{was.ThumbLagMs,6:F2} ms to the thumb, {was.TextLagMs,6:F2} to the text");
             Console.WriteLine($"      {"",-18} now {now.WallMs / now.Steps,6:F2} ms/move, " +
                               $"{now.ThumbLagMs,6:F2} ms to the thumb, {now.TextLagMs,6:F2} to the text");
+        }
+    }
+
+    private static void SelectionHighlights(MainForm form, string? term, int steps, int repeats)
+    {
+        var doc = form.DocForTesting;
+        var grid = form.GridForTesting;
+        var bar = form.FindBarForTesting;
+        var options = bar.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<FlowLayoutPanel>().Single();
+        var caseOption = options.Controls.OfType<CheckBox>().Single(option => option.Text == "&Case sensitive");
+        long row = doc.RowCount / 2;
+        string text = doc.GetLineText(row);
+        term ??= System.Text.RegularExpressions.Regex.Match(text, "[A-Za-z]{2,}").Value;
+        int selectedAt = text.IndexOf(term, StringComparison.OrdinalIgnoreCase);
+        if (term.Length < 2 || selectedAt < 0) throw new InvalidOperationException("The selection term must occur in the middle line and contain at least two characters.");
+        string selected = text.Substring(selectedAt, term.Length);
+        foreach (bool caseSensitive in new[] { true, false })
+        {
+            form.PressCmdKeyForTesting(Keys.Control | Keys.F);
+            bar.SetTerm("");
+            caseOption.Checked = caseSensitive;
+            form.CloseFindForTesting();
+            grid.ScrollToRow(row);
+            Pump();
+            grid.DragForTesting(row, grid.XForCharForTesting(row, selectedAt), grid.XForCharForTesting(row, selectedAt + selected.Length));
+            if (grid.SelectedText != selected) throw new InvalidOperationException("The benchmark must retain its text selection.");
+            for (int repeat = 0; repeat < repeats; repeat++)
+            {
+                int before = grid.PaintsForTesting;
+                var run = Measure(steps, doc.RowCount, 1, _ => { grid.Invalidate(); grid.Update(); });
+                int paints = grid.PaintsForTesting - before;
+                if (paints != steps + 20 || grid.SelectedText != selected || grid.MarksMadeForTesting == 0)
+                    throw new InvalidOperationException("The selection benchmark must paint matches on every frame without dropping its selection.");
+                Console.WriteLine($"SELECTION caseSensitive={caseSensitive} run={repeat + 1} ms={run.Wall:F3} cpu={run.Cpu:F3} bytes={run.Bytes:F1} paints={paints} marksPerPaint={grid.MarksMadeForTesting}");
+            }
         }
     }
 
