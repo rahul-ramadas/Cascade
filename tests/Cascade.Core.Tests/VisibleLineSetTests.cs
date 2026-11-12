@@ -480,7 +480,14 @@ public class VisibleLineSetTests
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         Exception? failure = null;
 
-        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        // Each loop on a thread of its own. On the pool, the five of them took every thread a 4-core runner
+        // has and spun there until the timer above stopped them - but a timer needs a pool thread to fire,
+        // so the two seconds took up to eleven, and every other test in the process waited on the pool for
+        // all of it. That is what timed out the cropped-find and freed-mapping tests beside it.
+        static Task OwnThread(Action loop)
+            => Task.Factory.StartNew(loop, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+        var readers = Enumerable.Range(0, 4).Select(_ => OwnThread(() =>
         {
             var rnd = new Random(Environment.CurrentManagedThreadId);
             try
@@ -496,7 +503,7 @@ public class VisibleLineSetTests
             catch (Exception ex) { failure = ex; }
         })).ToArray();
 
-        var writer = Task.Run(() =>
+        var writer = OwnThread(() =>
         {
             for (int pass = 0; !stop.IsCancellationRequested; pass++)
             {

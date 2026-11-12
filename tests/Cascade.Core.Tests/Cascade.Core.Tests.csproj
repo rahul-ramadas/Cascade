@@ -3,6 +3,13 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
+    <!-- These tests park pool threads on purpose - a checkpoint holds a sweep or a pass still while the test
+         looks at it - and several run Parallel.For across every core. At the default minimum, one thread a
+         core, a few of them at once left nothing for anybody else, and the pool adds threads slowly when the
+         CPU is busy: on the 4-core nightly runner every test waiting on the pool stood still for 5 to 9
+         seconds at a time, then finished in the same tenth of a second. Tests that allowed 3 or 5 seconds
+         failed. At thirty-two, a few parked threads no longer starve the rest. -->
+    <ThreadPoolMinThreads>32</ThreadPoolMinThreads>
   </PropertyGroup>
 
   <ItemGroup>
