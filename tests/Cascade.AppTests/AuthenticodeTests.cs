@@ -1,3 +1,4 @@
+using System.Reflection.PortableExecutable;
 using Cascade.App;
 
 namespace Cascade.AppTests;
@@ -44,8 +45,7 @@ public class AuthenticodeTests
     {
         // The check that matters. A signature says the digest matches the bytes, so a copy with one byte
         // changed must fail - if it did not, verifying an update would prove nothing about what was
-        // downloaded. Struck near the end of the file, well past the headers, so what breaks is the digest
-        // and not the file's ability to be parsed at all.
+        // downloaded.
         string copy = Path.Combine(Path.GetTempPath(), "cascade_tampered_" + Guid.NewGuid().ToString("N") + ".dll");
         File.Copy(SignedSystemBinary, copy, overwrite: true);
         try
@@ -53,13 +53,30 @@ public class AuthenticodeTests
             Assert.NotNull(Authenticode.IdentityOf(copy));   // the copy alone is still valid
 
             byte[] bytes = File.ReadAllBytes(copy);
-            int at = bytes.Length - 4096;
-            bytes[at] ^= 0xFF;
+            bytes[AByteTheDigestCovers(bytes)] ^= 0xFF;
             File.WriteAllBytes(copy, bytes);
 
             Assert.Null(Authenticode.IdentityOf(copy));
         }
         finally { try { File.Delete(copy); } catch { /* best effort */ } }
+    }
+
+    /// <summary>
+    /// The middle of the file's largest section. Section data is always part of the digest, and the middle of
+    /// one is well past the headers, so what breaks is the digest and not the file's ability to be parsed.
+    ///
+    /// <para>Not "near the end of the file", which is where this used to strike. The end of a signed file is
+    /// its certificate table, which the digest has to leave out because it cannot cover itself. On a current
+    /// kernel32.dll the table is the last 34 KB and carries a second, nested signature, and 4 KB from the end
+    /// falls inside that: a change there touches neither the digest nor the primary signature, so the altered
+    /// copy still verified and this failed on every machine with that build of Windows.</para>
+    /// </summary>
+    private static int AByteTheDigestCovers(byte[] image)
+    {
+        using var pe = new PEReader(new MemoryStream(image));
+        SectionHeader largest = pe.PEHeaders.SectionHeaders.MaxBy(s => s.SizeOfRawData);
+        Assert.True(largest.SizeOfRawData > 0, "The file has no section data to alter.");
+        return largest.PointerToRawData + largest.SizeOfRawData / 2;
     }
 
     [Theory]
