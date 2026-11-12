@@ -209,12 +209,17 @@ internal sealed class HangWatchdog : IDisposable
 
     private bool WriteDump(string path, out string outcome)
     {
-        // Writing a dump suspends every other thread until it is done, so this lengthens the very freeze it
-        // is recording. That is the price of catching the stack in the act, and the app is already stuck.
+        // Written from a snapshot of the process, never from the live process. Asked to dump its own process,
+        // dbghelp holds every other thread still until it has finished, and if one of them was stopped holding
+        // a lock dbghelp then needs - the loader lock, which every thread start and exit and every library load
+        // takes - it waits for ever, with the whole app frozen around it. That is what wedged the test host on
+        // CI, again and again, and it reproduces on demand: with two threads loading a library and two starting
+        // threads, the first dump never came back. A snapshot holds the threads only while it is taken, so the
+        // window goes on answering while the dump is written - MEASURED at a 1 ms pause against 215 - and all
+        // 200 dumps under the same load came back. Dumping the live process also failed part way at 1 run in 5.
         //
-        // Taking a dump of one's own process is asking dbghelp to read a heap it is itself allocating from,
-        // and it fails part way often enough to matter - MEASURED at 1 run in 5. A second attempt is cheap
-        // and usually lands, and thread stacks are the fallback when it does not.
+        // A second attempt is cheap, and thread stacks are the fallback, for whatever can still refuse a dump:
+        // security software, or a full disk.
         string refused = "";
         for (int attempt = 0; attempt < 2; attempt++)
         {
@@ -257,8 +262,14 @@ internal sealed class HangWatchdog : IDisposable
 
     internal static uint FlagsForTesting(DumpDetail detail) => Flags(detail);
 
+    /// <summary>Test seam: one dump, by exactly the route a recorded stall takes, without having to stall a
+    /// window to get it.</summary>
+    internal static bool WriteDumpForTesting(string path, DumpDetail detail, out string failure)
+        => TryWriteDump(path, Flags(detail), out failure);
+
     private static bool TryWriteDump(string path, uint type, out string failure)
     {
+        IntPtr snapshot = IntPtr.Zero;
         try
         {
             // Refusing still goes through dbghelp, with a handle it cannot use: the call fails for real, so
@@ -267,17 +278,78 @@ internal sealed class HangWatchdog : IDisposable
             // second half of the condition.
             bool refuse = RefuseDumpForTesting?.Invoke(type) == true;
             using var file = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-            if (MiniDumpWriteDump(refuse ? IntPtr.Zero : GetCurrentProcess(), (uint)Environment.ProcessId,
-                                  file.SafeFileHandle, type, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero) && !refuse)
+            int error = refuse ? 0 : PssCaptureSnapshot(GetCurrentProcess(), SnapshotCapture, ThreadContextAll, out snapshot);
+            if (error != 0)
+            {
+                snapshot = IntPtr.Zero;
+                failure = "could not take a snapshot to dump: " + Explain(error);
+            }
+            else if (MiniDumpWriteDump(refuse ? IntPtr.Zero : snapshot, (uint)Environment.ProcessId, file.SafeFileHandle,
+                                       type, IntPtr.Zero, IntPtr.Zero, refuse ? IntPtr.Zero : SnapshotCallback) && !refuse)
             {
                 failure = "";
                 return true;
             }
-            failure = Explain(Marshal.GetLastWin32Error());
+            else failure = Explain(Marshal.GetLastWin32Error());
         }
         catch (Exception ex) { failure = $"{ex.GetType().Name}: {ex.Message}"; }
+        finally
+        {
+            if (snapshot != IntPtr.Zero) _ = PssFreeSnapshot(GetCurrentProcess(), snapshot);
+        }
         try { File.Delete(path); } catch { /* nothing else to try */ }
         return false;
+    }
+
+    /// <summary>What PssCaptureSnapshot takes, which is what Microsoft's own example of dumping a snapshot asks
+    /// for: a copy-on-write clone of the address space, every thread with its registers, and the handles with
+    /// all that is known about them. The clone leaves the app's job if the job allows it, so a job that limits
+    /// how many processes it holds cannot refuse the snapshot.</summary>
+    private const uint SnapshotCapture =
+        0x00000001      // PSS_CAPTURE_VA_CLONE
+      | 0x00000004      // PSS_CAPTURE_HANDLES
+      | 0x00000008      // PSS_CAPTURE_HANDLE_NAME_INFORMATION
+      | 0x00000010      // PSS_CAPTURE_HANDLE_BASIC_INFORMATION
+      | 0x00000020      // PSS_CAPTURE_HANDLE_TYPE_SPECIFIC_INFORMATION
+      | 0x00000040      // PSS_CAPTURE_HANDLE_TRACE
+      | 0x00000080      // PSS_CAPTURE_THREADS
+      | 0x00000100      // PSS_CAPTURE_THREAD_CONTEXT
+      | 0x00000200      // PSS_CAPTURE_THREAD_CONTEXT_EXTENDED
+      | 0x04000000      // PSS_CREATE_BREAKAWAY_OPTIONAL
+      | 0x08000000      // PSS_CREATE_BREAKAWAY
+      | 0x20000000      // PSS_CREATE_USE_VM_ALLOCATIONS
+      | 0x80000000;     // PSS_CREATE_RELEASE_SECTION
+
+    /// <summary>CONTEXT_ALL for the architecture this is running as: every register of every thread.</summary>
+    private static uint ThreadContextAll => RuntimeInformation.ProcessArchitecture switch
+    {
+        Architecture.X86 => 0x0001003F,
+        Architecture.Arm64 => 0x0040001F,
+        _ => 0x0010001F,
+    };
+
+    /// <summary>MINIDUMP_CALLBACK_INFORMATION naming <see cref="AnswerIsSnapshot"/>. Built once and never freed:
+    /// it is two pointers, and a dump can be asked for at any point in the life of the process.</summary>
+    private static readonly IntPtr SnapshotCallback = CreateSnapshotCallback();
+
+    private static unsafe IntPtr CreateSnapshotCallback()
+    {
+        IntPtr info = Marshal.AllocHGlobal(2 * IntPtr.Size);
+        Marshal.WriteIntPtr(info, 0, (IntPtr)(delegate* unmanaged<IntPtr, IntPtr, IntPtr, int>)&AnswerIsSnapshot);
+        Marshal.WriteIntPtr(info, IntPtr.Size, IntPtr.Zero);
+        return info;
+    }
+
+    /// <summary>dbghelp's half of dumping a snapshot. Asked whether the handle it was given is a snapshot,
+    /// the answer is S_FALSE, which is how it is told yes; everything else it asks is left to its defaults.
+    /// The callback input is packed to four bytes, so its type follows a ULONG and a HANDLE.</summary>
+    [UnmanagedCallersOnly]
+    private static int AnswerIsSnapshot(IntPtr param, IntPtr input, IntPtr output)
+    {
+        const int IsProcessSnapshotCallback = 16, SFalse = 1;
+        if (Marshal.ReadInt32(input, sizeof(uint) + IntPtr.Size) == IsProcessSnapshotCallback)
+            Marshal.WriteInt32(output, SFalse);
+        return 1;
     }
 
     /// <summary>What Windows said, in words as well as in numbers. dbghelp reports its failures as HRESULTs
@@ -338,6 +410,15 @@ internal sealed class HangWatchdog : IDisposable
     [DllImport("kernel32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern int PssCaptureSnapshot(IntPtr process, uint captureFlags, uint threadContextFlags,
+                                                 out IntPtr snapshot);
+
+    [DllImport("kernel32.dll")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    private static extern int PssFreeSnapshot(IntPtr process, IntPtr snapshot);
 
     [DllImport("user32.dll")]
     [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
