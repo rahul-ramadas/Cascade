@@ -19,6 +19,28 @@ internal static partial class Checks
     private const int StallLimitMs = 400;
     private const int StallMs = 900;
 
+    /// <summary>Until there are <paramref name="count"/> reports and the last of them says how its dump ended.
+    /// A report is written before its dump and again once the dump is done, and the window - this thread - goes
+    /// on answering while the dump is written, so a dump file appearing says nothing yet about the report. It
+    /// used to look as if it did only because writing a dump froze the whole process, this thread included.</summary>
+    private static void WaitForFinishedReport(string dir, int count)
+    {
+        for (int i = 0; i < 400; i++)
+        {
+            string[] reports = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
+            if (reports.Length >= count && !StillBeingTaken(reports[count - 1])) break;
+            Pump();
+            Thread.Sleep(25);
+        }
+        for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+
+        static bool StillBeingTaken(string report)
+        {
+            try { return File.ReadAllText(report).Contains("still being taken", StringComparison.Ordinal); }
+            catch (IOException) { return true; }   // caught while it was being rewritten
+        }
+    }
+
     /// <summary>The hang watchdog: it must stay out of the way until asked for, notice a UI thread that has
     /// stopped answering, leave one dump and one report per episode rather than a pile of them, and tell the
     /// window so when it comes back.
@@ -139,9 +161,7 @@ internal static partial class Checks
             HangWatchdog.RefuseDumpForTesting = flags => flags == HangWatchdog.FlagsForTesting(DumpDetail.Heap);
             int dumpsBefore = Directory.GetFiles(dir, "*.dmp").Length;
             Thread.Sleep(StallMs);
-            for (int i = 0; i < 200 && Directory.GetFiles(dir, "*.dmp").Length == dumpsBefore; i++)
-            { Pump(); Thread.Sleep(25); }
-            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+            WaitForFinishedReport(dir, 2);
 
             string[] afterFallback = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
             ok &= Check($"a refused heap dump falls back to thread stacks ({Directory.GetFiles(dir, "*.dmp").Length} dumps)",
@@ -161,9 +181,7 @@ internal static partial class Checks
             int before = Directory.GetFiles(dir, "*.dmp").Length;
             for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
             Thread.Sleep(StallMs);
-            for (int i = 0; i < 120 && Directory.GetFiles(dir, "cascade_hang_*.txt").Length < 3; i++)
-            { Pump(); Thread.Sleep(25); }
-            for (int i = 0; i < 6; i++) { Pump(); Thread.Sleep(20); }
+            WaitForFinishedReport(dir, 3);
 
             string[] afterRefusal = Directory.GetFiles(dir, "cascade_hang_*.txt").OrderBy(f => f).ToArray();
             ok &= Check($"a third stall is recorded even when no dump can be taken ({afterRefusal.Length} reports)",
