@@ -121,13 +121,17 @@ public class FindSearchTests
     [Fact]
     public async Task The_first_result_is_there_long_before_the_sweep_finishes()
     {
-        // Held after the first block of each direction, so the search is deliberately incomplete.
-        var gate = new SemaphoreSlim(2);
-        var fake = new Fake(l => l % 3 == 0, gate);
-        using var search = Started(5_000_000, 2_500_002, fake);
+        // Everything but the first forward block is held, so the search is deliberately incomplete. It has to
+        // be that block by name. This used to hand both sweeps one gate with two permits, meaning one block
+        // each - but nothing made them take one each, and when the backward sweep got to the gate twice first
+        // the block holding the answer was never read, and the wait below lasted until --blame-hang killed it.
+        const long start = 2_500_002;
+        var gate = new SemaphoreSlim(0);
+        var fake = new Fake(l => l % 3 == 0, gate, from => from != start);
+        using var search = Started(5_000_000, start, fake);
 
-        long hit = await search.NextAsync(2_500_002, true, null, CancellationToken.None);
-        Assert.Equal(2_500_002, hit);
+        long hit = await search.NextAsync(start, true, null, CancellationToken.None);
+        Assert.Equal(start, hit);
         Assert.False(search.Complete);
         Assert.True(search.Progress < 0.5);
     }
