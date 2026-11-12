@@ -85,6 +85,7 @@ if ($Coverage -and -not (Test-Path $coverageTool)) {
 }
 
 $burners = @()
+$stopped = @()
 if ($Load -gt 0) {
     $room = [Math]::Max(1, [int]([Environment]::ProcessorCount / 2))
     if ($Load -gt $room) {
@@ -106,6 +107,10 @@ try {
 
         for ($run = 1; $run -le $Runs; $run++) {
             $log = Join-Path $ResultsDirectory "$name-$run.trx"
+            # Blame's record of which tests started and which finished, kept only when it stops a run. Noted
+            # beforehand so the ones this run leaves can be told apart from an earlier run's.
+            $sequencesBefore = @(Get-ChildItem -Path $ResultsDirectory -Recurse -Filter 'Sequence_*.xml' -ErrorAction SilentlyContinue |
+                                 ForEach-Object FullName)
             # --blame-hang answers the case this hunt is most likely to meet: one repeat in twenty where a
             # test never returns. It names that test and dumps the host from the inside, which the watchdog
             # below cannot do - and the watchdog covers what blame cannot, which is everything that goes
@@ -131,13 +136,36 @@ try {
                             -ReportDirectory $stuck -Quiet -Command (@('dotnet') + $args)
             }
             $seconds = ((Get-Date) - $started).TotalSeconds
-            $verdict = if ($LASTEXITCODE -eq 0) { 'green' } else { 'RED' }
+            $exitCode = $LASTEXITCODE
+            $verdict = if ($exitCode -eq 0) { 'green' } else { 'RED' }
             Write-Host ("{0,-5} run {1,2}: {2,-5} {3,6:N1}s" -f $name, $run, $verdict, $seconds)
+
+            # Red with not one test recorded as failing means the run was stopped rather than lost: --blame-hang
+            # killed the test host, or it died. The tests that had finished are in the trx and the one that was
+            # running is simply missing from it, so the tally below would call this green. That is how a test
+            # that deadlocked one night in five went unreported for two months.
+            if ($exitCode -ne 0 -and $exitCode -ne 124) {
+                $failedHere = 0
+                if (Test-Path -LiteralPath $log) {
+                    [xml] $x = Get-Content -LiteralPath $log
+                    $failedHere = @($x.TestRun.Results.UnitTestResult |
+                                    Where-Object { $_ -and $_.outcome -notin 'Passed', 'NotExecuted' }).Count
+                }
+                if ($failedHere -eq 0) {
+                    $unfinished = @(Get-ChildItem -Path $ResultsDirectory -Recurse -Filter 'Sequence_*.xml' -ErrorAction SilentlyContinue |
+                                    Where-Object { $sequencesBefore -notcontains $_.FullName } |
+                                    ForEach-Object { ([xml] (Get-Content -LiteralPath $_.FullName)).TestSequence.Test } |
+                                    Where-Object { $_ -and $_.Completed -ne 'True' } |
+                                    ForEach-Object { $_.Name } |
+                                    Select-Object -Unique)
+                    $stopped += [pscustomobject]@{ Run = "$name-$run"; Exit = $exitCode; Unfinished = $unfinished }
+                }
+            }
 
             # A wedge has already been diagnosed by the time we get here - stacks printed, dump written -
             # and the repeats after it would each cost another whole timeout for nothing. Stop this suite
             # and let the next one have the step's remaining budget, which is what the wedge was taking.
-            if ($LASTEXITCODE -eq 124) {
+            if ($exitCode -eq 124) {
                 Write-Host ("{0,-5} not repeated further: run {1} never finished." -f $name, $run) -ForegroundColor Red
                 break
             }
@@ -186,8 +214,12 @@ foreach ($report in $wedged) {
     Write-Host ("  never finished: {0}" -f $report.BaseName.Replace('-hang', '')) -ForegroundColor Red
     Write-Host ("      stacks and dumps beside {0}" -f $report.FullName) -ForegroundColor DarkRed
 }
+foreach ($run in $stopped) {
+    Write-Host ("  stopped part way: {0} exited {1} with no test recorded as failing" -f $run.Run, $run.Exit) -ForegroundColor Red
+    foreach ($test in $run.Unfinished) { Write-Host ("      never finished: {0}" -f $test) -ForegroundColor DarkRed }
+}
 
-if (-not $unstable -and -not $wedged) {
+if (-not $unstable -and -not $wedged -and -not $stopped) {
     Write-Host ("{0} tests passed in every run." -f ($outcomes.Count - $skipped.Count)) -ForegroundColor Green
     exit 0
 }
